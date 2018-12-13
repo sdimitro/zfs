@@ -393,7 +393,7 @@ spa_checkpoint_discard_thread_check(void *arg, zthr_t *zthr)
 	return (B_TRUE);
 }
 
-int
+void
 spa_checkpoint_discard_thread(void *arg, zthr_t *zthr)
 {
 	spa_t *spa = arg;
@@ -408,7 +408,7 @@ spa_checkpoint_discard_thread(void *arg, zthr_t *zthr)
 			dmu_buf_t **dbp;
 
 			if (zthr_iscancelled(zthr))
-				return (0);
+				return;
 
 			ASSERT3P(vd->vdev_ops, !=, &vdev_indirect_ops);
 
@@ -446,7 +446,7 @@ spa_checkpoint_discard_thread(void *arg, zthr_t *zthr)
 	    spa_checkpoint_discard_complete_sync, spa,
 	    0, ZFS_SPACE_CHECK_NONE));
 
-	return (0);
+	return;
 }
 
 
