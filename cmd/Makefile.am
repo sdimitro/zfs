@@ -1,4 +1,4 @@
-SUBDIRS  = zfs zpool zdb zhack zinject zstreamdump ztest
+SUBDIRS  = zfs zpool zdb zhack zinject zstreamdump ztest zfsd
 SUBDIRS += fsck_zfs vdev_id raidz_test zgenhostid
 
 if USING_PYTHON

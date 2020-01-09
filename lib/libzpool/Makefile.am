@@ -20,7 +20,8 @@ lib_LTLIBRARIES = libzpool.la
 USER_C = \
 	kernel.c \
 	taskq.c \
-	util.c
+	util.c \
+	zfs_user_ioctl.c
 
 KERNEL_C = \
 	zfeature_common.c \

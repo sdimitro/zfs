@@ -508,6 +508,9 @@ typedef struct zfs_useracct {
 
 #define	ZPOOL_EXPORT_AFTER_SPLIT 0x1
 
+/* Name of the environment variable which contains the socket path. */
+#define ZFS_SOCKET_ENVVAR "ZFS_DAEMON_SOCKET"
+
 #ifdef _KERNEL
 struct objset;
 struct zfsvfs;

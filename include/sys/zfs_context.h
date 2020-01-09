@@ -739,5 +739,10 @@ extern int kmem_cache_reap_active(void);
 
 #define	____cacheline_aligned
 
+/*
+ * Userland ioctl handling
+ */
+extern void zfs_user_ioctl_init(void);
+
 #endif /* _KERNEL */
 #endif	/* _SYS_ZFS_CONTEXT_H */

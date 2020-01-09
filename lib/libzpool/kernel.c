@@ -840,6 +840,8 @@ kernel_init(int mode)
 	fletcher_4_init();
 
 	tsd_create(&rrw_tsd_key, rrw_tsd_destroy);
+
+	zfs_user_ioctl_init();
 }
 
 void
