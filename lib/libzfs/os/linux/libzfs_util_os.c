@@ -47,7 +47,7 @@
 int
 zfs_ioctl(libzfs_handle_t *hdl, int request, zfs_cmd_t *zc)
 {
-	return (ioctl(hdl->libzfs_fd, request, zc));
+	return (lzc_ioctl_impl(request, zc));
 }
 
 const char *

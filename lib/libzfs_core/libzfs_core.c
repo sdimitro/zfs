@@ -90,10 +90,13 @@
 #include <sys/types.h>
 #include <sys/stat.h>
 #include <sys/zfs_ioctl.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 
 static int g_fd = -1;
+static boolean_t g_daemon = B_FALSE;
 static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
-static int g_refcount;
+static int g_refcount = 0;
 
 #ifdef ZFS_DEBUG
 static zfs_ioc_t fail_ioc_cmd;
@@ -132,14 +135,87 @@ libzfs_core_debug_ioc(void)
 #endif
 
 int
+ioctl_recv(int size, void *dst)
+{
+	while (size > 0) {
+		int recvd = recv(g_fd, dst, size, 0);
+		if (recvd == -1)
+			return (errno);
+		if (recvd == 0)
+			return (EINVAL);
+		size -= recvd;
+		dst = (char *)dst + recvd;
+	}
+	return (0);
+}
+
+int
+ioctl_send(int size, const void *data)
+{
+	while (size > 0) {
+		int sent = send(g_fd, data, size, 0);
+		if (sent == -1)
+			return (errno);
+		if (sent == 0)
+			return (EINVAL);
+		size -= sent;
+		data = (const char *)data + sent;
+	}
+	return (0);
+}
+
+int
+ioctl_sendmsg(const zfs_ioctl_msg_t *msg, int payload_len, const void *payload)
+{
+	int error;
+
+	error = ioctl_send(sizeof (*msg), msg);
+	if (error != 0)
+		return (error);
+
+	if (payload_len != 0)
+		error = ioctl_send(payload_len, payload);
+	return (error);
+}
+
+int
+ioctl_recvmsg(zfs_ioctl_msg_t *msg)
+{
+	return (ioctl_recv(sizeof (*msg), msg));
+}
+
+int
 libzfs_core_init(void)
 {
 	(void) pthread_mutex_lock(&g_lock);
 	if (g_refcount == 0) {
-		g_fd = open(ZFS_DEV, O_RDWR);
-		if (g_fd < 0) {
-			(void) pthread_mutex_unlock(&g_lock);
-			return (errno);
+		const char *sockname = getenv(ZFS_SOCKET_ENVVAR);
+
+		if (sockname != NULL) {
+			g_fd = socket(PF_UNIX, SOCK_STREAM, 0);
+			if (g_fd < 0) {
+				(void) pthread_mutex_unlock(&g_lock);
+				return (errno);
+				// XXX: may want to have specific errors so
+				//      we know who failed - this or the call
+				//      to connect() below.
+			}
+			struct sockaddr_un addr = { 0 };
+			addr.sun_family = AF_UNIX;
+			snprintf(addr.sun_path, sizeof (addr.sun_path),
+			    "%s", sockname);
+			if (connect(g_fd, (struct sockaddr *)&addr, sizeof (addr)) != 0) {
+				(void) pthread_mutex_unlock(&g_lock);
+				return (errno);
+			}
+
+			g_daemon = B_TRUE;
+		} else {
+			g_fd = open(ZFS_DEV, O_RDWR);
+			if (g_fd < 0) {
+				(void) pthread_mutex_unlock(&g_lock);
+				return (errno);
+			}
 		}
 	}
 	g_refcount++;
@@ -165,6 +241,156 @@ libzfs_core_fini(void)
 		g_fd = -1;
 	}
 	(void) pthread_mutex_unlock(&g_lock);
+}
+
+static int
+lzc_process_message(zfs_ioctl_msg_t *msg)
+{
+	int error;
+
+	// XXX: uses of perror - libzfs_core is not supposed to print
+
+	switch (msg->zim_type) {
+	case ZIM_IOCTL_RESPONSE:
+		errno = msg->zim_u.zim_ioctl_response.zim_errno;
+		return (msg->zim_u.zim_ioctl_response.zim_retval);
+	case ZIM_COPYIN: {
+		uint64_t len = msg->zim_u.zim_copyin.zim_len;
+		void *addr = (void *)(uintptr_t)msg->zim_u.zim_copyin.zim_address;
+		printf("handling copyin request for %lu bytes\n",
+		    len);
+		/* XXX [mahrens]: handle EFAULT */
+		msg->zim_type = ZIM_COPYIN_RESPONSE;
+		msg->zim_u.zim_copyin_response.zim_errno = 0;
+		error = ioctl_sendmsg(msg, len, addr);
+		if (error != 0) {
+			perror("sendmsg(copyin_response) failed");
+			return (-1);
+		}
+		break;
+	}
+	case ZIM_COPYINSTR: {
+		uint64_t len = msg->zim_u.zim_copyinstr.zim_length;
+		void *addr = (void *)(uintptr_t)msg->zim_u.zim_copyin.zim_address;
+		printf("handling copyinstr request for %lu bytes\n",
+		    len);
+		/* XXX [mahrens]: handle EFAULT */
+		msg->zim_type = ZIM_COPYINSTR_RESPONSE;
+		msg->zim_u.zim_copyinstr_response.zim_errno = 0;
+		msg->zim_u.zim_copyinstr_response.zim_length =
+		    strnlen(addr, len - 1);
+		error = ioctl_sendmsg(msg,
+		    msg->zim_u.zim_copyinstr_response.zim_length, addr);
+		if (error != 0) {
+			perror("sendmsg(copyinstr_response) failed");
+			return (-1);
+		}
+		break;
+	}
+	case ZIM_COPYOUT: {
+		uint64_t len = msg->zim_u.zim_copyout.zim_len;
+		void *addr = (void *)(uintptr_t)msg->zim_u.zim_copyout.zim_address;
+
+		printf("handling copyout request for %lu bytes\n",
+		    len);
+
+		error = ioctl_recv(len, addr);
+		if (error != 0) {
+			perror("recv for copyout failed");
+			return (-1);
+		}
+
+		/* XXX [mahrens]: handle EFAULT */
+		msg->zim_type = ZIM_COPYOUT_RESPONSE;
+		msg->zim_u.zim_copyout_response.zim_errno = 0;
+		error = ioctl_sendmsg(msg, 0, NULL);
+		if (error != 0) {
+			perror("sendmsg(copyout_response) failed");
+			return (-1);
+		}
+
+		break;
+	}
+	case ZIM_READ_FD: {
+		int fd = msg->zim_u.zim_read_fd.zim_fd;
+		uint64_t len = msg->zim_u.zim_read_fd.zim_len;
+		void *buf = malloc(len);
+
+		error = read(fd, buf, len);
+		msg->zim_type = ZIM_READ_FD_RESPONSE;
+		msg->zim_u.zim_read_fd_response.zim_errno = error;
+		error = ioctl_sendmsg(msg, len, buf);
+		if (error != 0) {
+			perror("sendmsg(read_fd_response) failed");
+			return (-1);
+		}
+		break;
+	}
+	case ZIM_WRITE_FD: {
+		int fd = msg->zim_u.zim_write_fd.zim_fd;
+		uint64_t len = msg->zim_u.zim_write_fd.zim_len;
+		void *buf = malloc(len);
+
+		error = ioctl_recv(len, buf);
+		if (error != 0) {
+			perror("recv for write_fd failed");
+			return (-1);
+		}
+
+		error = write(fd, buf, len);
+
+		msg->zim_type = ZIM_WRITE_FD_RESPONSE;
+		msg->zim_u.zim_write_fd_response.zim_errno = error;
+		error = ioctl_sendmsg(msg, 0, NULL);
+		if (error != 0) {
+			perror("sendmsg(write_fd_response) failed");
+			return (-1);
+		}
+		break;
+	}
+	default:
+		printf("invalid message type %u\n",
+		    msg->zim_type);
+		return (-1);
+	}
+	return (0);
+}
+
+int
+lzc_ioctl_impl(zfs_ioc_t ioc, zfs_cmd_t *cmd)
+{
+	if (g_daemon) {
+		int error;
+		zfs_ioctl_msg_t msg = { 0 };
+
+		/* XXX [mahrens]: need one connection per thread */
+		msg.zim_type = ZIM_IOCTL;
+		msg.zim_u.zim_ioctl.zim_ioctl = ioc;
+		msg.zim_u.zim_ioctl.zim_cmd = (uintptr_t)cmd;
+		error = ioctl_sendmsg(&msg, 0, NULL);
+		if (error != 0) {
+			perror("sendmsg failed");
+			return (-1);
+		}
+
+		while (1) {
+			error = ioctl_recvmsg(&msg);
+			if (error != 0) {
+				perror("recvmsg failed");
+				return (-1);
+			}
+			if (msg.zim_type == ZIM_IOCTL_RESPONSE) {
+				errno = msg.zim_u.zim_ioctl_response.zim_errno;
+				return (msg.zim_u.zim_ioctl_response.zim_retval);
+			}
+			error = lzc_process_message(&msg);
+			if (error != 0)
+				return (error);
+		}
+	} else {
+		return (zfs_ioctl_fd(g_fd, ioc, cmd));
+	}
+	return (0);
 }
 
 static int
@@ -209,7 +435,7 @@ lzc_ioctl(zfs_ioc_t ioc, const char *name,
 		}
 	}
 
-	while (zfs_ioctl_fd(g_fd, ioc, &zc) != 0) {
+	while (lzc_ioctl_impl(ioc, &zc) != 0) {
 		/*
 		 * If ioctl exited with ENOMEM, we retry the ioctl after
 		 * increasing the size of the destination nvlist.
@@ -466,7 +692,7 @@ lzc_exists(const char *dataset)
 	VERIFY3S(g_fd, !=, -1);
 
 	(void) strlcpy(zc.zc_name, dataset, sizeof (zc.zc_name));
-	return (zfs_ioctl_fd(g_fd, ZFS_IOC_OBJSET_STATS, &zc) == 0);
+	return (lzc_ioctl_impl(ZFS_IOC_OBJSET_STATS, &zc) == 0);
 }
 
 /*
@@ -940,7 +1166,7 @@ recv_impl(const char *snapname, nvlist_t *recvdprops, nvlist_t *localprops,
 		zc.zc_nvlist_dst = (uint64_t)(uintptr_t)
 		    malloc(zc.zc_nvlist_dst_size);
 
-		error = zfs_ioctl_fd(g_fd, ZFS_IOC_RECV, &zc);
+		error = lzc_ioctl_impl(ZFS_IOC_RECV, &zc);
 		if (error != 0) {
 			error = errno;
 		} else {

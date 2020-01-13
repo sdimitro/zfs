@@ -4900,7 +4900,7 @@ zfs_smb_acl_mgmt(libzfs_handle_t *hdl, char *dataset, char *path,
 	default:
 		return (-1);
 	}
-	error = ioctl(hdl->libzfs_fd, ZFS_IOC_SMB_ACL, &zc);
+	error = zfs_ioctl(hdl, ZFS_IOC_SMB_ACL, &zc);
 	nvlist_free(nvlist);
 	return (error);
 }

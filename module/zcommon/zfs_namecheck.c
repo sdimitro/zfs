@@ -289,6 +289,8 @@ entity_namecheck(const char *path, namecheck_err_t *why, char *what)
 		/* Update to the next component */
 		start = end + 1;
 	}
+
+	return (0);
 }
 
 /*
