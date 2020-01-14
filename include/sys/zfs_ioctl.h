@@ -599,6 +599,9 @@ typedef struct zfs_ioctl_msg {
 
 } zfs_ioctl_msg_t;
 
+extern int zfsdev_ioctl(dev_t, int, intptr_t, int, cred_t *, int *);
+extern void zfs_ioctl_init(void);
+
 #ifdef _KERNEL
 struct objset;
 struct zfsvfs;
