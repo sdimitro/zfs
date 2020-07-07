@@ -1604,17 +1604,17 @@ dnode_rele(dnode_t *dn, void *tag)
 void
 dnode_rele_and_unlock(dnode_t *dn, void *tag, boolean_t evicting)
 {
-	uint64_t refs;
 	/* Get while the hold prevents the dnode from moving. */
 	dmu_buf_impl_t *db = dn->dn_dbuf;
 	dnode_handle_t *dnh = dn->dn_handle;
 
-	refs = zfs_refcount_remove(&dn->dn_holds, tag);
+	uint64_t refs = zfs_refcount_remove(&dn->dn_holds, tag);
 	if (refs == 0)
 		cv_broadcast(&dn->dn_nodnholds);
 	mutex_exit(&dn->dn_mtx);
 	/* dnode could get destroyed at this point, so don't use it anymore */
 
+#ifdef ZFS_DEBUG
 	/*
 	 * It's unsafe to release the last hold on a dnode by dnode_rele() or
 	 * indirectly by dbuf_rele() while relying on the dnode handle to
@@ -1625,6 +1625,7 @@ dnode_rele_and_unlock(dnode_t *dn, void *tag, boolean_t evicting)
 	 * handle.
 	 */
 	ASSERT(refs > 0 || dnh->dnh_zrlock.zr_owner != curthread);
+#endif
 
 	/* NOTE: the DNODE_DNODE does not have a dn_dbuf */
 	if (refs == 0 && db != NULL) {

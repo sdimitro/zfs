@@ -4089,7 +4089,9 @@ spa_ld_get_props(spa_t *spa)
 		VERIFY(!nvlist_exists(mos_config,
 		    ZPOOL_CONFIG_HAS_PER_VDEV_ZAPS));
 		spa->spa_avz_action = AVZ_ACTION_INITIALIZE;
+#ifdef ZFS_DEBUG
 		ASSERT0(vdev_count_verify_zaps(spa->spa_root_vdev));
+#endif
 	} else if (error != 0) {
 		return (spa_vdev_err(rvd, VDEV_AUX_CORRUPT_DATA, EIO));
 	} else if (!nvlist_exists(mos_config, ZPOOL_CONFIG_HAS_PER_VDEV_ZAPS)) {
@@ -4099,11 +4101,13 @@ spa_ld_get_props(spa_t *spa)
 		 * destruction to later; see spa_sync_config_object.
 		 */
 		spa->spa_avz_action = AVZ_ACTION_DESTROY;
+#ifdef ZFS_DEBUG
 		/*
 		 * We're assuming that no vdevs have had their ZAPs created
 		 * before this. Better be sure of it.
 		 */
 		ASSERT0(vdev_count_verify_zaps(spa->spa_root_vdev));
+#endif
 	}
 	nvlist_free(mos_config);
 

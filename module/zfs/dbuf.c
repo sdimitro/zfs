@@ -3343,7 +3343,9 @@ dbuf_hold_impl(dnode_t *dn, uint8_t level, uint64_t blkid,
 		ASSERT3P(db->db.db_data, ==, db->db_buf->b_data);
 	}
 
+#ifdef ZFS_DEBUG
 	ASSERT(db->db_buf == NULL || arc_referenced(db->db_buf));
+#endif
 
 	/*
 	 * If this buffer is currently syncing out, and we are
