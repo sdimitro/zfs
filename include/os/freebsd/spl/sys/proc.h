@@ -90,6 +90,9 @@ do_thread_create(caddr_t stk, size_t stksize, void (*proc)(void *), void *arg,
 	return (td);
 }
 
+#define	thread_create_named(name, stk, stksize, proc, arg, len,	\
+    pp, state, pri) \
+	do_thread_create(stk, stksize, proc, arg, len, pp, state, pri)
 #define	thread_create(stk, stksize, proc, arg, len, pp, state, pri) \
 	do_thread_create(stk, stksize, proc, arg, len, pp, state, pri)
 #define	thread_exit()	kthread_exit()

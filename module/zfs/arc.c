@@ -7372,10 +7372,10 @@ arc_init(void)
 		kstat_install(arc_ksp);
 	}
 
-	arc_adjust_zthr = zthr_create_timer(arc_adjust_cb_check,
-	    arc_adjust_cb, NULL, SEC2NSEC(1));
-	arc_reap_zthr = zthr_create_timer(arc_reap_cb_check,
-	    arc_reap_cb, NULL, SEC2NSEC(1));
+	arc_adjust_zthr = zthr_create_timer("arc_adjust",
+	    arc_adjust_cb_check, arc_adjust_cb, NULL, SEC2NSEC(1));
+	arc_reap_zthr = zthr_create_timer("arc_reap",
+	    arc_reap_cb_check, arc_reap_cb, NULL, SEC2NSEC(1));
 
 	arc_initialized = B_TRUE;
 	arc_warm = B_FALSE;
