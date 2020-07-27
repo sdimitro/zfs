@@ -78,8 +78,7 @@ do_thread_create(caddr_t stk, size_t stksize, void (*proc)(void *), void *arg,
 	ASSERT(state == TS_RUN);
 
 	error = kproc_kthread_add(proc, arg, &zfsproc, &td,
-	    RFSTOPPED, stksize / PAGE_SIZE, "zfskern", "solthread %s (%p)",
-	    name, proc);
+	    RFSTOPPED, stksize / PAGE_SIZE, "zfskern", "%s", name);
 	if (error == 0) {
 		thread_lock(td);
 		sched_prio(td, pri);
