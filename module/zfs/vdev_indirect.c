@@ -27,7 +27,6 @@
 #include <sys/zio.h>
 #include <sys/zio_checksum.h>
 #include <sys/metaslab.h>
-#include <sys/refcount.h>
 #include <sys/dmu.h>
 #include <sys/vdev_indirect_mapping.h>
 #include <sys/dmu_tx.h>
@@ -421,7 +420,7 @@ vdev_indirect_should_condense(vdev_t *vd)
 	 * If nothing new has been marked obsolete, there is no
 	 * point in condensing.
 	 */
-	ASSERTV(uint64_t obsolete_sm_obj);
+	uint64_t obsolete_sm_obj __maybe_unused;
 	ASSERT0(vdev_obsolete_sm_object(vd, &obsolete_sm_obj));
 	if (vd->vdev_obsolete_sm == NULL) {
 		ASSERT0(obsolete_sm_obj);
@@ -544,7 +543,7 @@ spa_condense_indirect_commit_sync(void *arg, dmu_tx_t *tx)
 {
 	spa_condensing_indirect_t *sci = arg;
 	uint64_t txg = dmu_tx_get_txg(tx);
-	ASSERTV(spa_t *spa = dmu_tx_pool(tx)->dp_spa);
+	spa_t *spa __maybe_unused = dmu_tx_pool(tx)->dp_spa;
 
 	ASSERT(dmu_tx_is_syncing(tx));
 	ASSERT3P(sci, ==, spa->spa_condensing_indirect);
@@ -815,7 +814,7 @@ void
 vdev_indirect_sync_obsolete(vdev_t *vd, dmu_tx_t *tx)
 {
 	spa_t *spa = vd->vdev_spa;
-	ASSERTV(vdev_indirect_config_t *vic = &vd->vdev_indirect_config);
+	vdev_indirect_config_t *vic __maybe_unused = &vd->vdev_indirect_config;
 
 	ASSERT3U(vic->vic_mapping_object, !=, 0);
 	ASSERT(range_tree_space(vd->vdev_obsolete_segments) > 0);
@@ -884,7 +883,8 @@ void
 spa_start_indirect_condensing_thread(spa_t *spa)
 {
 	ASSERT3P(spa->spa_condense_zthr, ==, NULL);
-	spa->spa_condense_zthr = zthr_create(spa_condense_indirect_thread_check,
+	spa->spa_condense_zthr = zthr_create("z_indirect_condense",
+	    spa_condense_indirect_thread_check,
 	    spa_condense_indirect_thread, spa);
 }
 
@@ -966,7 +966,7 @@ typedef struct remap_segment {
 	list_node_t rs_node;
 } remap_segment_t;
 
-remap_segment_t *
+static remap_segment_t *
 rs_alloc(vdev_t *vd, uint64_t offset, uint64_t asize, uint64_t split_offset)
 {
 	remap_segment_t *rs = kmem_alloc(sizeof (remap_segment_t), KM_SLEEP);
@@ -990,7 +990,7 @@ rs_alloc(vdev_t *vd, uint64_t offset, uint64_t asize, uint64_t split_offset)
  * Finally, since we are doing an allocation, it is up to the caller to
  * free the array allocated in this function.
  */
-vdev_indirect_mapping_entry_phys_t *
+static vdev_indirect_mapping_entry_phys_t *
 vdev_indirect_mapping_duplicate_adjacent_entries(vdev_t *vd, uint64_t offset,
     uint64_t asize, uint64_t *copied_entries)
 {
@@ -1298,7 +1298,7 @@ vdev_indirect_read_all(zio_t *zio)
 static void
 vdev_indirect_io_start(zio_t *zio)
 {
-	ASSERTV(spa_t *spa = zio->io_spa);
+	spa_t *spa __maybe_unused = zio->io_spa;
 	indirect_vsd_t *iv = kmem_zalloc(sizeof (*iv), KM_SLEEP);
 	list_create(&iv->iv_splits,
 	    sizeof (indirect_split_t), offsetof(indirect_split_t, is_node));
@@ -1638,7 +1638,7 @@ vdev_indirect_splits_damage(indirect_vsd_t *iv, zio_t *zio)
 			if (ic->ic_data == NULL)
 				continue;
 
-			abd_zero(ic->ic_data, ic->ic_data->abd_size);
+			abd_zero(ic->ic_data, abd_get_size(ic->ic_data));
 		}
 
 		iv->iv_attempts_max *= 2;
@@ -1858,7 +1858,6 @@ vdev_ops_t vdev_indirect_ops = {
 	.vdev_op_leaf = B_FALSE			/* leaf vdev */
 };
 
-EXPORT_SYMBOL(rs_alloc);
 EXPORT_SYMBOL(spa_condense_fini);
 EXPORT_SYMBOL(spa_start_indirect_condensing_thread);
 EXPORT_SYMBOL(spa_condense_indirect_start_sync);

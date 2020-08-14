@@ -453,7 +453,7 @@ txg_dispatch_callbacks(dsl_pool_t *dp, uint64_t txg)
 			 * Commit callback taskq hasn't been created yet.
 			 */
 			tx->tx_commit_cb_taskq = taskq_create("tx_commit_cb",
-			    max_ncpus, defclsyspri, max_ncpus, max_ncpus * 2,
+			    boot_ncpus, defclsyspri, boot_ncpus, boot_ncpus * 2,
 			    TASKQ_PREPOPULATE | TASKQ_DYNAMIC);
 		}
 
@@ -813,7 +813,7 @@ txg_sync_waiting(dsl_pool_t *dp)
 void
 txg_verify(spa_t *spa, uint64_t txg)
 {
-	ASSERTV(dsl_pool_t *dp = spa_get_dsl(spa));
+	dsl_pool_t *dp __maybe_unused = spa_get_dsl(spa);
 	if (txg <= TXG_INITIAL || txg == ZILTEST_TXG)
 		return;
 	ASSERT3U(txg, <=, dp->dp_tx.tx_open_txg);
@@ -1054,6 +1054,6 @@ EXPORT_SYMBOL(txg_stalled);
 EXPORT_SYMBOL(txg_sync_waiting);
 
 /* BEGIN CSTYLED */
-ZFS_MODULE_PARAM(zfs, zfs_, txg_timeout, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_txg, zfs_txg_, timeout, INT, ZMOD_RW,
 	"Max seconds worth of delta per txg");
 /* END CSTYLED */

@@ -27,11 +27,11 @@
 #include <sys/spa_impl.h>
 #include <sys/txg.h>
 #include <sys/vdev_impl.h>
-#include <sys/refcount.h>
 #include <sys/metaslab_impl.h>
 #include <sys/dsl_synctask.h>
 #include <sys/zap.h>
 #include <sys/dmu_tx.h>
+#include <sys/vdev_initialize.h>
 
 /*
  * Value that is written to disk during initialization.
@@ -424,7 +424,7 @@ vdev_initialize_load(vdev_t *vd)
  * Convert the logical range into a physical range and add it to our
  * avl tree.
  */
-void
+static void
 vdev_initialize_range_add(void *arg, uint64_t start, uint64_t size)
 {
 	vdev_t *vd = arg;
@@ -557,6 +557,8 @@ vdev_initialize_thread(void *arg)
 	vd->vdev_initialize_thread = NULL;
 	cv_broadcast(&vd->vdev_initialize_cv);
 	mutex_exit(&vd->vdev_initialize_lock);
+
+	thread_exit();
 }
 
 /*
@@ -712,7 +714,7 @@ vdev_initialize_restart(vdev_t *vd)
 		    vd->vdev_leaf_zap, VDEV_LEAF_ZAP_INITIALIZE_ACTION_TIME,
 		    sizeof (timestamp), 1, &timestamp);
 		ASSERT(err == 0 || err == ENOENT);
-		vd->vdev_initialize_action_time = (time_t)timestamp;
+		vd->vdev_initialize_action_time = timestamp;
 
 		if (vd->vdev_initialize_state == VDEV_INITIALIZE_SUSPENDED ||
 		    vd->vdev_offline) {

@@ -4,6 +4,7 @@ SUBDIRS = \
 	arc \
 	atime \
 	bootfs \
+	btree \
 	cache \
 	cachefile \
 	casenorm \
@@ -21,6 +22,7 @@ SUBDIRS = \
 	devices \
 	events \
 	exec \
+	fallocate \
 	fault \
 	features \
 	grow \
@@ -44,6 +46,8 @@ SUBDIRS = \
 	no_space \
 	nopwrite \
 	online_offline \
+	pam \
+	persist_l2arc \
 	pool_checkpoint \
 	pool_names \
 	poolversion \
@@ -70,7 +74,6 @@ SUBDIRS = \
 	sparse \
 	suid \
 	threadsappend \
-	tmpfile \
 	trim \
 	truncate \
 	upgrade \
@@ -80,3 +83,8 @@ SUBDIRS = \
 	write_dirs \
 	xattr \
 	zvol
+
+if BUILD_LINUX
+SUBDIRS += \
+	tmpfile
+endif

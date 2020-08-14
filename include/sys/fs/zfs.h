@@ -115,7 +115,7 @@ typedef enum {
 	ZFS_PROP_READONLY,
 	ZFS_PROP_ZONED,
 	ZFS_PROP_SNAPDIR,
-	ZFS_PROP_PRIVATE,		/* not exposed to user, temporary */
+	ZFS_PROP_ACLMODE,
 	ZFS_PROP_ACLINHERIT,
 	ZFS_PROP_CREATETXG,
 	ZFS_PROP_NAME,			/* not exposed to the user */
@@ -573,6 +573,11 @@ typedef enum zfs_key_location {
 #define	ZPL_VERSION_USERSPACE		ZPL_VERSION_4
 #define	ZPL_VERSION_SA			ZPL_VERSION_5
 
+/* Persistent L2ARC version */
+#define	L2ARC_PERSISTENT_VERSION_1	1ULL
+#define	L2ARC_PERSISTENT_VERSION	L2ARC_PERSISTENT_VERSION_1
+#define	L2ARC_PERSISTENT_VERSION_STRING	"1"
+
 /* Rewind policy information */
 #define	ZPOOL_NO_REWIND		1  /* No policy - default behavior */
 #define	ZPOOL_NEVER_REWIND	2  /* Do not search for best txg or rewind */
@@ -591,8 +596,8 @@ typedef struct zpool_load_policy {
 
 /*
  * The following are configuration names used in the nvlist describing a pool's
- * configuration.  New on-disk names should be prefixed with "<reverse-DNS>:"
- * (e.g. "org.open-zfs:") to avoid conflicting names being developed
+ * configuration.  New on-disk names should be prefixed with "<reversed-DNS>:"
+ * (e.g. "org.openzfs:") to avoid conflicting names being developed
  * independently.
  */
 #define	ZPOOL_CONFIG_VERSION		"version"
@@ -699,6 +704,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_SPLIT_LIST		"guid_list"
 #define	ZPOOL_CONFIG_REMOVING		"removing"
 #define	ZPOOL_CONFIG_RESILVER_TXG	"resilver_txg"
+#define	ZPOOL_CONFIG_REBUILD_TXG	"rebuild_txg"
 #define	ZPOOL_CONFIG_COMMENT		"comment"
 #define	ZPOOL_CONFIG_SUSPENDED		"suspended"	/* not stored on disk */
 #define	ZPOOL_CONFIG_SUSPENDED_REASON	"suspended_reason"	/* not stored */
@@ -725,6 +731,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_MMP_HOSTID		"mmp_hostid"	/* not stored on disk */
 #define	ZPOOL_CONFIG_ALLOCATION_BIAS	"alloc_bias"	/* not stored on disk */
 #define	ZPOOL_CONFIG_EXPANSION_TIME	"expansion_time"	/* not stored */
+#define	ZPOOL_CONFIG_REBUILD_STATS	"org.openzfs:rebuild_stats"
 
 /*
  * The persistent vdev state is stored as separate values rather than a single
@@ -772,6 +779,9 @@ typedef struct zpool_load_policy {
 	"com.delphix:pool_checkpoint_sm"
 #define	VDEV_TOP_ZAP_MS_UNFLUSHED_PHYS_TXGS \
 	"com.delphix:ms_unflushed_phys_txgs"
+
+#define	VDEV_TOP_ZAP_VDEV_REBUILD_PHYS \
+	"org.openzfs:vdev_rebuild"
 
 #define	VDEV_TOP_ZAP_ALLOCATION_BIAS \
 	"org.zfsonlinux:allocation_bias"
@@ -986,8 +996,23 @@ typedef enum dsl_scan_state {
 	DSS_NUM_STATES
 } dsl_scan_state_t;
 
+typedef struct vdev_rebuild_stat {
+	uint64_t vrs_state;		/* vdev_rebuild_state_t */
+	uint64_t vrs_start_time;	/* time_t */
+	uint64_t vrs_end_time;		/* time_t */
+	uint64_t vrs_scan_time_ms;	/* total run time (millisecs) */
+	uint64_t vrs_bytes_scanned;	/* allocated bytes scanned */
+	uint64_t vrs_bytes_issued;	/* read bytes issued */
+	uint64_t vrs_bytes_rebuilt;	/* rebuilt bytes */
+	uint64_t vrs_bytes_est;		/* total bytes to scan */
+	uint64_t vrs_errors;		/* scanning errors */
+	uint64_t vrs_pass_time_ms;	/* pass run time (millisecs) */
+	uint64_t vrs_pass_bytes_scanned; /* bytes scanned since start/resume */
+	uint64_t vrs_pass_bytes_issued;	/* bytes rebuilt since start/resume */
+} vdev_rebuild_stat_t;
+
 /*
- * Errata described by http://zfsonlinux.org/msg/ZFS-8000-ER.  The ordering
+ * Errata described by https://zfsonlinux.org/msg/ZFS-8000-ER.  The ordering
  * of this enum must be maintained to ensure the errata identifiers map to
  * the correct documentation.  New errata may only be appended to the list
  * and must contain corresponding documentation at the above link.
@@ -1042,6 +1067,7 @@ typedef struct vdev_stat {
 	uint64_t	vs_trim_bytes_est;	/* total bytes to trim */
 	uint64_t	vs_trim_state;		/* vdev_trim_state_t */
 	uint64_t	vs_trim_action_time;	/* time_t */
+	uint64_t	vs_rebuild_processed;	/* bytes rebuilt */
 } vdev_stat_t;
 
 /*
@@ -1148,7 +1174,7 @@ typedef struct ddt_histogram {
 #define	ZFS_SUPER_MAGIC	0x2fc12fc1
 
 /* general zvol path */
-#define	ZVOL_DIR	"/dev"
+#define	ZVOL_DIR		"/dev/zvol/"
 
 #define	ZVOL_MAJOR		230
 #define	ZVOL_MINOR_BITS		4
@@ -1175,6 +1201,13 @@ typedef enum {
 	VDEV_TRIM_COMPLETE,
 } vdev_trim_state_t;
 
+typedef enum {
+	VDEV_REBUILD_NONE,
+	VDEV_REBUILD_ACTIVE,
+	VDEV_REBUILD_CANCELED,
+	VDEV_REBUILD_COMPLETE,
+} vdev_rebuild_state_t;
+
 /*
  * nvlist name constants. Facilitate restricting snapshot iteration range for
  * the "list next snapshot" ioctl
@@ -1189,9 +1222,13 @@ typedef enum {
  */
 typedef enum zfs_ioc {
 	/*
-	 * illumos - 81/128 numbers reserved.
+	 * Core features - 81/128 numbers reserved.
 	 */
+#ifdef __FreeBSD__
+	ZFS_IOC_FIRST =	0,
+#else
 	ZFS_IOC_FIRST =	('Z' << 8),
+#endif
 	ZFS_IOC = ZFS_IOC_FIRST,
 	ZFS_IOC_POOL_CREATE = ZFS_IOC_FIRST,	/* 0x5a00 */
 	ZFS_IOC_POOL_DESTROY,			/* 0x5a01 */
@@ -1280,18 +1317,17 @@ typedef enum zfs_ioc {
 	ZFS_IOC_WAIT_FS,			/* 0x5a54 */
 
 	/*
-	 * Linux - 3/64 numbers reserved.
+	 * Per-platform (Optional) - 8/128 numbers reserved.
 	 */
-	ZFS_IOC_LINUX = ('Z' << 8) + 0x80,
-	ZFS_IOC_EVENTS_NEXT,			/* 0x5a81 */
-	ZFS_IOC_EVENTS_CLEAR,			/* 0x5a82 */
-	ZFS_IOC_EVENTS_SEEK,			/* 0x5a83 */
-
-	/*
-	 * FreeBSD - 1/64 numbers reserved.
-	 */
-	ZFS_IOC_FREEBSD = ('Z' << 8) + 0xC0,
-
+	ZFS_IOC_PLATFORM = ZFS_IOC_FIRST + 0x80,
+	ZFS_IOC_EVENTS_NEXT,			/* 0x81 (Linux) */
+	ZFS_IOC_EVENTS_CLEAR,			/* 0x82 (Linux) */
+	ZFS_IOC_EVENTS_SEEK,			/* 0x83 (Linux) */
+	ZFS_IOC_NEXTBOOT,			/* 0x84 (FreeBSD) */
+	ZFS_IOC_JAIL,				/* 0x85 (FreeBSD) */
+	ZFS_IOC_UNJAIL,				/* 0x86 (FreeBSD) */
+	ZFS_IOC_SET_BOOTENV,			/* 0x87 (Linux) */
+	ZFS_IOC_GET_BOOTENV,			/* 0x88 (Linux) */
 	ZFS_IOC_LAST
 } zfs_ioc_t;
 
@@ -1309,6 +1345,8 @@ typedef enum zfs_ioc {
  * not described precisely by generic errno codes.
  *
  * These numbers should not change over time. New entries should be appended.
+ *
+ * (Keep in sync with contrib/pyzfs/libzfs_core/_constants.py)
  */
 typedef enum {
 	ZFS_ERR_CHECKPOINT_EXISTS = 1024,
@@ -1326,6 +1364,12 @@ typedef enum {
 	ZFS_ERR_SPILL_BLOCK_FLAG_MISSING,
 	ZFS_ERR_UNKNOWN_SEND_STREAM_FEATURE,
 	ZFS_ERR_EXPORT_IN_PROGRESS,
+	ZFS_ERR_BOOKMARK_SOURCE_NOT_ANCESTOR,
+	ZFS_ERR_STREAM_TRUNCATED,
+	ZFS_ERR_STREAM_LARGE_BLOCK_MISMATCH,
+	ZFS_ERR_RESILVER_IN_PROGRESS,
+	ZFS_ERR_REBUILD_IN_PROGRESS,
+	ZFS_ERR_BADPROP,
 } zfs_errno_t;
 
 /*
@@ -1354,6 +1398,7 @@ typedef enum {
 	ZPOOL_WAIT_REMOVE,
 	ZPOOL_WAIT_RESILVER,
 	ZPOOL_WAIT_SCRUB,
+	ZPOOL_WAIT_TRIM,
 	ZPOOL_WAIT_NUM_ACTIVITIES
 } zpool_wait_activity_t;
 
@@ -1471,7 +1516,12 @@ typedef enum {
  * given payloads:
  *
  *	ESC_ZFS_RESILVER_START
- *	ESC_ZFS_RESILVER_END
+ *	ESC_ZFS_RESILVER_FINISH
+ *
+ *		ZFS_EV_POOL_NAME	DATA_TYPE_STRING
+ *		ZFS_EV_POOL_GUID	DATA_TYPE_UINT64
+ *		ZFS_EV_RESILVER_TYPE	DATA_TYPE_STRING
+ *
  *	ESC_ZFS_POOL_DESTROY
  *	ESC_ZFS_POOL_REGUID
  *
@@ -1525,6 +1575,7 @@ typedef enum {
 #define	ZFS_EV_HIST_IOCTL	"history_ioctl"
 #define	ZFS_EV_HIST_DSNAME	"history_dsname"
 #define	ZFS_EV_HIST_DSID	"history_dsid"
+#define	ZFS_EV_RESILVER_TYPE	"resilver_type"
 
 #ifdef	__cplusplus
 }

@@ -23,9 +23,9 @@
  */
 
 
+#include <sys/zfs_znode.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/zfs_vnops.h>
-#include <sys/zfs_znode.h>
 #include <sys/zfs_ctldir.h>
 #include <sys/zpl.h>
 
@@ -138,7 +138,7 @@ zpl_statfs(struct dentry *dentry, struct kstatfs *statp)
 	int error;
 
 	cookie = spl_fstrans_mark();
-	error = -zfs_statvfs(dentry, statp);
+	error = -zfs_statvfs(dentry->d_inode, statp);
 	spl_fstrans_unmark(cookie);
 	ASSERT3S(error, <=, 0);
 

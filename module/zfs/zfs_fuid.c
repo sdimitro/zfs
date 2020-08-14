@@ -26,7 +26,6 @@
 #include <sys/dmu.h>
 #include <sys/avl.h>
 #include <sys/zap.h>
-#include <sys/refcount.h>
 #include <sys/nvpair.h>
 #ifdef _KERNEL
 #include <sys/sid.h>
@@ -382,9 +381,9 @@ zfs_fuid_find_by_idx(zfsvfs_t *zfsvfs, uint32_t idx)
 void
 zfs_fuid_map_ids(znode_t *zp, cred_t *cr, uid_t *uidp, uid_t *gidp)
 {
-	*uidp = zfs_fuid_map_id(ZTOZSB(zp), KUID_TO_SUID(ZTOI(zp)->i_uid),
+	*uidp = zfs_fuid_map_id(ZTOZSB(zp), KUID_TO_SUID(ZTOUID(zp)),
 	    cr, ZFS_OWNER);
-	*gidp = zfs_fuid_map_id(ZTOZSB(zp), KGID_TO_SGID(ZTOI(zp)->i_gid),
+	*gidp = zfs_fuid_map_id(ZTOZSB(zp), KGID_TO_SGID(ZTOGID(zp)),
 	    cr, ZFS_GROUP);
 }
 
@@ -771,5 +770,25 @@ zfs_fuid_txhold(zfsvfs_t *zfsvfs, dmu_tx_t *tx)
 		dmu_tx_hold_write(tx, zfsvfs->z_fuid_obj, 0,
 		    FUID_SIZE_ESTIMATE(zfsvfs));
 	}
+}
+
+/*
+ * buf must be big enough (eg, 32 bytes)
+ */
+int
+zfs_id_to_fuidstr(zfsvfs_t *zfsvfs, const char *domain, uid_t rid,
+    char *buf, size_t len, boolean_t addok)
+{
+	uint64_t fuid;
+	int domainid = 0;
+
+	if (domain && domain[0]) {
+		domainid = zfs_fuid_find_by_domain(zfsvfs, domain, NULL, addok);
+		if (domainid == -1)
+			return (SET_ERROR(ENOENT));
+	}
+	fuid = FUID_ENCODE(domainid, rid);
+	(void) snprintf(buf, len, "%llx", (longlong_t)fuid);
+	return (0);
 }
 #endif
