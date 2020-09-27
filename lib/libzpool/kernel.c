@@ -40,6 +40,7 @@
 #include <sys/time.h>
 #include <sys/utsname.h>
 #include <sys/zfs_context.h>
+#include <sys/zfs_ioctl.h>
 #include <sys/zfs_onexit.h>
 #include <sys/zfs_vfsops.h>
 #include <sys/zstd/zstd.h>
@@ -846,6 +847,8 @@ kernel_init(int mode)
 	fletcher_4_init();
 
 	tsd_create(&rrw_tsd_key, rrw_tsd_destroy);
+
+	zfs_ioctl_init();
 }
 
 void

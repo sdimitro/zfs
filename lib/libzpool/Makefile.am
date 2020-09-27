@@ -155,6 +155,7 @@ KERNEL_C = \
 	zfs_debug.c \
 	zfs_fm.c \
 	zfs_fuid.c \
+	zfs_ioctl.c \
 	zfs_sa.c \
 	zfs_znode.c \
 	zfs_ratelimit.c \

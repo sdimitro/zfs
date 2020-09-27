@@ -528,6 +528,8 @@ typedef struct zfs_useracct {
 
 #define	ZPOOL_EXPORT_AFTER_SPLIT 0x1
 
+extern void zfs_ioctl_init(void);
+
 #ifdef _KERNEL
 struct objset;
 struct zfsvfs;
