@@ -293,6 +293,18 @@ libzfs_error_description(libzfs_handle_t *hdl)
 	case EZFS_REBUILDING:
 		return (dgettext(TEXT_DOMAIN, "currently sequentially "
 		    "resilvering"));
+	case EZFS_VDEV_NOALLOC_MARK_EXISTS:
+		return (dgettext(TEXT_DOMAIN, "device already marked "
+		    "as non-allocatable"));
+	case EZFS_VDEV_NOALLOC_NOT_MARKED:
+		return (dgettext(TEXT_DOMAIN, "device not marked as "
+		    "non-allocatable"));
+	case EZFS_VDEV_NOT_HEALTHY:
+		return (dgettext(TEXT_DOMAIN, "device not currently in "
+		    "HEALTHY state"));
+	case EZFS_VDEV_INCORRECT_TYPE:
+		return (dgettext(TEXT_DOMAIN, "incorrect device type "
+		    "for this operation"));
 	case EZFS_UNKNOWN:
 		return (dgettext(TEXT_DOMAIN, "unknown error"));
 	default:
@@ -716,6 +728,18 @@ zpool_standard_error_fmt(libzfs_handle_t *hdl, int error, const char *fmt, ...)
 		break;
 	case ZFS_ERR_BADPROP:
 		zfs_verror(hdl, EZFS_BADPROP, fmt, ap);
+		break;
+	case ZFS_ERR_VDEV_NOALLOC_MARK_EXISTS:
+		zfs_verror(hdl, EZFS_VDEV_NOALLOC_MARK_EXISTS, fmt, ap);
+		break;
+	case ZFS_ERR_VDEV_NOALLOC_NOT_MARKED:
+		zfs_verror(hdl, EZFS_VDEV_NOALLOC_NOT_MARKED, fmt, ap);
+		break;
+	case ZFS_ERR_VDEV_NOT_HEALTHY:
+		zfs_verror(hdl, EZFS_VDEV_NOT_HEALTHY, fmt, ap);
+		break;
+	case ZFS_ERR_VDEV_INCORRECT_TYPE:
+		zfs_verror(hdl, EZFS_VDEV_INCORRECT_TYPE, fmt, ap);
 		break;
 	case ZFS_ERR_IOC_CMD_UNAVAIL:
 		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN, "the loaded zfs "

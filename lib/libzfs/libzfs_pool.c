@@ -2109,6 +2109,37 @@ zpool_translate_vdev_guids(zpool_handle_t *zhp, nvlist_t *vds,
 	return (error);
 }
 
+/*
+ * Check errlist and report any errors. An error translator function
+ * and an error message may be optionally specified for operation
+ * specific error customizations.
+ *
+ * Returns B_TRUE if any errors were reported, B_FALSE otherwise.
+ */
+static int
+report_vdev_errors(zpool_handle_t *zhp, nvlist_t *guids_to_paths,
+    int (*xlate_err_func)(int), char *err_msg, nvlist_t *errlist)
+{
+	boolean_t reported_errs = B_FALSE;
+	for (nvpair_t *elem = nvlist_next_nvpair(errlist, NULL);
+	    elem != NULL; elem = nvlist_next_nvpair(errlist, elem)) {
+		reported_errs = B_TRUE;
+
+		int64_t vd_error = fnvpair_value_int64(elem);
+		if (xlate_err_func != NULL)
+			vd_error = xlate_err_func(vd_error);
+
+		char *vd_desc = "";
+		if (nvlist_lookup_string(guids_to_paths, nvpair_name(elem),
+		    &vd_desc) != 0)
+			vd_desc = nvpair_name(elem);
+
+		(void) zfs_error_fmt(zhp->zpool_hdl, vd_error,
+		    "%s '%s'", (err_msg != NULL) ? err_msg: "vdev", vd_desc);
+	}
+	return (reported_errs);
+}
+
 static int
 xlate_init_err(int err)
 {
@@ -2138,35 +2169,35 @@ zpool_initialize_impl(zpool_handle_t *zhp, pool_initialize_func_t cmd_type,
 
 	nvlist_t *vdev_guids = fnvlist_alloc();
 	nvlist_t *guids_to_paths = fnvlist_alloc();
-	nvlist_t *vd_errlist = NULL;
-	nvlist_t *errlist;
-	nvpair_t *elem;
+	nvlist_t *errlist = NULL;
 
 	err = zpool_translate_vdev_guids(zhp, vds, vdev_guids,
-	    guids_to_paths, &vd_errlist);
-
+	    guids_to_paths, &errlist);
 	if (err != 0) {
-		verify(vd_errlist != NULL);
-		goto list_errors;
+		verify(errlist != NULL);
+		verify(report_vdev_errors(zhp, guids_to_paths,
+		    xlate_init_err, "cannot initialize", errlist));
+		goto out;
 	}
 
 	err = lzc_initialize(zhp->zpool_name, cmd_type,
 	    vdev_guids, &errlist);
-
 	if (err != 0) {
 		if (errlist != NULL) {
-			vd_errlist = fnvlist_lookup_nvlist(errlist,
+			nvlist_t *vd_errlist = fnvlist_lookup_nvlist(errlist,
 			    ZPOOL_INITIALIZE_VDEVS);
-			goto list_errors;
+			verify(report_vdev_errors(zhp, guids_to_paths,
+			    xlate_init_err, "cannot initialize", vd_errlist));
+		} else {
+			(void) zpool_standard_error(zhp->zpool_hdl, err,
+			    dgettext(TEXT_DOMAIN, "operation failed"));
 		}
-		(void) zpool_standard_error(zhp->zpool_hdl, err,
-		    dgettext(TEXT_DOMAIN, "operation failed"));
 		goto out;
 	}
 
 	if (wait) {
-		for (elem = nvlist_next_nvpair(vdev_guids, NULL); elem != NULL;
-		    elem = nvlist_next_nvpair(vdev_guids, elem)) {
+		for (nvpair_t *elem = nvlist_next_nvpair(vdev_guids, NULL);
+		    elem != NULL; elem = nvlist_next_nvpair(vdev_guids, elem)) {
 
 			uint64_t guid = fnvpair_value_uint64(elem);
 
@@ -2177,34 +2208,16 @@ zpool_initialize_impl(zpool_handle_t *zhp, pool_initialize_func_t cmd_type,
 				    err, dgettext(TEXT_DOMAIN, "error "
 				    "waiting for '%s' to initialize"),
 				    nvpair_name(elem));
-
-				goto out;
+				break;
 			}
 		}
 	}
-	goto out;
-
-list_errors:
-	for (elem = nvlist_next_nvpair(vd_errlist, NULL); elem != NULL;
-	    elem = nvlist_next_nvpair(vd_errlist, elem)) {
-		int64_t vd_error = xlate_init_err(fnvpair_value_int64(elem));
-		char *path;
-
-		if (nvlist_lookup_string(guids_to_paths, nvpair_name(elem),
-		    &path) != 0)
-			path = nvpair_name(elem);
-
-		(void) zfs_error_fmt(zhp->zpool_hdl, vd_error,
-		    "cannot initialize '%s'", path);
-	}
 
 out:
+	if (errlist != NULL)
+		fnvlist_free(errlist);
 	fnvlist_free(vdev_guids);
 	fnvlist_free(guids_to_paths);
-
-	if (vd_errlist != NULL)
-		fnvlist_free(vd_errlist);
-
 	return (err == 0 ? 0 : -1);
 }
 
@@ -4528,4 +4541,40 @@ zpool_get_bootenv(zpool_handle_t *zhp, char *outbuf, size_t size, off_t offset)
 	int bytes = MIN(strlen(envmap + offset), size);
 	fnvlist_free(nvl);
 	return (bytes);
+}
+
+int
+zpool_vdev_noalloc(zpool_handle_t *zhp, boolean_t unmark, nvlist_t *vds)
+{
+	nvlist_t *vdev_guids = fnvlist_alloc();
+	nvlist_t *guids_to_paths = fnvlist_alloc();
+	nvlist_t *errlist = NULL;
+
+	int error = zpool_translate_vdev_guids(zhp, vds, vdev_guids,
+	    guids_to_paths, &errlist);
+	if (error != 0) {
+		verify(report_vdev_errors(zhp,
+		    guids_to_paths, NULL, NULL, errlist));
+		goto out;
+	}
+
+	error = lzc_noalloc_mark(zhp->zpool_name, unmark, vdev_guids, &errlist);
+	if (error != 0) {
+		if (errlist != NULL) {
+			nvlist_t *vd_errlist = fnvlist_lookup_nvlist(errlist,
+			    ZPOOL_NOALLOC_VDEVS);
+			verify(report_vdev_errors(zhp, guids_to_paths,
+			    NULL, NULL, vd_errlist));
+		} else {
+			(void) zpool_standard_error(zhp->zpool_hdl, error,
+			    dgettext(TEXT_DOMAIN, "operation failed"));
+		}
+	}
+
+out:
+	if (errlist != NULL)
+		fnvlist_free(errlist);
+	fnvlist_free(vdev_guids);
+	fnvlist_free(guids_to_paths);
+	return ((error == 0) ? 0 : -1);
 }

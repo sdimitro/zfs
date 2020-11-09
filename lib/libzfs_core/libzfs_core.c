@@ -1659,3 +1659,53 @@ lzc_get_bootenv(const char *pool, nvlist_t **outnvl)
 {
 	return (lzc_ioctl(ZFS_IOC_GET_BOOTENV, pool, NULL, outnvl));
 }
+
+/*
+ * Marks a vdev as non-allocatable effective disabling any allocations
+ * on it (`unmark` flag set to false), or re-enables allocations for a
+ * vdev already marked as non-allocatable (`unmark` flag set to true).
+ *
+ * If this functions returns 0, all vdevs were marked/unmarked
+ * successfully. In case of failure per-vdev errors are returned through
+ * `errlist`. Each error entry in this nvlist is a (guid, errno) pair
+ * where guid is stringified with PRIu64, and errno is one of the
+ * following:
+ *
+ * ENODEV
+ *	Could not find vdev from supplied guid.
+ *
+ * ENOSPC
+ *	There is currently not enough allocatable space in the pool
+ *	for the supplied devices to be marked as non-allocatable.
+ *
+ * ZFS_ERR_VDEV_NOALLOC_MARK_EXISTS
+ *	The supplied vdev has already been marked as non-allocatable.
+ *	Returned only when `unmark` is set to false (e.g. marking vdevs).
+ *
+ * ZFS_ERR_VDEV_NOALLOC_NOT_MARKED
+ *	The supplied vdev is not currently marked as non-allocatable.
+ *	Returned only when `unmark` is set to true (e.g. unmarking vdevs).
+ *
+ * ZFS_ERR_VDEV_NOT_HEALTHY
+ *	The supplied vdev in not in HEALTHY state.
+ *
+ * ZFS_ERR_VDEV_INCORRECT_TYPE
+ *	The supplied vdev is of the wrong type (e.g. not a top-level vdev,
+ *	a log device, etc..).
+ */
+int
+lzc_noalloc_mark(const char *pool, boolean_t unmark,
+    nvlist_t *vdevs, nvlist_t **errlist)
+{
+	int error;
+
+	nvlist_t *args = fnvlist_alloc();
+	fnvlist_add_boolean_value(args, ZPOOL_NOALLOC_UNMARK, unmark);
+	fnvlist_add_nvlist(args, ZPOOL_NOALLOC_VDEVS, vdevs);
+
+	error = lzc_ioctl(ZFS_IOC_VDEV_NOALLOC, pool, args, errlist);
+
+	fnvlist_free(args);
+
+	return (error);
+}

@@ -83,6 +83,7 @@ static int zpool_do_destroy(int, char **);
 static int zpool_do_add(int, char **);
 static int zpool_do_remove(int, char **);
 static int zpool_do_labelclear(int, char **);
+static int zpool_do_noalloc(int, char **);
 
 static int zpool_do_checkpoint(int, char **);
 
@@ -157,6 +158,7 @@ typedef enum {
 	HELP_IOSTAT,
 	HELP_LABELCLEAR,
 	HELP_LIST,
+	HELP_NOALLOC,
 	HELP_OFFLINE,
 	HELP_ONLINE,
 	HELP_REPLACE,
@@ -284,6 +286,8 @@ static zpool_command_t command_table[] = {
 	{ NULL },
 	{ "labelclear",	zpool_do_labelclear,	HELP_LABELCLEAR		},
 	{ NULL },
+	{ "noalloc",	zpool_do_noalloc,	HELP_NOALLOC		},
+	{ NULL },
 	{ "checkpoint",	zpool_do_checkpoint,	HELP_CHECKPOINT		},
 	{ NULL },
 	{ "list",	zpool_do_list,		HELP_LIST		},
@@ -375,6 +379,9 @@ get_usage(zpool_help_t idx)
 		return (gettext("\tlist [-gHLpPv] [-o property[,...]] "
 		    "[-T d|u] [pool] ... \n"
 		    "\t    [interval [count]]\n"));
+	case HELP_NOALLOC:
+		return (gettext("\tnoalloc [-f] <pool> "
+		    "<device> [<device> ...]\n"));
 	case HELP_OFFLINE:
 		return (gettext("\toffline [-f] [-t] <pool> <device> ...\n"));
 	case HELP_ONLINE:
@@ -1112,6 +1119,66 @@ zpool_do_remove(int argc, char **argv)
 	zpool_close(zhp);
 
 	return (ret);
+}
+
+/*
+ * zpool noalloc <pool> <vdev> [<vdev> ...]
+ *       noalloc --unmark <pool> <vdev> [<vdev> ...]
+ *
+ *       -u       Re-enable allocations for supplied vdev(s).
+ *       --unmark
+ *
+ * Disable allocations from the supplied vdevs.
+ */
+int
+zpool_do_noalloc(int argc, char **argv)
+{
+	boolean_t unmark = B_FALSE;
+
+	struct option long_options[] = {
+		{"unmark", no_argument, NULL, 'u'},
+		{0, 0, 0, 0}
+	};
+
+	int c;
+	while ((c = getopt_long(argc, argv, "u", long_options, NULL)) != -1) {
+		switch (c) {
+		case 'u':
+			unmark = B_TRUE;
+			break;
+		case '?':
+			(void) fprintf(stderr, gettext("invalid option '%c'\n"),
+			    optopt);
+			usage(B_FALSE);
+		}
+	}
+	argc -= optind;
+	argv += optind;
+
+	if (argc < 1) {
+		(void) fprintf(stderr, gettext("missing pool name argument\n"));
+		usage(B_FALSE);
+	} else if (argc < 2) {
+		(void) fprintf(stderr, gettext("missing vdev argument\n"));
+		usage(B_FALSE);
+	}
+
+	char *poolname = argv[0];
+	zpool_handle_t *zhp = zpool_open(g_zfs, poolname);
+	if (zhp == NULL)
+		return (1);
+
+	nvlist_t *vdevs = fnvlist_alloc();
+	for (int i = 1; i < argc; i++) {
+		fnvlist_add_boolean(vdevs, argv[i]);
+	}
+
+	int error = (zpool_vdev_noalloc(zhp, unmark, vdevs) != 0);
+
+	fnvlist_free(vdevs);
+	zpool_close(zhp);
+
+	return (error);
 }
 
 /*
@@ -3024,6 +3091,7 @@ name_or_guid_exists(zpool_handle_t *zhp, void *data)
 
 	return (found);
 }
+
 /*
  * zpool checkpoint <pool>
  *       checkpoint --discard <pool>

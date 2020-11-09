@@ -66,6 +66,7 @@ dist_man_MANS = \
 	zpool-iostat.8 \
 	zpool-labelclear.8 \
 	zpool-list.8 \
+	zpool-noalloc.8 \
 	zpool-offline.8 \
 	zpool-online.8 \
 	zpool-reguid.8 \

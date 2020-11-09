@@ -149,6 +149,10 @@ typedef enum zfs_error {
 	EZFS_NO_RESILVER_DEFER,	/* pool doesn't support resilver_defer */
 	EZFS_EXPORT_IN_PROGRESS,	/* currently exporting the pool */
 	EZFS_REBUILDING,	/* resilvering (sequential reconstrution) */
+	EZFS_VDEV_NOALLOC_MARK_EXISTS,	/* vdev is already marked noalloc */
+	EZFS_VDEV_NOALLOC_NOT_MARKED,	/* vdev is not marked as noalloc */
+	EZFS_VDEV_NOT_HEALTHY,	/* vdev is not in healthy state */
+	EZFS_VDEV_INCORRECT_TYPE,	/* incorrect vdev type */
 	EZFS_UNKNOWN
 } zfs_error_t;
 
@@ -305,6 +309,7 @@ extern int zpool_vdev_remove_cancel(zpool_handle_t *);
 extern int zpool_vdev_indirect_size(zpool_handle_t *, const char *, uint64_t *);
 extern int zpool_vdev_split(zpool_handle_t *, char *, nvlist_t **, nvlist_t *,
     splitflags_t);
+extern int zpool_vdev_noalloc(zpool_handle_t *, boolean_t, nvlist_t *);
 
 extern int zpool_vdev_fault(zpool_handle_t *, uint64_t, vdev_aux_t);
 extern int zpool_vdev_degrade(zpool_handle_t *, uint64_t, vdev_aux_t);

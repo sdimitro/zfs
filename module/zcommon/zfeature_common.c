@@ -589,6 +589,10 @@ zpool_feature_init(void)
 	    "zstd compression algorithm support.",
 	    ZFEATURE_FLAG_PER_DATASET, ZFEATURE_TYPE_BOOLEAN, zstd_deps);
 	}
+	zfeature_register(SPA_FEATURE_VDEV_NOALLOC,
+	    "com.delphix:vdev_noalloc", "vdev_noalloc",
+	    "Support for disabling allocations for specific vdevs.",
+	    ZFEATURE_FLAG_READONLY_COMPAT, ZFEATURE_TYPE_BOOLEAN, NULL);
 }
 
 #if defined(_KERNEL)

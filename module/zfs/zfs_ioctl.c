@@ -3559,6 +3559,76 @@ zfs_ioc_get_bootenv(const char *name, nvlist_t *innvl, nvlist_t *outnvl)
 }
 
 /*
+ * innvl: {
+ *     "noalloc_unmark" -> Set to unmark already marked vdevs (boolean),
+ *     "noalloc_vdevs": { -> guids to mark/unmark with noalloc (nvlist)
+ *         "vdev_path_1": vdev_guid_1, (uint64),
+ *         "vdev_path_2": vdev_guid_2, (uint64),
+ *         ...
+ *     }
+ * }
+ *
+ * outnvl: {
+ *     "noalloc_vdevs": { -> noalloc errors (nvlist)
+ *         "vdev_path_1": errno, see function body for possible errnos (uint64)
+ *         "vdev_path_2": errno, ... (uint64)
+ *         ...
+ *     }
+ * }
+ *
+ * EINVAL is returned for an unknown commands or if any of the provided vdev
+ * guids have be specified with a type other than uint64.
+ */
+static const zfs_ioc_key_t zfs_keys_vdev_noalloc[] = {
+	{ZPOOL_NOALLOC_UNMARK,	DATA_TYPE_BOOLEAN_VALUE,	0},
+	{ZPOOL_NOALLOC_VDEVS,	DATA_TYPE_NVLIST,		0},
+};
+
+static int
+zfs_ioc_vdev_noalloc(const char *poolname, nvlist_t *innvl, nvlist_t *outnvl)
+{
+	boolean_t unmark;
+	if (nvlist_lookup_boolean_value(innvl, ZPOOL_NOALLOC_UNMARK,
+	    &unmark) != 0)
+		return (SET_ERROR(EINVAL));
+
+	nvlist_t *vdev_guids;
+	if (nvlist_lookup_nvlist(innvl, ZPOOL_NOALLOC_VDEVS, &vdev_guids) != 0)
+		return (SET_ERROR(EINVAL));
+
+	for (nvpair_t *pair = nvlist_next_nvpair(vdev_guids, NULL);
+	    pair != NULL; pair = nvlist_next_nvpair(vdev_guids, pair)) {
+		uint64_t vdev_guid;
+		if (nvpair_value_uint64(pair, &vdev_guid) != 0) {
+			return (SET_ERROR(EINVAL));
+		}
+	}
+
+	spa_t *spa;
+	int error = spa_open(poolname, &spa, FTAG);
+	if (error != 0)
+		return (error);
+
+	if (!spa_feature_is_enabled(spa, SPA_FEATURE_VDEV_NOALLOC)) {
+		spa_close(spa, FTAG);
+		return (SET_ERROR(ENOTSUP));
+	}
+
+	nvlist_t *vdev_errlist = fnvlist_alloc();
+	if (unmark)
+		error = spa_vdev_noalloc_unmark(spa, vdev_guids, vdev_errlist);
+	else
+		error = spa_vdev_noalloc_mark(spa, vdev_guids, vdev_errlist);
+
+	if (fnvlist_size(vdev_errlist) > 0)
+		fnvlist_add_nvlist(outnvl, ZPOOL_NOALLOC_VDEVS, vdev_errlist);
+	fnvlist_free(vdev_errlist);
+
+	spa_close(spa, FTAG);
+	return (error);
+}
+
+/*
  * The dp_config_rwlock must not be held when calling this, because the
  * unmount may need to write out data.
  *
@@ -7034,6 +7104,11 @@ zfs_ioctl_init(void)
 	    zfs_ioc_get_bootenv, zfs_secpolicy_none, POOL_NAME,
 	    POOL_CHECK_SUSPENDED, B_FALSE, B_TRUE,
 	    zfs_keys_get_bootenv, ARRAY_SIZE(zfs_keys_get_bootenv));
+
+	zfs_ioctl_register("noalloc", ZFS_IOC_VDEV_NOALLOC,
+	    zfs_ioc_vdev_noalloc, zfs_secpolicy_config, POOL_NAME,
+	    POOL_CHECK_SUSPENDED | POOL_CHECK_READONLY, B_TRUE, B_TRUE,
+	    zfs_keys_vdev_noalloc, ARRAY_SIZE(zfs_keys_vdev_noalloc));
 
 	/* IOCTLS that use the legacy function signature */
 

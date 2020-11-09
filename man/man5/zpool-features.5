@@ -1,5 +1,5 @@
 '\" te
-.\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
+.\" Copyright (c) 2012, 2020 by Delphix. All rights reserved.
 .\" Copyright (c) 2013 by Saso Kiselkov. All rights reserved.
 .\" Copyright (c) 2014, Joyent, Inc. All rights reserved.
 .\" The contents of this file are subject to the terms of the Common Development
@@ -16,7 +16,7 @@
 .\" Portions Copyright [yyyy] [name of copyright owner]
 .\" Copyright (c) 2019, Klara Inc.
 .\" Copyright (c) 2019, Allan Jude
-.TH ZPOOL-FEATURES 5 "Aug 24, 2020" OpenZFS
+.TH ZPOOL-FEATURES 5 "Nov 12, 2020" OpenZFS
 .SH NAME
 zpool\-features \- ZFS pool feature descriptions
 .SH DESCRIPTION
@@ -1000,6 +1000,31 @@ All blocks allocated and freed after a clone is created are tracked by the
 the clone's livelist which is referenced during the deletion of the clone.
 The feature is activated when a clone is created and remains active until all
 clones have been destroyed.
+.RE
+
+.sp
+.ne 2
+.na
+\fBvdev_noalloc\fR
+.ad
+.RS 4n
+.TS
+l l .
+GUID	com.delphix:vdev_noalloc
+READ\-ONLY COMPATIBLE	yes
+DEPENDENCIES	none
+.TE
+
+This feature allows vdevs to be marked as non-allocatable, effectively
+disabling allocations from them. Its main usage is preparing vdevs that
+are part of a multiple device removal plan so that these vdevs do not
+get remapped segments from the current device being removed and make
+their own removal in the future quicker.
+
+Once enabled, the feature becomes active when a device in the pool is
+marked with \fBnoalloc\fR and remains active as longs as there exist
+vdevs that are marked in the pool. When there are no marked vdevs left
+in the pool, the feature goes back to being enabled.
 
 .SH "SEE ALSO"
 zpool(8)

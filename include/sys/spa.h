@@ -813,6 +813,10 @@ extern int spa_vdev_initialize(spa_t *spa, nvlist_t *nv, uint64_t cmd_type,
     nvlist_t *vdev_errlist);
 extern int spa_vdev_trim(spa_t *spa, nvlist_t *nv, uint64_t cmd_type,
     uint64_t rate, boolean_t partial, boolean_t secure, nvlist_t *vdev_errlist);
+extern int spa_vdev_noalloc_mark(spa_t *spa,
+    nvlist_t *vdev_guids, nvlist_t *vdev_errlist);
+extern int spa_vdev_noalloc_unmark(spa_t *spa,
+    nvlist_t *vdev_guids, nvlist_t *vdev_errlist);
 extern int spa_vdev_setpath(spa_t *spa, uint64_t guid, const char *newpath);
 extern int spa_vdev_setfru(spa_t *spa, uint64_t guid, const char *newfru);
 extern int spa_vdev_split_mirror(spa_t *spa, char *newname, nvlist_t *config,

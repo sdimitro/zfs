@@ -779,6 +779,8 @@ typedef struct zpool_load_policy {
 	"com.delphix:pool_checkpoint_sm"
 #define	VDEV_TOP_ZAP_MS_UNFLUSHED_PHYS_TXGS \
 	"com.delphix:ms_unflushed_phys_txgs"
+#define	VDEV_TOP_ZAP_VDEV_NOALLOC \
+	"com.delphix:vdev_noalloc"
 
 #define	VDEV_TOP_ZAP_VDEV_REBUILD_PHYS \
 	"org.openzfs:vdev_rebuild"
@@ -1325,6 +1327,7 @@ typedef enum zfs_ioc {
 	ZFS_IOC_GET_BOOKMARK_PROPS,		/* 0x5a52 */
 	ZFS_IOC_WAIT,				/* 0x5a53 */
 	ZFS_IOC_WAIT_FS,			/* 0x5a54 */
+	ZFS_IOC_VDEV_NOALLOC,			/* 0x5a55 */
 
 	/*
 	 * Per-platform (Optional) - 8/128 numbers reserved.
@@ -1380,6 +1383,10 @@ typedef enum {
 	ZFS_ERR_RESILVER_IN_PROGRESS,
 	ZFS_ERR_REBUILD_IN_PROGRESS,
 	ZFS_ERR_BADPROP,
+	ZFS_ERR_VDEV_NOALLOC_MARK_EXISTS,
+	ZFS_ERR_VDEV_NOALLOC_NOT_MARKED,
+	ZFS_ERR_VDEV_NOT_HEALTHY,
+	ZFS_ERR_VDEV_INCORRECT_TYPE,
 } zfs_errno_t;
 
 /*
@@ -1470,6 +1477,12 @@ typedef enum {
  */
 #define	ZPOOL_INITIALIZE_COMMAND	"initialize_command"
 #define	ZPOOL_INITIALIZE_VDEVS		"initialize_vdevs"
+
+/*
+ * The following are names used when invoking ZFS_IOC_VDEV_NOALLOC.
+ */
+#define	ZPOOL_NOALLOC_VDEVS		"noalloc_vdevs"
+#define	ZPOOL_NOALLOC_UNMARK		"noalloc_unmark"
 
 /*
  * The following are names used when invoking ZFS_IOC_POOL_TRIM.

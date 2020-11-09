@@ -1101,6 +1101,14 @@ vdev_remove_complete_sync(void *arg, dmu_tx_t *tx)
 
 	vdev_destroy_spacemaps(vd, tx);
 
+	if (vd->vdev_noalloc) {
+		spa_feature_decr(spa, SPA_FEATURE_VDEV_NOALLOC, tx);
+		vd->vdev_noalloc = B_FALSE;
+		ASSERT3U(vd->vdev_top_zap, !=, 0);
+		VERIFY0(zap_remove(spa_meta_objset(spa), vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_VDEV_NOALLOC, tx));
+	}
+
 	/* destroy leaf zaps, if any */
 	ASSERT3P(svr->svr_zaplist, !=, NULL);
 	for (nvpair_t *pair = nvlist_next_nvpair(svr->svr_zaplist, NULL);
@@ -1784,10 +1792,12 @@ spa_vdev_remove_cancel_impl(spa_t *spa)
 	if (error == 0) {
 		spa_config_enter(spa, SCL_ALLOC | SCL_VDEV, FTAG, RW_WRITER);
 		vdev_t *vd = vdev_lookup_top(spa, vdid);
-		metaslab_group_activate(vd->vdev_mg);
-		ASSERT(!vd->vdev_islog);
-		if (vd->vdev_log_mg != NULL)
-			metaslab_group_activate(vd->vdev_log_mg);
+		if (!vd->vdev_noalloc) {
+			metaslab_group_activate(vd->vdev_mg);
+			ASSERT(!vd->vdev_islog);
+			if (vd->vdev_log_mg != NULL)
+				metaslab_group_activate(vd->vdev_log_mg);
+		}
 		spa_config_exit(spa, SCL_ALLOC | SCL_VDEV, FTAG);
 	}
 
@@ -2116,18 +2126,18 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 		return (error);
 
 	/*
-	 * Stop allocating from this vdev.  Note that we must check
-	 * that this is not the only device in the pool before
-	 * passivating, otherwise we will not be able to make
-	 * progress because we can't allocate from any vdevs.
-	 * The above check for sufficient free space serves this
-	 * purpose.
+	 * If vdev is not already marked with noalloc stop allocating from
+	 * this vdev.  Note that we must check that this is not the only
+	 * device in the pool before passivating, otherwise we will not be
+	 * able to make progress because we can't allocate from any vdevs.
+	 * The above check for sufficient free space serves this purpose.
 	 */
-	metaslab_group_t *mg = vd->vdev_mg;
-	metaslab_group_passivate(mg);
-	ASSERT(!vd->vdev_islog);
-	if (vd->vdev_log_mg != NULL)
-		metaslab_group_passivate(vd->vdev_log_mg);
+	if (!vd->vdev_noalloc) {
+		metaslab_group_passivate(vd->vdev_mg);
+		ASSERT(!vd->vdev_islog);
+		if (vd->vdev_log_mg != NULL)
+			metaslab_group_passivate(vd->vdev_log_mg);
+	}
 
 	/*
 	 * Wait for the youngest allocations and frees to sync,
@@ -2163,10 +2173,12 @@ spa_vdev_remove_top(vdev_t *vd, uint64_t *txg)
 		error = spa_vdev_remove_top_check(vd);
 
 	if (error != 0) {
-		metaslab_group_activate(mg);
-		ASSERT(!vd->vdev_islog);
-		if (vd->vdev_log_mg != NULL)
-			metaslab_group_activate(vd->vdev_log_mg);
+		if (!vd->vdev_noalloc) {
+			metaslab_group_activate(vd->vdev_mg);
+			ASSERT(!vd->vdev_islog);
+			if (vd->vdev_log_mg != NULL)
+				metaslab_group_activate(vd->vdev_log_mg);
+		}
 		spa_async_request(spa, SPA_ASYNC_INITIALIZE_RESTART);
 		spa_async_request(spa, SPA_ASYNC_TRIM_RESTART);
 		spa_async_request(spa, SPA_ASYNC_AUTOTRIM_RESTART);

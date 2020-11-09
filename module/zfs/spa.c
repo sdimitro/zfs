@@ -7306,6 +7306,319 @@ spa_vdev_trim(spa_t *spa, nvlist_t *nv, uint64_t cmd_type, uint64_t rate,
 }
 
 /*
+ * Translate the vdev guids to vdev_t pointers, while also checking that
+ * these vdevs are suitable to be marked as non-allocatable.
+ */
+static int
+spa_vdev_noalloc_mark_xlate_guids(spa_t *spa, nvlist_t *vdev_guids,
+    vdev_t **vdevs, nvlist_t *vdev_errlist)
+{
+	int total_errors = 0;
+
+	int vdev_idx = 0;
+	for (nvpair_t *pair = nvlist_next_nvpair(vdev_guids, NULL);
+	    pair != NULL; pair = nvlist_next_nvpair(vdev_guids, pair)) {
+		int error = 0;
+
+		uint64_t vdev_guid = fnvpair_value_uint64(pair);
+		vdev_t *vd = spa_lookup_by_guid(spa, vdev_guid, B_FALSE);
+		if (vd == NULL) {
+			error = ENODEV;
+		} else if (vd->vdev_noalloc) {
+			error = ZFS_ERR_VDEV_NOALLOC_MARK_EXISTS;
+		} else if (vd != vd->vdev_top || !vdev_is_concrete(vd) ||
+		    vd->vdev_islog) {
+			error = ZFS_ERR_VDEV_INCORRECT_TYPE;
+		} else if (vd->vdev_state != VDEV_STATE_HEALTHY) {
+			error = ZFS_ERR_VDEV_NOT_HEALTHY;
+		}
+
+		// XXX:
+		// Need to do space checking here and break out
+		// of the loop if we fuck it over. Also need to
+		// figure out how we could propage that ENOSPC
+		// error up to the userland.
+
+		if (error != 0) {
+			char guid_as_str[MAXNAMELEN];
+			(void) snprintf(guid_as_str, sizeof (guid_as_str),
+			    "%llu", (unsigned long long)vdev_guid);
+			fnvlist_add_int64(vdev_errlist, guid_as_str, error);
+			total_errors++;
+		} else {
+			vdevs[vdev_idx] = vd;
+			vdev_idx++;
+		}
+	}
+
+	// XXX: If case here about space accounting ENOSPC above
+
+	if (total_errors > 0)
+		return (SET_ERROR(EINVAL));
+
+	return (0);
+}
+
+typedef struct spa_vdev_noalloc_sync_args {
+	vdev_t **vdevs;
+	int num_vdevs;
+} spa_vdev_noalloc_sync_args_t;
+
+static void
+spa_vdev_noalloc_mark_sync(void *arg, dmu_tx_t *tx)
+{
+	spa_t *spa = tx->tx_pool->dp_spa;
+	spa_vdev_noalloc_sync_args_t *vdev_vector = arg;
+	boolean_t marker = B_TRUE;
+
+	for (int c = 0; c < vdev_vector->num_vdevs; c++) {
+		vdev_t *vd = vdev_vector->vdevs[c];
+		VERIFY0(zap_add(vd->vdev_spa->spa_meta_objset,
+		    vd->vdev_top_zap, VDEV_TOP_ZAP_VDEV_NOALLOC,
+		    sizeof (marker), 1, &marker, tx));
+		spa_feature_incr(spa, SPA_FEATURE_VDEV_NOALLOC, tx);
+	}
+}
+
+/*
+ * With the VDEV NOALLOC feature a user can mark one or more vdevs
+ * as non-allocatable. The main use of this feature comes up when
+ * a user is planning to remove multiple devices from a pool. ZFS
+ * can currently perform one removal at a time, and the results such
+ * an operation spreads the allocated segments of that device to the
+ * rest of the devices in that pool. A user can mark all in advance
+ * all the devices that they plan to remove, ensuring that each
+ * device removal won't allocate more space in those vdevs and make
+ * subsequent removals slower. Another use-case that's more rare is
+ * redirecting allocations temporarily from slow or faulty vdevs.
+ *
+ * To mark a vdev as non-allocatable we passivate the vdev's metaslab
+ * group (and log metaslab group if embedded slog is enabled) so no
+ * further allocations take place on it, set the `vdev_noalloc` flag
+ * in its vdev_t in memory, and place an entry in its `vdev_top_zap`
+ * on disk for persistence. Unmarking a vdev undoes all of the above.
+ *
+ * Operations like device removal that activate/passivate a vdev's
+ * metaslab group should always check whether `vdev_noalloc` is not
+ * set before proceeding with such manipulations.
+ */
+int
+spa_vdev_noalloc_mark(spa_t *spa,
+    nvlist_t *vdev_guids, nvlist_t *vdev_errlist)
+{
+	int error;
+
+	int num_vdevs = 0;
+	for (nvpair_t *guid = nvlist_next_nvpair(vdev_guids, NULL);
+	    guid != NULL; guid = nvlist_next_nvpair(vdev_guids, guid)) {
+		num_vdevs++;
+	}
+	vdev_t **vdevs = kmem_zalloc(num_vdevs * sizeof (vdev_t *), KM_SLEEP);
+
+	/*
+	 * We hold the namespace lock through the whole function
+	 * to prevent any changes to the pool while we're starting or
+	 * stopping TRIM. The config and state locks are held so that
+	 * we can properly assess the vdev state before we commit to
+	 * the TRIM operation.
+	 */
+	/*
+	 * XXX: Is this necessary? What if we just hold the vdev_top_lock?
+	 * or should we go ahead and do spa_vdev_config_enter()?
+	 * or spa_config_enter(spa, SCL_ALLOC | SCL_VDEV, FTAG, RW_WRITER);?
+	 * ^ need spa_config_enter() with specific flags for passivate
+	 */
+	mutex_enter(&spa->spa_vdev_top_lock);
+	spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+
+	error = spa_vdev_noalloc_mark_xlate_guids(spa,
+	    vdev_guids, vdevs, vdev_errlist);
+	if (error != 0) {
+		// XXX: see above on which hold to hold
+		spa_config_exit(spa, SCL_ALL, FTAG);
+		mutex_exit(&spa->spa_vdev_top_lock);
+		kmem_free(vdevs, num_vdevs * sizeof (vdev_t *));
+		return (error);
+	}
+
+	// XXX: Do I need to do anything about initialization and trimming
+	// or reset the logs like removal?
+
+	for (int c = 0; c < num_vdevs; c++) {
+		vdev_t *vd = vdevs[c];
+		metaslab_group_passivate(vd->vdev_mg);
+		ASSERT(!vd->vdev_islog);
+		if (vd->vdev_log_mg != NULL)
+			metaslab_group_passivate(vd->vdev_log_mg);
+		vd->vdev_noalloc = B_TRUE;
+	}
+	spa_config_exit(spa, SCL_ALL, FTAG);
+
+	spa_vdev_noalloc_sync_args_t vdev_vector = {
+		.vdevs = vdevs,
+		.num_vdevs = num_vdevs,
+	};
+	error = dsl_sync_task(spa->spa_name, NULL,
+	    spa_vdev_noalloc_mark_sync, &vdev_vector,
+	    0, ZFS_SPACE_CHECK_NORMAL);
+	if (error != 0) {
+		spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+		for (int c = 0; c < num_vdevs; c++) {
+			vdev_t *vd = vdevs[c];
+			metaslab_group_activate(vd->vdev_mg);
+			if (vd->vdev_log_mg != NULL)
+				metaslab_group_activate(vd->vdev_log_mg);
+			ASSERT(vd->vdev_noalloc);
+			vd->vdev_noalloc = B_FALSE;
+		}
+		spa_config_exit(spa, SCL_ALL, FTAG);
+	}
+	mutex_exit(&spa->spa_vdev_top_lock);
+
+	if (error == 0) {
+		spa_history_log_internal(spa, "vdev noalloc mark",  NULL,
+		    "marked %d vdev(s) in %s", num_vdevs, spa_name(spa));
+	}
+
+	kmem_free(vdevs, num_vdevs * sizeof (vdev_t *));
+	return (error);
+}
+
+/*
+ * Translate the vdev guids to vdev_t pointers, while also validating
+ * that they are currently marked as non-allocatable.
+ */
+static int
+spa_vdev_noalloc_unmark_xlate_guids(spa_t *spa, nvlist_t *vdev_guids,
+    vdev_t **vdevs, nvlist_t *vdev_errlist)
+{
+	int total_errors = 0;
+
+	int vdev_idx = 0;
+	for (nvpair_t *pair = nvlist_next_nvpair(vdev_guids, NULL);
+	    pair != NULL; pair = nvlist_next_nvpair(vdev_guids, pair)) {
+		int error = 0;
+
+		uint64_t vdev_guid = fnvpair_value_uint64(pair);
+		vdev_t *vd = spa_lookup_by_guid(spa, vdev_guid, B_FALSE);
+		if (vd == NULL) {
+			error = ENODEV;
+		} else if (!vd->vdev_noalloc) {
+			error = ZFS_ERR_VDEV_NOALLOC_NOT_MARKED;
+		} else if (vd->vdev_state != VDEV_STATE_HEALTHY) {
+			error = ZFS_ERR_VDEV_NOT_HEALTHY;
+		}
+
+		if (error != 0) {
+			char guid_as_str[MAXNAMELEN];
+			(void) snprintf(guid_as_str, sizeof (guid_as_str),
+			    "%llu", (unsigned long long)vdev_guid);
+			fnvlist_add_int64(vdev_errlist, guid_as_str, error);
+			total_errors++;
+		} else {
+			ASSERT3U(vd, ==, vd->vdev_top);
+			vdevs[vdev_idx] = vd;
+			vdev_idx++;
+		}
+	}
+
+	if (total_errors > 0)
+		return (SET_ERROR(EINVAL));
+
+	return (0);
+}
+
+static void
+spa_vdev_noalloc_unmark_sync(void *arg, dmu_tx_t *tx)
+{
+	spa_t *spa = tx->tx_pool->dp_spa;
+	spa_vdev_noalloc_sync_args_t *vdev_vector = arg;
+
+	for (int c = 0; c < vdev_vector->num_vdevs; c++) {
+		vdev_t *vd = vdev_vector->vdevs[c];
+		VERIFY0(zap_remove(spa_meta_objset(spa),
+		    vd->vdev_top_zap, VDEV_TOP_ZAP_VDEV_NOALLOC, tx));
+		spa_feature_decr(spa, SPA_FEATURE_VDEV_NOALLOC, tx);
+	}
+}
+
+int
+spa_vdev_noalloc_unmark(spa_t *spa,
+    nvlist_t *vdev_guids, nvlist_t *vdev_errlist)
+{
+	int error;
+
+	int num_vdevs = 0;
+	for (nvpair_t *guid = nvlist_next_nvpair(vdev_guids, NULL);
+	    guid != NULL; guid = nvlist_next_nvpair(vdev_guids, guid)) {
+		num_vdevs++;
+	}
+	vdev_t **vdevs = kmem_zalloc(num_vdevs * sizeof (vdev_t *), KM_SLEEP);
+
+	/*
+	 * We hold the namespace lock through the whole function
+	 * to prevent any changes to the pool while we're starting or
+	 * stopping TRIM. The config and state locks are held so that
+	 * we can properly assess the vdev state before we commit to
+	 * the TRIM operation.
+	 */
+	/*
+	 * XXX: Is this necessary? What if we just hold the vdev_top_lock?
+	 * or should we go ahead and do spa_vdev_config_enter()?
+	 */
+	mutex_enter(&spa->spa_vdev_top_lock);
+	spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+
+	error = spa_vdev_noalloc_unmark_xlate_guids(spa,
+	    vdev_guids, vdevs, vdev_errlist);
+	if (error != 0) {
+		// XXX: see above on which hold to hold
+		spa_config_exit(spa, SCL_ALL, FTAG);
+		mutex_exit(&spa->spa_vdev_top_lock);
+		kmem_free(vdevs, num_vdevs * sizeof (vdev_t *));
+		return (error);
+	}
+	spa_config_exit(spa, SCL_ALL, FTAG);
+
+	// XXX: Do I need to do anything about initialization and trimming
+	// or reset the logs like removal?
+
+	spa_vdev_noalloc_sync_args_t vdev_vector = {
+		.vdevs = vdevs,
+		.num_vdevs = num_vdevs,
+	};
+	// XXX: mention space check in theory statement
+	error = dsl_sync_task(spa->spa_name, NULL,
+	    spa_vdev_noalloc_unmark_sync, &vdev_vector,
+	    0, ZFS_SPACE_CHECK_NONE);
+	if (error == 0) {
+		spa_config_enter(spa, SCL_ALL, spa, RW_WRITER);
+		for (int c = 0; c < num_vdevs; c++) {
+			vdev_t *vd = vdevs[c];
+
+			metaslab_group_activate(vd->vdev_mg);
+			ASSERT(!vd->vdev_islog);
+			if (vd->vdev_log_mg != NULL)
+				metaslab_group_activate(vd->vdev_log_mg);
+
+			ASSERT(vd->vdev_noalloc);
+			vd->vdev_noalloc = B_FALSE;
+		}
+		spa_config_exit(spa, SCL_ALL, FTAG);
+	}
+	// XXX: see above on which hold to hold
+	mutex_exit(&spa->spa_vdev_top_lock);
+
+	if (error == 0) {
+		spa_history_log_internal(spa, "vdev noalloc unmark",  NULL,
+		    "unmarked %d vdev(s) in %s", num_vdevs, spa_name(spa));
+	}
+
+	kmem_free(vdevs, num_vdevs * sizeof (vdev_t *));
+	return (error);
+}
+
+/*
  * Split a set of devices from their mirrors, and create a new pool from them.
  */
 int

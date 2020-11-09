@@ -1485,9 +1485,10 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 	/*
 	 * If the vdev is being removed we don't activate
 	 * the metaslabs since we want to ensure that no new
-	 * allocations are performed on this device.
+	 * allocations are performed on this device. Similarly
+	 * for devices marked with noalloc.
 	 */
-	if (!expanding && !vd->vdev_removing) {
+	if (!expanding && !vd->vdev_removing && !vd->vdev_noalloc) {
 		metaslab_group_activate(vd->vdev_mg);
 		if (vd->vdev_log_mg != NULL)
 			metaslab_group_activate(vd->vdev_log_mg);
@@ -3279,6 +3280,7 @@ int
 vdev_load(vdev_t *vd)
 {
 	int error = 0;
+	spa_t *spa = vd->vdev_spa;
 
 	/*
 	 * Recursively load all children.
@@ -3292,13 +3294,11 @@ vdev_load(vdev_t *vd)
 
 	vdev_set_deflate_ratio(vd);
 
-	/*
-	 * On spa_load path, grab the allocation bias from our zap
-	 */
 	if (vd == vd->vdev_top && vd->vdev_top_zap != 0) {
-		spa_t *spa = vd->vdev_spa;
+		/*
+		 * Grab the allocation bias from top-level vdev zap.
+		 */
 		char bias_str[64];
-
 		error = zap_lookup(spa->spa_meta_objset, vd->vdev_top_zap,
 		    VDEV_TOP_ZAP_ALLOCATION_BIAS, 1, sizeof (bias_str),
 		    bias_str);
@@ -3308,22 +3308,40 @@ vdev_load(vdev_t *vd)
 		} else if (error != ENOENT) {
 			vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
 			    VDEV_AUX_CORRUPT_DATA);
-			vdev_dbgmsg(vd, "vdev_load: zap_lookup(top_zap=%llu) "
-			    "failed [error=%d]", vd->vdev_top_zap, error);
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(top_zap=%llu, "
+			    "%s) failed [error=%d]", vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_ALLOCATION_BIAS, error);
 			return (error);
 		}
-	}
 
-	/*
-	 * Load any rebuild state from the top-level vdev zap.
-	 */
-	if (vd == vd->vdev_top && vd->vdev_top_zap != 0) {
+		/*
+		 * Load any rebuild state from the top-level vdev zap.
+		 */
 		error = vdev_rebuild_load(vd);
 		if (error && error != ENOTSUP) {
 			vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
 			    VDEV_AUX_CORRUPT_DATA);
 			vdev_dbgmsg(vd, "vdev_load: vdev_rebuild_load "
 			    "failed [error=%d]", error);
+			return (error);
+		}
+
+		/*
+		 * Check if vdev is marked as non-allocatable.
+		 */
+		boolean_t noalloc = B_FALSE;
+		error = zap_lookup(spa->spa_meta_objset, vd->vdev_top_zap,
+		    VDEV_TOP_ZAP_VDEV_NOALLOC, 1, sizeof (noalloc),
+		    &noalloc);
+		if (error == 0) {
+			ASSERT(noalloc);
+			vd->vdev_noalloc = B_TRUE;
+		} else if (error != ENOENT) {
+			vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
+			    VDEV_AUX_CORRUPT_DATA);
+			vdev_dbgmsg(vd, "vdev_load: zap_lookup(top_zap=%llu, "
+			    "%s) failed [error=%d]", vd->vdev_top_zap,
+			    VDEV_TOP_ZAP_VDEV_NOALLOC, error);
 			return (error);
 		}
 	}
@@ -3355,7 +3373,7 @@ vdev_load(vdev_t *vd)
 		uint64_t checkpoint_sm_obj;
 		error = vdev_checkpoint_sm_object(vd, &checkpoint_sm_obj);
 		if (error == 0 && checkpoint_sm_obj != 0) {
-			objset_t *mos = spa_meta_objset(vd->vdev_spa);
+			objset_t *mos = spa_meta_objset(spa);
 			ASSERT(vd->vdev_asize != 0);
 			ASSERT3P(vd->vdev_checkpoint_sm, ==, NULL);
 
@@ -3379,7 +3397,7 @@ vdev_load(vdev_t *vd)
 			 */
 			vd->vdev_stat.vs_checkpoint_space =
 			    -space_map_allocated(vd->vdev_checkpoint_sm);
-			vd->vdev_spa->spa_checkpoint_info.sci_dspace +=
+			spa->spa_checkpoint_info.sci_dspace +=
 			    vd->vdev_stat.vs_checkpoint_space;
 		} else if (error != 0) {
 			vdev_dbgmsg(vd, "vdev_load: failed to retrieve "
@@ -3403,7 +3421,7 @@ vdev_load(vdev_t *vd)
 	uint64_t obsolete_sm_object;
 	error = vdev_obsolete_sm_object(vd, &obsolete_sm_object);
 	if (error == 0 && obsolete_sm_object != 0) {
-		objset_t *mos = vd->vdev_spa->spa_meta_objset;
+		objset_t *mos = spa_meta_objset(spa);
 		ASSERT(vd->vdev_asize != 0);
 		ASSERT3P(vd->vdev_obsolete_sm, ==, NULL);
 

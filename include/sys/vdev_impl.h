@@ -280,6 +280,9 @@ struct vdev {
 	/* pool checkpoint related */
 	space_map_t	*vdev_checkpoint_sm;	/* contains reserved blocks */
 
+	/* vdev_noalloc related */
+	boolean_t vdev_noalloc;
+
 	/* Initialize related */
 	boolean_t	vdev_initialize_exit_wanted;
 	vdev_initializing_state_t	vdev_initialize_state;

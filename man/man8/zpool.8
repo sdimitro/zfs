@@ -20,14 +20,14 @@
 .\"
 .\"
 .\" Copyright (c) 2007, Sun Microsystems, Inc. All Rights Reserved.
-.\" Copyright (c) 2012, 2018 by Delphix. All rights reserved.
+.\" Copyright (c) 2012, 2020 by Delphix. All rights reserved.
 .\" Copyright (c) 2012 Cyril Plisko. All Rights Reserved.
 .\" Copyright (c) 2017 Datto Inc.
 .\" Copyright (c) 2018 George Melikov. All Rights Reserved.
 .\" Copyright 2017 Nexenta Systems, Inc.
 .\" Copyright (c) 2017 Open-E, Inc. All Rights Reserved.
 .\"
-.Dd August 9, 2019
+.Dd November 12, 2020
 .Dt ZPOOL 8
 .Os
 .Sh NAME
@@ -118,6 +118,8 @@ Increases or decreases redundancy by
 .Xc
 Adds the specified virtual devices to the given pool,
 or removes the specified device from the pool.
+.It Xr zpool-noalloc 8
+Disables allocations from the supplied vdev(s).
 .It Xr zpool-replace 8
 Replaces an existing device (which may be faulted) with a new one.
 .It Xr zpool-split 8
@@ -580,6 +582,7 @@ is not set, it is assumed that the user is allowed to run
 .Xr zpool-iostat 8 ,
 .Xr zpool-labelclear 8 ,
 .Xr zpool-list 8 ,
+.Xr zpool-noalloc 8 ,
 .Xr zpool-offline 8 ,
 .Xr zpool-online 8 ,
 .Xr zpool-reguid 8 ,

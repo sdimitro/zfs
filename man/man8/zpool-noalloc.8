@@ -1,0 +1,59 @@
+.\"
+.\" CDDL HEADER START
+.\"
+.\" The contents of this file are subject to the terms of the
+.\" Common Development and Distribution License (the "License").
+.\" You may not use this file except in compliance with the License.
+.\"
+.\" You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+.\" or http://www.opensolaris.org/os/licensing.
+.\" See the License for the specific language governing permissions
+.\" and limitations under the License.
+.\"
+.\" When distributing Covered Code, include this CDDL HEADER in each
+.\" file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+.\" If applicable, add the following below this CDDL HEADER, with the
+.\" fields enclosed by brackets "[]" replaced with your own identifying
+.\" information: Portions Copyright [yyyy] [name of copyright owner]
+.\"
+.\" CDDL HEADER END
+.\"
+.\"
+.\" Copyright (c) 2020 by Delphix. All rights reserved.
+.\"
+.Dd November 12, 2020
+.Dt ZPOOL-NOALLOC 8
+.Os
+.Sh NAME
+.Nm zpool-noalloc
+.Nd Disables allocations from one or more devices in a ZFS storage pool.
+.Sh SYNOPSIS
+.Nm zpool
+.Cm noalloc
+.Op Fl u
+.Ar pool
+.Ar device
+.Op Ar device Ns ...
+.Sh DESCRIPTION
+.Bl -tag -width Ds
+.It Xo
+.Nm zpool
+.Cm noalloc
+.Op Fl u
+.Ar pool
+.Ar device
+.Op Ar device Ns ...
+.Xc
+Disables allocation from the specified vdevs by marking them as non-allocatable.
+The main use-case of this feature is to prevent all types of allocations in vdevs
+that are to be removed in the near feature so their removals finish faster.
+Another less frequent use-case is redirecting allocations away from degraded or
+faulty vdevs.
+.Bl -tag -width Ds
+.It Fl u, -unmark
+Re-enable allocations for the specified marked devices.
+.El
+.El
+.Sh SEE ALSO
+.Xr zpool-remove 8 ,
+.Xr zpool 8

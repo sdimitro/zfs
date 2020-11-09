@@ -139,6 +139,8 @@ int lzc_wait_fs(const char *, zfs_wait_activity_t, boolean_t *);
 
 int lzc_set_bootenv(const char *, const char *);
 int lzc_get_bootenv(const char *, nvlist_t **);
+
+int lzc_noalloc_mark(const char *, boolean_t, nvlist_t *, nvlist_t **);
 #ifdef	__cplusplus
 }
 #endif

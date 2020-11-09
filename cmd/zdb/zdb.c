@@ -1356,6 +1356,43 @@ dump_zpldir(objset_t *os, uint64_t object, void *data, size_t size)
 }
 
 static int
+get_vdev_noalloc_refcount(vdev_t *vd)
+{
+	int refcount = 0;
+
+	if (vd->vdev_top == vd && vd->vdev_top_zap != 0 &&
+	    zap_contains(spa_meta_objset(vd->vdev_spa),
+	    vd->vdev_top_zap, VDEV_TOP_ZAP_POOL_CHECKPOINT_SM) == 0)
+		refcount++;
+
+	for (uint64_t c = 0; c < vd->vdev_children; c++)
+		refcount += get_vdev_noalloc_refcount(vd->vdev_child[c]);
+
+	return (refcount);
+}
+
+static int
+verify_vdev_noalloc_refcounts(spa_t *spa)
+{
+
+	uint64_t expected_refcount = 0;
+	(void) feature_get_refcount(spa,
+	    &spa_feature_table[SPA_FEATURE_VDEV_NOALLOC],
+	    &expected_refcount);
+
+	uint64_t actual_refcount =
+	    get_vdev_noalloc_refcount(spa->spa_root_vdev);
+	if (expected_refcount != actual_refcount) {
+		(void) printf("vdev noalloc refcount mismatch: "
+		    "expected %lld != actual %lld\n",
+		    (longlong_t)expected_refcount,
+		    (longlong_t)actual_refcount);
+		return (2);
+	}
+	return (0);
+}
+
+static int
 get_dtl_refcount(vdev_t *vd)
 {
 	int refcount = 0;
@@ -1439,10 +1476,17 @@ get_checkpoint_refcount(vdev_t *vd)
 {
 	int refcount = 0;
 
-	if (vd->vdev_top == vd && vd->vdev_top_zap != 0 &&
-	    zap_contains(spa_meta_objset(vd->vdev_spa),
-	    vd->vdev_top_zap, VDEV_TOP_ZAP_POOL_CHECKPOINT_SM) == 0)
-		refcount++;
+	if (vd->vdev_top == vd && vd->vdev_top_zap != 0) {
+		boolean_t noalloc = B_FALSE;
+		int error = zap_lookup(spa_meta_objset(vd->vdev_spa),
+		    vd->vdev_top_zap, VDEV_TOP_ZAP_VDEV_NOALLOC,
+		    sizeof (noalloc), 1, &noalloc);
+		if (error != ENOENT) {
+			ASSERT0(error);
+			ASSERT(noalloc);
+			refcount++;
+		}
+	}
 
 	for (uint64_t c = 0; c < vd->vdev_children; c++)
 		refcount += get_checkpoint_refcount(vd->vdev_child[c]);
@@ -1674,8 +1718,9 @@ print_vdev_metaslab_header(vdev_t *vd)
 		}
 	}
 
-	(void) printf("\tvdev %10llu   %s",
-	    (u_longlong_t)vd->vdev_id, bias_str);
+	(void) printf("\tvdev %10llu   %s %s",
+	    (u_longlong_t)vd->vdev_id, bias_str,
+	    (vd->vdev_noalloc) ? "non-allocatable" : "");
 
 	if (ms_flush_data_obj != 0) {
 		(void) printf("   ms_unflushed_phys object %llu",
@@ -7164,11 +7209,23 @@ mos_leak_vdev_top_zap(vdev_t *vd)
 	int error = zap_lookup(spa_meta_objset(vd->vdev_spa),
 	    vd->vdev_top_zap, VDEV_TOP_ZAP_MS_UNFLUSHED_PHYS_TXGS,
 	    sizeof (ms_flush_data_obj), 1, &ms_flush_data_obj);
-	if (error == ENOENT)
-		return;
-	ASSERT0(error);
+	if (error == 0) {
+		mos_obj_refd(ms_flush_data_obj);
+	} else {
+		ASSERT3S(error, ==, ENOENT);
+	}
 
-	mos_obj_refd(ms_flush_data_obj);
+
+	boolean_t vdev_noalloc_mark;
+	error = zap_lookup(spa_meta_objset(vd->vdev_spa),
+	    vd->vdev_top_zap, VDEV_TOP_ZAP_VDEV_NOALLOC,
+	    sizeof (vdev_noalloc_mark), 1, &vdev_noalloc_mark);
+	if (error == 0) {
+		ASSERT(vdev_noalloc_mark);
+		mos_obj_refd(vdev_noalloc_mark);
+	} else {
+		ASSERT3S(error, ==, ENOENT);
+	}
 }
 
 static void
@@ -7532,6 +7589,9 @@ dump_zpool(spa_t *spa)
 
 	if (rc == 0 && (dump_opt['b'] || dump_opt['c']))
 		rc = dump_block_stats(spa);
+
+	if (rc == 0)
+		rc = verify_vdev_noalloc_refcounts(spa);
 
 	if (rc == 0)
 		rc = verify_spacemap_refcounts(spa);
