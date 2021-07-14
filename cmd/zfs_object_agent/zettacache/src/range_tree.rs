@@ -4,12 +4,14 @@ use std::{collections::BTreeMap, ops::RangeBounds};
 #[derive(Default)]
 pub struct RangeTree {
     tree: BTreeMap<u64, u64>, // start -> size
+    space: u64,
 }
 
 impl RangeTree {
     pub fn new() -> RangeTree {
         RangeTree {
             tree: BTreeMap::new(),
+            space: 0,
         }
     }
 
@@ -59,6 +61,7 @@ impl RangeTree {
         } else {
             self.tree.insert(start, size);
         }
+        self.space += size;
     }
 
     // panics if not present
@@ -84,6 +87,7 @@ impl RangeTree {
         } else {
             self.tree.remove(&start);
         }
+        self.space -= size;
     }
 
     pub fn verify_absent(&self, start: u64, size: u64) {
@@ -115,5 +119,14 @@ impl RangeTree {
 
     pub fn clear(&mut self) {
         self.tree.clear();
+        self.space = 0;
+    }
+
+    pub fn space(&self) -> u64 {
+        self.space
+    }
+
+    pub fn verify_space(&self) {
+        assert_eq!(self.space, self.tree.values().sum::<u64>())
     }
 }
