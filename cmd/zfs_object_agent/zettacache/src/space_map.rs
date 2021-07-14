@@ -1,15 +1,19 @@
-use crate::base_types::OnDisk;
+use crate::base_types::DiskLocation;
+use crate::base_types::Extent;
 use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
-use crate::range_tree::RangeTree;
+use crate::{
+    base_types::OnDisk,
+    block_based_log::{BlockBasedLog, BlockBasedLogEntry},
+};
 use futures::future;
 use futures::stream::*;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-struct SpaceMapExtent {
+pub struct SpaceMapExtent {
     offset: u64,
     size: u64,
 }
@@ -55,22 +59,20 @@ impl SpaceMap {
         }
     }
 
-    /// Returns rangetree of allocatable segments
-    pub async fn load(&self) -> RangeTree {
-        let mut rt = RangeTree::new();
-        rt.add(self.coverage.offset, self.coverage.size);
-
+    pub async fn load<F>(&self, mut import_cb: F)
+    where
+        F: FnMut(u64, u64, bool),
+    {
         self.log
             .iter()
             .for_each(|entry| {
                 match entry {
-                    SpaceMapEntry::Alloc(extent) => rt.remove(extent.offset, extent.size),
-                    SpaceMapEntry::Free(extent) => rt.add(extent.offset, extent.size),
+                    SpaceMapEntry::Alloc(extent) => import_cb(extent.offset, extent.size, true),
+                    SpaceMapEntry::Free(extent) => import_cb(extent.offset, extent.size, false),
                 }
                 future::ready(())
             })
             .await;
-        rt
     }
 
     pub fn alloc(&mut self, offset: u64, size: u64) {
@@ -87,6 +89,15 @@ impl SpaceMap {
         SpaceMapPhys {
             log: self.log.flush().await,
             coverage: self.coverage,
+        }
+    }
+
+    pub fn get_coverage(&self) -> Extent {
+        Extent {
+            location: DiskLocation {
+                offset: self.coverage.offset,
+            },
+            size: self.coverage.size as usize,
         }
     }
 }

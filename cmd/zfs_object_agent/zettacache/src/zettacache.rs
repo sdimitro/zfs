@@ -34,7 +34,7 @@ use tokio::sync::Semaphore;
 lazy_static! {
     static ref SUPERBLOCK_SIZE: usize = get_tunable("superblock_size", 4 * 1024);
     static ref DEFAULT_CHECKPOINT_RING_BUFFER_SIZE: usize = get_tunable("default_checkpoint_ring_buffer_size", 1024 * 1024);
-    static ref DEFAULT_SLAB_SIZE: usize = get_tunable("default_slab_size", 16 * 1024 * 1024);
+    pub static ref DEFAULT_SLAB_SIZE: usize = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 5.0); // Can lower this to test forced eviction.
     static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
@@ -1151,7 +1151,7 @@ impl ZettaCacheState {
                 location: value.location,
                 size: value.size,
             };
-            self.block_allocator.free(&extent);
+            self.block_allocator.free(extent);
         }
 
         debug!("new histogram: {:#?}", new_index.atime_histogram);
