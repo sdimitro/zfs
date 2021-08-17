@@ -645,6 +645,18 @@ agent_resume_state_check(vdev_t *vd)
 {
 	vdev_object_store_t *vos = vd->vdev_tsd;
 
+	/*
+	 * If we're resuming in the middle of pool creation,
+	 * then the agent may not have any on-disk state yet.
+	 * We wait till after TXG_INITIAL to ensure that
+	 * the agent has fully processed our initial transaction
+	 * group.
+	 */
+	if (vd->vdev_spa->spa_load_state == SPA_LOAD_CREATE &&
+	    vd->vdev_spa->spa_uberblock.ub_txg <= TXG_INITIAL) {
+		return (0);
+	}
+
 	if (bcmp(&vd->vdev_spa->spa_ubsync, &vos->vos_uberblock,
 	    sizeof (uberblock_t)) == 0) {
 		return (0);
@@ -1227,7 +1239,6 @@ vdev_object_store_fini(vdev_t *vd)
 
 	zfs_dbgmsg("vdev_object_store_fini");
 }
-
 
 static int
 vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
