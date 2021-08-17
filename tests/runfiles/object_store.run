@@ -40,10 +40,10 @@ tags = ['functional', 'acl', 'posix']
 tests = ['posix_001_pos', 'posix_002_pos', 'posix_003_pos', 'posix_004_pos']
 tags = ['functional', 'acl', 'posix-sa']
 
-# -----------------
-# Pool checkpoint functionality hasn't been implemented yet. Uncomment the below section
-# once its done.
-# -----------------
+# -------------------------------------------------------------
+# TODO: Pool checkpoint functionality hasn't been implemented yet. Uncomment the
+# below section once its done.
+# -------------------------------------------------------------
 # [tests/functional/pool_checkpoint]
 # tests = ['checkpoint_after_rewind', 'checkpoint_big_rewind',
 #     'checkpoint_capacity', 'checkpoint_conf_change', 'checkpoint_discard',
@@ -54,6 +54,7 @@ tags = ['functional', 'acl', 'posix-sa']
 #     'checkpoint_vdev_add', 'checkpoint_zdb', 'checkpoint_zhack_feat']
 # tags = ['functional', 'pool_checkpoint']
 # timeout = 1800
+
 [tests/functional/chattr]
 tests = ['chattr_001_pos', 'chattr_002_neg']
 tags = ['functional', 'chattr']
@@ -101,3 +102,34 @@ tests = ['zfs_change-key.ksh', 'zfs_change-key_child.ksh', 'zfs_change-key_clone
 	'zfs_change-key_format.ksh', 'zfs_change-key_inherit.ksh', 'zfs_change-key_load.ksh',
 	'zfs_change-key_location.ksh', 'zfs_change-key_pbkdf2iters.ksh']
 tags = ['functional', 'cli_root', 'zfs_change-key']
+
+# -------------------------------------------------------------
+# TODO: Add the following tests back after relevant bug fixes.
+# zpool_create_018_pos - DOSE-550
+# zpool_create_encrypted - DOSE-550
+# zpool_create_features_002_pos - DOSE-550
+# zpool_create_features_003_pos - DOSE-550
+# zpool_create_features_006_pos - DOSE-550
+# zpool_create_features_009_pos - DOSE-550
+# zpool_create_024_pos - DOSE-568
+# -------------------------------------------------------------
+# TODO: zpool_create_003_pos fails because of DOSE-545. Its not creating a
+# panic, hence, keeping it in the suite.
+# -------------------------------------------------------------
+[tests/functional/cli_root/zpool_create]
+tests = ['zpool_create_001_pos', 'zpool_create_002_pos',
+	'zpool_create_003_pos', 'zpool_create_004_pos', 'zpool_create_005_pos',
+	'zpool_create_006_pos', 'zpool_create_007_neg', 'zpool_create_008_pos',
+	'zpool_create_009_neg', 'zpool_create_010_neg', 'zpool_create_011_neg',
+	'zpool_create_012_neg', 'zpool_create_014_neg', 'zpool_create_015_neg',
+	'zpool_create_017_neg', 'zpool_create_019_pos',
+	'zpool_create_020_pos', 'zpool_create_021_pos', 'zpool_create_022_pos',
+	'zpool_create_023_neg', 'zpool_create_crypt_combos',
+	'zpool_create_draid_001_pos', 'zpool_create_draid_002_pos',
+	'zpool_create_draid_003_pos', 'zpool_create_draid_004_pos',
+	'zpool_create_features_001_pos', 'zpool_create_features_004_neg',
+	'zpool_create_features_005_pos',
+	'zpool_create_features_007_pos', 'zpool_create_features_008_pos',
+	'create-o_ashift',
+	'zpool_create_tempname', 'zpool_create_dryrun_output']
+tags = ['functional', 'cli_root', 'zpool_create']

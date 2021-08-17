@@ -48,6 +48,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Creates pool with same devices twice." \
+		"Hence, not applicable for object storage run."
+fi
+
 function cleanup
 {
 	typeset pool

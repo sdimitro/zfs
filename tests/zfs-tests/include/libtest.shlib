@@ -1763,9 +1763,10 @@ function create_pool
 	typeset devices_list=""
 	typeset extra_options=""
 
+	typeset opt=""
 	while getopts "p:d:e:" opt; do
 		case $opt in
-		    p) pool=$OPTARG ;;
+			p) pool=$OPTARG ;;
 			d) devices_list=$OPTARG ;;
 			e) extra_options=$OPTARG ;;
 		esac
@@ -1790,18 +1791,24 @@ function create_pool
 		return 0
 	fi
 
+	typeset zpool_create_cmd=""
 	if use_object_store; then
-		log_must zpool create \
-		    -o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		    -o object-region=$ZTS_REGION \
-		    -o object-credentials-profile=$ZTS_CREDS_PROFILE \
-		    $extra_options \
-		    $pool s3 $ZTS_BUCKET_NAME
+		zpool_create_cmd="zpool create \
+			-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
+			-o object-region=$ZTS_REGION \
+			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
+			$extra_options \
+			$pool s3 $ZTS_BUCKET_NAME"
 	else
-		log_must zpool create $extra_options -f $pool $devices_list
+		zpool_create_cmd="zpool create \
+			$extra_options \
+			-f $pool $devices_list"
 	fi
 
-	return 0
+	log_note $zpool_create_cmd
+	$zpool_create_cmd
+
+	return $?
 }
 
 # Return 0 if destroy successfully or the pool exists; $? otherwise

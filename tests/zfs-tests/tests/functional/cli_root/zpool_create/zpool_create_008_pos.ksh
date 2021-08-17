@@ -44,6 +44,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Uses -f to create new pools." \
+		"Hence, not applicable for object storage run."
+fi
+
 function cleanup
 {
 	if [[ $exported_pool == true ]]; then

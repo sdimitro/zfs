@@ -130,6 +130,13 @@ cleanup() {
 		rm -f "${TEST_FILE}" >/dev/null 2>&1
 	done
 
+
+	# Cleanup zfs_object_agent process
+	if [ -n "$ZTS_OBJECT_STORE" ]; then
+		sudo pkill -f -TERM zfs_object_agent
+	fi
+
+	# From this point onwards, the script will run with an empty $PATH
 	if [ "$STF_PATH_REMOVE" = "yes" ] && [ -d "$STF_PATH" ]; then
 		rm -Rf "$STF_PATH"
 	fi
@@ -601,15 +608,10 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 
 	#
 	# Start zfs_object_agent service and redirect the output to ZOA_LOG
-	# file. Ensure that the log file doesn't exist before the run and then
-	# start the agent.
+	# file.
 	#
-	if [ -f "$ZOA_LOG" ]; then
-		sudo rm -f $ZOA_LOG
-	fi
 	sudo -E /sbin/zfs_object_agent -vv \
 	    --output-file=$ZOA_LOG >/dev/null 2>&1 &
-	ZOA_PID=$!
 
 	# Verify connectivity before proceeding
 	/sbin/zoa_test -p "$ZTS_CREDS_PROFILE" -b "$ZTS_BUCKET_NAME" \
@@ -744,8 +746,4 @@ if [ -n "$SINGLETEST" ]; then
 	rm -f "$RUNFILES" >/dev/null 2>&1
 fi
 
-# Cleanup zfs_object_agent process
-if [ -n "$ZOA_PID" ]; then
-	sudo kill $ZOA_PID >/dev/null 2>&1
-fi
 exit ${RESULT}

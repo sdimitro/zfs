@@ -47,6 +47,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Tests different kind of device combinations." \
+		"Hence, not applicable for object storage run."
+fi
+
 function cleanup
 {
 	for pool in $TESTPOOL $TESTPOOL1

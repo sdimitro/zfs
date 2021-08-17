@@ -68,6 +68,18 @@ function log_must
 	(( $? != 0 )) && log_fail
 }
 
+# Execute a positive test with keyword expected, and exit
+# $STF_FAIL if test fails
+#
+# $1 - keyword expected
+# $2-$@ - command to execute
+
+function log_must_expect
+{
+	log_pos_expect "$@"
+	(( $? != 0 )) && log_fail
+}
+
 # Execute a positive test but retry the command on failure if the output
 # matches an expected pattern.  Otherwise behave like log_must and exit
 # $STF_FAIL is test fails.
@@ -260,14 +272,31 @@ function log_neg_expect
 
 function log_pos
 {
+	log_pos_expect "" "$@"
+	return $?
+}
+
+# Execute and print command with status where success equals zero result
+# and output includes expected keyword
+#
+# $1 - keyword expected
+# $2-$@ - command to execute
+#
+# return 0 if command passes, and the output contains the expected keyword,
+# @ return 1 otherwise
+
+function log_pos_expect
+{
 	typeset out=""
 	typeset logfile="/tmp/log.$$"
+	typeset expect=$1
+	shift
 
 	while [[ -e $logfile ]]; do
 		logfile="$logfile.$$"
 	done
 
-	"$@" 2>$logfile
+	"$@" >$logfile 2>&1
 	typeset status=$?
 	out="cat $logfile"
 
@@ -283,7 +312,19 @@ function log_pos
 			_printerror "$@" "internal error or assertion failure" \
 				" exited $status"
 			status=1
+		elif [[ -n $expect ]] ; then
+			$out | grep -i "$expect" > /dev/null 2>&1
+			if (( $? == 0 )); then
+				status=0
+			else
+				print -u2 $($out)
+				_printerror "$@" "unexpectedly exited $status"
+			fi
 		else
+			status=0
+		fi
+
+		if (( $status == 0 )); then
 			[[ -n $LOGAPI_DEBUG ]] && cat $logfile
 			_printsuccess "$@"
 		fi
