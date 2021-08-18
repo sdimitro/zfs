@@ -66,11 +66,7 @@ const char *zio_type_name[ZIO_TYPES] = {
 	"z_null", "z_rd", "z_wr", "z_fr", "z_cl", "z_ioctl", "z_trim"
 };
 
-/*
- * XXX We should just set mc_alloc_throttle_enabled=0 on the normal class
- * if it's object-store-based.
- */
-int zio_dva_throttle_enabled = B_FALSE;
+int zio_dva_throttle_enabled = B_TRUE;
 int zio_deadman_log_all = B_FALSE;
 
 /*
@@ -1458,6 +1454,9 @@ zio_vdev_child_io(zio_t *pio, blkptr_t *bp, vdev_t *vd, uint64_t offset,
 		pio->io_pipeline &= ~ZIO_STAGE_CHECKSUM_VERIFY;
 	}
 
+	/*
+	 * Object-based pools don't contain a label region.
+	 */
 	if (vd->vdev_ops->vdev_op_leaf && !vdev_is_object_based(vd)) {
 		ASSERT0(vd->vdev_children);
 		offset += VDEV_LABEL_START_SIZE;

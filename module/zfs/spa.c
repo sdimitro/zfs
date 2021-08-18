@@ -362,7 +362,7 @@ spa_prop_get_config(spa_t *spa, nvlist_t **nvp)
 			freeing +=
 			    dsl_dir_phys(pool->dp_free_dir)->dd_used_bytes;
 		}
-		if (vdev_is_object_based(rvd)) {
+		if (spa_is_object_based(spa)) {
 			vdev_object_store_stats_t voss;
 			object_store_get_stats(rvd->vdev_child[0], &voss);
 			freeing += voss.voss_pending_frees_bytes;
@@ -1607,7 +1607,13 @@ spa_unload(spa_t *spa)
 	 */
 	spa_async_suspend(spa);
 
-	if (spa->spa_root_vdev && spa->spa_final_txg == UINT64_MAX) {
+	/*
+	 * If we're unloading the pool because it's still active,
+	 * then we need to stop all initialize, trim, and rebuild
+	 * activity here. All other states, like exporting,
+	 * will stop these activities in the export code.
+	 */
+	if (spa->spa_root_vdev && spa->spa_state == POOL_STATE_ACTIVE) {
 		vdev_t *root_vdev = spa->spa_root_vdev;
 		vdev_initialize_stop_all(root_vdev, VDEV_INITIALIZE_ACTIVE);
 		vdev_trim_stop_all(root_vdev, VDEV_TRIM_ACTIVE);
@@ -9121,9 +9127,15 @@ spa_sync_adjust_vdev_max_queue_depth(spa_t *spa)
 		dedup->mc_allocator[i].mca_alloc_max_slots =
 		    slots_per_allocator;
 	}
-	normal->mc_alloc_throttle_enabled = zio_dva_throttle_enabled;
-	special->mc_alloc_throttle_enabled = zio_dva_throttle_enabled;
-	dedup->mc_alloc_throttle_enabled = zio_dva_throttle_enabled;
+	/*
+	 * For object-based storage, we disable the dva throttle.
+	 */
+	boolean_t dva_throttle_enabled = spa_is_object_based(spa) ?
+	    B_FALSE: zio_dva_throttle_enabled;
+
+	normal->mc_alloc_throttle_enabled = dva_throttle_enabled;
+	special->mc_alloc_throttle_enabled = dva_throttle_enabled;
+	dedup->mc_alloc_throttle_enabled = dva_throttle_enabled;
 }
 
 static void

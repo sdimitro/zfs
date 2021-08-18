@@ -2907,9 +2907,6 @@ zil_commit_itx_assign(zilog_t *zilog, zil_commit_waiter_t *zcw)
 void
 zil_commit(zilog_t *zilog, uint64_t foid)
 {
-	// XXX ZIL can not be on object store, because writes not allowed
-	// outside syncing context.
-	return;
 	/*
 	 * We should never attempt to call zil_commit on a snapshot for
 	 * a couple of reasons:
@@ -2925,7 +2922,9 @@ zil_commit(zilog_t *zilog, uint64_t foid)
 	 */
 	ASSERT3B(dmu_objset_is_snapshot(zilog->zl_os), ==, B_FALSE);
 
-	if (zilog->zl_sync == ZFS_SYNC_DISABLED)
+	if (zilog->zl_sync == ZFS_SYNC_DISABLED ||
+	    (spa_is_object_based(zilog->zl_spa) &&
+	     !spa_has_slogs(zilog->zl_spa)))
 		return;
 
 	if (!spa_writeable(zilog->zl_spa)) {

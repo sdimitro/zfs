@@ -3615,8 +3615,7 @@ dsl_scan_sync(dsl_pool_t *dp, dmu_tx_t *tx)
 	 * beneficial for object based pools so that we don't have to re-read
 	 * objects as much, so we should fix this at some point.
 	 */
-	if (!zfs_scan_legacy &&
-	    !vdev_is_object_based(spa->spa_root_vdev)) {
+	if (!zfs_scan_legacy && !spa_is_object_based(spa)) {
 		scn->scn_is_sorted = B_TRUE;
 		if (scn->scn_last_checkpoint == 0)
 			scn->scn_last_checkpoint = ddi_get_lbolt();

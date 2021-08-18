@@ -2785,6 +2785,18 @@ spa_suspend_async_destroy(spa_t *spa)
 	return (B_FALSE);
 }
 
+boolean_t
+spa_is_object_based(spa_t *spa)
+{
+	vdev_t *rvd = spa->spa_root_vdev;
+	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
+		if (vdev_is_object_based(rvd->vdev_child[c]))
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+
 #if defined(_KERNEL)
 
 int

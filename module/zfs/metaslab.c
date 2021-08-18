@@ -5908,11 +5908,10 @@ metaslab_alloc(spa_t *spa, metaslab_class_t *mc, uint64_t psize, blkptr_t *bp,
 			 */
 			metaslab_group_alloc_increment(spa,
 			    DVA_GET_VDEV(&dva[d]), zio, flags, allocator);
-			/*
-			 * XXX this assumes d==0; should be max of current max
-			 * and this dva's offset
-			 */
-			zio->io_max_offset = DVA_GET_OFFSET(&dva[0]);
+			if (zio != NULL) {
+				zio->io_max_offset = MAX(zio->io_max_offset,
+				    DVA_GET_OFFSET(&dva[d]));
+			}
 		}
 	}
 	ASSERT(error == 0);
