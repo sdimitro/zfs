@@ -16,6 +16,7 @@ use futures::future::join3;
 use futures::future::Either;
 use futures::future::Future;
 use futures::stream::*;
+use futures::FutureExt;
 use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
@@ -34,6 +35,7 @@ use std::time::Duration;
 use std::time::{Instant, SystemTime};
 use stream_reduce::Reduce;
 use tokio::sync::oneshot;
+use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use uuid::Uuid;
 use zettacache::base_types::*;
@@ -58,6 +60,9 @@ lazy_static! {
     static ref LOG_CONDENSE_MULTIPLE: usize = get_tunable("log_condense_multiple", 5);
 
     static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
+
+    // By default, retain metadata for as long as we would return Uberblocks in a block-based pool
+    static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
 }
 
 const ONE_MIB: u64 = 1_048_576;
@@ -280,6 +285,31 @@ impl UberblockPhys {
             .put_object(&Self::key(self.guid, self.txg), buf)
             .await;
     }
+
+    async fn delete_many(object_access: &ObjectAccess, guid: PoolGuid, txgs: Vec<Txg>) {
+        let keys: Vec<String> = txgs.iter().map(|txg| Self::key(guid, *txg)).collect();
+        object_access.delete_objects(&keys).await;
+    }
+
+    async fn cleanup_older_uberblocks(object_access: &ObjectAccess, ub: UberblockPhys) {
+        let mut txgs: Vec<Txg> = object_access
+            .collect_objects(&format!("zfs/{}/txg/", ub.guid), None)
+            .await
+            .iter()
+            .map(|prefix| {
+                Txg(prefix.rsplit('/').collect::<Vec<&str>>()[0]
+                    .parse::<u64>()
+                    .unwrap())
+            })
+            .collect();
+
+        txgs.retain(|txg| txg < &ub.txg);
+        if txgs.is_empty() {
+            return;
+        }
+        debug!("Deleting old uberblocks: {:?}", txgs);
+        Self::delete_many(object_access, ub.guid, txgs).await;
+    }
 }
 
 const NUM_DATA_PREFIXES: i32 = 64;
@@ -407,6 +437,7 @@ struct PoolSyncingState {
     objects_to_delete: Vec<ObjectId>,
     // Flush immediately once we have one of these blocks (and all previous blocks)
     pending_flushes: BTreeSet<BlockId>,
+    cleanup_handle: Option<JoinHandle<()>>,
 }
 
 type SyncTask =
@@ -634,19 +665,12 @@ impl Pool {
         });
 
         // load block -> object mapping
-        let storage_object_log = ObjectBasedLog::open_by_phys(
-            shared_state.clone(),
-            &format!("zfs/{}/StorageObjectLog", pool_phys.guid),
-            &phys.storage_object_log,
-        );
+        let storage_object_log =
+            ObjectBasedLog::open_by_phys(shared_state.clone(), &phys.storage_object_log);
         let object_block_map = ObjectBlockMap::load(&storage_object_log, phys.next_block).await;
         let mut logs = Vec::new();
-        for (i, log) in phys.pending_frees_log.iter().enumerate() {
-            logs.push(ObjectBasedLog::open_by_phys(
-                shared_state.clone(),
-                &format!("zfs/{}/PendingFreesLog/{}", pool_phys.guid, i),
-                log,
-            ));
+        for (_, log) in phys.pending_frees_log.iter().enumerate() {
+            logs.push(ObjectBasedLog::open_by_phys(shared_state.clone(), log));
         }
         let pool = Pool {
             state: Arc::new(PoolState {
@@ -657,7 +681,6 @@ impl Pool {
                     storage_object_log,
                     object_size_log: ObjectBasedLog::open_by_phys(
                         shared_state.clone(),
-                        &format!("zfs/{}/ObjectSizeLog", pool_phys.guid),
                         &phys.object_size_log,
                     ),
                     pending_frees_log: logs,
@@ -668,6 +691,7 @@ impl Pool {
                     rewriting_objects: Default::default(),
                     objects_to_delete: Default::default(),
                     pending_flushes: Default::default(),
+                    cleanup_handle: None,
                 })),
                 zettacache: cache,
                 object_block_map,
@@ -743,6 +767,7 @@ impl Pool {
                         rewriting_objects: Default::default(),
                         objects_to_delete: Default::default(),
                         pending_flushes: Default::default(),
+                        cleanup_handle: None,
                     })),
                     zettacache: cache,
                     object_block_map,
@@ -1045,6 +1070,13 @@ impl Pool {
 
         try_reclaim_frees(state.clone(), &mut syncing_state);
         try_condense_object_log(state.clone(), &mut syncing_state).await;
+        if syncing_state
+            .cleanup_handle
+            .as_mut()
+            .map_or(true, |handle| handle.now_or_never().is_some())
+        {
+            syncing_state.cleanup_handle = clean_metadata(state.clone(), &mut syncing_state);
+        }
 
         syncing_state.rewriting_objects.clear();
 
@@ -2163,4 +2195,57 @@ fn peekable_next_if<I: Iterator>(
         Some(matched) if func(matched) => this.next(),
         _ => None,
     }
+}
+
+fn clean_metadata(
+    state: Arc<PoolState>,
+    syncing_state: &mut PoolSyncingState,
+) -> Option<JoinHandle<()>> {
+    let oldest_valid_txg = match syncing_state
+        .syncing_txg
+        .unwrap()
+        .checked_sub(*METADATA_RETENTION_TXGS)
+    {
+        Some(txg) => txg,
+        None => {
+            return None;
+        }
+    };
+    Some(tokio::spawn(async move {
+        let ub = match UberblockPhys::get(
+            &state.shared_state.object_access,
+            state.shared_state.guid,
+            oldest_valid_txg,
+        )
+        .await
+        {
+            Ok(ub) => ub,
+            Err(_) => {
+                return;
+            }
+        };
+
+        ub.object_size_log
+            .cleanup_older_generations(&state.shared_state.object_access)
+            .await;
+        ub.storage_object_log
+            .cleanup_older_generations(&state.shared_state.object_access)
+            .await;
+        for (_, log_phys) in ub.pending_frees_log.iter().enumerate() {
+            /*
+             * XXX We shouldn't run all of these serially in every TXG. Not only would it be slow
+             * to wait for the necessary list operations, but we pay per request to s3.
+             *
+             * Instead, we should store in memory the lowest generation of a given log. We can
+             * quickly compare that value to the ObjectBasedLogPhys here, and determine whether any
+             * cleanup is necessary. We need to populate the list of lowest generations when we
+             * import the pool, but that is cheap compared to getting the full list every txg.
+             */
+            log_phys
+                .cleanup_older_generations(&state.shared_state.object_access)
+                .await;
+        }
+
+        UberblockPhys::cleanup_older_uberblocks(&state.shared_state.object_access, ub).await;
+    }))
 }

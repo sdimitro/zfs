@@ -34,6 +34,36 @@ pub struct ObjectBasedLogPhys {
     generation: u64,
     num_chunks: u64,
     num_entries: u64,
+    key: String,
+}
+
+impl ObjectBasedLogPhys {
+    pub async fn cleanup_older_generations(&self, object_access: &ObjectAccess) {
+        let mut generations = object_access
+            .collect_prefixes(&format!("{}/", self.key))
+            .await;
+
+        generations.retain(|gen| {
+            gen.rsplit('/').collect::<Vec<&str>>()[1]
+                .parse::<u64>()
+                .unwrap()
+                < self.generation
+        });
+        if generations.is_empty() {
+            return;
+        }
+        debug!(
+            "Retreiving old generations of {}: {:?}",
+            self.key, generations
+        );
+        let mut object_list = Vec::new();
+        for generation in generations {
+            object_list.append(&mut object_access.collect_all_objects(generation.as_str()).await);
+        }
+        trace!("All old generation objects: {:?}", object_list);
+        assert!(!object_list.is_empty());
+        object_access.delete_objects(&object_list).await;
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -121,12 +151,11 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
 
     pub fn open_by_phys(
         shared_state: Arc<PoolSharedState>,
-        name: &str,
         phys: &ObjectBasedLogPhys,
     ) -> ObjectBasedLog<T> {
         ObjectBasedLog {
             shared_state,
-            name: name.to_string(),
+            name: phys.key.clone(),
             generation: phys.generation,
             num_flushed_chunks: phys.num_chunks,
             num_chunks: phys.num_chunks,
@@ -198,6 +227,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
             generation: self.generation,
             num_chunks: self.num_chunks,
             num_entries: self.num_entries,
+            key: self.name.clone(),
         }
     }
 
