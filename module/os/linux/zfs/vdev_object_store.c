@@ -271,8 +271,11 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	size_t iov_size = 0;
 	char *iov_buf = fnvlist_pack(nv, &iov_size);
 	uint64_t size64 = iov_size;
-	zfs_dbgmsg("sending %llu-byte request to agent type=%s",
-	    (u_longlong_t)size64, fnvlist_lookup_string(nv, AGENT_TYPE));
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("sending %llu-byte request to agent type=%s",
+		    (u_longlong_t)size64,
+		    fnvlist_lookup_string(nv, AGENT_TYPE));
+	}
 
 	iov[0].iov_base = &size64;
 	iov[0].iov_len = sizeof (size64);
@@ -326,8 +329,10 @@ agent_request_zio(vdev_object_store_t *vos, zio_t *zio, nvlist_t *nv)
 	fnvlist_add_uint64(nv, AGENT_REQUEST_ID, blockid);
 	fnvlist_add_uint64(nv, AGENT_TOKEN, (uint64_t)zio);
 	vosr->vosr_req = blockid;
-	zfs_dbgmsg("agent_request_zio(blockid=%llu)",
-	    (u_longlong_t)blockid);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("agent_request_zio(blockid=%llu)",
+		    (u_longlong_t)blockid);
+	}
 
 	agent_request(vos, nv, FTAG);
 }
@@ -386,10 +391,13 @@ agent_io_block_alloc(zio_t *zio)
 	}
 	fnvlist_add_uint64(nv, AGENT_SIZE, zio->io_size);
 	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
-	zfs_dbgmsg("agent_io_block_alloc(guid=%llu blkid=%llu len=%llu) %s",
-	    (u_longlong_t)spa_guid(zio->io_spa), (u_longlong_t)blockid,
-	    (u_longlong_t)zio->io_size,
-	    zio->io_type == ZIO_TYPE_WRITE ? "WRITE" : "READ");
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("agent_io_block_alloc(guid=%llu blkid=%llu "
+		    "len=%llu) %s",
+		    (u_longlong_t)spa_guid(zio->io_spa), (u_longlong_t)blockid,
+		    (u_longlong_t)zio->io_size,
+		    zio->io_type == ZIO_TYPE_WRITE ? "WRITE" : "READ");
+	}
 	return (nv);
 }
 
@@ -457,8 +465,10 @@ agent_free_block(vdev_object_store_t *vos, uint64_t offset, uint64_t asize)
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCK);
 	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
 	fnvlist_add_uint64(nv, AGENT_SIZE, asize);
-	zfs_dbgmsg("agent_free_block(blkid=%llu, asize=%llu)",
-	    (u_longlong_t)blockid, (u_longlong_t)asize);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("agent_free_block(blkid=%llu, asize=%llu)",
+		    (u_longlong_t)blockid, (u_longlong_t)asize);
+	}
 	/*
 	 * We need to ensure that we only issue a request when the
 	 * socket is ready. Otherwise, we block here since the agent
@@ -867,7 +877,8 @@ agent_read_all(vdev_object_store_t *vos, void *buf, size_t len)
 		    &msg, &iov, 1, len - recvd_total, 0);
 		if (recvd > 0) {
 			recvd_total += recvd;
-			if (recvd_total < len) {
+			if (recvd_total < len &&
+			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
 				zfs_dbgmsg("incomplete recvmsg but trying for "
 				    "more len=%d recvd=%d recvd_total=%d",
 				    (int)len,
@@ -919,7 +930,9 @@ agent_reader(void *arg)
 	}
 
 	const char *type = fnvlist_lookup_string(nv, AGENT_TYPE);
-	zfs_dbgmsg("got response from agent type=%s", type);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("got response from agent type=%s", type);
+	}
 	// XXX debug message the nvlist
 	if (strcmp(type, "pool create done") == 0) {
 		mutex_enter(&vos->vos_outstanding_lock);
@@ -1010,8 +1023,11 @@ agent_reader(void *arg)
 		uint_t len;
 		void *data = fnvlist_lookup_uint8_array(nv,
 		    AGENT_DATA, &len);
-		zfs_dbgmsg("got read done req=%llu datalen=%u, token %px",
-		    (u_longlong_t)req, len, (zio_t *)token);
+		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+			zfs_dbgmsg("got read done req=%llu datalen=%u, "
+			    "token %px",
+			    (u_longlong_t)req, len, (zio_t *)token);
+		}
 		zio_t *zio = agent_complete_zio(vos, req, token);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
 		    zio->io_offset >> SPA_MINBLOCKSHIFT);
@@ -1024,8 +1040,10 @@ agent_reader(void *arg)
 		uint64_t req = fnvlist_lookup_uint64(nv,
 		    AGENT_REQUEST_ID);
 		uintptr_t token = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
-		zfs_dbgmsg("got write done req=%llu, token %px",
-		    (u_longlong_t)req, (zio_t *)token);
+		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+			zfs_dbgmsg("got write done req=%llu, token %px",
+			    (u_longlong_t)req, (zio_t *)token);
+		}
 		zio_t *zio = agent_complete_zio(vos, req, token);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
 		    zio->io_offset >> SPA_MINBLOCKSHIFT);

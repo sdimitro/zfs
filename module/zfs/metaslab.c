@@ -4765,8 +4765,10 @@ metaslab_group_alloc_object(metaslab_group_t *mg, zio_alloc_list_t *zal,
 	VERIFY0(activation_error);
 
 	uint64_t offset = mc->mc_ops->msop_alloc(msp, 1);
-	zfs_dbgmsg("ALLOC: %llu, next %llu", (u_longlong_t)offset,
-	    (u_longlong_t)msp->ms_lbas[0]);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("ALLOC: %llu, next %llu", (u_longlong_t)offset,
+		    (u_longlong_t)msp->ms_lbas[0]);
+	}
 	VERIFY3U(offset, !=, -1ULL);
 
 	mutex_exit(&msp->ms_lock);
@@ -5906,6 +5908,10 @@ metaslab_alloc(spa_t *spa, metaslab_class_t *mc, uint64_t psize, blkptr_t *bp,
 			 */
 			metaslab_group_alloc_increment(spa,
 			    DVA_GET_VDEV(&dva[d]), zio, flags, allocator);
+			/*
+			 * XXX this assumes d==0; should be max of current max
+			 * and this dva's offset
+			 */
 			zio->io_max_offset = DVA_GET_OFFSET(&dva[0]);
 		}
 	}

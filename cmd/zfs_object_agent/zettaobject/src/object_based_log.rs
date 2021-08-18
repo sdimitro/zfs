@@ -350,6 +350,8 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         first_chunk: ObjectBasedLogRemainder,
     ) -> impl Stream<Item = T> {
         self.flush(txg).await;
+        // XXX It would be faster if we kept all the "remainder" entries in RAM
+        // until we iter the remainder and transfer it to the new generation.
         self.iter_impl(Some(first_chunk)).0
     }
 }

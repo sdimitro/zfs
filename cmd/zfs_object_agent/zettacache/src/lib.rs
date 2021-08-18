@@ -5,6 +5,7 @@ mod block_based_log;
 mod extent_allocator;
 mod index;
 mod lock_set;
+mod mutex_ext;
 mod range_tree;
 mod space_map;
 mod tunable;

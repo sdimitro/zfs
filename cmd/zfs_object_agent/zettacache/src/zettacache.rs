@@ -9,6 +9,7 @@ use crate::get_tunable;
 use crate::index::*;
 use crate::lock_set::LockSet;
 use crate::lock_set::LockedItem;
+use crate::mutex_ext::MutexExt;
 use anyhow::Result;
 use futures::future;
 use futures::stream::*;
@@ -23,7 +24,6 @@ use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map;
 use std::collections::BTreeMap;
-use std::marker::PhantomData;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -117,33 +117,6 @@ pub struct ZettaCache {
     metrics: Arc<ZettaCacheMetrics>,
 }
 
-struct NonSendMutexGuard<'a, T> {
-    inner: tokio::sync::MutexGuard<'a, T>,
-    // force this to not be Send
-    _marker: PhantomData<*const ()>,
-}
-
-impl<'a, T> std::ops::Deref for NonSendMutexGuard<'a, T> {
-    type Target = T;
-
-    fn deref(&self) -> &Self::Target {
-        &self.inner
-    }
-}
-
-impl<'a, T> std::ops::DerefMut for NonSendMutexGuard<'a, T> {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        &mut self.inner
-    }
-}
-
-async fn lock_non_send<T>(lock: &tokio::sync::Mutex<T>) -> NonSendMutexGuard<'_, T> {
-    NonSendMutexGuard {
-        inner: lock.lock().await,
-        _marker: PhantomData,
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 struct ChunkSummaryEntry {
     offset: LogOffset,
@@ -154,8 +127,8 @@ impl BlockBasedLogEntry for ChunkSummaryEntry {}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 enum OperationLogEntry {
-    Insert((IndexKey, IndexValue)),
-    Remove((IndexKey, IndexValue)),
+    Insert(IndexKey, IndexValue),
+    Remove(IndexKey, IndexValue),
 }
 impl OnDisk for OperationLogEntry {}
 impl BlockBasedLogEntry for OperationLogEntry {}
@@ -432,7 +405,7 @@ impl ZettaCache {
             .iter()
             .for_each(|entry| {
                 match entry {
-                    OperationLogEntry::Insert((key, value)) => {
+                    OperationLogEntry::Insert(key, value) => {
                         match pending_changes.entry(key) {
                             btree_map::Entry::Occupied(mut oe) => match oe.get() {
                                 PendingChange::Remove() => {
@@ -456,7 +429,7 @@ impl ZettaCache {
                         num_insert_entries += 1;
                         atime_histogram.insert(value);
                     }
-                    OperationLogEntry::Remove((key, value)) => {
+                    OperationLogEntry::Remove(key, value) => {
                         match pending_changes.entry(key) {
                             btree_map::Entry::Occupied(mut oe) => match oe.get() {
                                 PendingChange::Insert(value) => {
@@ -517,10 +490,6 @@ impl ZettaCache {
         trace!("cache hit after reading index for {:?}", key);
     }
 
-    async fn lock_state_non_async(&self) -> NonSendMutexGuard<'_, ZettaCacheState> {
-        lock_non_send(&self.state).await
-    }
-
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]
@@ -535,7 +504,7 @@ impl ZettaCache {
             // We don't want to hold the state lock while reading from disk.  We
             // use lock_state_non_async() to ensure that we can't hold it across
             // .await.
-            let mut state = self.lock_state_non_async().await;
+            let mut state = self.state.lock_non_send().await;
 
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
@@ -585,7 +554,8 @@ impl ZettaCache {
                 // We use lock_state_non_async() to ensure that we can't hold it
                 // across .await.
                 let read_data_fut = self
-                    .lock_state_non_async()
+                    .state
+                    .lock_non_send()
                     .await
                     .lookup_with_value_from_index(key, Some(entry.value));
                 match read_data_fut.await {
@@ -771,7 +741,7 @@ impl ZettaCacheState {
         trace!("adding Remove to operation_log {:?}", key);
         self.atime_histogram.remove(value);
         self.operation_log
-            .append(OperationLogEntry::Remove((key, value)));
+            .append(OperationLogEntry::Remove(key, value));
     }
 
     /// Insert this block to the cache, if space and performance parameters
@@ -837,7 +807,7 @@ impl ZettaCacheState {
 
         trace!("adding Insert to operation_log {:?} {:?}", key, value);
         self.operation_log
-            .append(OperationLogEntry::Insert((key, value)));
+            .append(OperationLogEntry::Insert(key, value));
 
         let sem = Arc::new(Semaphore::new(0));
         let sem2 = sem.clone();
@@ -988,9 +958,9 @@ impl ZettaCacheState {
         // Calculate an eviction atime for the new index: use 10% of available space:
         let target_size = (self.block_access.size() / 100) * *TARGET_CACHE_SIZE_PCT;
         info!(
-            "target cache size for storage size {} is {}",
-            self.block_access.size(),
-            target_size
+            "target cache size for storage size {}GB is {}GB",
+            self.block_access.size() / 1024 / 1024 / 1024,
+            target_size / 1024 / 1024 / 1024
         );
         let mut new_index = ZettaCacheIndex::open(
             self.block_access.clone(),

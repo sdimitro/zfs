@@ -27,6 +27,7 @@ use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
+use std::fmt::Display;
 use std::mem;
 use std::ops::Bound::*;
 use std::pin::Pin;
@@ -181,6 +182,22 @@ struct DataObjectPhys {
     blocks: HashMap<BlockId, ByteBuf>,
 }
 impl OnDisk for DataObjectPhys {}
+
+impl Display for DataObjectPhys {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{:?}: blocks={} bytes={} BlockId[{},{}) TXG[{},{}]",
+            self.object,
+            self.blocks.len(),
+            self.blocks_size,
+            self.min_block,
+            self.next_block,
+            self.min_txg.0,
+            self.max_txg.0,
+        )
+    }
+}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 enum ObjectSizeLogEntry {
@@ -359,7 +376,7 @@ impl DataObjectPhys {
         let begin = Instant::now();
         let this: Self =
             bincode::deserialize(&buf).context(format!("Failed to decode contents of {}", key))?;
-        debug!(
+        trace!(
             "{:?}: deserialized {} blocks from {} bytes in {}ms",
             this.object,
             this.blocks.len(),
@@ -373,7 +390,7 @@ impl DataObjectPhys {
     async fn put(&self, object_access: &ObjectAccess) {
         let begin = Instant::now();
         let contents = bincode::serialize(&self).unwrap();
-        debug!(
+        trace!(
             "{:?}: serialized {} blocks in {} bytes in {}ms",
             self.object,
             self.blocks.len(),
@@ -869,13 +886,13 @@ impl Pool {
             .buffer_unordered(50)
             .fold(BTreeMap::new(), |mut map, data_res| async move {
                 let data = data_res.unwrap();
-                assert_eq!(data.guid, shared_state.guid);
-                assert_eq!(data.min_txg, txg);
-                assert_eq!(data.max_txg, txg);
                 debug!(
                     "resume: found {:?}, min={:?} next={:?}",
                     data.object, data.min_block, data.next_block
                 );
+                assert_eq!(data.guid, shared_state.guid);
+                assert_eq!(data.min_txg, txg);
+                assert_eq!(data.max_txg, txg);
                 map.insert(data.object, data);
                 map
             })
@@ -934,10 +951,7 @@ impl Pool {
                         );
 
                         let (phys, _) = syncing_state.pending_object.as_mut_pending();
-                        debug!(
-                            "resume: writes are next; creating {:?}, min={:?} next={:?}",
-                            phys.object, phys.min_block, phys.next_block
-                        );
+                        debug!("resume: writes are next; creating {}", phys);
 
                         Self::initiate_flush_object_impl(state, syncing_state);
                         let next_block = syncing_state.pending_object.next_block();
@@ -952,10 +966,7 @@ impl Pool {
                         // already-written object is next
 
                         let (_, recovered_obj) = recovered_objects_iter.next().unwrap();
-                        debug!(
-                            "resume: next is {:?}, min={:?} next={:?}",
-                            recovered_obj.object, recovered_obj.min_block, recovered_obj.next_block
-                        );
+                        debug!("resume: next is {}", recovered_obj);
 
                         Self::account_new_object(state, syncing_state, &recovered_obj);
 
@@ -1203,7 +1214,7 @@ impl Pool {
     // start writing that pending object immediately.
     pub fn initiate_flush(&self, block: BlockId) {
         self.state.with_syncing_state(|syncing_state| {
-            trace!("flushing block {}", block);
+            trace!("flushing {:?}", block);
             if !syncing_state.pending_object.is_pending() {
                 return;
             }
@@ -1271,14 +1282,7 @@ impl Pool {
 
         Self::account_new_object(state, syncing_state, &phys);
 
-        debug!(
-            "{:?}: writing {:?}: blocks={} bytes={} min={:?}",
-            txg,
-            object,
-            phys.blocks.len(),
-            phys.blocks_size,
-            phys.min_block
-        );
+        debug!("{:?}: writing {}", txg, phys);
 
         // write to object store and wake up waiters
         let shared_state = state.shared_state.clone();
@@ -1585,6 +1589,7 @@ fn log_new_sizes(syncing_state: &mut PoolSyncingState, rewritten_object_sizes: V
     let txg = syncing_state.syncing_txg.unwrap();
     for object_size in rewritten_object_sizes {
         // log to on-disk size
+        trace!("logging {:?}", object_size);
         syncing_state
             .object_size_log
             .append(txg, ObjectSizeLogEntry::Exists(object_size));
@@ -1771,6 +1776,7 @@ async fn reclaim_frees_object(
                 DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object)
                     .await
                     .unwrap();
+
             for ent in frees {
                 // If we crashed in the middle of this operation last time, the
                 // block may already have been removed (and the object
@@ -1872,6 +1878,7 @@ async fn reclaim_frees_object(
     assert_eq!(new_phys.object, first_object);
     // XXX would be nice to skip this if we didn't actually make any change
     // (because we already did it all before crashing)
+    debug!("reclaim: rewriting {}", new_phys);
     new_phys.put(&shared_state.object_access).await;
 
     (&new_phys).into()
@@ -1946,6 +1953,12 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         // sort objects by number of free blocks
         // XXX should be based on free space (bytes)?  And perhaps objects that
         // will be entirely freed should always be processed?
+        // XXX we want to maximize bytes freed per unit time. network bandwidth
+        // is the constraint on time, so bytes freed per bytes read+written
+        // would be a good metric. (or just read or just written, if we knew
+        // which direction was the performance constraint; we are reading more
+        // than writing, but if caching is effective then other processes may be
+        // doing more writing than reading)
         let mut objects_by_frees: BTreeSet<(usize, ObjectId)> = BTreeSet::new();
         for (obj, hs) in frees_per_object.iter() {
             // MAX-len because we want to sort by which has the most to

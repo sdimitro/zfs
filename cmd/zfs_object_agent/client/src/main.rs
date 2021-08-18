@@ -13,9 +13,6 @@ use rusoto_credential::InstanceMetadataProvider;
 use rusoto_credential::ProfileProvider;
 use rusoto_credential::ProvideAwsCredentials;
 use rusoto_s3::*;
-use s3::bucket::Bucket;
-use s3::creds::Credentials;
-use s3::Region;
 use std::collections::BTreeSet;
 use std::env;
 use std::error::Error;
@@ -42,30 +39,6 @@ lazy_static! {
         Ok(val) => format!("{}/", val),
         Err(_) => "".to_string(),
     };
-}
-
-async fn do_s3(bucket: &Bucket) -> Result<(), Box<dyn Error>> {
-    let key = "mahrens/test.file2";
-    println!("getting {}", key);
-    let (data, code) = bucket.get_object(key).await?;
-    println!("HTTP return code = {}", code);
-    println!("object contents = {}", String::from_utf8(data)?);
-
-    let content = "I want to go to S3".as_bytes();
-    println!("putting {}", key);
-    let (data, code) = bucket.put_object(key, content).await?;
-    println!("HTTP return code = {}", code);
-    println!("response contents = {}", String::from_utf8(data)?);
-
-    let results = bucket.list("mahrens".to_string(), None).await?;
-    for list_results in results {
-        assert_eq!(code, 200);
-        for res in list_results.contents {
-            println!("found object {}", res.key);
-        }
-    }
-
-    Ok(())
 }
 
 async fn do_rusoto_provider<P>(credentials_provider: P, file: &str)
@@ -599,14 +572,6 @@ async fn main() {
     );
 
     match matches.subcommand() {
-        ("s3", Some(_matches)) => {
-            let region: Region = region_str.parse().unwrap();
-            let credentials = Credentials::default().unwrap();
-
-            let bucket = Bucket::new(bucket_name, region, credentials).unwrap();
-            println!("bucket: {:?}", bucket);
-            do_s3(&bucket).await.unwrap();
-        }
         ("s3_rusoto", Some(_matches)) => {
             do_s3_rusoto().await.unwrap();
         }

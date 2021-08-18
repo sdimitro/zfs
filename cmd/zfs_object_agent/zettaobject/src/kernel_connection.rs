@@ -188,7 +188,7 @@ impl KernelConnectionState {
     }
 
     fn flush_writes(&mut self, nvl: NvList) -> HandlerReturn {
-        trace!("got request: {:?}", nvl);
+        debug!("got request: {:?}", nvl);
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
         let block = BlockId(nvl.lookup_uint64("block")?);
         pool.initiate_flush(block);

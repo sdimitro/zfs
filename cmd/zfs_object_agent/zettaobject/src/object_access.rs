@@ -157,7 +157,11 @@ where
     let elapsed = begin.elapsed();
     debug!("{}: returned in {}ms", msg, elapsed.as_millis());
     if elapsed > *LONG_OPERATION_DURATION {
-        info!("long completion: {}: returned in {:?}", msg, elapsed);
+        info!(
+            "long completion: {}: returned in {:.1}s",
+            msg,
+            elapsed.as_secs_f64()
+        );
     }
     result
 }

@@ -26,9 +26,9 @@ more-asserts = "0.2.1"
 num = "0.4.0"
 nvpair = { git = "https://github.com/ahrens/rust-libzfs", branch = "work"}
 rand = "0.8.3"
-rusoto_core = "0.46.0"
-rusoto_credential = "0.46.0"
-rusoto_s3 = "0.46.0"
+rusoto_core = "0.47.0"
+rusoto_credential = "0.47.0"
+rusoto_s3 = "0.47.0"
 serde = { version = "1.0.125", features = ["derive"] }
 serde_bytes = "0.11"
 serde_json = "1.0.64"

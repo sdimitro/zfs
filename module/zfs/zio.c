@@ -3509,8 +3509,10 @@ zio_object_allocate(zio_t *zio)
 	    &zio->io_alloc_list, zio, zio->io_allocator);
 	VERIFY0(error);
 
-	zfs_dbgmsg("zio=%px allocd %llu",
-	    zio, DVA_GET_OFFSET(&bp->blk_dva[0]));
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("zio=%px allocd %llu",
+		    zio, DVA_GET_OFFSET(&bp->blk_dva[0]));
+	}
 
 	return (zio);
 }

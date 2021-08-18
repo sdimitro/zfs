@@ -36,6 +36,7 @@ impl UserConnectionState {
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
+        info!("got request: {:?}", nvl);
         Ok(Box::pin(async move { Self::get_pools_impl(nvl).await }))
     }
 
@@ -106,7 +107,7 @@ impl UserConnectionState {
             }
             client = object_access.release_client();
         }
-        debug!("sending response: {:?}", response);
+        info!("sending response: {:?}", response);
         Ok(Some(response))
     }
 }
