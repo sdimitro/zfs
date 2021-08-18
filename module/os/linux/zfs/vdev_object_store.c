@@ -193,13 +193,12 @@ zfs_object_store_open(vdev_object_store_t *vos)
 {
 	ksocket_t s = INVALID_SOCKET;
 
-	mutex_enter(&vos->vos_sock_lock);
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 	vos->vos_sock_state = VOS_SOCK_OPENING;
 	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
 	if (rc != 0) {
 		zfs_dbgmsg("zfs_object_store_open unable to create "
 		    "socket: %d", rc);
-		mutex_exit(&vos->vos_sock_lock);
 		return (rc);
 	}
 
@@ -222,16 +221,14 @@ zfs_object_store_open(vdev_object_store_t *vos)
 		vos->vos_sock_state = VOS_SOCK_OPEN;
 		cv_broadcast(&vos->vos_sock_cv);
 	}
-	mutex_exit(&vos->vos_sock_lock);
 	return (0);
 }
 
 static void
 zfs_object_store_shutdown(vdev_object_store_t *vos)
 {
-	mutex_enter(&vos->vos_sock_lock);
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 	if (vos->vos_sock == INVALID_SOCKET) {
-		mutex_exit(&vos->vos_sock_lock);
 		return;
 	}
 
@@ -240,15 +237,13 @@ zfs_object_store_shutdown(vdev_object_store_t *vos)
 	vos->vos_sock_state = VOS_SOCK_SHUTTING_DOWN;
 	ksock_shutdown(vos->vos_sock, SHUT_RDWR);
 	vos->vos_sock_state = VOS_SOCK_SHUTDOWN;
-	mutex_exit(&vos->vos_sock_lock);
 }
 
 static void
 zfs_object_store_close(vdev_object_store_t *vos)
 {
-	mutex_enter(&vos->vos_sock_lock);
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 	if (vos->vos_sock == INVALID_SOCKET) {
-		mutex_exit(&vos->vos_sock_lock);
 		return;
 	}
 
@@ -256,7 +251,6 @@ zfs_object_store_close(vdev_object_store_t *vos)
 	ksock_close(vos->vos_sock);
 	vos->vos_sock = INVALID_SOCKET;
 	vos->vos_sock_state = VOS_SOCK_CLOSED;
-	mutex_exit(&vos->vos_sock_lock);
 }
 
 static int
@@ -296,8 +290,14 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	    2, total_size);
 	if (sent != total_size) {
 		zfs_dbgmsg("sent wrong length to agent socket: "
-		    "expected %d got %d",
+		    "expected %d got %d, closing socket",
 		    (int)total_size, (int)sent);
+
+		zfs_object_store_shutdown(vos);
+		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_SHUTDOWN);
+		zfs_object_store_close(vos);
+		ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
+		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_CLOSED);
 	}
 
 	if (zio_injection_enabled) {
@@ -877,12 +877,14 @@ agent_read_all(vdev_object_store_t *vos, void *buf, size_t len)
 		iov.iov_len = len - recvd_total;
 
 		mutex_enter(&vos->vos_lock);
-		if (vos->vos_agent_thread_exit) {
+		if (vos->vos_agent_thread_exit ||
+		    vos->vos_sock == INVALID_SOCKET) {
 			zfs_dbgmsg("(%px) agent_read_all shutting down",
 			    curthread);
 			mutex_exit(&vos->vos_lock);
 			return (SET_ERROR(ENOTCONN));
 		}
+
 		mutex_exit(&vos->vos_lock);
 
 		size_t recvd = ksock_receive(vos->vos_sock,
@@ -1094,7 +1096,9 @@ vdev_object_store_socket_open(vdev_t *vd)
 		mutex_enter(&vos->vos_lock);
 		VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
 
+		mutex_enter(&vos->vos_sock_lock);
 		int error = zfs_object_store_open(vos);
+		mutex_exit(&vos->vos_sock_lock);
 		if (error != 0) {
 			mutex_exit(&vos->vos_lock);
 			return (error);
@@ -1135,12 +1139,12 @@ vdev_agent_thread(void *arg)
 		 * serial request.
 		 */
 
+		zfs_dbgmsg("(%px) agent_reader exited, reopen, err %d",
+		    curthread, err);
 
-		ASSERT3U(err, ==, EAGAIN);
-		zfs_dbgmsg("(%px) agent_reader exited, reopen", curthread);
-
+		mutex_enter(&vos->vos_sock_lock);
 		zfs_object_store_shutdown(vos);
-		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_SHUTDOWN);
+		VERIFY3U(vos->vos_sock_state, <=, VOS_SOCK_SHUTDOWN);
 
 		/*
 		 * XXX - it's possible that the socket may reopen
@@ -1150,6 +1154,7 @@ vdev_agent_thread(void *arg)
 		delay(hz);
 
 		zfs_object_store_close(vos);
+		mutex_exit(&vos->vos_sock_lock);
 		ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
 		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_CLOSED);
 
@@ -1343,13 +1348,20 @@ vdev_object_store_close(vdev_t *vd)
 	mutex_enter(&vos->vos_lock);
 	vos->vos_agent_thread_exit = B_TRUE;
 	vos->vos_vdev = NULL;
+
+	mutex_enter(&vos->vos_sock_lock);
 	zfs_object_store_shutdown(vos);
+	mutex_exit(&vos->vos_sock_lock);
 
 	while (vos->vos_agent_thread != NULL) {
 		zfs_dbgmsg("vdev_object_store_close: shutting down agent");
 		cv_wait(&vos->vos_cv, &vos->vos_lock);
 	}
+
+	mutex_enter(&vos->vos_sock_lock);
 	zfs_object_store_close(vos);
+	mutex_exit(&vos->vos_sock_lock);
+
 	mutex_exit(&vos->vos_lock);
 	ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
 	vd->vdev_delayed_close = B_FALSE;
@@ -1408,9 +1420,9 @@ vdev_object_store_io_start(zio_t *zio)
 
 	zio->io_target_timestamp = zio_handle_io_delay(zio);
 	agent_request_zio(vos, zio, nv);
-	agent_io_block_free(nv);
-
 	mutex_exit(&vos->vos_sock_lock);
+
+	agent_io_block_free(nv);
 }
 
 /* ARGSUSED */
