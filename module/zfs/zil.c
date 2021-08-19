@@ -2924,7 +2924,7 @@ zil_commit(zilog_t *zilog, uint64_t foid)
 
 	if (zilog->zl_sync == ZFS_SYNC_DISABLED ||
 	    (spa_is_object_based(zilog->zl_spa) &&
-	     !spa_has_slogs(zilog->zl_spa)))
+	    !spa_has_slogs(zilog->zl_spa)))
 		return;
 
 	if (!spa_writeable(zilog->zl_spa)) {
