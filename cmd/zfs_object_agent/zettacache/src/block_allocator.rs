@@ -50,13 +50,15 @@ impl BlockAllocator {
 
     pub async fn flush(&mut self) -> BlockAllocatorPhys {
         // Space freed during this checkpoint is now available for reallocation.
-        for (start, size) in self.freeing.iter() {
-            self.space_map.free(*start, *size);
-            self.allocatable.add(*start, *size);
+        for (&start, &size) in self.freeing.iter() {
+            self.allocating.verify_absent(start, size);
+            self.space_map.free(start, size);
+            self.allocatable.add(start, size);
         }
         self.freeing.clear();
-        for (start, size) in self.allocating.iter() {
-            self.space_map.alloc(*start, *size);
+        for (&start, &size) in self.allocating.iter() {
+            self.allocatable.verify_absent(start, size);
+            self.space_map.alloc(start, size);
         }
         self.allocating.clear();
 
@@ -68,11 +70,9 @@ impl BlockAllocator {
     pub fn allocate(&mut self, size: u64) -> Option<Extent> {
         // find first segment where this fits, or largest free segment.
         // XXX keep size-sorted tree as well?
-        for (allocatable_offset_ref, allocatable_size_ref) in self.allocatable.iter() {
-            let allocatable_offset = *allocatable_offset_ref;
-            let allocatable_size = *allocatable_size_ref;
-
+        for (&allocatable_offset, &allocatable_size) in self.allocatable.iter() {
             if allocatable_size >= size {
+                self.freeing.verify_absent(allocatable_offset, size);
                 self.allocatable.remove(allocatable_offset, size);
                 self.allocating.add(allocatable_offset, size);
                 return Some(Extent {
@@ -87,7 +87,10 @@ impl BlockAllocator {
     }
 
     pub fn free(&mut self, extent: &Extent) {
-        // XXX assert that it's not in allocating or allocatable
+        self.allocatable
+            .verify_absent(extent.location.offset, extent.size as u64);
+        self.allocating
+            .verify_absent(extent.location.offset, extent.size as u64);
         self.freeing.add(extent.location.offset, extent.size as u64);
     }
 }

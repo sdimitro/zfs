@@ -24,27 +24,27 @@ impl RangeTree {
         let after = self.tree.range(start..).next();
 
         let merge_before = match before {
-            Some((before_start, before_size)) => {
+            Some((&before_start, &before_size)) => {
                 assert_le!(before_start + before_size, start);
-                *before_start + *before_size == start
+                before_start + before_size == start
             }
             None => false,
         };
 
         let merge_after = match after {
-            Some((after_start, _after_size)) => {
-                assert_ge!(*after_start, end);
-                *after_start == end
+            Some((&after_start, &_after_size)) => {
+                assert_ge!(after_start, end);
+                after_start == end
             }
             None => false,
         };
 
         if merge_before && merge_after {
-            let before_start = *before.unwrap().0;
-            let after_start = *after.unwrap().0;
+            let &before_start = before.unwrap().0;
+            let (&after_start, &after_size) = after.unwrap();
             self.tree
                 .entry(before_start)
-                .and_modify(|before_size| *before_size += size);
+                .and_modify(|before_size| *before_size += size + after_size);
             self.tree.remove(&after_start);
         } else if merge_before {
             let before_start = *before.unwrap().0;
@@ -86,6 +86,21 @@ impl RangeTree {
             self.tree.insert(end, existing_end - end);
         } else {
             self.tree.remove(&start);
+        }
+    }
+
+    pub fn verify_absent(&self, start: u64, size: u64) {
+        assert_ne!(size, 0);
+
+        let end = start + size;
+        if let Some((&existing_start, &existing_size)) = self.tree.range(..end).next_back() {
+            let existing_end = existing_start + existing_size;
+            if existing_start <= start && existing_end >= end {
+                panic!(
+                    "range_tree segment [{}, {}) is not absent (overlaps with segment [{}, {}))",
+                    start, end, existing_start, existing_end
+                );
+            }
         }
     }
 
