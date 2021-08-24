@@ -610,8 +610,14 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	# Start zfs_object_agent service and redirect the output to ZOA_LOG
 	# file.
 	#
-	sudo -E /sbin/zfs_object_agent -vv \
-	    --output-file=$ZOA_LOG >/dev/null 2>&1 &
+	if [ -n "$ZETTA_CACHE_DEV" ]; then
+		dev=$(basename "$ZETTA_CACHE_DEV")
+		sudo -E /sbin/zfs_object_agent -vv -c "/dev/${dev}" \
+			--output-file=$ZOA_LOG >/dev/null 2>&1 &
+	else
+		sudo -E /sbin/zfs_object_agent -vv \
+			--output-file=$ZOA_LOG >/dev/null 2>&1 &
+	fi
 
 	# Verify connectivity before proceeding
 	/sbin/zoa_test -p "$ZTS_CREDS_PROFILE" -b "$ZTS_BUCKET_NAME" \
@@ -691,6 +697,7 @@ msg "STACK_TRACER:          $STACK_TRACER"
 msg "Keep pool(s):          $KEEP"
 msg "Missing util(s):       $STF_MISSING_BIN"
 msg "ZTS_OBJECT_STORE:      $ZTS_OBJECT_STORE"
+msg "ZETTA_CACHE_DEV:       $ZETTA_CACHE_DEV"
 msg "RUST_BACKTRACE:        $RUST_BACKTRACE"
 msg ""
 

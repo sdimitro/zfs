@@ -90,11 +90,14 @@ export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
 export DIRECTORY=$(get_directory)
 log_must fio $FIO_SCRIPTS/mkfiles.fio
 
+# Populate ZettaCache if applicable
+fill_zetta_cache 600
+
 # Set up the scripts and output files that will log performance data.
 lun_list=$(pool_to_lun_list $PERFPOOL)
 log_note "Collecting backend IO stats with lun list $lun_list"
 if is_linux; then
-	typeset perf_record_cmd="perf record -F 99 -a -g -q \
+	typeset perf_record_cmd="perf record --call-graph dwarf,8192 -F 49 -agq \
 	    -o /dev/stdout -- sleep ${PERF_RUNTIME}"
 
         export collect_scripts=(
@@ -102,6 +105,8 @@ if is_linux; then
 	    "vmstat -t 1" "vmstat"
 	    "mpstat -P ALL 1" "mpstat"
 	    "iostat -tdxyz 1" "iostat"
+	    "arcstat 1" "arcstat"
+	    "dstat -at --nocolor 1" "dstat"
 	    "$perf_record_cmd" "perf"
 	)
 else

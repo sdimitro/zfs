@@ -54,6 +54,19 @@ function get_suffix
 	echo $suffix
 }
 
+function fill_zetta_cache
+{
+	[ -z "$ZETTA_CACHE_DEV" ] && return
+
+	log_note "Filling ZettaCache: $ZETTA_CACHE_DEV"
+
+	export RUNTIME=$1
+	export BLOCKSIZE=1m
+	export SYNC_TYPE=1
+	export DIRECT=0
+	log_must fio  --output /tmp/fio_fill.out $FIO_SCRIPTS/sequential_reads.fio
+}
+
 function do_fio_run_impl
 {
 	typeset script=$1
