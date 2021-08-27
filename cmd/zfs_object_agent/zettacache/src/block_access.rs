@@ -21,9 +21,12 @@ use std::os::unix::prelude::AsRawFd;
 use std::time::Instant;
 use tokio::fs::File;
 use tokio::fs::OpenOptions;
+use tokio::sync::Semaphore;
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
+    static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = get_tunable("disk_write_max_queue_depth", 32);
+    static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -40,6 +43,8 @@ pub struct BlockAccess {
     size: u64,
     sector_size: usize,
     metrics: BlockAccessMetrics,
+    outstanding_reads: Semaphore,
+    outstanding_writes: Semaphore,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -107,6 +112,8 @@ impl BlockAccess {
             size,
             sector_size,
             metrics: Default::default(),
+            outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
+            outstanding_writes: Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH),
         };
         info!("opening cache file {}: {:?}", disk_path, this);
 
@@ -132,6 +139,7 @@ impl BlockAccess {
         let fd = self.disk.as_raw_fd();
         let sector_size = self.sector_size;
         let begin = Instant::now();
+        let _permit = self.outstanding_reads.acquire().await.unwrap();
         let vec = tokio::task::spawn_blocking(move || {
             let mut v = Vec::new();
             // XXX use unsafe code to avoid double initializing it?
@@ -171,6 +179,7 @@ impl BlockAccess {
         assert_eq!(offset, self.round_up_to_sector(offset));
         assert_eq!(length, self.round_up_to_sector(length));
         let begin = Instant::now();
+        let _permit = self.outstanding_writes.acquire().await.unwrap();
         tokio::task::spawn_blocking(move || {
             let mut v = Vec::new();
             // XXX directio requires the pointer to be sector-aligned, requiring this grossness

@@ -84,7 +84,8 @@ impl UserConnectionState {
                         debug!("sending response: {:?}", response);
                         return Ok(Some(response));
                     }
-                    Err(_) => {
+                    Err(e) => {
+                        error!("skipping {:?}: {:?}", guid, e);
                         client = object_access.release_client();
                         continue;
                     }

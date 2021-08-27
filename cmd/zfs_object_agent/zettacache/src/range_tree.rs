@@ -1,5 +1,5 @@
 use more_asserts::*;
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, ops::RangeBounds};
 
 #[derive(Default)]
 pub struct RangeTree {
@@ -66,11 +66,8 @@ impl RangeTree {
         assert_ne!(size, 0);
 
         let end = start + size;
-        let (existing_start_ref, existing_size_ref) =
-            self.tree.range_mut(..end).next_back().unwrap();
-        let existing_start = *existing_start_ref;
-        let existing_size = *existing_size_ref;
-        let existing_end = existing_start + existing_size;
+        let (&existing_start, existing_size_ref) = self.tree.range_mut(..end).next_back().unwrap();
+        let existing_end = existing_start + *existing_size_ref;
         assert_le!(existing_start, start);
         assert_ge!(existing_end, end);
         let left_over = existing_start != start;
@@ -107,6 +104,13 @@ impl RangeTree {
     /// Returns Iter<start, size>
     pub fn iter(&self) -> std::collections::btree_map::Iter<u64, u64> {
         self.tree.iter()
+    }
+
+    pub fn range<R>(&self, range: R) -> std::collections::btree_map::Range<'_, u64, u64>
+    where
+        R: RangeBounds<u64>,
+    {
+        self.tree.range(range)
     }
 
     pub fn clear(&mut self) {

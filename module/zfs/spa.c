@@ -9175,7 +9175,8 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 		dsl_pool_sync(dp, txg);
 
 		if (pass < zfs_sync_pass_deferred_free ||
-		    spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP)) {
+		    spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP) ||
+		    spa_is_object_based(spa)) {
 			/*
 			 * If the log space map feature is active we don't
 			 * care about deferred frees and the deferred bpobj

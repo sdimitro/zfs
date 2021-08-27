@@ -1184,6 +1184,12 @@ zio_rewrite(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, abd_t *data,
 {
 	zio_t *zio;
 
+	/*
+	 * Object based pools don't handle changing a block's contents,
+	 * and shouldn't need to.
+	 */
+	ASSERT(!spa_is_object_based(spa));
+
 	zio = zio_create(pio, spa, txg, bp, data, size, size, done, private,
 	    ZIO_TYPE_WRITE, priority, flags | ZIO_FLAG_IO_REWRITE, NULL, 0, zb,
 	    ZIO_STAGE_OPEN, ZIO_REWRITE_PIPELINE);
@@ -1239,7 +1245,8 @@ zio_free(spa_t *spa, uint64_t txg, const blkptr_t *bp)
 	    BP_GET_DEDUP(bp) ||
 	    txg != spa->spa_syncing_txg ||
 	    (spa_sync_pass(spa) >= zfs_sync_pass_deferred_free &&
-	    !spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP))) {
+	    !spa_feature_is_active(spa, SPA_FEATURE_LOG_SPACEMAP) &&
+	    !spa_is_object_based(spa))) {
 		bplist_append(&spa->spa_free_bplist[txg & TXG_MASK], bp);
 	} else {
 		VERIFY3P(zio_free_sync(NULL, spa, txg, bp, 0), ==, NULL);
@@ -1811,7 +1818,8 @@ zio_write_compress(zio_t *zio)
 	 */
 	if (!BP_IS_HOLE(bp) && bp->blk_birth == zio->io_txg &&
 	    BP_GET_PSIZE(bp) == psize &&
-	    pass >= zfs_sync_pass_rewrite) {
+	    pass >= zfs_sync_pass_rewrite &&
+	    !spa_is_object_based(spa)) {
 		VERIFY3U(psize, !=, 0);
 		enum zio_stage gang_stages = zio->io_pipeline & ZIO_GANG_STAGES;
 

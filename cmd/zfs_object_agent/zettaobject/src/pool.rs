@@ -64,6 +64,8 @@ lazy_static! {
 
     // By default, retain metadata for as long as we would return Uberblocks in a block-based pool
     static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
+
+    static ref WRITES_INGEST_TO_ZETTACACHE: bool = get_tunable("writes_ingest_to_zettacache", true);
 }
 
 const ONE_MIB: u64 = 1_048_576;
@@ -469,8 +471,6 @@ struct PoolSyncingState {
     pub syncing_txg: Option<Txg>,
     stats: PoolStatsPhys,
     reclaim_done: Option<oneshot::Receiver<SyncTask>>,
-    // Protects objects that are being overwritten for sync-to-convergence
-    rewriting_objects: HashMap<ObjectId, Arc<tokio::sync::Mutex<()>>>,
     // objects to delete at the end of this txg
     objects_to_delete: Vec<ObjectId>,
     // Flush immediately once we have one of these blocks (and all previous blocks)
@@ -544,6 +544,8 @@ pub struct PoolSharedState {
     pub name: String,
 }
 
+const OBJECTS_PER_LOG: u64 = 1000;
+
 impl PoolSyncingState {
     fn next_block(&self) -> BlockId {
         self.pending_object.next_block()
@@ -567,7 +569,27 @@ impl PoolSyncingState {
         // - aim for 100,000 objects per log which is roughly 32 million blocks per log
         // XXX for now substitute 1,000 for 100,000 to better exercise the logs
         let nlogs = self.pending_frees_logs.len() as u64;
-        FreeLogId(((object.0 / 1000) % nlogs) as usize)
+        FreeLogId(((object.0 / OBJECTS_PER_LOG) % nlogs) as usize)
+    }
+
+    /// Calculate the range of continuous objects that are part of the same log
+    /// as the specified object.  Returns [min, max) (i.e. min is inclusive, max
+    /// is exclusive)
+    fn get_log_range(object: ObjectId) -> (ObjectId, ObjectId) {
+        let min = ObjectId(object.0 / OBJECTS_PER_LOG * OBJECTS_PER_LOG);
+        let max = ObjectId(min.0 + OBJECTS_PER_LOG);
+
+        assert_le!(min, object);
+        assert_ge!(max, object);
+        /*
+        let log = self.get_log_id(object);
+        assert_ne!(self.get_log_id(ObjectId(min.0 - 1)), log);
+        assert_eq!(self.get_log_id(min), log);
+        assert_eq!(self.get_log_id(ObjectId(max.0 - 1)), log);
+        assert_ne!(self.get_log_id(max), log);
+        */
+
+        (min, max)
     }
 
     fn get_pending_frees_log(&mut self, log: FreeLogId) -> &mut PendingFreesLog {
@@ -738,7 +760,6 @@ impl Pool {
                     pending_unordered_writes: HashMap::new(),
                     stats: phys.stats,
                     reclaim_done: None,
-                    rewriting_objects: Default::default(),
                     objects_to_delete: Default::default(),
                     pending_flushes: Default::default(),
                     cleanup_handle: None,
@@ -816,7 +837,6 @@ impl Pool {
                         pending_unordered_writes: Default::default(),
                         stats: Default::default(),
                         reclaim_done: None,
-                        rewriting_objects: Default::default(),
                         objects_to_delete: Default::default(),
                         pending_flushes: Default::default(),
                         cleanup_handle: None,
@@ -1124,8 +1144,6 @@ impl Pool {
             syncing_state.cleanup_handle = clean_metadata(state.clone(), &mut syncing_state);
         }
 
-        syncing_state.rewriting_objects.clear();
-
         let txg = syncing_state.syncing_txg.unwrap();
 
         // Should only be adding to this during end_txg.
@@ -1335,54 +1353,6 @@ impl Pool {
         });
     }
 
-    fn do_overwrite_impl(
-        state: &PoolState,
-        syncing_state: &mut PoolSyncingState,
-        id: BlockId,
-        data: Vec<u8>,
-    ) -> oneshot::Receiver<()> {
-        let object = state.object_block_map.block_to_object(id);
-        let shared_state = state.shared_state.clone();
-        let txg = syncing_state.syncing_txg.unwrap();
-        let (sender, receiver) = oneshot::channel();
-
-        // lock is needed because client could concurrently overwrite 2
-        // blocks in the same object. If the get/put's from the object store
-        // could run concurrently, the last put could clobber the earlier
-        // ones.
-        let mtx = syncing_state
-            .rewriting_objects
-            .entry(object)
-            .or_default()
-            .clone();
-
-        tokio::spawn(async move {
-            let _guard = mtx.lock().await;
-            debug!("rewriting {:?} to overwrite {:?}", object, id);
-            let mut phys =
-                DataObjectPhys::get(&shared_state.object_access, shared_state.guid, object)
-                    .await
-                    .unwrap();
-            // must have been written this txg
-            assert_eq!(phys.min_txg, txg);
-            assert_eq!(phys.max_txg, txg);
-            let removed = phys.blocks.remove(&id);
-            // this blockID must have been written
-            assert!(removed.is_some());
-
-            // Size must not change.  This way we don't have to change the
-            // accounting, which would require writing a new entry to the
-            // ObjectSizeLog, which is not allowed in this (async) context.
-            // XXX this may be problematic if we switch to ashift=0
-            assert_eq!(removed.unwrap().len(), data.len());
-
-            phys.blocks.insert(id, ByteBuf::from(data));
-            phys.put(&shared_state.object_access).await;
-            sender.send(()).unwrap();
-        });
-        receiver
-    }
-
     fn write_unordered_to_pending_object(
         state: &PoolState,
         syncing_state: &mut PoolSyncingState,
@@ -1421,32 +1391,39 @@ impl Pool {
     }
 
     pub fn write_block(&self, block: BlockId, data: Vec<u8>) -> impl Future<Output = ()> {
+        let data2 = data.clone(); // XXX copying
         let receiver = self.state.with_syncing_state(|syncing_state| {
             // XXX change to return error
             assert!(syncing_state.syncing_txg.is_some());
+            assert_ge!(block, syncing_state.next_block());
 
-            if block < syncing_state.next_block() {
-                // XXX the design is for this to not happen. Writes must be received
-                // in blockID-order. However, for now we allow overwrites during
-                // sync to convergence via this slow path.
-                Self::do_overwrite_impl(&self.state, syncing_state, block, data)
-            } else {
-                let (sender, receiver) = oneshot::channel();
-                trace!("inserting {:?} to unordered pending writes", block);
-                syncing_state
-                    .pending_unordered_writes
-                    .insert(block, (ByteBuf::from(data), sender));
+            let (sender, receiver) = oneshot::channel();
+            trace!("inserting {:?} to unordered pending writes", block);
+            syncing_state
+                .pending_unordered_writes
+                .insert(block, (ByteBuf::from(data), sender));
 
-                Self::write_unordered_to_pending_object(
-                    &self.state,
-                    syncing_state,
-                    Some(*MAX_BYTES_PER_OBJECT),
-                    None,
-                );
-                receiver
-            }
+            Self::write_unordered_to_pending_object(
+                &self.state,
+                syncing_state,
+                Some(*MAX_BYTES_PER_OBJECT),
+                None,
+            );
+            receiver
         });
+        let guid = self.state.shared_state.guid;
+        // XXX Cloning the zettacache has to clone several Arc's; maybe should
+        // have one that covers all the members?  Or find a way to use the
+        // Pool's zettacache?
+        let cache = match *WRITES_INGEST_TO_ZETTACACHE {
+            true => self.state.zettacache.as_ref().cloned(),
+            false => None,
+        };
         async move {
+            if let Some(cache) = cache {
+                let key = cache.lock_key(guid, block).await;
+                cache.insert(key, data2).await;
+            }
             receiver.await.unwrap();
         }
     }
@@ -1877,13 +1854,13 @@ async fn reclaim_frees_object(
                 "reclaim: moving {} blocks from {:?} (TXG[{},{}] BlockID[{},{})) to {:?} (TXG[{},{}] BlockID[{},{}))",
                 b.blocks.len(),
                 b.object,
-                b.min_txg,
-                b.max_txg,
+                b.min_txg.0,
+                b.max_txg.0,
                 b.min_block,
                 b.next_block,
                 a.object,
-                a.min_txg,
-                a.max_txg,
+                a.min_txg.0,
+                a.max_txg.0,
                 a.min_block,
                 a.next_block,
             );
@@ -2033,7 +2010,8 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
             let mut new_size: u32 = 0;
             assert!(object_sizes.contains(&object));
             let mut first = true;
-            for later_object_size in object_sizes.range((Included(object), Unbounded)) {
+            let (_min_object, max_object) = PoolSyncingState::get_log_range(object);
+            for later_object_size in object_sizes.range((Included(object), Excluded(max_object))) {
                 let later_object = later_object_size.object;
                 let empty_vec = Vec::new();
                 let later_object_frees = frees_per_object.get(&later_object).unwrap_or(&empty_vec);

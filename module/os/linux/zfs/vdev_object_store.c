@@ -618,8 +618,9 @@ agent_end_txg(vdev_object_store_t *vos, uint64_t txg, void *ub_buf,
 	fnvlist_add_uint8_array(nv, AGENT_UBERBLOCK, ub_buf, ub_len);
 	fnvlist_add_uint8_array(nv, AGENT_CONFIG, config_buf, config_len);
 
-	zfs_dbgmsg("agent_end_txg(%llu)",
-	    (u_longlong_t)txg);
+	zfs_dbgmsg("agent_end_txg(%llu), %u passes",
+	    (u_longlong_t)txg,
+	    vos->vos_vdev->vdev_spa->spa_sync_pass);
 	agent_request(vos, nv, FTAG);
 	fnvlist_free(nv);
 }

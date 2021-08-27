@@ -28,6 +28,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
 lazy_static! {
@@ -36,7 +37,10 @@ lazy_static! {
     static ref DEFAULT_SLAB_SIZE: usize = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 5.0); // Can lower this to test forced eviction.
     static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
-    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 10);
+    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
+
+    // number of insertions that can be buffered before we start dropping them; around a second's worth
+    static ref CACHE_INSERT_MAX_BUFFER: usize = get_tunable("cache_insert_max_buffer", 10_000);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -80,7 +84,6 @@ struct ZettaCheckpointPhys {
     //last_valid_data_offset: u64, // XXX move to BlockAllocatorPhys
     last_atime: Atime,
     index: ZettaCacheIndexPhys,
-    chunk_summary: BlockBasedLogPhys,
     operation_log: BlockBasedLogPhys,
 }
 
@@ -115,6 +118,7 @@ pub struct ZettaCache {
     state: Arc<tokio::sync::Mutex<ZettaCacheState>>,
     outstanding_lookups: LockSet<IndexKey>,
     metrics: Arc<ZettaCacheMetrics>,
+    outstanding_inserts: Arc<Semaphore>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -158,17 +162,15 @@ impl AtimeHistogramPhys {
             self.histogram.len()
         );
         let mut remaining = target_size;
-        let mut target_index = self.start.0;
-        for (index, count) in self.histogram.iter().enumerate().rev() {
-            if remaining <= *count {
-                trace!("final include of {} for target at bucket {}", count, index);
-                target_index += index as u64;
-                break;
+        for (index, &bytes) in self.histogram.iter().enumerate().rev() {
+            if remaining <= bytes {
+                trace!("final include of {} for target at bucket {}", bytes, index);
+                return Atime(self.start.0 + index as u64);
             }
-            trace!("including {} in target at bucket {}", count, index);
-            remaining -= count;
+            trace!("including {} in target at bucket {}", bytes, index);
+            remaining -= bytes;
         }
-        Atime(target_index)
+        self.start
     }
 
     pub fn insert(&mut self, value: IndexValue) {
@@ -189,6 +191,10 @@ impl AtimeHistogramPhys {
     pub fn clear(&mut self) {
         self.histogram.clear();
     }
+
+    fn sum(&self) -> u64 {
+        self.histogram.iter().sum()
+    }
 }
 
 struct ZettaCacheState {
@@ -203,7 +209,6 @@ struct ZettaCacheState {
     // and then this is useful.  Same goes for block_access.
     extent_allocator: Arc<ExtentAllocator>,
     atime_histogram: AtimeHistogramPhys, // includes pending_changes, including AtimeUpdate which is not logged
-    chunk_summary: BlockBasedLog<ChunkSummaryEntry>,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
     // When i/o completes, the value will be sent, and the entry can be removed
@@ -240,7 +245,6 @@ impl ZettaCache {
                 last_valid_offset: data_start as u64,
             },
             index: Default::default(),
-            chunk_summary: Default::default(),
             operation_log: Default::default(),
             last_atime: Atime(0),
             block_allocator: BlockAllocatorPhys::new(
@@ -323,11 +327,6 @@ impl ZettaCache {
             block_access: block_access.clone(),
             pending_changes,
             atime_histogram,
-            chunk_summary: BlockBasedLog::open(
-                block_access.clone(),
-                extent_allocator.clone(),
-                checkpoint.chunk_summary,
-            ),
             operation_log,
             super_phys: phys,
             outstanding_reads: Default::default(),
@@ -347,6 +346,7 @@ impl ZettaCache {
             state: Arc::new(tokio::sync::Mutex::new(state)),
             outstanding_lookups: LockSet::new(),
             metrics: Default::default(),
+            outstanding_inserts: Arc::new(Semaphore::new(*CACHE_INSERT_MAX_BUFFER)),
         };
 
         let my_cache = this.clone();
@@ -490,6 +490,11 @@ impl ZettaCache {
         trace!("cache hit after reading index for {:?}", key);
     }
 
+    #[measure(HitCount)]
+    fn insert_failed_max_queue_depth(&self, key: &IndexKey) {
+        trace!("insertion failed due to max queue depth for {:?}", key);
+    }
+
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]
@@ -572,14 +577,34 @@ impl ZettaCache {
         }
     }
 
+    /// Only to be used when the BlockId is sure to not be in the cache already;
+    /// otherwise use lookup().
+    #[measure(HitCount)]
+    pub async fn lock_key(&self, guid: PoolGuid, block: BlockId) -> LockedKey {
+        let key = IndexKey { guid, block };
+        LockedKey(self.outstanding_lookups.lock(key).await)
+    }
+
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
     pub async fn insert(&self, locked_key: LockedKey, buf: Vec<u8>) {
+        // This permit will be dropped when the write to disk completes.  It
+        // serves to limit the number of insert()'s that we can buffer before
+        // dropping (ignoring) insertion requests.
+        let permit = match self.outstanding_inserts.clone().try_acquire_owned() {
+            Ok(permit) => permit,
+            Err(tokio::sync::TryAcquireError::NoPermits) => {
+                self.insert_failed_max_queue_depth(locked_key.0.value());
+                return;
+            }
+            Err(e) => panic!("unexpected error from try_acquire: {:?}", e),
+        };
+
         let mut state = self.state.lock().await;
         let index_key = locked_key.0.value();
-        state.insert(index_key.guid, index_key.block, buf);
+        state.insert(permit, index_key.guid, index_key.block, buf);
     }
 }
 
@@ -746,7 +771,13 @@ impl ZettaCacheState {
 
     /// Insert this block to the cache, if space and performance parameters
     /// allow.  It may be a recent cache miss, or a recently-written block.
-    fn insert(&mut self, guid: PoolGuid, block: BlockId, buf: Vec<u8>) {
+    fn insert(
+        &mut self,
+        permit: OwnedSemaphorePermit,
+        guid: PoolGuid,
+        block: BlockId,
+        buf: Vec<u8>,
+    ) {
         let buf_size = buf.len();
         let aligned_size = self.block_access.round_up_to_sector(buf.len());
 
@@ -815,6 +846,7 @@ impl ZettaCacheState {
         tokio::spawn(async move {
             block_access.write_raw(location, aligned_buf).await;
             sem2.add_permits(1);
+            drop(permit);
         });
         // note: we don't need to insert before initiating the write, because we
         // have exclusive access to the State, so nobody can see the
@@ -873,18 +905,13 @@ impl ZettaCacheState {
             *index = new_index;
         }
 
-        let (index_phys, chunk_summary_phys, operation_log_phys) = future::join3(
-            index.flush(),
-            self.chunk_summary.flush(),
-            self.operation_log.flush(),
-        )
-        .await;
+        let (index_phys, operation_log_phys) =
+            future::join(index.flush(), self.operation_log.flush()).await;
 
         let checkpoint = ZettaCheckpointPhys {
             generation: self.super_phys.last_checkpoint_id.next(),
             extent_allocator: self.extent_allocator.get_phys(),
             index: index_phys,
-            chunk_summary: chunk_summary_phys,
             operation_log: operation_log_phys,
             last_atime: self.atime,
             block_allocator: self.block_allocator.flush().await,
@@ -958,9 +985,12 @@ impl ZettaCacheState {
         // Calculate an eviction atime for the new index: use 10% of available space:
         let target_size = (self.block_access.size() / 100) * *TARGET_CACHE_SIZE_PCT;
         info!(
-            "target cache size for storage size {}GB is {}GB",
+            "target cache size for storage size {}GB is {}GB; {}GB used; {}GB freeing; histogram covers {}GB",
             self.block_access.size() / 1024 / 1024 / 1024,
-            target_size / 1024 / 1024 / 1024
+            target_size / 1024 / 1024 / 1024,
+            (self.block_access.size() - self.block_allocator.get_available()) / 1024 / 1024 / 1024,
+            self.block_allocator.get_freeing() / 1024 / 1024 / 1024,
+            self.atime_histogram.sum() / 1024 / 1024 / 1024,
         );
         let mut new_index = ZettaCacheIndex::open(
             self.block_access.clone(),
@@ -990,7 +1020,7 @@ impl ZettaCacheState {
                 // index entry, which must be all Inserts (Removes,
                 // RemoveThenInserts, and AtimeUpdates refer to existing Index
                 // entries).
-                trace!("next index entry: {:?}", entry);
+                //trace!("next index entry: {:?}", entry);
                 while let Some((pc_key, PendingChange::Insert(pc_value))) =
                     pending_changes_iter.peek()
                 {
@@ -1084,11 +1114,13 @@ impl ZettaCacheState {
             .await;
         while let Some((pc_key, PendingChange::Insert(pc_value))) = pending_changes_iter.peek() {
             // Add this new entry to the index
+            /*
             trace!(
                 "remaining pending change, appending to new index: {:?} {:?}",
                 pc_key,
                 pc_value
             );
+            */
             add_to_index_or_list(
                 &mut new_index,
                 &mut free_list,

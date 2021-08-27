@@ -12,6 +12,7 @@ pub struct BlockAllocator {
     allocatable: RangeTree,
     allocating: RangeTree,
     freeing: RangeTree,
+    last_location: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -45,6 +46,7 @@ impl BlockAllocator {
             space_map,
             allocating: Default::default(),
             freeing: Default::default(),
+            last_location: 0,
         }
     }
 
@@ -67,14 +69,15 @@ impl BlockAllocator {
         }
     }
 
-    pub fn allocate(&mut self, size: u64) -> Option<Extent> {
-        // find first segment where this fits, or largest free segment.
-        // XXX keep size-sorted tree as well?
-        for (&allocatable_offset, &allocatable_size) in self.allocatable.iter() {
+    fn allocate_impl(&mut self, size: u64, min_location: u64, max_location: u64) -> Option<Extent> {
+        for (&allocatable_offset, &allocatable_size) in
+            self.allocatable.range(min_location..max_location)
+        {
             if allocatable_size >= size {
                 self.freeing.verify_absent(allocatable_offset, size);
                 self.allocatable.remove(allocatable_offset, size);
                 self.allocating.add(allocatable_offset, size);
+                self.last_location = allocatable_offset + size;
                 return Some(Extent {
                     location: DiskLocation {
                         offset: allocatable_offset,
@@ -86,11 +89,30 @@ impl BlockAllocator {
         None
     }
 
+    pub fn allocate(&mut self, size: u64) -> Option<Extent> {
+        // find next segment where this fits, or largest free segment.
+        // XXX keep size-sorted tree as well?
+        match self.allocate_impl(size, self.last_location, u64::MAX) {
+            Some(e) => Some(e),
+            None => self.allocate_impl(size, 0, self.last_location),
+        }
+    }
+
     pub fn free(&mut self, extent: &Extent) {
         self.allocatable
             .verify_absent(extent.location.offset, extent.size as u64);
         self.allocating
             .verify_absent(extent.location.offset, extent.size as u64);
         self.freeing.add(extent.location.offset, extent.size as u64);
+    }
+
+    // XXX this is O(N); should make the RangeTree keep the sum
+    pub fn get_available(&self) -> u64 {
+        self.allocatable.iter().map(|(_offset, size)| size).sum()
+    }
+
+    // XXX this is O(N); should make the RangeTree keep the sum
+    pub fn get_freeing(&self) -> u64 {
+        self.freeing.iter().map(|(_offset, size)| size).sum()
     }
 }
