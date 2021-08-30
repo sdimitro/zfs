@@ -366,6 +366,7 @@ agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid,
 	VERIFY3P(zio, ==, token);
 	VERIFY3U(zio->io_offset >> SPA_MINBLOCKSHIFT, ==, blockid);
 
+	vdev_queue_pending_remove(vq, zio);
 	vdev_object_store_request_t *vosr = zio->io_vsd;
 	VERIFY3U(vosr->vosr_req, ==, blockid);
 	mutex_exit(&vq->vq_lock);

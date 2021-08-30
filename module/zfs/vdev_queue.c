@@ -577,7 +577,7 @@ vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio)
 	avl_add(&vq->vq_active_tree, zio);
 }
 
-static void
+void
 vdev_queue_pending_remove(vdev_queue_t *vq, zio_t *zio)
 {
 	ASSERT(MUTEX_HELD(&vq->vq_lock));
@@ -968,18 +968,20 @@ vdev_queue_io_done(zio_t *zio)
 	vq->vq_io_delta_ts = zio->io_delta = now - zio->io_timestamp;
 
 	mutex_enter(&vq->vq_lock);
-	vdev_queue_pending_remove(vq, zio);
 
 	/*
 	 * Object-based pools do not buffer any
-	 * I/Os in the kernel so we can simply return once
-	 * we've removed the completed I/O from the pending queue.
+	 * I/Os in the kernel so we can simply return.
+	 * The I/O would have already been removed from
+	 * the active queue.
 	 */
 	if (vdev_is_object_based(vq->vq_vdev)) {
 		ASSERT3P(vdev_queue_io_to_issue(vq), ==, NULL);
 		mutex_exit(&vq->vq_lock);
 		return;
 	}
+
+	vdev_queue_pending_remove(vq, zio);
 
 	while ((nio = vdev_queue_io_to_issue(vq)) != NULL) {
 		mutex_exit(&vq->vq_lock);
