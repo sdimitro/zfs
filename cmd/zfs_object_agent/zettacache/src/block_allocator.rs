@@ -78,7 +78,7 @@ impl BitmapSlab {
         assert_ge!(extent.location.offset, self.slab_offset);
         assert_le!(
             extent.location.offset + extent.size as u64,
-            self.slab_offset + (self.total_slots + self.slot_size) as u64
+            self.slab_offset + (self.total_slots * self.slot_size) as u64
         );
     }
 }
