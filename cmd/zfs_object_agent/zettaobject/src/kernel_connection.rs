@@ -19,6 +19,7 @@ use zettacache::ZettaCache;
 lazy_static! {
     pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
         get_tunable("die_before_end_txg_response_pct", 0.0);
+    pub static ref DIE_AFTER_FREE_BLOCK_PCT: f64 = get_tunable("die_after_free_block_pct", 0.0);
 }
 
 pub struct KernelServerState {
@@ -286,7 +287,10 @@ impl KernelConnectionState {
 
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
         pool.free_block(block, size);
-
+        if rand::random::<f64>() * 100.0 < *DIE_AFTER_FREE_BLOCK_PCT {
+            warn!("test: exiting after freeing block");
+            panic!("test: exiting after freeing block");
+        }
         handler_return_ok(None)
     }
 

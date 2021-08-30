@@ -1941,7 +1941,16 @@ retry:
 	 * it only needs to notify the backend that
 	 * we've completed the txg and return.
 	 */
-	if (vdev_is_object_based(spa->spa_root_vdev)) {
+	if (spa_is_object_based(spa)) {
+		/*
+		 * XXX - Right now we don't update the labels on
+		 * any slog devices if we're using object-based pools.
+		 * This seems to be fine since the mos config object
+		 * will have all the information we need. However, there
+		 * might be some corner cases where need to look at the
+		 * label on the slog device directly. If that is
+		 * the case, then we will need to revisit this.
+		 */
 		nvlist_t *label = spa_config_generate(spa,
 		    svd[0], txg, B_FALSE);
 		object_store_end_txg(svd[0], label, txg);

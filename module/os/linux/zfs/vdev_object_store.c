@@ -114,6 +114,13 @@ typedef struct vdev_object_store_request {
 	uint64_t vosr_req;
 } vdev_object_store_request_t;
 
+typedef struct object_store_free_block {
+	list_node_t osfb_list_node;
+	uint64_t osfb_offset;
+	uint64_t osfb_size;
+} object_store_free_block_t;
+
+
 typedef struct vdev_object_store {
 	vdev_t *vos_vdev;
 	char *vos_endpoint;
@@ -141,6 +148,8 @@ typedef struct vdev_object_store {
 	uint64_t vos_next_block;
 	uberblock_t vos_uberblock;
 	nvlist_t *vos_config;
+
+	list_t vos_free_list;
 } vdev_object_store_t;
 
 static mode_t
@@ -293,6 +302,13 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 		    "expected %d got %d, closing socket",
 		    (int)total_size, (int)sent);
 
+		/*
+		 * If we were unable to send, then the kernel
+		 * will shutdown the socket and allow the resume
+		 * logic to re-establish the connection and retry
+		 * any operations which were in flight prior to this
+		 * failure.
+		 */
 		zfs_object_store_shutdown(vos);
 		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_SHUTDOWN);
 		zfs_object_store_close(vos);
@@ -457,28 +473,37 @@ object_store_stop_agent(vdev_t *vd)
 	agent_wait_serial(vos, VOS_SERIAL_CLOSE_POOL);
 }
 
-static void
-agent_free_block(vdev_object_store_t *vos, uint64_t offset, uint64_t asize)
+static int
+agent_free_blocks(vdev_object_store_t *vos)
 {
-	uint64_t blockid = offset >> 9;
-	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCK);
-	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
-	fnvlist_add_uint64(nv, AGENT_SIZE, asize);
-	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
-		zfs_dbgmsg("agent_free_block(blkid=%llu, asize=%llu)",
-		    (u_longlong_t)blockid, (u_longlong_t)asize);
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+
+	int blocks_freed = 0;
+	for (object_store_free_block_t *osfb = list_head(&vos->vos_free_list);
+	    osfb != NULL; osfb = list_next(&vos->vos_free_list, osfb)) {
+
+		blocks_freed++;
+		uint64_t blockid = osfb->osfb_offset >> 9;
+		nvlist_t *nv = fnvlist_alloc();
+		fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCK);
+
+		fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
+		fnvlist_add_uint64(nv, AGENT_SIZE, osfb->osfb_size);
+		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+			zfs_dbgmsg("agent_free_blocks(blkid=%llu, asize=%llu)",
+			    (u_longlong_t)blockid,
+			    (u_longlong_t)osfb->osfb_size);
+		}
+		int err = agent_request(vos, nv, FTAG);
+		if (err != 0) {
+			fnvlist_free(nv);
+			zfs_dbgmsg("agnet_free_block failed to send: %d", err);
+			return (err);
+		}
+		fnvlist_free(nv);
 	}
-	/*
-	 * We need to ensure that we only issue a request when the
-	 * socket is ready. Otherwise, we block here since the agent
-	 * might be in recovery.
-	 */
-	mutex_enter(&vos->vos_sock_lock);
-	zfs_object_store_wait(vos, VOS_SOCK_READY);
-	agent_request(vos, nv, FTAG);
-	mutex_exit(&vos->vos_sock_lock);
-	fnvlist_free(nv);
+	zfs_dbgmsg("agent_free_blocks freed %d blocks", blocks_freed);
+	return (0);
 }
 
 static void
@@ -760,6 +785,11 @@ agent_resume(void *arg)
 
 	if (vos->vos_send_txg_selector == VOS_TXG_END ||
 	    vos->vos_send_txg_selector == VOS_TXG_END_AGAIN) {
+		if (agent_free_blocks(vos) != 0)  {
+			zfs_dbgmsg("agent_resume freeing failed");
+			mutex_exit(&vos->vos_sock_lock);
+			return;
+		}
 		size_t nvlen;
 		char *nvbuf = fnvlist_pack(vos->vos_config, &nvlen);
 		agent_end_txg(vos, spa_syncing_txg(spa),
@@ -822,18 +852,28 @@ object_store_end_txg(vdev_t *vd, nvlist_t *config, uint64_t txg)
 	// The credentials profile should not be persisted on-disk.
 	remove_cred_profile(config);
 
-	size_t nvlen;
-	char *nvbuf = fnvlist_pack(config, &nvlen);
-	agent_end_txg(vos, txg,
-	    &spa->spa_uberblock, sizeof (spa->spa_uberblock), nvbuf, nvlen);
-	fnvlist_pack_free(nvbuf, nvlen);
-
-	if (vos->vos_config != NULL)
-		fnvlist_free(vos->vos_config);
-	vos->vos_config = fnvlist_dup(config);
 	vos->vos_send_txg_selector = VOS_TXG_END;
+	if (agent_free_blocks(vos) == 0)  {
+		size_t nvlen;
+		char *nvbuf = fnvlist_pack(config, &nvlen);
+		agent_end_txg(vos, txg,
+		    &spa->spa_uberblock, sizeof (spa->spa_uberblock),
+		    nvbuf, nvlen);
+		fnvlist_pack_free(nvbuf, nvlen);
+
+		if (vos->vos_config != NULL)
+			fnvlist_free(vos->vos_config);
+		vos->vos_config = fnvlist_dup(config);
+	}
+
 	mutex_exit(&vos->vos_sock_lock);
 	agent_wait_serial(vos, VOS_SERIAL_END_TXG);
+
+	object_store_free_block_t *osfb;
+	while ((osfb = list_remove_head(&vos->vos_free_list)) != NULL) {
+		kmem_free(osfb, sizeof (object_store_free_block_t));
+	}
+	ASSERT(list_is_empty(&vos->vos_free_list));
 	vos->vos_send_txg_selector = VOS_TXG_NONE;
 }
 
@@ -842,7 +882,17 @@ object_store_free_block(vdev_t *vd, uint64_t offset, uint64_t asize)
 {
 	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
-	agent_free_block(vos, offset, asize);
+
+	/*
+	 * We add freed blocks to our list which will get processed
+	 * at the end of the txg.
+	 */
+	object_store_free_block_t *osfb =
+	    kmem_alloc(sizeof (object_store_free_block_t),
+	    KM_SLEEP);
+	osfb->osfb_offset = offset;
+	osfb->osfb_size = asize;
+	list_insert_tail(&vos->vos_free_list, osfb);
 }
 
 void
@@ -1194,6 +1244,9 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	cv_init(&vos->vos_sock_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_outstanding_cv, NULL, CV_DEFAULT, NULL);
 
+	list_create(&vos->vos_free_list, sizeof (object_store_free_block_t),
+	    offsetof(object_store_free_block_t, osfb_list_node));
+
 	if (!nvlist_lookup_string(nv,
 	    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), &val)) {
 		vos->vos_endpoint = kmem_strdup(val);
@@ -1221,6 +1274,8 @@ vdev_object_store_fini(vdev_t *vd)
 {
 	vdev_object_store_t *vos = vd->vdev_tsd;
 
+	ASSERT(list_is_empty(&vos->vos_free_list));
+	list_destroy(&vos->vos_free_list);
 	mutex_destroy(&vos->vos_lock);
 	mutex_destroy(&vos->vos_stats_lock);
 	mutex_destroy(&vos->vos_sock_lock);

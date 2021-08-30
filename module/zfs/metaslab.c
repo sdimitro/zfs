@@ -3979,6 +3979,14 @@ metaslab_sync(metaslab_t *msp, uint64_t txg)
 		return;
 	}
 
+	if (vdev_is_object_based(vd)) {
+		ASSERT0(range_tree_space(alloctree));
+		ASSERT0(range_tree_space(msp->ms_freeing));
+		ASSERT0(range_tree_space(msp->ms_freed));
+		ASSERT0(range_tree_space(msp->ms_checkpointing));
+		ASSERT0(range_tree_space(msp->ms_trim));
+	}
+
 	/*
 	 * Normally, we don't want to process a metaslab if there are no
 	 * allocations or frees to perform. However, if the metaslab is being
@@ -5382,16 +5390,6 @@ metaslab_free_concrete(vdev_t *vd, uint64_t offset, uint64_t asize,
 	metaslab_t *msp;
 	spa_t *spa = vd->vdev_spa;
 
-	if (vdev_is_object_based(vd)) {
-		/*
-		 * XXX might be better to put it in ms_freeing and then send up
-		 * the whole rangetree in metaslab_sync().
-		 * XXX need to think about how to handle checkpoint.
-		 */
-		object_store_free_block(vd, offset, asize);
-		return;
-	}
-
 	ASSERT(vdev_is_concrete(vd));
 	ASSERT3U(spa_config_held(spa, SCL_ALL, RW_READER), !=, 0);
 	ASSERT3U(offset >> vd->vdev_ms_shift, <, vd->vdev_ms_count);
@@ -5416,7 +5414,11 @@ metaslab_free_concrete(vdev_t *vd, uint64_t offset, uint64_t asize,
 		ASSERT(spa_has_checkpoint(spa));
 		range_tree_add(msp->ms_checkpointing, offset, asize);
 	} else {
-		range_tree_add(msp->ms_freeing, offset, asize);
+		if (vdev_is_object_based(vd)) {
+			object_store_free_block(vd, offset, asize);
+		} else {
+			range_tree_add(msp->ms_freeing, offset, asize);
+		}
 	}
 	mutex_exit(&msp->ms_lock);
 }
