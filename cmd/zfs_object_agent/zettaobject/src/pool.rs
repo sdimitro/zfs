@@ -876,6 +876,14 @@ impl Pool {
                     .state
                     .with_syncing_state(|syncing_state| syncing_state.last_txg);
                 let state = pool.state.clone();
+                if last_txg != phys.last_txg {
+                    // We opened an older TXG.  Before cleaning up (deleting)
+                    // future TXG's, update the super object to the old TXG, so
+                    // that if we re-open the pool we don't try to use the
+                    // future (deleted) TXG.
+                    let new_phys = PoolPhys { last_txg, ..phys };
+                    new_phys.put(object_access).await;
+                }
                 // Note: cleanup_log_objects() takes the syncing_state, so the
                 // other concurrently-executed cleanups can not access the
                 // syncing state.  That's why we need to pass in the last_txg.
