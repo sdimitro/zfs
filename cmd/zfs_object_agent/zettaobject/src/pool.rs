@@ -1,4 +1,5 @@
 use crate::base_types::*;
+use crate::data_object::DataObjectPhys;
 use crate::heartbeat;
 use crate::heartbeat::HeartbeatGuard;
 use crate::heartbeat::HeartbeatPhys;
@@ -27,7 +28,6 @@ use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
-use std::fmt::Display;
 use std::mem;
 use std::ops::Bound::*;
 use std::pin::Pin;
@@ -173,40 +173,6 @@ pub struct PoolStatsPhys {
 }
 impl OnDisk for PoolStatsPhys {}
 
-#[derive(Serialize, Deserialize, Debug)]
-struct DataObjectPhys {
-    guid: PoolGuid,      // redundant with key, for verification
-    object: ObjectId,    // redundant with key, for verification
-    blocks_size: u32,    // sum of blocks.values().len()
-    min_block: BlockId,  // inclusive (all blocks are >= min_block)
-    next_block: BlockId, // exclusive (all blocks are < next_block)
-
-    // Note: if this object was rewritten to consolidate adjacent objects, the
-    // blocks in this object may have been originally written over a range of
-    // TXG's.
-    min_txg: Txg,
-    max_txg: Txg, // inclusive
-
-    blocks: HashMap<BlockId, ByteBuf>,
-}
-impl OnDisk for DataObjectPhys {}
-
-impl Display for DataObjectPhys {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{:?}: blocks={} bytes={} BlockId[{},{}) TXG[{},{}]",
-            self.object,
-            self.blocks.len(),
-            self.blocks_size,
-            self.min_block,
-            self.next_block,
-            self.min_txg.0,
-            self.max_txg.0,
-        )
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 enum ObjectSizeLogEntry {
     Exists(ObjectSize),
@@ -235,7 +201,7 @@ impl From<&DataObjectPhys> for ObjectSize {
     fn from(phys: &DataObjectPhys) -> Self {
         ObjectSize {
             object: phys.object,
-            num_blocks: phys.blocks.len() as u32,
+            num_blocks: phys.blocks_len() as u32,
             num_bytes: phys.blocks_size,
         }
     }
@@ -334,81 +300,6 @@ impl UberblockPhys {
         }
         debug!("Deleting old uberblocks: {:?}", txgs);
         Self::delete_many(object_access, ub.guid, txgs).await;
-    }
-}
-
-const NUM_DATA_PREFIXES: i32 = 64;
-
-impl DataObjectPhys {
-    fn key(guid: PoolGuid, object: ObjectId) -> String {
-        format!(
-            "zfs/{}/data/{:03}/{}",
-            guid,
-            object.0 % NUM_DATA_PREFIXES as u64,
-            object
-        )
-    }
-
-    // Could change this to return an Iterator
-    fn prefixes(guid: PoolGuid) -> Vec<String> {
-        let mut vec = Vec::new();
-        for x in 0..NUM_DATA_PREFIXES {
-            vec.push(format!("zfs/{}/data/{:03}/", guid, x));
-        }
-        vec
-    }
-
-    fn calculate_blocks_size(&self) -> u32 {
-        self.blocks.values().map(|buf| buf.len() as u32).sum()
-    }
-
-    fn verify(&self) {
-        assert_eq!(self.blocks_size, self.calculate_blocks_size());
-        assert_le!(self.min_txg, self.max_txg);
-        assert_le!(self.min_block, self.next_block);
-        if !self.blocks.is_empty() {
-            assert_le!(self.min_block, self.blocks.keys().min().unwrap());
-            assert_gt!(self.next_block, self.blocks.keys().max().unwrap());
-        }
-    }
-
-    async fn get(object_access: &ObjectAccess, guid: PoolGuid, obj: ObjectId) -> Result<Self> {
-        let this = Self::get_from_key(object_access, &Self::key(guid, obj)).await?;
-        assert_eq!(this.guid, guid);
-        assert_eq!(this.object, obj);
-        Ok(this)
-    }
-
-    async fn get_from_key(object_access: &ObjectAccess, key: &str) -> Result<Self> {
-        let buf = object_access.get_object(key).await?;
-        let begin = Instant::now();
-        let this: Self =
-            bincode::deserialize(&buf).context(format!("Failed to decode contents of {}", key))?;
-        trace!(
-            "{:?}: deserialized {} blocks from {} bytes in {}ms",
-            this.object,
-            this.blocks.len(),
-            buf.len(),
-            begin.elapsed().as_millis()
-        );
-        this.verify();
-        Ok(this)
-    }
-
-    async fn put(&self, object_access: &ObjectAccess) {
-        let begin = Instant::now();
-        let contents = bincode::serialize(&self).unwrap();
-        trace!(
-            "{:?}: serialized {} blocks in {} bytes in {}ms",
-            self.object,
-            self.blocks.len(),
-            contents.len(),
-            begin.elapsed().as_millis()
-        );
-        self.verify();
-        object_access
-            .put_object(&Self::key(self.guid, self.object), contents)
-            .await;
     }
 }
 
@@ -518,16 +409,7 @@ impl PendingObjectState {
 
     fn new_pending(guid: PoolGuid, object: ObjectId, next_block: BlockId, txg: Txg) -> Self {
         PendingObjectState::Pending(
-            DataObjectPhys {
-                guid,
-                object,
-                min_block: next_block,
-                next_block,
-                min_txg: txg,
-                max_txg: txg,
-                blocks_size: 0,
-                blocks: HashMap::new(),
-            },
+            DataObjectPhys::new(guid, object, next_block, txg),
             Vec::new(),
         )
     }
@@ -1136,7 +1018,7 @@ impl Pool {
         assert!(syncing_state.pending_unordered_writes.is_empty());
         {
             let (phys, senders) = syncing_state.pending_object.as_mut_pending();
-            assert!(phys.blocks.is_empty());
+            assert!(phys.is_empty());
             assert!(senders.is_empty());
 
             syncing_state.pending_object = PendingObjectState::NotPending(phys.next_block);
@@ -1303,7 +1185,7 @@ impl Pool {
         assert_gt!(object, state.object_block_map.last_object());
         syncing_state.stats.objects_count += 1;
         syncing_state.stats.blocks_bytes += phys.blocks_size as u64;
-        syncing_state.stats.blocks_count += phys.blocks.len() as u64;
+        syncing_state.stats.blocks_count += phys.blocks_len() as u64;
         state
             .object_block_map
             .insert(object, phys.min_block, phys.next_block);
@@ -1327,7 +1209,7 @@ impl Pool {
 
         let (object, next_block) = {
             let (phys, _) = syncing_state.pending_object.as_mut_pending();
-            if phys.blocks.is_empty() {
+            if phys.is_empty() {
                 return;
             } else {
                 (phys.object, phys.next_block)
@@ -1455,12 +1337,8 @@ impl Pool {
             .unwrap();
         // XXX consider using debug_assert_eq
         assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
-        if phys.blocks.get(&block).is_none() {
-            //println!("{:#?}", self.objects);
-            error!("{:#?}", phys);
-        }
         // XXX to_owned() copies the data; would be nice to return a reference
-        let v = phys.blocks.get(&block).unwrap().to_owned().into_vec();
+        let v = phys.get_block(block).to_owned();
 
         // add to ZettaCache
         if let Some(key) = key {
@@ -1849,7 +1727,7 @@ async fn reclaim_frees_object(
             }
             assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
             assert_eq!(phys.blocks_size, object_size.num_bytes);
-            assert_eq!(phys.blocks.len(), object_size.num_blocks as usize);
+            assert_eq!(phys.blocks_len(), object_size.num_blocks as usize);
 
             phys
         }));
@@ -1860,7 +1738,7 @@ async fn reclaim_frees_object(
             assert_eq!(a.guid, b.guid);
             debug!(
                 "reclaim: moving {} blocks from {:?} (TXG[{},{}] BlockID[{},{})) to {:?} (TXG[{},{}] BlockID[{},{}))",
-                b.blocks.len(),
+                b.blocks_len(),
                 b.object,
                 b.min_txg.0,
                 b.max_txg.0,
@@ -1884,7 +1762,7 @@ async fn reclaim_frees_object(
                     Some(old_vec) => {
                         // May have already been transferred in a previous job
                         // during which we crashed before updating the metadata.
-                        assert_eq!(&old_vec, a.blocks.get(&k).unwrap());
+                        assert_eq!(&old_vec, a.get_block(k));
                         already_moved += 1;
                     }
                     None => {
