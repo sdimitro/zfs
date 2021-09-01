@@ -272,8 +272,36 @@ function log_neg_expect
 
 function log_pos
 {
-	log_pos_expect "" "$@"
-	return $?
+	typeset out=""
+	typeset logfile="/tmp/log.$$"
+
+	while [[ -e $logfile ]]; do
+		logfile="$logfile.$$"
+	done
+
+	"$@" 2>$logfile
+	typeset status=$?
+	out="cat $logfile"
+
+	if (( $status != 0 )) ; then
+		print -u2 $($out)
+		_printerror "$@" "exited $status"
+	else
+		$out | egrep -i "internal error|assertion failed" \
+			> /dev/null 2>&1
+		# internal error or assertion failed
+		if [[ $? -eq 0 ]]; then
+			print -u2 $($out)
+			_printerror "$@" "internal error or assertion failure" \
+				" exited $status"
+			status=1
+		else
+			[[ -n $LOGAPI_DEBUG ]] && cat $logfile
+			_printsuccess "$@"
+		fi
+	fi
+	_recursive_output $logfile "false"
+	return $status
 }
 
 # Execute and print command with status where success equals zero result
@@ -304,21 +332,17 @@ function log_pos_expect
 		print -u2 $($out)
 		_printerror "$@" "exited $status"
 	else
-		$out | egrep -i "internal error|assertion failed" \
-			> /dev/null 2>&1
 		# internal error or assertion failed
-		if [[ $? -eq 0 ]]; then
+		if $out | grep -qi "internal error|assertion failed"; then
 			print -u2 $($out)
 			_printerror "$@" "internal error or assertion failure" \
 				" exited $status"
 			status=1
 		elif [[ -n $expect ]] ; then
-			$out | grep -i "$expect" > /dev/null 2>&1
-			if (( $? == 0 )); then
-				status=0
-			else
+			if ! $out | grep -qi "$expect"; then
 				print -u2 $($out)
 				_printerror "$@" "unexpectedly exited $status"
+				status=1
 			fi
 		else
 			status=0

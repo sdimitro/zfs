@@ -133,3 +133,41 @@ tests = ['zpool_create_001_pos', 'zpool_create_002_pos',
 	'create-o_ashift',
 	'zpool_create_tempname', 'zpool_create_dryrun_output']
 tags = ['functional', 'cli_root', 'zpool_create']
+
+[tests/functional/cli_root/zpool_get]
+tests = ['zpool_get_001_pos', 'zpool_get_002_pos', 'zpool_get_003_pos',
+    'zpool_get_004_neg', 'zpool_get_005_pos']
+tags = ['functional', 'cli_root', 'zpool_get']
+
+[tests/functional/cli_root/zpool_status]
+tests = ['zpool_status_001_pos', 'zpool_status_002_pos',
+    'zpool_status_features_001_pos']
+tags = ['functional', 'cli_root', 'zpool_status']
+
+[tests/functional/cli_root/zpool]
+tests = ['zpool_001_neg', 'zpool_002_pos', 'zpool_003_pos', 'zpool_colors']
+tags = ['functional', 'cli_root', 'zpool']
+
+[tests/functional/cli_root/zpool_add]
+tests = ['zpool_add_001_pos', 'zpool_add_002_pos', 'zpool_add_003_pos',
+    'zpool_add_004_pos', 'zpool_add_006_pos', 'zpool_add_007_neg',
+    'zpool_add_008_neg', 'zpool_add_009_neg', 'zpool_add_010_pos',
+    'add-o_ashift', 'add_prop_ashift', 'zpool_add_dryrun_output']
+tags = ['functional', 'cli_root', 'zpool_add']
+
+[tests/functional/cli_root/zpool_attach]
+tests = ['zpool_attach_001_neg', 'attach-o_ashift']
+tags = ['functional', 'cli_root', 'zpool_attach']
+
+[tests/functional/cli_root/zpool_detach]
+tests = ['zpool_detach_001_neg']
+tags = ['functional', 'cli_root', 'zpool_detach']
+
+[tests/functional/cli_root/zpool_offline]
+tests = ['zpool_offline_001_pos', 'zpool_offline_002_neg',
+    'zpool_offline_003_pos']
+tags = ['functional', 'cli_root', 'zpool_offline']
+
+[tests/functional/cli_root/zpool_online]
+tests = ['zpool_online_001_pos', 'zpool_online_002_neg']
+tags = ['functional', 'cli_root', 'zpool_online']

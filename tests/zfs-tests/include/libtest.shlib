@@ -671,11 +671,11 @@ function default_cleanup_noexit
 		log_must rm -rf $TESTDIR
 
 	if ! use_object_store; then
-        disk1=${DISKS%% *}
-        if is_mpath_device $disk1; then
-            delete_partitions
-        fi
-    fi
+		disk1=${DISKS%% *}
+		if is_mpath_device $disk1; then
+			delete_partitions
+		fi
+	fi
 
 	rm -f $TEST_BASE_DIR/{err,out}
 }
@@ -3326,7 +3326,7 @@ function get_rootpool
 function verify_disk_count
 {
 	typeset -i min=${2:-1}
-	typeset -i count=$(wc -w "$1")
+	typeset -i count=$(echo "$1" | wc -w)
 
 	use_object_store && return
 
