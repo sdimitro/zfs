@@ -88,26 +88,22 @@ if use_object_store; then
 		-o object-region=$ZTS_REGION \
 		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
 		$TESTPOOL s3 $ZTS_BUCKET_NAME" \
-		"-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		-o object-region=blah \
-		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-		$TESTPOOL s3 $ZTS_BUCKET_NAME" \
-		"-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		-o object-region=$ZTS_REGION \
-		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-		$TESTPOOL s3 blah" \
-		"-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		-o object-region=$ZTS_REGION \
-		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-		$TESTPOOL s3 $ZTS_BUCKET_NAME mirror" \
-		"-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		-o object-region=$ZTS_REGION \
-		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-		$TESTPOOL s3 $ZTS_BUCKET_NAME raidz" \
-		"-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		-o object-region=$ZTS_REGION \
-		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-		$TESTPOOL s3 $ZTS_BUCKET_NAME draid" \
+		"$object_store_params $TESTPOOL s3 blah" \
+		"$object_store_params $TESTPOOL s3 $ZTS_BUCKET_NAME mirror" \
+		"$object_store_params $TESTPOOL s3 $ZTS_BUCKET_NAME raidz" \
+		"$object_store_params $TESTPOOL s3 $ZTS_BUCKET_NAME draid" \
+		"$TESTPOOL s3 $ZTS_BUCKET_NAME" \
+		"$TESTPOOL $ZTS_BUCKET_NAME"
+
+	# Testing with invalid region is not applicable for minio. Minio ignores
+	# object-region value and hence, the command will pass instead of
+	# failing. We should add this test case for just AWS S3.
+	if endpoint_is_s3; then
+		args+=("-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
+			-o object-region=blah \
+			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
+			$TESTPOOL s3 $ZTS_BUCKET_NAME")
+	fi
 else
 	set -A args  "" "-?" "-n" "-f" "-nf" "-fn" "-f -n" "--f" "-e" "-s" \
 		"-m" "-R" "-m -R" "-Rm" "-mR" "-m $TESTDIR $TESTPOOL" \

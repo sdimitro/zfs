@@ -166,11 +166,24 @@ function is_kmemleak
 
 function use_object_store
 {
-    if [ -n "$ZTS_OBJECT_STORE" ]; then
-        return 0
-    else
-        return 1
-    fi
+	if [ -n "$ZTS_OBJECT_STORE" ]; then
+		return 0
+	else
+		return 1
+	fi
+}
+
+# Determine if ZTS_OBJECT_ENDPOINT points to AWS S3
+#
+# Return 0 if ZTS_OBJECT_ENDPOINT points to AWS S3, 1 if otherwise
+
+function endpoint_is_s3
+{
+	if [[ $ZTS_OBJECT_ENDPOINT == "https://s3*" ]]; then
+		return 0
+	else
+		return 1
+	fi
 }
 
 # Determine whether a dataset is mounted

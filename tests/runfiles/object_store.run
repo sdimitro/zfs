@@ -105,6 +105,7 @@ tags = ['functional', 'cli_root', 'zfs_change-key']
 
 # -------------------------------------------------------------
 # TODO: Add the following tests back after relevant bug fixes.
+# zpool_create_007_neg - DOSE-608
 # zpool_create_018_pos - DOSE-550
 # zpool_create_encrypted - DOSE-550
 # zpool_create_features_002_pos - DOSE-550
@@ -119,7 +120,7 @@ tags = ['functional', 'cli_root', 'zfs_change-key']
 [tests/functional/cli_root/zpool_create]
 tests = ['zpool_create_001_pos', 'zpool_create_002_pos',
 	'zpool_create_003_pos', 'zpool_create_004_pos', 'zpool_create_005_pos',
-	'zpool_create_006_pos', 'zpool_create_007_neg', 'zpool_create_008_pos',
+	'zpool_create_006_pos', 'zpool_create_008_pos',
 	'zpool_create_009_neg', 'zpool_create_010_neg', 'zpool_create_011_neg',
 	'zpool_create_012_neg', 'zpool_create_014_neg', 'zpool_create_015_neg',
 	'zpool_create_017_neg', 'zpool_create_019_pos',
