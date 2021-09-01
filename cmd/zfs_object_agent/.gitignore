@@ -1,4 +1,5 @@
 /target
 zfs_object_agent
+zfs_object_perf
 zoa_test
 libzoa.so

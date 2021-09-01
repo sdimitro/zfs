@@ -1,10 +1,12 @@
 lib_LTLIBRARIES = libzoa.la
 
-sbin_PROGRAMS = zfs_object_agent zoa_test
+sbin_PROGRAMS = zfs_object_agent zfs_object_perf zoa_test
 
 common_sources = $(wildcard zettacache/src/*.rs zettacache/Cargo.toml zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
 
 zfs_object_agent_SOURCES = $(wildcard server/src/*.rs server/Cargo.toml) $(common_sources)
+
+zfs_object_perf_SOURCES = $(wildcard object_perf/src/*.rs object_perf/Cargo.toml) $(common_sources)
 
 zoa_test_SOURCES = $(wildcard client/src/*.rs client/Cargo.toml) $(common_sources)
 
@@ -16,6 +18,7 @@ RUSTFLAGS = \
 
 .PHONY: \
 	zfs_object_agent$(EXEEXT) \
+	zfs_object_perf$(EXEEXT) \
 	zoa_test$(EXEEXT) \
 	libzoa.la
 
@@ -27,6 +30,10 @@ zfs_object_agent$(EXEEXT) :
 	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_agent $(RUSTTARGET)
 	cp target/@RUSTDIR@/zfs_object_agent .
 
+zfs_object_perf$(EXEEXT) :
+	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_perf $(RUSTTARGET)
+	cp target/@RUSTDIR@/zfs_object_perf .
+
 zoa_test$(EXEEXT) :
 	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa_test $(RUSTTARGET)
 	cp target/@RUSTDIR@/zoa_test .
@@ -36,6 +43,7 @@ all: build
 build: \
 	libzoa.la \
 	zfs_object_agent$(EXEEXT) \
+	zfs_object_perf$(EXEEXT) \
 	zoa_test$(EXEEXT)
 
 install-exec-hook :

@@ -13,5 +13,6 @@ members = [
     "server",
     "zettacache",
     "zettaobject",
+    "object_perf",
     "zoa",
 ]
