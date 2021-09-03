@@ -1188,7 +1188,10 @@ zio_rewrite(zio_t *pio, spa_t *spa, uint64_t txg, blkptr_t *bp, abd_t *data,
 	 * Object based pools don't handle changing a block's contents,
 	 * and shouldn't need to.
 	 */
-	ASSERT(!spa_is_object_based(spa));
+	spa_config_enter(spa, SCL_VDEV, FTAG, RW_READER);
+	VERIFY(!vdev_is_object_based(vdev_lookup_top(spa,
+	    DVA_GET_VDEV(&bp->blk_dva[0]))));
+	spa_config_exit(spa, SCL_VDEV, FTAG);
 
 	zio = zio_create(pio, spa, txg, bp, data, size, size, done, private,
 	    ZIO_TYPE_WRITE, priority, flags | ZIO_FLAG_IO_REWRITE, NULL, 0, zb,
