@@ -1,0 +1,46 @@
+#!/bin/sh
+
+#
+# This script starts the ZFS Object Agent process.
+# It uses the following environment variables, typically set by zfs-object-agent.service
+# to determine which command line parameters to pass to the ZFS Object Agent process.
+#  - ZOA_LOG: File to log output to
+#  - ZOA_CONFIG: Configuration file to set tunables (toml/json/yaml"
+#  - ZETTACACHE_DEVICE: File/device to use for ZettaCache
+#  - ZOA_LOG_LEVEL : Sets the level of logging verbosity.
+#		     Values can be TRACE, DEBUG, INFO, WARN.
+#
+
+error() {
+	echo "$@" 1>&2
+}
+
+ZOA_LOG="${ZOA_LOG:-/var/log/zoa.log}"
+PARAMS="-o ${ZOA_LOG}"
+echo "Logging to: ${ZOA_LOG}"
+
+if [ ! -z $ZOA_CONFIG ]; then
+	echo "Config file: ${ZOA_CONFIG}"
+	PARAMS="${PARAMS} -t ${ZOA_CONFIG}"
+fi
+
+if [ ! -z $ZETTACACHE_DEVICE ]; then
+	echo "ZettaCache: ${ZETTACACHE_DEVICE}"
+	PARAMS="$PARAMS -c ${ZETTACACHE_DEVICE}"
+fi
+
+if [ ! -z $ZOA_LOG_LEVEL ]; then
+	if [ $ZOA_LOG_LEVEL = 'WARN' ]; then
+		: # WARN is the default log level.
+	elif [ $ZOA_LOG_LEVEL = 'INFO' ]; then
+		PARAMS="${PARAMS} -v"
+	elif [ $ZOA_LOG_LEVEL = 'DEBUG' ]; then
+		PARAMS="${PARAMS} -vv"
+	elif [ $ZOA_LOG_LEVEL = 'TRACE' ]; then
+		PARAMS="${PARAMS} -vvv"
+	else
+		error "Invalid log level setting: $ZOA_LOG_LEVEL; ignoring."
+	fi
+fi
+
+/sbin/zfs_object_agent ${PARAMS}

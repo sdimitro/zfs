@@ -17,6 +17,8 @@ lib/udev/
 debian/tmp/etc/default/zfs etc/default/
 debian/tmp/etc/zfs/zfs-functions etc/zfs/
 etc/zfs/zpool.d/
+debian/tmp/etc/zfs/zoa_config.toml etc/zfs/
+debian/tmp/etc/zfs/zoa.conf etc/zfs/
 usr/lib/*/zfs/zpool.d/
 usr/lib/*/zfs/zpool_influxdb
 sbin/fsck.zfs
@@ -38,6 +40,7 @@ sbin/zoa_test
 cmd/zfs_object_agent/libzoa.so lib/
 usr/bin/zvol_wait
 usr/bin/zoa_chaos_monkey
+usr/bin/start_zoa
 usr/sbin/arc_summary
 usr/sbin/arcstat
 usr/sbin/dbufstat

@@ -478,6 +478,7 @@ systemctl --system daemon-reload >/dev/null || true
 %{_bindir}/zvol_wait
 # Optional zfs_object_agent script
 %{_bindir}/zoa_chaos_monkey
+%{_bindir}/start_zoa
 # Optional Python 2/3 scripts
 %{_bindir}/arc_summary
 %{_bindir}/arcstat
@@ -512,6 +513,8 @@ systemctl --system daemon-reload >/dev/null || true
 %endif
 %config(noreplace) %{_sysconfdir}/%{name}/zed.d/*
 %config(noreplace) %{_sysconfdir}/%{name}/zpool.d/*
+%config(noreplace) %{_sysconfdir}/%{name}/zoa_config.toml
+%config(noreplace) %{_sysconfdir}/%{name}/zoa.conf
 %config(noreplace) %{_sysconfdir}/%{name}/vdev_id.conf.*.example
 %attr(440, root, root) %config(noreplace) %{_sysconfdir}/sudoers.d/*
 %if %{with pam}
