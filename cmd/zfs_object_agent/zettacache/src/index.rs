@@ -70,7 +70,14 @@ impl ZettaCacheIndex {
         }
     }
 
-    pub fn get_histogram_start(&mut self) -> Atime {
+    pub fn get_phys(&self) -> ZettaCacheIndexPhys {
+        ZettaCacheIndexPhys {
+            atime_histogram: self.atime_histogram.clone(),
+            log: self.log.get_phys(),
+        }
+    }
+
+    pub fn get_histogram_start(&self) -> Atime {
         self.atime_histogram.get_start()
     }
 

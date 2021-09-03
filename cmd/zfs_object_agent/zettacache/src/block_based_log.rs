@@ -42,6 +42,15 @@ pub struct BlockBasedLogPhys {
     num_entries: u64,
 }
 
+impl BlockBasedLogPhys {
+    pub fn clear(&mut self, extent_allocator: Arc<ExtentAllocator>) {
+        for extent in self.extents.values() {
+            extent_allocator.free(extent);
+        }
+        *self = Default::default();
+    }
+}
+
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 pub struct BlockBasedLogWithSummaryPhys {
     this: BlockBasedLogPhys,
@@ -184,10 +193,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
     pub fn clear(&mut self) {
         self.pending_entries.clear();
-        for extent in self.phys.extents.values() {
-            self.extent_allocator.free(extent);
-        }
-        self.phys = BlockBasedLogPhys::default();
+        self.phys.clear(self.extent_allocator.clone());
     }
 
     fn next_write_location(&self) -> Extent {
@@ -312,6 +318,16 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         BlockBasedLogWithSummaryPhys {
             this: new_this,
             chunk_summary: new_chunk_summary,
+        }
+    }
+
+    // Works only if there are no pending entries
+    pub fn get_phys(&self) -> BlockBasedLogWithSummaryPhys {
+        assert!(self.this.pending_entries.is_empty());
+        assert!(self.chunk_summary.pending_entries.is_empty());
+        BlockBasedLogWithSummaryPhys {
+            this: self.this.phys.clone(),
+            chunk_summary: self.chunk_summary.phys.clone(),
         }
     }
 
