@@ -784,13 +784,19 @@ agent_resume(void *arg)
 		agent_resume_complete(vos);
 	}
 
+	/*
+	 * We only free blocks if we haven't written
+	 * out the uberblock.
+	 */
+	if (vos->vos_send_txg_selector == VOS_TXG_END &&
+	    agent_free_blocks(vos) != 0)  {
+		zfs_dbgmsg("agent_resume freeing failed");
+		mutex_exit(&vos->vos_sock_lock);
+		return;
+	}
+
 	if (vos->vos_send_txg_selector == VOS_TXG_END ||
 	    vos->vos_send_txg_selector == VOS_TXG_END_AGAIN) {
-		if (agent_free_blocks(vos) != 0)  {
-			zfs_dbgmsg("agent_resume freeing failed");
-			mutex_exit(&vos->vos_sock_lock);
-			return;
-		}
 		size_t nvlen;
 		char *nvbuf = fnvlist_pack(vos->vos_config, &nvlen);
 		agent_end_txg(vos, spa_syncing_txg(spa),
