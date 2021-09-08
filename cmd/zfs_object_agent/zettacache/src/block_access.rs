@@ -126,10 +126,6 @@ impl BlockAccess {
         self.size
     }
 
-    pub fn sector_size(&self) -> usize {
-        self.sector_size
-    }
-
     pub fn dump_metrics(&self) {
         debug!("metrics: {:#?}", self.metrics);
     }

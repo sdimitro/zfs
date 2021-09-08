@@ -37,12 +37,17 @@ impl BlockBasedLogEntry for SpaceMapEntry {}
 pub struct SpaceMap {
     log: BlockBasedLog<SpaceMapEntry>,
     coverage: SpaceMapExtent,
+
+    // This is only used currently for printing out the ideal size that the
+    // spacemap would have if it was condensed to our logs.
+    alloc_entries: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpaceMapPhys {
     log: BlockBasedLogPhys<SpaceMapEntry>,
     coverage: SpaceMapExtent,
+    alloc_entries: u64,
 }
 impl OnDisk for SpaceMapPhys {}
 
@@ -51,6 +56,7 @@ impl SpaceMapPhys {
         SpaceMapPhys {
             log: Default::default(),
             coverage: SpaceMapExtent { offset, size },
+            alloc_entries: 0,
         }
     }
 }
@@ -64,6 +70,7 @@ impl SpaceMap {
         SpaceMap {
             log: BlockBasedLog::open(block_access, extent_allocator, phys.log),
             coverage: phys.coverage,
+            alloc_entries: phys.alloc_entries,
         }
     }
 
@@ -81,13 +88,18 @@ impl SpaceMap {
     }
 
     pub fn alloc(&mut self, offset: u64, size: u64) {
-        self.log
-            .append(SpaceMapEntry::Alloc(SpaceMapExtent { offset, size }));
+        if size != 0 {
+            self.log
+                .append(SpaceMapEntry::Alloc(SpaceMapExtent { offset, size }));
+            self.alloc_entries += 1;
+        }
     }
 
     pub fn free(&mut self, offset: u64, size: u64) {
-        self.log
-            .append(SpaceMapEntry::Free(SpaceMapExtent { offset, size }));
+        if size != 0 {
+            self.log
+                .append(SpaceMapEntry::Free(SpaceMapExtent { offset, size }));
+        }
     }
 
     pub fn mark_generation(&mut self, slab_id: SlabId, generation: u64) {
@@ -102,6 +114,7 @@ impl SpaceMap {
         SpaceMapPhys {
             log: self.log.flush().await,
             coverage: self.coverage,
+            alloc_entries: self.alloc_entries,
         }
     }
 
@@ -112,5 +125,13 @@ impl SpaceMap {
             },
             size: self.coverage.size,
         }
+    }
+
+    pub fn get_total_entries(&self) -> u64 {
+        self.log.len()
+    }
+
+    pub fn get_alloc_entries(&self) -> u64 {
+        self.alloc_entries
     }
 }
