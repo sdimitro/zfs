@@ -94,4 +94,16 @@ impl Sub<Atime> for Atime {
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
-pub struct FreeLogId(pub usize);
+pub struct ReclaimLogId(pub u16);
+impl Display for ReclaimLogId {
+    // For crash cleanup we want value prefixed with zeroes and there can be up to 2 ^ 16 logs
+    fn fmt(&self, f: &mut Formatter) -> Result {
+        write!(f, "{:05}", self.0)
+    }
+}
+
+impl ReclaimLogId {
+    pub fn as_index(self) -> usize {
+        usize::from(self.0)
+    }
+}

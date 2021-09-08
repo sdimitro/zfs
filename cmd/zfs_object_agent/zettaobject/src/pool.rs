@@ -27,7 +27,9 @@ use serde_bytes::ByteBuf;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::convert::TryFrom;
 use std::fmt;
+use std::fmt::Display;
 use std::mem;
 use std::ops::Bound::*;
 use std::pin::Pin;
@@ -53,7 +55,16 @@ lazy_static! {
     static ref FREE_MIN_BLOCKS: u64 = get_tunable("free_min_blocks", 1000);
     static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 1024 * 1024);
 
-    static ref PENDING_FREE_LOG_COUNT: u64 = get_tunable("pending_free_log_count", 100);
+    // Split a reclaim free log when it exceeds this many entries.  We picked 10 million to
+    // keep the memory size for loading pending frees and object sizes logs at about 1/2 GB.
+    //
+    // If this value is smaller than the number of blocks that could be freed in one object
+    // group (1000 objects), then we may end up trying to repeatedly split a log that contains
+    // blocks of only a single object group, because we'll send all the records to a single
+    // "side" of the split. Given object size=1MB, group size=1000 objects, and min block
+    // size=512b, the maximum blocks (and thus entries) in one object group is 2 million.
+    // Therefore this setting should be >2M.
+    static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = get_tunable("reclaim_log_entries_limit", 10_000_000);
 
     // minimum number of chunks before we consider condensing
     static ref LOG_CONDENSE_MIN_CHUNKS: usize = get_tunable("log_condense_min_chunks", 30);
@@ -69,6 +80,9 @@ lazy_static! {
 }
 
 const ONE_MIB: u64 = 1_048_576;
+
+const OBJECTS_PER_LOG: u64 = 1024;
+const RECLAIM_TABLE_MAX_BITS: u8 = 16;
 
 enum OwnResult {
     Success,
@@ -133,11 +147,29 @@ struct PoolPhys {
 }
 impl OnDisk for PoolPhys {}
 
+/// contains a pending_frees_log and matching object_size_log
 #[derive(Serialize, Deserialize, Debug)]
-struct PendingFreesLogPhys {
+struct ReclaimLogPhys {
+    num_bits: u8, // aka local depth; range is [0, 16], inclusive
+    prefix: u16,  // prefix used to locate this log in table
     pending_frees_log: ObjectBasedLogPhys,
     pending_free_bytes: u64,
     object_size_log: ObjectBasedLogPhys,
+}
+
+/// Metadata for reclaiming freed blocks
+#[derive(Serialize, Deserialize, Debug)]
+struct ReclaimInfoPhys {
+    indirect_table: Vec<ReclaimLogId>, // has at least one entry and size is always a power of two
+    reclaim_logs: Vec<ReclaimLogPhys>,
+}
+
+impl ReclaimInfoPhys {
+    fn table_bits(&self) -> u8 {
+        let length = &self.indirect_table.len();
+        assert!(length.is_power_of_two());
+        u8::try_from(length.trailing_zeros()).unwrap()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -146,8 +178,8 @@ pub struct UberblockPhys {
     txg: Txg,         // redundant with key, for verification
     date: SystemTime, // for debugging
     storage_object_log: ObjectBasedLogPhys,
-    pending_frees_logs: Vec<PendingFreesLogPhys>, // list of logs, initially 100
-    next_block: BlockId,                          // next BlockID that can be allocated
+    reclaim_info: ReclaimInfoPhys, // Extendible hash structures for reclaiming free blocks
+    next_block: BlockId,           // next BlockID that can be allocated
     stats: PoolStatsPhys,
     zfs_uberblock: TerseVec<u8>,
     zfs_config: TerseVec<u8>,
@@ -321,18 +353,102 @@ pub struct PoolState {
     _heartbeat_guard: Option<HeartbeatGuard>, // Used for RAII
 }
 
-struct PendingFreesLog {
+/// runtime data for each pair of pending frees + object sizes logs
+struct ReclaimLog {
+    reclaim_busy: bool, // being reclaimed (skip splitting)
+    num_bits: u8,       // aka local depth and range is { 0, 16 }
+    prefix: u16,        // prefix used to locate this log in table
+    id: ReclaimLogId,
+
+    // Note: the pending_frees_log may contain frees that were already applied,
+    // if we crashed while processing pending frees.
     pending_frees_log: ObjectBasedLog<PendingFreesLogEntry>,
     pending_free_bytes: u64,
+    // Note: the object_size_log may not have the most up-to-date size info for
+    // every object, because it's updated after the object is overwritten, when
+    // processing pending frees.
     object_size_log: ObjectBasedLog<ObjectSizeLogEntry>,
 }
 
-impl PendingFreesLog {
-    fn to_phys(&self) -> PendingFreesLogPhys {
-        PendingFreesLogPhys {
+impl ReclaimLog {
+    fn to_phys(&self) -> ReclaimLogPhys {
+        ReclaimLogPhys {
+            num_bits: self.num_bits,
+            prefix: self.prefix,
             pending_frees_log: self.pending_frees_log.to_phys(),
             pending_free_bytes: self.pending_free_bytes,
             object_size_log: self.object_size_log.to_phys(),
+        }
+    }
+}
+
+struct ReclaimIndirectTable {
+    table_bits: u8,             // aka global depth; range is [0, 16], inclusive
+    log_ids: Vec<ReclaimLogId>, // has at least one entry and size of table is 2 ^ table_bits
+}
+
+impl ReclaimIndirectTable {
+    fn grow_table(&mut self) {
+        assert_lt!(self.table_bits, RECLAIM_TABLE_MAX_BITS);
+
+        let old_len = self.log_ids.len();
+        let mut new_log_ids = Vec::with_capacity(old_len * 2);
+        for &index in &self.log_ids {
+            new_log_ids.push(index);
+            new_log_ids.push(index);
+        }
+        self.log_ids = new_log_ids;
+        self.table_bits += 1;
+
+        info!(
+            "reclaim: growing indirect table from {} to {}",
+            old_len,
+            self.log_ids.len()
+        );
+
+        assert_eq!(self.log_ids.len(), 1 << self.table_bits);
+    }
+
+    /// Update the sibling indices to point to a new log
+    fn update_siblings(&mut self, log_bits: u8, log_prefix: u16, new_log_id: ReclaimLogId) {
+        // Note: there will always be a power of 2 amount of siblings to update
+        let prefix_diff = self.table_bits - log_bits;
+        let sibling_index = usize::from(log_prefix << prefix_diff);
+        let bit_width = self.table_bits as usize;
+        for i in 0..(1 << prefix_diff) {
+            self.log_ids[sibling_index + i] = new_log_id;
+            debug!(
+                "reclaim: update sibling[{:#0width$b}] = {}",
+                sibling_index + i,
+                new_log_id.0,
+                width = bit_width + 2,
+            );
+        }
+    }
+}
+
+impl Display for ReclaimIndirectTable {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        writeln!(f, "ReclaimIndirectTable[{} bits]", self.table_bits)?;
+        let bits = self.table_bits as usize;
+        for (i, v) in self.log_ids.iter().enumerate() {
+            writeln!(f, "   log_ids[{:#0width$b}] = {}", i, v, width = bits + 2)?;
+        }
+        Ok(())
+    }
+}
+
+/// runtime data for reclaiming pending frees
+struct ReclaimInfo {
+    indirect_table: ReclaimIndirectTable,
+    reclaim_logs: Vec<ReclaimLog>,
+}
+
+impl ReclaimInfo {
+    fn to_phys(&self) -> ReclaimInfoPhys {
+        ReclaimInfoPhys {
+            indirect_table: self.indirect_table.log_ids.clone(),
+            reclaim_logs: self.reclaim_logs.iter().map(|log| log.to_phys()).collect(),
         }
     }
 }
@@ -346,15 +462,7 @@ struct PoolSyncingState {
     // XXX put this in its own type (in object_block_map.rs?)
     storage_object_log: ObjectBasedLog<StorageObjectLogEntry>,
 
-    // There are multiple pending_frees and object_size logs, initially set at 100 logs
-    //
-    // Note: the object_size_log may not have the most up-to-date size info for
-    // every object, because it's updated after the object is overwritten, when
-    // processing pending frees.
-    //
-    // Note: the pending_frees_log may contain frees that were already applied,
-    // if we crashed while processing pending frees.
-    pending_frees_logs: Vec<PendingFreesLog>,
+    reclaim_info: ReclaimInfo, // Extendible hash structure for pending frees
 
     pending_object: PendingObjectState,
     pending_unordered_writes: HashMap<BlockId, (ByteBuf, oneshot::Sender<()>)>,
@@ -426,8 +534,6 @@ pub struct PoolSharedState {
     pub name: String,
 }
 
-const OBJECTS_PER_LOG: u64 = 1000;
-
 impl PoolSyncingState {
     fn next_block(&self) -> BlockId {
         self.pending_object.next_block()
@@ -445,13 +551,17 @@ impl PoolSyncingState {
         self.stats.pending_frees_bytes += ent.size as u64;
     }
 
-    fn get_log_id(&self, object: ObjectId) -> FreeLogId {
-        // Pick which log to use for this entry
-        // - we want all the freed blocks from the same object to land in the same log
-        // - aim for 100,000 objects per log which is roughly 32 million blocks per log
-        // XXX for now substitute 1,000 for 100,000 to better exercise the logs
-        let nlogs = self.pending_frees_logs.len() as u64;
-        FreeLogId(((object.0 / OBJECTS_PER_LOG) % nlogs) as usize)
+    /// Locate which log to use for this object.
+    fn get_log_id(&mut self, object: ObjectId) -> ReclaimLogId {
+        // Note: All the freed blocks from the same object land in the same log
+
+        // Group adjacent objects together
+        let object_group = object.0 / OBJECTS_PER_LOG;
+
+        let hash_value = ((object_group % (1 << RECLAIM_TABLE_MAX_BITS)) as u16).reverse_bits();
+        let table = &self.reclaim_info.indirect_table;
+        let index = usize::from(hash_value) >> (RECLAIM_TABLE_MAX_BITS - table.table_bits);
+        table.log_ids[index]
     }
 
     /// Calculate the range of continuous objects that are part of the same log
@@ -474,13 +584,13 @@ impl PoolSyncingState {
         (min, max)
     }
 
-    fn get_pending_frees_log(&mut self, log: FreeLogId) -> &mut PendingFreesLog {
-        &mut self.pending_frees_logs[log.0]
+    fn get_pending_frees_log(&mut self, log: ReclaimLogId) -> &mut ReclaimLog {
+        &mut self.reclaim_info.reclaim_logs[log.as_index()]
     }
 
-    fn get_pending_frees_log_for_obj(&mut self, object: ObjectId) -> &mut PendingFreesLog {
+    fn get_pending_frees_log_for_obj(&mut self, object: ObjectId) -> &mut ReclaimLog {
         let log = self.get_log_id(object);
-        &mut self.pending_frees_logs[log.0]
+        &mut self.reclaim_info.reclaim_logs[log.as_index()]
     }
 }
 
@@ -517,7 +627,7 @@ impl PoolState {
         let begin = Instant::now();
         let frees_log_stream = FuturesUnordered::new();
         let size_log_stream = FuturesUnordered::new();
-        for log in syncing_state.pending_frees_logs.iter_mut() {
+        for log in syncing_state.reclaim_info.reclaim_logs.iter_mut() {
             frees_log_stream.push(log.pending_frees_log.cleanup());
             size_log_stream.push(log.object_size_log.cleanup());
         }
@@ -617,8 +727,12 @@ impl Pool {
             ObjectBasedLog::open_by_phys(shared_state.clone(), &phys.storage_object_log);
         let object_block_map = ObjectBlockMap::load(&storage_object_log, phys.next_block).await;
         let mut logs = Vec::new();
-        for log_phys in phys.pending_frees_logs.iter() {
-            logs.push(PendingFreesLog {
+        for (i, log_phys) in phys.reclaim_info.reclaim_logs.iter().enumerate() {
+            logs.push(ReclaimLog {
+                reclaim_busy: false,
+                num_bits: log_phys.num_bits,
+                prefix: log_phys.prefix,
+                id: ReclaimLogId(u16::try_from(i).unwrap()),
                 pending_frees_log: ObjectBasedLog::open_by_phys(
                     shared_state.clone(),
                     &log_phys.pending_frees_log,
@@ -637,7 +751,13 @@ impl Pool {
                     last_txg: phys.txg,
                     syncing_txg: None,
                     storage_object_log,
-                    pending_frees_logs: logs,
+                    reclaim_info: ReclaimInfo {
+                        indirect_table: ReclaimIndirectTable {
+                            table_bits: phys.reclaim_info.table_bits(),
+                            log_ids: phys.reclaim_info.indirect_table.clone(),
+                        },
+                        reclaim_logs: logs,
+                    },
                     pending_object: PendingObjectState::NotPending(phys.next_block),
                     pending_unordered_writes: HashMap::new(),
                     stats: phys.stats,
@@ -692,21 +812,25 @@ impl Pool {
             );
             let object_block_map = ObjectBlockMap::load(&storage_object_log, BlockId(0)).await;
 
-            // Start with 100 logs, each capable of 32 million entries
+            // start with a table of size 1 and a single log
             let mut logs = Vec::new();
-            for i in 0..*PENDING_FREE_LOG_COUNT {
-                logs.push(PendingFreesLog {
-                    pending_frees_log: ObjectBasedLog::create(
-                        shared_state.clone(),
-                        &format!("zfs/{}/PendingFreesLog/{}", guid, i as usize),
-                    ),
-                    pending_free_bytes: 0,
-                    object_size_log: ObjectBasedLog::create(
-                        shared_state.clone(),
-                        &format!("zfs/{}/ObjectSizeLog/{}", guid, i as usize),
-                    ),
-                });
-            }
+            let log_id = ReclaimLogId(0);
+            logs.push(ReclaimLog {
+                reclaim_busy: false,
+                num_bits: 0, // starts with a table of 1 entry
+                prefix: 0,
+                id: log_id,
+                pending_frees_log: ObjectBasedLog::create(
+                    shared_state.clone(),
+                    &format!("zfs/{}/PendingFreesLog/{}", guid, log_id),
+                ),
+                pending_free_bytes: 0,
+                object_size_log: ObjectBasedLog::create(
+                    shared_state.clone(),
+                    &format!("zfs/{}/ObjectSizeLog/{}", guid, log_id),
+                ),
+            });
+
             let mut pool = Pool {
                 state: Arc::new(PoolState {
                     shared_state: shared_state.clone(),
@@ -714,7 +838,13 @@ impl Pool {
                         last_txg: Txg(0),
                         syncing_txg: None,
                         storage_object_log,
-                        pending_frees_logs: logs,
+                        reclaim_info: ReclaimInfo {
+                            indirect_table: ReclaimIndirectTable {
+                                table_bits: 0,
+                                log_ids: vec![ReclaimLogId(0)],
+                            },
+                            reclaim_logs: logs,
+                        },
                         pending_object: PendingObjectState::NotPending(BlockId(0)),
                         pending_unordered_writes: Default::default(),
                         stats: Default::default(),
@@ -1024,6 +1154,7 @@ impl Pool {
             syncing_state.pending_object = PendingObjectState::NotPending(phys.next_block);
         }
 
+        try_split_reclaim_logs(state.clone(), &mut syncing_state).await;
         try_reclaim_frees(state.clone(), &mut syncing_state);
         try_condense_object_log(state.clone(), &mut syncing_state).await;
         if syncing_state
@@ -1048,7 +1179,7 @@ impl Pool {
 
         let frees_log_stream = FuturesUnordered::new();
         let size_log_stream = FuturesUnordered::new();
-        for log in syncing_state.pending_frees_logs.iter_mut() {
+        for log in syncing_state.reclaim_info.reclaim_logs.iter_mut() {
             frees_log_stream.push(log.pending_frees_log.flush(txg));
             size_log_stream.push(log.object_size_log.flush(txg));
         }
@@ -1062,18 +1193,13 @@ impl Pool {
 
         syncing_state.storage_object_log.flush(txg).await;
 
-        let mut logs = Vec::new();
-        for log in syncing_state.pending_frees_logs.iter() {
-            logs.push(log.to_phys());
-        }
-
         // write uberblock
         let u = UberblockPhys {
             guid: state.shared_state.guid,
             txg,
             date: SystemTime::now(),
             storage_object_log: syncing_state.storage_object_log.to_phys(),
-            pending_frees_logs: logs,
+            reclaim_info: syncing_state.reclaim_info.to_phys(),
             next_block: syncing_state.next_block(),
             zfs_uberblock: TerseVec(uberblock),
             stats: syncing_state.stats,
@@ -1488,12 +1614,8 @@ impl Pool {
 // Following routines deal with reclaiming free space
 //
 
-fn log_new_sizes(
-    txg: Txg,
-    pending_frees: &mut PendingFreesLog,
-    rewritten_object_sizes: Vec<ObjectSize>,
-) {
-    let object_size_log = &mut pending_frees.object_size_log;
+fn log_new_sizes(txg: Txg, reclaim_log: &mut ReclaimLog, rewritten_object_sizes: Vec<ObjectSize>) {
+    let object_size_log = &mut reclaim_log.object_size_log;
 
     for object_size in rewritten_object_sizes {
         // log to on-disk size
@@ -1534,7 +1656,7 @@ fn log_deleted_objects(
 /// builds a new pending frees log based off the remainder from reclaiming
 async fn build_new_frees<'a, I>(
     txg: Txg,
-    pending_frees: &mut PendingFreesLog,
+    reclaim_log: &mut ReclaimLog,
     remaining_frees: I,
     remainder: ObjectBasedLogRemainder,
 ) where
@@ -1542,7 +1664,7 @@ async fn build_new_frees<'a, I>(
 {
     let begin = Instant::now();
 
-    let log = &mut pending_frees.pending_frees_log;
+    let log = &mut reclaim_log.pending_frees_log;
 
     // We need to call .iter_remainder() before .clear(), otherwise we'd be
     // iterating the new, empty generation.
@@ -1574,10 +1696,10 @@ async fn build_new_frees<'a, I>(
         "reclaim: {:?} transferred {} freed blocks ({}MiB) in {}ms",
         txg,
         count,
-        pending_frees.pending_free_bytes / ONE_MIB,
+        reclaim_log.pending_free_bytes / ONE_MIB,
         begin.elapsed().as_millis()
     );
-    assert_eq!(bytes, pending_frees.pending_free_bytes);
+    assert_eq!(bytes, reclaim_log.pending_free_bytes);
 }
 
 async fn get_object_sizes(
@@ -1790,6 +1912,189 @@ async fn reclaim_frees_object(
     (&new_phys).into()
 }
 
+/// Split the pending frees content across two logs
+async fn split_pending_frees_log(
+    txg: Txg,
+    state: &Arc<PoolState>,
+    syncing_state: &mut PoolSyncingState,
+    original_id: ReclaimLogId,
+    sibling_id: ReclaimLogId,
+) {
+    let reclaim_log = syncing_state.get_pending_frees_log(original_id);
+    reclaim_log.pending_frees_log.flush(txg).await;
+    let pending_frees_log_stream = reclaim_log.pending_frees_log.iterate();
+
+    // Clear original log and pending_free_bytes since they are going to be rebuilt
+    assert!(!reclaim_log.reclaim_busy);
+    reclaim_log.pending_frees_log.clear(txg).await;
+    reclaim_log.pending_free_bytes = 0;
+
+    pending_frees_log_stream
+        .for_each(|ent| {
+            let id = syncing_state.get_log_id(state.object_block_map.block_to_object(ent.block));
+            assert!(id == original_id || id == sibling_id);
+            let this_reclaim_log = syncing_state.get_pending_frees_log(id);
+            this_reclaim_log.pending_frees_log.append(txg, ent);
+            this_reclaim_log.pending_free_bytes += u64::from(ent.size);
+            future::ready(())
+        })
+        .await;
+
+    for id in &[original_id, sibling_id] {
+        let log = syncing_state.get_pending_frees_log(*id);
+        log.pending_frees_log.flush(txg).await;
+        debug!(
+            "reclaim: {:?} split pending frees {:?} has {} entries and {} MiB",
+            txg,
+            id,
+            log.pending_frees_log.num_entries,
+            log.pending_free_bytes / ONE_MIB
+        );
+    }
+}
+
+/// Split the object sizes content across two logs
+async fn split_object_sizes_log(
+    txg: Txg,
+    syncing_state: &mut PoolSyncingState,
+    original_id: ReclaimLogId,
+    sibling_id: ReclaimLogId,
+) {
+    let reclaim_log = &mut syncing_state.get_pending_frees_log(original_id);
+    reclaim_log.object_size_log.flush(txg).await;
+    let object_size_log_stream = reclaim_log.object_size_log.iterate();
+
+    // Clear previous log since it's going to be rebuilt
+    reclaim_log.object_size_log.clear(txg).await;
+
+    object_size_log_stream
+        .for_each(|ent| {
+            let object = match ent {
+                ObjectSizeLogEntry::Exists(object_size) => object_size.object,
+                ObjectSizeLogEntry::Freed { object } => object,
+            };
+            let id = syncing_state.get_log_id(object);
+            assert!(id == original_id || id == sibling_id);
+            syncing_state
+                .get_pending_frees_log(id)
+                .object_size_log
+                .append(txg, ent);
+            future::ready(())
+        })
+        .await;
+
+    for id in &[original_id, sibling_id] {
+        let log = syncing_state.get_pending_frees_log(*id);
+        log.object_size_log.flush(txg).await;
+        debug!(
+            "reclaim: {:?} split object sizes {:?} has {} entries",
+            txg, id, log.object_size_log.num_entries
+        );
+    }
+}
+
+/// Split logs that are getting full
+async fn try_split_reclaim_logs(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState) {
+    // Locate the largest log
+    // XXX This can simplified further with reduce() when we move to a more recent version of Rust
+    let (log_id, entries) = syncing_state.reclaim_info.reclaim_logs.iter().fold(
+        (ReclaimLogId(0), 0),
+        |(best_id, best_num_entries), ent| {
+            // find the largest log that is not being reclaimed
+            if !ent.reclaim_busy
+                && ent.num_bits != RECLAIM_TABLE_MAX_BITS
+                && ent.pending_frees_log.num_entries >= best_num_entries
+            {
+                (ent.id, ent.pending_frees_log.num_entries)
+            } else {
+                (best_id, best_num_entries)
+            }
+        },
+    );
+
+    // Split when largest log exceeds the upper limit
+    if entries < *RECLAIM_LOG_ENTRIES_LIMIT
+        || syncing_state.get_pending_frees_log(log_id).reclaim_busy
+    {
+        return;
+    }
+
+    let begin = Instant::now();
+    let reclaim_log = syncing_state.get_pending_frees_log(log_id);
+    let log_bits = reclaim_log.num_bits;
+    let log_prefix = reclaim_log.prefix;
+
+    // Once a log reaches RECLAIM_TABLE_MAX_BITS it can no longer be split
+    if log_bits == RECLAIM_TABLE_MAX_BITS {
+        return;
+    }
+    info!(
+        "reclaim: splitting pending frees log {:?} with {} entries (bits = {}, limit = {})",
+        log_id, entries, log_bits, *RECLAIM_LOG_ENTRIES_LIMIT
+    );
+
+    // Expand log's prefix and bit count
+    reclaim_log.num_bits += 1;
+    reclaim_log.prefix <<= 1;
+
+    let indirect_table = &mut syncing_state.reclaim_info.indirect_table;
+    let table_bits = indirect_table.table_bits;
+
+    // Grow the indirect table if this log has no more siblings in the table
+    if table_bits == log_bits {
+        indirect_table.grow_table();
+    }
+
+    // Create the new log files for the split
+    // XXX -- need to clean up these new logs if we crash (DOSE-613)
+    let pool_guid = state.shared_state.guid;
+    let new_log_id =
+        ReclaimLogId(u16::try_from(syncing_state.reclaim_info.reclaim_logs.len()).unwrap());
+    let new_log = ReclaimLog {
+        reclaim_busy: false,
+        num_bits: log_bits + 1,
+        prefix: (log_prefix << 1) | 1,
+        id: new_log_id,
+        pending_frees_log: ObjectBasedLog::create(
+            state.shared_state.clone(),
+            &format!("zfs/{}/PendingFreesLog/{}", pool_guid, new_log_id),
+        ),
+        pending_free_bytes: 0,
+        object_size_log: ObjectBasedLog::create(
+            state.shared_state.clone(),
+            &format!("zfs/{}/ObjectSizeLog/{}", pool_guid, new_log_id),
+        ),
+    };
+    syncing_state.reclaim_info.reclaim_logs.push(new_log);
+
+    // Update sibling indices in the table to point to the new logs (used by get_log_id below)
+    indirect_table.update_siblings(log_bits + 1, (log_prefix << 1) | 1, new_log_id);
+
+    // log the latest table
+    if indirect_table.log_ids.len() <= 256 {
+        debug!("{}", syncing_state.reclaim_info.indirect_table);
+    }
+
+    // read previous log content and distribute it across original and new
+    let txg = syncing_state.syncing_txg.unwrap();
+    split_pending_frees_log(txg, &state, syncing_state, log_id, new_log_id).await;
+    split_object_sizes_log(txg, syncing_state, log_id, new_log_id).await;
+
+    // log the distribution of current logs
+    for p in syncing_state.reclaim_info.reclaim_logs.iter() {
+        debug!(
+            "reclaim: log {:?}: {} entries",
+            p.id, p.pending_frees_log.num_entries
+        )
+    }
+
+    info!(
+        "reclaim: {:?} split of reclaim logs took {}ms",
+        txg,
+        begin.elapsed().as_millis()
+    );
+}
+
 /// reclaim free blocks from one of our pending-free logs
 /// processes the log with the most space freed
 fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState) {
@@ -1797,7 +2102,6 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         return;
     }
 
-    // XXX make this tunable?
     if syncing_state.stats.pending_frees_bytes
         < (syncing_state.stats.blocks_bytes as f64 * *FREE_HIGHWATER_PCT / 100f64) as u64
         || syncing_state.stats.pending_frees_count < *FREE_MIN_BLOCKS
@@ -1820,31 +2124,35 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     // for now just use the one with the most entries
 
     // XXX This can simplified even further with reduce() when we move to a more recent version of Rust
-    let best_log = FreeLogId(
-        syncing_state
-            .pending_frees_logs
-            .iter()
-            .enumerate()
-            .fold((0, 0), |best, ent| {
-                if ent.1.pending_free_bytes >= best.1 {
-                    (ent.0, ent.1.pending_free_bytes)
-                } else {
-                    best
-                }
-            })
-            .0,
-    );
+    let best_log = syncing_state
+        .reclaim_info
+        .reclaim_logs
+        .iter()
+        .fold((ReclaimLogId(0), 0), |(best_id, best_bytes), ent| {
+            if ent.pending_free_bytes >= best_bytes {
+                (ent.id, ent.pending_free_bytes)
+            } else {
+                (best_id, best_bytes)
+            }
+        })
+        .0;
 
-    let best_log_struct = syncing_state.get_pending_frees_log(best_log);
+    let best_reclaim_log = syncing_state.get_pending_frees_log(best_log);
     info!(
         "reclaim: using {:?} with {} free entries, {}MiB free bytes",
         best_log,
-        best_log_struct.pending_frees_log.num_entries,
-        best_log_struct.pending_free_bytes / ONE_MIB
+        best_reclaim_log.pending_frees_log.num_entries,
+        best_reclaim_log.pending_free_bytes / ONE_MIB
     );
 
-    let (pending_frees_log_stream, frees_remainder) = best_log_struct.pending_frees_log.iter_most();
-    let (object_size_log_stream, sizes_remainder) = best_log_struct.object_size_log.iter_most();
+    let (pending_frees_log_stream, frees_remainder) =
+        best_reclaim_log.pending_frees_log.iter_most();
+    let (object_size_log_stream, sizes_remainder) = best_reclaim_log.object_size_log.iter_most();
+    // Note: The split code will shrink the log entries and reset the log's pending_free_bytes.
+    // The *_remainders streams implicitly depend on the *_logs not being reset (only appended
+    // to). Likewise, the pending_free_bytes is assumed not to shrink during the reclaim (can
+    // only increase). Tag this log so that the split code will choose another candidate.
+    best_reclaim_log.reclaim_busy = true;
 
     let (sender, receiver) = oneshot::channel();
     syncing_state.reclaim_done = Some(receiver);
@@ -2008,6 +2316,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                 );
 
                 syncing_state.reclaim_done = None;
+                syncing_state.get_pending_frees_log(best_log).reclaim_busy = false;
             })
         }));
         assert!(r.is_ok()); // can not use .unwrap() because the type is not Debug
@@ -2066,11 +2375,11 @@ async fn try_condense_object_log(state: Arc<PoolState>, syncing_state: &mut Pool
 
 async fn try_condense_object_sizes(
     txg: Txg,
-    pending_frees: &mut PendingFreesLog,
+    reclaim_log: &mut ReclaimLog,
     object_sizes: BTreeSet<ObjectSize>,
     remainder: ObjectBasedLogRemainder,
 ) {
-    let object_size_log = &mut pending_frees.object_size_log;
+    let object_size_log = &mut reclaim_log.object_size_log;
 
     // XXX change this to be based on bytes, once those stats are working?
     let len = object_sizes.len();
@@ -2158,7 +2467,7 @@ fn clean_metadata(
         ub.storage_object_log
             .cleanup_older_generations(&state.shared_state.object_access)
             .await;
-        for log_phys in ub.pending_frees_logs.iter() {
+        for log_phys in ub.reclaim_info.reclaim_logs.iter() {
             /*
              * XXX We shouldn't run all of these serially in every TXG. Not only would it be slow
              * to wait for the necessary list operations, but we pay per request to s3.
