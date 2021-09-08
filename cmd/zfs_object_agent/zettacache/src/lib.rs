@@ -4,6 +4,7 @@
 #![warn(clippy::cast_sign_loss)]
 
 pub mod base_types;
+mod bitmap_range_iterator;
 mod block_access;
 mod block_allocator;
 mod block_based_log;
