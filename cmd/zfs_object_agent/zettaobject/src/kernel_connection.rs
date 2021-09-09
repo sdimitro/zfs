@@ -7,20 +7,13 @@ use crate::server::SerialHandlerReturn;
 use crate::server::Server;
 use anyhow::anyhow;
 use anyhow::Result;
-use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::sync::Arc;
 use uuid::Uuid;
 use zettacache::base_types::*;
-use zettacache::get_tunable;
+use zettacache::maybe_die_with;
 use zettacache::ZettaCache;
-
-lazy_static! {
-    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
-        get_tunable("die_before_end_txg_response_pct", 0.0);
-    pub static ref DIE_AFTER_FREE_BLOCK_PCT: f64 = get_tunable("die_after_free_block_pct", 0.0);
-}
 
 pub struct KernelServerState {
     cache: Option<ZettaCache>,
@@ -105,6 +98,7 @@ impl KernelConnectionState {
             response.insert("Type", "pool create done").unwrap();
             response.insert("GUID", &guid.0).unwrap();
 
+            maybe_die_with(|| format!("before sending response: {:?}", response));
             debug!("sending response: {:?}", response);
             Ok(Some(response))
         })
@@ -153,6 +147,7 @@ impl KernelConnectionState {
             response.insert("next_block", &next_block.0).unwrap();
 
             self.pool = Some(Arc::new(pool));
+            maybe_die_with(|| format!("before sending response: {:?}", response));
             debug!("sending response: {:?}", response);
             Ok(Some(response))
         })
@@ -203,21 +198,26 @@ impl KernelConnectionState {
         config: Vec<u8>,
     ) -> Result<Option<NvList>> {
         let stats = pool.end_txg(uberblock, config).await;
-        let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "end txg done").unwrap();
-        nvl.insert("blocks_count", &stats.blocks_count).unwrap();
-        nvl.insert("blocks_bytes", &stats.blocks_bytes).unwrap();
-        nvl.insert("pending_frees_count", &stats.pending_frees_count)
+        let mut response = NvList::new_unique_names();
+        response.insert("Type", "end txg done").unwrap();
+        response
+            .insert("blocks_count", &stats.blocks_count)
             .unwrap();
-        nvl.insert("pending_frees_bytes", &stats.pending_frees_bytes)
+        response
+            .insert("blocks_bytes", &stats.blocks_bytes)
             .unwrap();
-        nvl.insert("objects_count", &stats.objects_count).unwrap();
-        if rand::random::<f64>() * 100.0 < *DIE_BEFORE_END_TXG_RESPONSE_PCT {
-            warn!("test: exiting before sending response: {:?}", nvl);
-            panic!("test: exiting before sending response: {:?}", nvl);
-        }
-        debug!("sending response: {:?}", nvl);
-        Ok(Some(nvl))
+        response
+            .insert("pending_frees_count", &stats.pending_frees_count)
+            .unwrap();
+        response
+            .insert("pending_frees_bytes", &stats.pending_frees_bytes)
+            .unwrap();
+        response
+            .insert("objects_count", &stats.objects_count)
+            .unwrap();
+        maybe_die_with(|| format!("before sending response: {:?}", response));
+        debug!("sending response: {:?}", response);
+        Ok(Some(response))
     }
 
     fn end_txg(&mut self, nvl: NvList) -> HandlerReturn {
@@ -287,10 +287,7 @@ impl KernelConnectionState {
 
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
         pool.free_block(block, size);
-        if rand::random::<f64>() * 100.0 < *DIE_AFTER_FREE_BLOCK_PCT {
-            warn!("test: exiting after freeing block");
-            panic!("test: exiting after freeing block");
-        }
+        maybe_die_with(|| format!("after free block request: {:?}", block));
         handler_return_ok(None)
     }
 
@@ -337,6 +334,7 @@ impl KernelConnectionState {
             }
             let mut response = NvList::new_unique_names();
             response.insert("Type", "pool close done").unwrap();
+            maybe_die_with(|| format!("before sending response: {:?}", response));
             debug!("sending response: {:?}", response);
             Ok(Some(response))
         }))

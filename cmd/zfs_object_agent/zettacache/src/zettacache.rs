@@ -9,6 +9,7 @@ use crate::get_tunable;
 use crate::index::*;
 use crate::lock_set::LockSet;
 use crate::lock_set::LockedItem;
+use crate::maybe_die_with;
 use crate::mutex_ext::MutexExt;
 use anyhow::Result;
 use futures::future;
@@ -69,6 +70,7 @@ impl ZettaSuperBlockPhys {
     }
 
     async fn write(&self, block_access: &BlockAccess) {
+        maybe_die_with(|| format!("before writing {:#?}", self));
         debug!("writing {:#?}", self);
         let raw = block_access.chunk_to_raw(EncodeType::Json, self);
         block_access
@@ -1199,6 +1201,7 @@ impl ZettaCacheState {
             // single checkpoint to wrap around (part of it at the end and
             // then part at the beginning of the space).
         }
+        maybe_die_with(|| format!("before writing {:#?}", checkpoint));
         debug!("writing to {:?}: {:#?}", checkpoint_location, checkpoint);
 
         self.super_phys.last_checkpoint_extent = Extent {

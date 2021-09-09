@@ -43,6 +43,7 @@ use tokio::time::sleep;
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::get_tunable;
+use zettacache::maybe_die_with;
 use zettacache::LookupResponse;
 use zettacache::ZettaCache;
 
@@ -116,6 +117,7 @@ impl PoolOwnerPhys {
         object_access: &ObjectAccess,
         timeout: Option<Duration>,
     ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+        maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
@@ -271,6 +273,7 @@ impl PoolPhys {
     }
 
     async fn put(&self, object_access: &ObjectAccess) {
+        maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access.put_object(&Self::key(self.guid), buf).await;
@@ -302,6 +305,7 @@ impl UberblockPhys {
     }
 
     async fn put(&self, object_access: &ObjectAccess) {
+        maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access

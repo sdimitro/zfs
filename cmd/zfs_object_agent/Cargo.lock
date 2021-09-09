@@ -2374,6 +2374,7 @@ dependencies = [
  "more-asserts",
  "nix",
  "num",
+ "rand",
  "roaring",
  "seahash",
  "serde 1.0.127",

@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::sync::watch::{self, Receiver};
 use uuid::Uuid;
-use zettacache::get_tunable;
+use zettacache::{get_tunable, maybe_die_with};
 
 lazy_static! {
     pub static ref LEASE_DURATION: Duration =
@@ -49,6 +49,7 @@ impl HeartbeatPhys {
         object_access: &ObjectAccess,
         timeout: Option<Duration>,
     ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+        maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
