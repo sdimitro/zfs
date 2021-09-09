@@ -60,12 +60,11 @@ impl ExtentAllocator {
             .lock()
             .unwrap()
             .allocatable
-            .remove(extent.location.offset, extent.size as u64);
+            .remove(extent.location.offset, extent.size);
     }
 
-    pub fn allocate(&self, min_size: usize, max_size: usize) -> Extent {
+    pub fn allocate(&self, min_size: u64, max_size: u64) -> Extent {
         let mut state = self.state.lock().unwrap();
-        let max_size64 = max_size as u64;
 
         // find first segment where this fits, or largest free segment.
         // XXX keep size-sorted tree as well?
@@ -76,14 +75,14 @@ impl ExtentAllocator {
                 best_size = *size;
                 best_offset = *offset;
             }
-            if *size >= max_size64 {
-                best_size = max_size64;
+            if *size >= max_size {
+                best_size = max_size;
                 break;
             }
         }
-        assert_le!(best_size, max_size64);
+        assert_le!(best_size, max_size);
 
-        if best_size < min_size as u64 {
+        if best_size < min_size {
             /*
             best_offset = state.phys.last_valid_offset;
             best_size = max_size64;
@@ -104,7 +103,7 @@ impl ExtentAllocator {
             location: DiskLocation {
                 offset: best_offset,
             },
-            size: best_size as usize,
+            size: best_size,
         };
         debug!("allocated {:?} for min={} max={}", this, min_size, max_size);
         this
@@ -113,8 +112,6 @@ impl ExtentAllocator {
     /// extent can be a subset of what was previously allocated
     pub fn free(&self, extent: &Extent) {
         let mut state = self.state.lock().unwrap();
-        state
-            .freeing
-            .add(extent.location.offset, extent.size as u64);
+        state.freeing.add(extent.location.offset, extent.size);
     }
 }

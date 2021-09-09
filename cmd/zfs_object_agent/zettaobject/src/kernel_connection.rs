@@ -9,6 +9,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
+use std::convert::TryFrom;
 use std::sync::Arc;
 use uuid::Uuid;
 use zettacache::base_types::*;
@@ -283,7 +284,7 @@ impl KernelConnectionState {
     fn free_block(&mut self, nvl: NvList) -> HandlerReturn {
         trace!("got request: {:?}", nvl);
         let block = BlockId(nvl.lookup_uint64("block")?);
-        let size = nvl.lookup_uint64("size")? as u32;
+        let size = u32::try_from(nvl.lookup_uint64("size")?)?;
 
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
         pool.free_block(block, size);

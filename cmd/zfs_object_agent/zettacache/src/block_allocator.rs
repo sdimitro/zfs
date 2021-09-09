@@ -26,6 +26,12 @@ lazy_static! {
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SlabId(u64);
 
+impl SlabId {
+    fn as_index(&self) -> usize {
+        usize::from64(self.0)
+    }
+}
+
 trait SlabTrait {
     fn import_alloc(&mut self, extent: Extent);
     fn import_free(&mut self, extent: Extent);
@@ -77,10 +83,10 @@ impl BitmapSlab {
     }
 
     fn verify_slab_extent(&self, extent: Extent) {
-        assert_le!(extent.size, self.get_max_size() as usize);
+        assert_le!(extent.size, self.get_max_size().into());
         assert_ge!(extent.location.offset, self.slab_offset);
         assert_le!(
-            extent.location.offset + extent.size as u64,
+            extent.location.offset + extent.size,
             self.slab_offset + u64::from(self.total_slots * self.slot_size)
         );
     }
@@ -124,7 +130,7 @@ impl SlabTrait for BitmapSlab {
             location: DiskLocation {
                 offset: u64::from(slot * self.slot_size) + self.slab_offset,
             },
-            size: self.slot_size as usize,
+            size: self.slot_size.into(),
         })
     }
 
@@ -221,7 +227,7 @@ impl ExtentSlab {
     fn verify_slab_extent(&self, extent: Extent) {
         assert_ge!(extent.location.offset, self.slab_offset);
         assert_le!(
-            extent.location.offset + extent.size as u64,
+            extent.location.offset + extent.size,
             self.slab_offset + self.total_space
         );
     }
@@ -239,7 +245,7 @@ impl ExtentSlab {
                     location: DiskLocation {
                         offset: allocatable_offset,
                     },
-                    size: size as usize,
+                    size,
                 });
             }
         }
@@ -250,14 +256,12 @@ impl ExtentSlab {
 impl SlabTrait for ExtentSlab {
     fn import_alloc(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
-        self.allocatable
-            .remove(extent.location.offset, extent.size as u64);
+        self.allocatable.remove(extent.location.offset, extent.size);
     }
 
     fn import_free(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
-        self.allocatable
-            .add(extent.location.offset, extent.size as u64);
+        self.allocatable.add(extent.location.offset, extent.size);
     }
 
     fn allocate(&mut self, size: u32) -> Option<Extent> {
@@ -273,10 +277,10 @@ impl SlabTrait for ExtentSlab {
     fn free(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
         self.allocatable
-            .verify_absent(extent.location.offset, extent.size as u64);
+            .verify_absent(extent.location.offset, extent.size);
         self.allocating
-            .verify_absent(extent.location.offset, extent.size as u64);
-        self.freeing.add(extent.location.offset, extent.size as u64);
+            .verify_absent(extent.location.offset, extent.size);
+        self.freeing.add(extent.location.offset, extent.size);
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
@@ -567,11 +571,11 @@ struct Slabs(Vec<Slab>);
 
 impl Slabs {
     fn get(&self, id: SlabId) -> &Slab {
-        &self.0[id.0 as usize]
+        &self.0[id.as_index()]
     }
 
     fn get_mut(&mut self, id: SlabId) -> &mut Slab {
-        &mut self.0[id.0 as usize]
+        &mut self.0[id.as_index()]
     }
 }
 
@@ -609,7 +613,7 @@ impl BlockAllocator {
 
         let coverage = spacemap.get_coverage();
         let slab_size = phys.slab_size;
-        let num_slabs = coverage.size / (slab_size as usize);
+        let num_slabs = usize::from64(coverage.size / u64::from(slab_size));
         assert_eq!(num_slabs, phys.slabs.len());
         let mut available_space = 0u64;
 
@@ -620,7 +624,7 @@ impl BlockAllocator {
 
             let sid = SlabId(slab_id as u64);
             let slab_offset = coverage.location.offset + (u64::from(slab_size) * num_slabs as u64)
-                - (sid.0 + 1) * (slab_size as u64);
+                - (sid.0 + 1) * u64::from(slab_size);
             match phys_slab.slab_type {
                 SlabPhysType::BitmapBased { block_size } => {
                     slabs_vec.push(BitmapSlab::new_slab(
@@ -656,15 +660,15 @@ impl BlockAllocator {
                         location: DiskLocation {
                             offset: extent.offset,
                         },
-                        size: extent.size as usize,
+                        size: extent.size,
                     };
                     let slab_id = BlockAllocator::slab_id_from_extent_impl(
                         coverage.location.offset,
-                        u64::from(slab_size),
+                        slab_size,
                         num_slabs as u64,
                         extent,
                     );
-                    if slabs.get(slab_id).generation == slab_import_generations[slab_id.0 as usize]
+                    if slabs.get(slab_id).generation == slab_import_generations[slab_id.as_index()]
                     {
                         slabs.get_mut(slab_id).import_alloc(extent)
                     }
@@ -674,15 +678,15 @@ impl BlockAllocator {
                         location: DiskLocation {
                             offset: extent.offset,
                         },
-                        size: extent.size as usize,
+                        size: extent.size,
                     };
                     let slab_id = BlockAllocator::slab_id_from_extent_impl(
                         coverage.location.offset,
-                        u64::from(slab_size),
+                        slab_size,
                         num_slabs as u64,
                         extent,
                     );
-                    if slabs.get(slab_id).generation == slab_import_generations[slab_id.0 as usize]
+                    if slabs.get(slab_id).generation == slab_import_generations[slab_id.as_index()]
                     {
                         slabs.get_mut(slab_id).import_free(extent)
                     }
@@ -690,9 +694,9 @@ impl BlockAllocator {
                 SpaceMapEntry::MarkGeneration(mark) => {
                     assert_ge!(
                         mark.generation,
-                        slab_import_generations[mark.slab_id.0 as usize]
+                        slab_import_generations[mark.slab_id.as_index()]
                     );
-                    slab_import_generations[mark.slab_id.0 as usize] = mark.generation;
+                    slab_import_generations[mark.slab_id.as_index()] = mark.generation;
                 }
             })
             .await;
@@ -703,11 +707,11 @@ impl BlockAllocator {
             match &slab.info {
                 SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => {
                     slab_buckets.add_slab_to_bucket(slab.get_max_size(), slab);
-                    available_space = available_space.checked_add(slab.get_free_space()).unwrap();
+                    available_space += slab.get_free_space();
                 }
                 SlabType::Free(_) => {
                     free_slabs.push(slab.id);
-                    available_space = available_space.checked_add(slab_size.into()).unwrap();
+                    available_space += u64::from(slab_size);
                 }
             }
         }
@@ -779,10 +783,7 @@ impl BlockAllocator {
             "BLOCK-ALLOCATOR: satisfied-allocation-new-slab: {:?}",
             extent
         );
-        self.available_space = self
-            .available_space
-            .checked_sub(extent.unwrap().size as u64)
-            .unwrap();
+        self.available_space -= extent.unwrap().size;
         extent
     }
 
@@ -827,10 +828,7 @@ impl BlockAllocator {
                     Some(extent) => {
                         trace!("BLOCK-ALLOCATOR: satisfied-allocation: {:?}", extent);
                         self.dirty_slab_id(id);
-                        self.available_space = self
-                            .available_space
-                            .checked_sub(extent.size as u64)
-                            .unwrap();
+                        self.available_space -= extent.size;
                         return Some(extent);
                     }
                     None => {
@@ -849,7 +847,7 @@ impl BlockAllocator {
 
         let slab_id = self.slab_id_from_extent(extent);
         self.slabs.get_mut(slab_id).free(extent);
-        self.freeing_space = self.freeing_space.checked_add(extent.size as u64).unwrap();
+        self.freeing_space += extent.size;
         self.dirty_slab_id(slab_id);
     }
 
@@ -895,10 +893,7 @@ impl BlockAllocator {
             });
             *bucket = SortedSlabs::new(bucket.is_extent_based, iter);
         }
-        self.available_space = self
-            .available_space
-            .checked_add(self.freeing_space)
-            .unwrap();
+        self.available_space += self.freeing_space;
         self.freeing_space = 0;
 
         BlockAllocatorPhys {
@@ -944,23 +939,24 @@ impl BlockAllocator {
     //
     fn slab_id_from_extent_impl(
         coverage_start: u64,
-        slab_size: u64,
+        slab_size: u32,
         num_slabs: u64,
         extent: Extent,
     ) -> SlabId {
-        let id = (num_slabs - 1) - ((extent.location.offset - coverage_start) / slab_size);
+        let id =
+            (num_slabs - 1) - ((extent.location.offset - coverage_start) / u64::from(slab_size));
         assert_lt!(id, num_slabs);
         SlabId(id)
     }
 
     fn slab_id_from_extent(&self, extent: Extent) -> SlabId {
-        let slab_sz = u64::from(self.slab_size);
+        let slab_size64 = u64::from(self.slab_size);
         let num_slabs = self.slabs.0.len() as u64;
-        assert_le!(extent.size as u64, slab_sz);
+        assert_le!(extent.size, slab_size64);
 
         let slab_id = BlockAllocator::slab_id_from_extent_impl(
             self.coverage.location.offset,
-            slab_sz,
+            self.slab_size,
             num_slabs,
             extent,
         );
@@ -968,10 +964,10 @@ impl BlockAllocator {
         // check all boundaries now before proceeding
         let slab_offset = self.slab_offset_from_slab_id(slab_id);
         assert_ge!(extent.location.offset, slab_offset);
-        assert_lt!(extent.location.offset, slab_offset + slab_sz);
+        assert_lt!(extent.location.offset, slab_offset + slab_size64);
         assert_le!(
-            extent.location.offset + extent.size as u64,
-            slab_offset + slab_sz
+            extent.location.offset + extent.size,
+            slab_offset + slab_size64
         );
 
         slab_id
@@ -1023,7 +1019,7 @@ impl SlabAllocationBucketsPhys {
         buckets.push((64 * 1024, true));
         buckets.push((256 * 1024, true));
         buckets.push((1024 * 1024, true));
-        buckets.push((*DEFAULT_SLAB_SIZE as u32, true));
+        buckets.push((*DEFAULT_SLAB_SIZE, true));
 
         SlabAllocationBucketsPhys { buckets }
     }
@@ -1042,7 +1038,7 @@ impl OnDisk for BlockAllocatorPhys {}
 impl BlockAllocatorPhys {
     // XXX eventually change this to indicate the size of each of the disks that we're managing
     pub fn new(offset: u64, size: u64) -> BlockAllocatorPhys {
-        let slab_size = *DEFAULT_SLAB_SIZE as u32;
+        let slab_size = *DEFAULT_SLAB_SIZE;
         let num_slabs = size / u64::from(slab_size);
         let mut slabs = Vec::new();
         for _ in range(0, num_slabs) {

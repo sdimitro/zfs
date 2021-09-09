@@ -110,7 +110,7 @@ impl SpaceMap {
             location: DiskLocation {
                 offset: self.coverage.offset,
             },
-            size: self.coverage.size as usize,
+            size: self.coverage.size,
         }
     }
 }

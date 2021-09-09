@@ -12,6 +12,7 @@ use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
 use anyhow::Error;
 use anyhow::{Context, Result};
+use conv::ConvUtil;
 use futures::future;
 use futures::future::join3;
 use futures::future::Either;
@@ -235,7 +236,7 @@ impl From<&DataObjectPhys> for ObjectSize {
     fn from(phys: &DataObjectPhys) -> Self {
         ObjectSize {
             object: phys.object,
-            num_blocks: phys.blocks_len() as u32,
+            num_blocks: phys.blocks_len(),
             num_bytes: phys.blocks_size,
         }
     }
@@ -549,10 +550,10 @@ impl PoolSyncingState {
 
         let log = self.get_pending_frees_log_for_obj(object_block_map.block_to_object(ent.block));
         log.pending_frees_log.append(txg, ent);
-        log.pending_free_bytes += ent.size as u64;
+        log.pending_free_bytes += u64::from(ent.size);
 
         self.stats.pending_frees_count += 1;
-        self.stats.pending_frees_bytes += ent.size as u64;
+        self.stats.pending_frees_bytes += u64::from(ent.size);
     }
 
     /// Locate which log to use for this object.
@@ -562,7 +563,9 @@ impl PoolSyncingState {
         // Group adjacent objects together
         let object_group = object.0 / OBJECTS_PER_LOG;
 
-        let hash_value = ((object_group % (1 << RECLAIM_TABLE_MAX_BITS)) as u16).reverse_bits();
+        let hash_value = u16::try_from(object_group % (1 << RECLAIM_TABLE_MAX_BITS))
+            .unwrap()
+            .reverse_bits();
         let table = &self.reclaim_info.indirect_table;
         let index = usize::from(hash_value) >> (RECLAIM_TABLE_MAX_BITS - table.table_bits);
         table.log_ids[index]
@@ -1314,8 +1317,8 @@ impl Pool {
         assert_eq!(phys.max_txg, txg);
         assert_gt!(object, state.object_block_map.last_object());
         syncing_state.stats.objects_count += 1;
-        syncing_state.stats.blocks_bytes += phys.blocks_size as u64;
-        syncing_state.stats.blocks_count += phys.blocks_len() as u64;
+        syncing_state.stats.blocks_bytes += u64::from(phys.blocks_size);
+        syncing_state.stats.blocks_count += u64::from(phys.blocks_len());
         state
             .object_block_map
             .insert(object, phys.min_block, phys.next_block);
@@ -1391,7 +1394,7 @@ impl Pool {
                 next_block
             );
             let (phys, senders) = syncing_state.pending_object.as_mut_pending();
-            phys.blocks_size += buf.len() as u32;
+            phys.blocks_size += u32::try_from(buf.len()).unwrap();
             phys.blocks.insert(phys.next_block, buf);
             next_block = next_block.next();
             phys.next_block = next_block;
@@ -1761,7 +1764,7 @@ async fn get_frees_per_obj(
             assert!(!frees_per_obj.entry(obj).or_default().contains(&ent));
             frees_per_obj.entry(obj).or_default().push(ent);
             count += 1;
-            freed_bytes += ent.size as u64;
+            freed_bytes += u64::from(ent.size);
             future::ready(())
         })
         .await;
@@ -1818,8 +1821,8 @@ async fn reclaim_frees_object(
                 // that it isn't present, but count this block as removed for
                 // stats purposes.
                 if let Some(v) = phys.blocks.remove(&ent.block) {
-                    assert_eq!(v.len() as u32, ent.size);
-                    phys.blocks_size -= v.len() as u32;
+                    assert_eq!(u32::try_from(v.len()).unwrap(), ent.size);
+                    phys.blocks_size -= ent.size;
                 }
             }
 
@@ -1853,7 +1856,7 @@ async fn reclaim_frees_object(
             }
             assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
             assert_eq!(phys.blocks_size, object_size.num_bytes);
-            assert_eq!(phys.blocks_len(), object_size.num_blocks as usize);
+            assert_eq!(phys.blocks_len(), object_size.num_blocks);
 
             phys
         }));
@@ -1883,7 +1886,7 @@ async fn reclaim_frees_object(
             a.next_block = max(a.next_block, b.next_block);
             let mut already_moved = 0;
             for (k, v) in b.blocks.drain() {
-                let len = v.len() as u32;
+                let len = u32::try_from(v.len()).unwrap();
                 match a.blocks.insert(k, v) {
                     Some(old_vec) => {
                         // May have already been transferred in a previous job
@@ -2107,7 +2110,9 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     }
 
     if syncing_state.stats.pending_frees_bytes
-        < (syncing_state.stats.blocks_bytes as f64 * *FREE_HIGHWATER_PCT / 100f64) as u64
+        < (syncing_state.stats.blocks_bytes as f64 * *FREE_HIGHWATER_PCT / 100f64)
+            .approx_as::<u64>()
+            .unwrap()
         || syncing_state.stats.pending_frees_count < *FREE_MIN_BLOCKS
     {
         return;
@@ -2166,7 +2171,9 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         let (freed_bytes, mut frees_per_object) =
             get_frees_per_obj(&state, pending_frees_log_stream).await;
 
-        let required_free_bytes = (freed_bytes as f64 * *FREE_LOWWATER_PCT / 100.0) as u64;
+        let required_free_bytes = (freed_bytes as f64 * *FREE_LOWWATER_PCT / 100.0)
+            .approx_as::<u64>()
+            .unwrap();
 
         // sort objects by number of free blocks
         // XXX should be based on free space (bytes)?  And perhaps objects that
@@ -2214,7 +2221,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                 let empty_vec = Vec::new();
                 let later_object_frees = frees_per_object.get(&later_object).unwrap_or(&empty_vec);
                 let later_bytes_freed: u32 = later_object_frees.iter().map(|e| e.size).sum();
-                let later_blocks_freed = later_object_frees.len() as u32;
+                let later_blocks_freed = u32::try_from(later_object_frees.len()).unwrap();
                 let later_object_new_size = ObjectSize {
                     object: later_object,
                     num_blocks: later_object_size.num_blocks - later_blocks_freed,

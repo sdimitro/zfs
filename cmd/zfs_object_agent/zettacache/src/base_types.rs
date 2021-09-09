@@ -1,6 +1,7 @@
 use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::convert::TryInto;
 use std::fmt::*;
 use std::ops::Add;
 use std::ops::Sub;
@@ -56,12 +57,11 @@ impl Add<usize> for DiskLocation {
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct Extent {
     pub location: DiskLocation,
-    // XXX for space efficiency and clarity, make this u32? since it's stored on disk?
-    pub size: usize, // note: since we read it into contiguous memory, it can't be more than usize
+    pub size: u64,
 }
 
 impl Extent {
-    pub fn range(&self, relative_offset: usize, size: usize) -> Extent {
+    pub fn range(&self, relative_offset: u64, size: u64) -> Extent {
         assert_ge!(self.size, relative_offset + size);
         Extent {
             location: self.location + relative_offset,
@@ -89,7 +89,7 @@ impl Atime {
 impl Sub<Atime> for Atime {
     type Output = usize;
     fn sub(self, rhs: Atime) -> usize {
-        self.0 as usize - rhs.0 as usize
+        usize::from64(self.0 - rhs.0)
     }
 }
 
@@ -105,5 +105,16 @@ impl Display for ReclaimLogId {
 impl ReclaimLogId {
     pub fn as_index(self) -> usize {
         usize::from(self.0)
+    }
+}
+
+/// Conversions that are safe assuming that we are on LP64 (usize == u64)
+pub trait From64<A> {
+    fn from64(a: A) -> Self;
+}
+
+impl From64<u64> for usize {
+    fn from64(a: u64) -> usize {
+        a.try_into().unwrap()
     }
 }

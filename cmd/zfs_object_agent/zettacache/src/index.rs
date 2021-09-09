@@ -19,8 +19,18 @@ pub struct IndexValue {
     // currently we need to return the right buffer size to the kernel, and it
     // isn't passing us the expected read size.  So we need to change some
     // interfaces to make that work right.
-    pub size: usize,
+    // XXX change to u32
+    pub size: u32,
     pub atime: Atime,
+}
+
+impl IndexValue {
+    pub fn extent(&self) -> Extent {
+        Extent {
+            location: self.location,
+            size: u64::from(self.size),
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]

@@ -1,5 +1,6 @@
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
+use crate::base_types::From64;
 use crate::get_tunable;
 use anyhow::{anyhow, Result};
 use bincode::Options;
@@ -15,6 +16,7 @@ use num::Num;
 use num::NumCast;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::convert::TryFrom;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
@@ -97,11 +99,11 @@ impl BlockAccess {
                 let mut ssz: usize = 0;
                 let ssz_ptr = &mut ssz as *mut usize;
                 ioctl_blksszget(disk.as_raw_fd(), ssz_ptr).unwrap();
-                ssz as usize
+                ssz
             };
             //sector_size = MIN_SECTOR_SIZE;
         } else if mode.contains(SFlag::S_IFREG) {
-            size = stat.st_size as u64;
+            size = u64::try_from(stat.st_size).unwrap();
             sector_size = *MIN_SECTOR_SIZE;
         } else {
             panic!("{}: invalid file type {:?}", disk_path, mode);
@@ -148,14 +150,15 @@ impl BlockAccess {
             let mut v = Vec::new();
             // XXX use unsafe code to avoid double initializing it?
             // XXX directio requires the pointer to be sector-aligned, requiring this grossness
-            v.resize(extent.size + sector_size, 0);
+            v.resize(usize::from64(extent.size) + sector_size, 0);
             let aligned = unsafe {
                 let ptr = v.as_mut_ptr() as usize;
                 let aligned_ptr = (ptr + sector_size - 1) / sector_size * sector_size;
                 assert_le!(aligned_ptr - v.as_mut_ptr() as usize, sector_size);
-                std::slice::from_raw_parts_mut(aligned_ptr as *mut u8, extent.size)
+                std::slice::from_raw_parts_mut(aligned_ptr as *mut u8, usize::from64(extent.size))
             };
-            nix::sys::uio::pread(fd, aligned, extent.location.offset as i64).unwrap();
+            nix::sys::uio::pread(fd, aligned, i64::try_from(extent.location.offset).unwrap())
+                .unwrap();
             // XXX copying again!
             aligned.to_owned()
         })
@@ -196,7 +199,7 @@ impl BlockAccess {
             };
             // XXX copying
             aligned.copy_from_slice(&data);
-            nix::sys::uio::pwrite(fd, aligned, offset as i64).unwrap();
+            nix::sys::uio::pwrite(fd, aligned, i64::try_from(offset).unwrap()).unwrap();
         })
         .await
         .unwrap();
@@ -271,7 +274,7 @@ impl BlockAccess {
         let header_size = buf.iter().position(|&c| c == b'\0').unwrap() + 1;
         let header: BlockHeader = serde_json::from_slice(&buf[..header_size - 1])?;
 
-        if header.payload_size as usize > buf.len() - header_size {
+        if header.payload_size > buf.len() - header_size {
             return Err(anyhow!(
                 "invalid length {}: expected at most {} bytes",
                 header.payload_size,

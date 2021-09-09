@@ -5,6 +5,7 @@ use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::collections::HashMap;
+use std::convert::TryFrom;
 use std::fmt;
 use std::fmt::Display;
 use std::time::Instant;
@@ -44,7 +45,7 @@ impl Display for DataObjectPhys {
     }
 }
 
-const NUM_DATA_PREFIXES: i32 = 64;
+const NUM_DATA_PREFIXES: u64 = 64;
 
 impl DataObjectPhys {
     pub fn new(guid: PoolGuid, object: ObjectId, next_block: BlockId, txg: Txg) -> Self {
@@ -64,7 +65,7 @@ impl DataObjectPhys {
         format!(
             "zfs/{}/data/{:03}/{}",
             guid,
-            object.0 % NUM_DATA_PREFIXES as u64,
+            object.0 % NUM_DATA_PREFIXES,
             object
         )
     }
@@ -79,7 +80,10 @@ impl DataObjectPhys {
     }
 
     pub fn calculate_blocks_size(&self) -> u32 {
-        self.blocks.values().map(|block| block.len() as u32).sum()
+        self.blocks
+            .values()
+            .map(|block| u32::try_from(block.len()).unwrap())
+            .sum()
     }
 
     fn verify(&self) {
@@ -135,8 +139,8 @@ impl DataObjectPhys {
         self.blocks.get(&block).unwrap()
     }
 
-    pub fn blocks_len(&self) -> usize {
-        self.blocks.len()
+    pub fn blocks_len(&self) -> u32 {
+        u32::try_from(self.blocks.len()).unwrap()
     }
 
     pub fn is_empty(&self) -> bool {

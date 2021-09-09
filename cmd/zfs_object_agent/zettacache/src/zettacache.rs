@@ -12,6 +12,7 @@ use crate::lock_set::LockedItem;
 use crate::maybe_die_with;
 use crate::mutex_ext::MutexExt;
 use anyhow::Result;
+use conv::ConvUtil;
 use futures::future;
 use futures::stream::*;
 use futures::Future;
@@ -25,6 +26,7 @@ use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map;
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,9 +35,9 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 
 lazy_static! {
-    static ref SUPERBLOCK_SIZE: usize = get_tunable("superblock_size", 4 * 1024);
-    static ref DEFAULT_CHECKPOINT_RING_BUFFER_SIZE: usize = get_tunable("default_checkpoint_ring_buffer_size", 1024 * 1024);
-    pub static ref DEFAULT_SLAB_SIZE: usize = get_tunable("default_slab_size", 16 * 1024 * 1024);
+    static ref SUPERBLOCK_SIZE: u64 = get_tunable("superblock_size", 4 * 1024);
+    static ref DEFAULT_CHECKPOINT_RING_BUFFER_SIZE: u32 = get_tunable("default_checkpoint_ring_buffer_size", 1024 * 1024);
+    pub static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 15.0); // Can lower this to test forced eviction.
     static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
@@ -196,13 +198,13 @@ impl AtimeHistogramPhys {
         if index >= self.histogram.len() {
             self.histogram.resize(index + 1, 0);
         }
-        self.histogram[index] += value.size as u64;
+        self.histogram[index] += u64::from(value.size);
     }
 
     pub fn remove(&mut self, value: IndexValue) {
         assert_ge!(value.atime, self.start);
         let index = value.atime - self.start;
-        self.histogram[index] -= value.size as u64;
+        self.histogram[index] -= u64::from(value.size);
     }
 
     pub fn clear(&mut self) {
@@ -428,43 +430,42 @@ pub enum LookupResponse {
 impl ZettaCache {
     pub async fn create(path: &str) {
         let block_access = BlockAccess::new(path).await;
-        let metadata_start = *SUPERBLOCK_SIZE + *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE;
+        let metadata_start = *SUPERBLOCK_SIZE + u64::from(*DEFAULT_CHECKPOINT_RING_BUFFER_SIZE);
         let data_start = block_access.round_up_to_sector(
-            metadata_start as u64
-                + (*DEFAULT_METADATA_SIZE_PCT / 100.0 * block_access.size() as f64) as u64,
+            metadata_start
+                + (*DEFAULT_METADATA_SIZE_PCT / 100.0 * block_access.size() as f64)
+                    .approx_as::<u64>()
+                    .unwrap(),
         );
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
             extent_allocator: ExtentAllocatorPhys {
-                first_valid_offset: metadata_start as u64,
-                last_valid_offset: data_start as u64,
+                first_valid_offset: metadata_start,
+                last_valid_offset: data_start,
             },
             index: Default::default(),
             operation_log: Default::default(),
             merging_operation_log: None,
             last_atime: Atime(0),
-            block_allocator: BlockAllocatorPhys::new(
-                data_start as u64,
-                block_access.size() - data_start,
-            ),
+            block_allocator: BlockAllocatorPhys::new(data_start, block_access.size() - data_start),
         };
         let raw = block_access.chunk_to_raw(EncodeType::Json, &checkpoint);
-        assert_le!(raw.len(), *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE);
-        let checkpoint_size = raw.len();
+        assert_le!(raw.len(), *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE as usize);
+        let checkpoint_size = raw.len() as u64;
         block_access
             .write_raw(
                 DiskLocation {
-                    offset: *SUPERBLOCK_SIZE as u64,
+                    offset: *SUPERBLOCK_SIZE,
                 },
                 raw,
             )
             .await;
         let phys = ZettaSuperBlockPhys {
-            checkpoint_ring_buffer_size: *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE as u32,
-            slab_size: *DEFAULT_SLAB_SIZE as u32,
+            checkpoint_ring_buffer_size: *DEFAULT_CHECKPOINT_RING_BUFFER_SIZE,
+            slab_size: *DEFAULT_SLAB_SIZE,
             last_checkpoint_extent: Extent {
                 location: DiskLocation {
-                    offset: *SUPERBLOCK_SIZE as u64,
+                    offset: *SUPERBLOCK_SIZE,
                 },
                 size: checkpoint_size,
             },
@@ -491,11 +492,11 @@ impl ZettaCache {
 
         assert_eq!(checkpoint.generation, phys.last_checkpoint_id);
 
-        let metadata_start = *SUPERBLOCK_SIZE + phys.checkpoint_ring_buffer_size as usize;
+        let metadata_start = *SUPERBLOCK_SIZE + u64::from(phys.checkpoint_ring_buffer_size);
         // XXX pass in the metadata_start to ExtentAllocator::open, rather than
         // having this represented twice in the on-disk format?
         assert_eq!(
-            metadata_start as u64,
+            metadata_start,
             checkpoint.extent_allocator.first_valid_offset
         );
         let extent_allocator = Arc::new(ExtentAllocator::open(&checkpoint.extent_allocator));
@@ -971,12 +972,7 @@ impl ZettaCacheState {
                 let _permit = write_sem.acquire().await.unwrap();
             }
 
-            let vec = block_access
-                .read_raw(Extent {
-                    location: value.location,
-                    size: value.size,
-                })
-                .await;
+            let vec = block_access.read_raw(value.extent()).await;
             sem2.add_permits(1);
             // XXX we can easily handle an io error here by returning None
             Some(vec)
@@ -1044,7 +1040,7 @@ impl ZettaCacheState {
         buf: Vec<u8>,
     ) {
         let buf_size = buf.len();
-        let aligned_size = self.block_access.round_up_to_sector(buf.len());
+        let aligned_size = self.block_access.round_up_to_sector(buf_size);
 
         let aligned_buf = if buf_size == aligned_size {
             buf
@@ -1057,7 +1053,7 @@ impl ZettaCacheState {
             // already has to copy it around to get the pointer aligned.
             [buf, tail].concat()
         };
-        let location_opt = self.allocate_block(aligned_buf.len());
+        let location_opt = self.allocate_block(u32::try_from(aligned_buf.len()).unwrap());
         if location_opt.is_none() {
             return;
         }
@@ -1070,7 +1066,7 @@ impl ZettaCacheState {
         let value = IndexValue {
             atime: self.atime,
             location,
-            size: buf_size,
+            size: u32::try_from(buf_size).unwrap(),
         };
 
         // XXX we'd like to assert that this is not already in the index
@@ -1120,9 +1116,9 @@ impl ZettaCacheState {
     }
 
     /// returns offset, or None if there's no space
-    fn allocate_block(&mut self, size: usize) -> Option<DiskLocation> {
+    fn allocate_block(&mut self, size: u32) -> Option<DiskLocation> {
         self.block_allocator
-            .allocate(size as u32)
+            .allocate(size)
             .map(|extent| extent.location)
     }
 
@@ -1184,14 +1180,18 @@ impl ZettaCacheState {
             .block_access
             .chunk_to_raw(EncodeType::Json, &checkpoint);
         if raw.len()
-            > (checkpoint.extent_allocator.first_valid_offset - checkpoint_location.offset) as usize
+            > usize::from64(
+                checkpoint.extent_allocator.first_valid_offset - checkpoint_location.offset,
+            )
         {
             // Out of space; go back to the beginning of the checkpoint space.
-            checkpoint_location.offset = *SUPERBLOCK_SIZE as u64;
+            checkpoint_location.offset = *SUPERBLOCK_SIZE;
             assert_le!(
                 raw.len(),
-                (self.super_phys.last_checkpoint_extent.location.offset
-                    - checkpoint_location.offset) as usize,
+                usize::from64(
+                    self.super_phys.last_checkpoint_extent.location.offset
+                        - checkpoint_location.offset
+                ),
             );
             // XXX The above assertion could fail if there isn't enough
             // checkpoint space for 3 checkpoints (the existing one that
@@ -1206,7 +1206,7 @@ impl ZettaCacheState {
 
         self.super_phys.last_checkpoint_extent = Extent {
             location: checkpoint_location,
-            size: raw.len(),
+            size: raw.len() as u64,
         };
         self.block_access.write_raw(checkpoint_location, raw).await;
 
@@ -1297,10 +1297,7 @@ impl ZettaCacheState {
         for entry in free_list {
             let pc = self.pending_changes.remove(&entry.key);
             assert!(matches!(pc, Some(PendingChange::UpdateAtime(_)) | None));
-            self.block_allocator.free(Extent {
-                location: entry.value.location,
-                size: entry.value.size,
-            });
+            self.block_allocator.free(entry.value.extent());
         }
 
         // Clear the operation log state associated with the merged changes

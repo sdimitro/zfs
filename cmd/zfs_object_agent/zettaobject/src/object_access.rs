@@ -12,6 +12,7 @@ use rand::prelude::*;
 use rusoto_core::{ByteStream, RusotoError};
 use rusoto_credential::{AutoRefreshingProvider, ChainProvider, ProfileProvider};
 use rusoto_s3::*;
+use std::convert::TryFrom;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
@@ -261,7 +262,8 @@ impl ObjectAccess {
             };
             let output = self.client.get_object(req).await?;
             let begin = Instant::now();
-            let mut v = Vec::with_capacity(output.content_length.unwrap_or(0) as usize);
+            let mut v =
+                Vec::with_capacity(usize::try_from(output.content_length.unwrap_or(0)).unwrap());
             match output
                 .body
                 .unwrap()

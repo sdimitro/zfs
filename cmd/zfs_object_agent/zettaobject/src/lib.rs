@@ -1,3 +1,8 @@
+#![warn(clippy::cast_lossless)]
+#![warn(clippy::cast_possible_truncation)]
+#![warn(clippy::cast_possible_wrap)]
+#![warn(clippy::cast_sign_loss)]
+
 pub mod base_types;
 mod data_object;
 mod heartbeat;

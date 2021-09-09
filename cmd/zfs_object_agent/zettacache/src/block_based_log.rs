@@ -26,7 +26,7 @@ use std::time::Instant;
 
 lazy_static! {
     // XXX maybe this is wasteful for the smaller logs?
-    static ref DEFAULT_EXTENT_SIZE: usize = get_tunable("default_extent_size", 128 * 1024 * 1024);
+    static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
     static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
 }
 
@@ -181,14 +181,14 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             let mut extent = self.next_write_location();
             // XXX I think we only want to use Bincode for the main index?
             let raw_chunk = self.block_access.chunk_to_raw(EncodeType::Bincode, &chunk);
-            let raw_size = raw_chunk.len();
+            let raw_size = raw_chunk.len() as u64;
             if raw_size > extent.size {
                 // free the unused tail of this extent
                 self.extent_allocator.free(&extent);
                 let capacity = match self.phys.extents.iter_mut().next_back() {
                     Some((last_offset, last_extent)) => {
                         last_extent.size -= extent.size;
-                        LogOffset(last_offset.0 + last_extent.size as u64)
+                        LogOffset(last_offset.0 + last_extent.size)
                     }
                     None => LogOffset(0),
                 };
@@ -215,7 +215,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
             self.phys.num_entries += chunk.entries.len() as u64;
             self.phys.next_chunk = self.phys.next_chunk.next();
-            self.phys.next_chunk_offset.0 += raw_size as u64;
+            self.phys.next_chunk_offset.0 += raw_size;
         }
         writes_stream.for_each(|_| async move {}).await;
         self.pending_entries.truncate(0);
@@ -233,12 +233,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 assert_ge!(self.phys.next_chunk_offset, offset);
                 let offset_within_extent = self.phys.next_chunk_offset.0 - offset.0;
                 // The last extent should go at least to the end of the chunks.
-                assert_le!(offset_within_extent as usize, extent.size);
+                assert_le!(offset_within_extent, extent.size);
                 Extent {
                     location: DiskLocation {
                         offset: extent.location.offset + offset_within_extent,
                     },
-                    size: extent.size - offset_within_extent as usize,
+                    size: extent.size - offset_within_extent,
                 }
             }
             None => Extent {
@@ -265,7 +265,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 // parallel?
 
                 let truncated_extent =
-                    extent.range(0, min(extent.size, (next_chunk_offset - *offset) as usize));
+                    extent.range(0, min(extent.size, (next_chunk_offset - *offset)));
                 let extent_bytes = block_access.read_raw(truncated_extent).await;
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
@@ -276,7 +276,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                     // XXX handle checksum error here
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
                         .chunk_from_raw(&extent_bytes[total_consumed..])
-                        .context(format!("{:?} at {:?}", chunk_id, chunk_location,))
+                        .context(format!("{:?} at {:?}", chunk_id, chunk_location))
                         .unwrap();
                     assert_eq!(chunk.id, chunk_id);
                     for entry in chunk.entries {
@@ -398,7 +398,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
             self.this.phys.next_chunk_offset - chunk_summary.offset
         } else {
             self.chunks[chunk_id + 1].offset - chunk_summary.offset
-        } as usize;
+        };
 
         let (extent_offset, extent) = self
             .this
@@ -407,7 +407,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
             .range((Unbounded, Included(chunk_summary.offset)))
             .next_back()
             .unwrap();
-        extent.range((chunk_summary.offset - *extent_offset) as usize, chunk_size)
+        extent.range(chunk_summary.offset - *extent_offset, chunk_size)
     }
 
     async fn lookup_by_key_impl<B, F>(&self, key: &B, mut f: F) -> Option<T>
