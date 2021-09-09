@@ -41,7 +41,7 @@ pub struct SpaceMap {
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpaceMapPhys {
-    log: BlockBasedLogPhys,
+    log: BlockBasedLogPhys<SpaceMapEntry>,
     coverage: SpaceMapExtent,
 }
 impl OnDisk for SpaceMapPhys {}

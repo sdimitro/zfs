@@ -154,9 +154,9 @@ impl OnDisk for PoolPhys {}
 struct ReclaimLogPhys {
     num_bits: u8, // aka local depth; range is [0, 16], inclusive
     prefix: u16,  // prefix used to locate this log in table
-    pending_frees_log: ObjectBasedLogPhys,
+    pending_frees_log: ObjectBasedLogPhys<PendingFreesLogEntry>,
     pending_free_bytes: u64,
-    object_size_log: ObjectBasedLogPhys,
+    object_size_log: ObjectBasedLogPhys<ObjectSizeLogEntry>,
 }
 
 /// Metadata for reclaiming freed blocks
@@ -179,7 +179,7 @@ pub struct UberblockPhys {
     guid: PoolGuid,   // redundant with key, for verification
     txg: Txg,         // redundant with key, for verification
     date: SystemTime, // for debugging
-    storage_object_log: ObjectBasedLogPhys,
+    storage_object_log: ObjectBasedLogPhys<StorageObjectLogEntry>,
     reclaim_info: ReclaimInfoPhys, // Extendible hash structures for reclaiming free blocks
     next_block: BlockId,           // next BlockID that can be allocated
     stats: PoolStatsPhys,

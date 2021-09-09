@@ -34,7 +34,7 @@ impl BlockBasedLogEntry for IndexEntry {}
 #[derive(Serialize, Deserialize, Debug, Default)]
 pub struct ZettaCacheIndexPhys {
     atime_histogram: AtimeHistogramPhys,
-    log: BlockBasedLogWithSummaryPhys,
+    log: BlockBasedLogWithSummaryPhys<IndexEntry>,
 }
 
 impl ZettaCacheIndexPhys {

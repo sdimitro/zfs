@@ -87,8 +87,8 @@ struct ZettaCheckpointPhys {
     //last_valid_data_offset: u64, // XXX move to BlockAllocatorPhys
     last_atime: Atime,
     index: ZettaCacheIndexPhys,
-    operation_log: BlockBasedLogPhys,
-    merging_operation_log: Option<BlockBasedLogPhys>,
+    operation_log: BlockBasedLogPhys<OperationLogEntry>,
+    merging_operation_log: Option<BlockBasedLogPhys<OperationLogEntry>>,
 }
 
 impl ZettaCheckpointPhys {
@@ -216,7 +216,7 @@ impl AtimeHistogramPhys {
 
 struct MergeState {
     old_pending_changes: BTreeMap<IndexKey, PendingChange>,
-    old_operation_log_phys: BlockBasedLogPhys,
+    old_operation_log_phys: BlockBasedLogPhys<OperationLogEntry>,
 }
 
 impl MergeState {

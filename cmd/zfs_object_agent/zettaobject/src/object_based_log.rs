@@ -11,6 +11,7 @@ use lazy_static::lazy_static;
 use log::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
@@ -30,14 +31,15 @@ lazy_static! {
 pub trait ObjectBasedLogEntry: 'static + OnDisk + Copy + Clone + Unpin + Send + Sync {}
 
 #[derive(Serialize, Deserialize, Debug)]
-pub struct ObjectBasedLogPhys {
+pub struct ObjectBasedLogPhys<T: ObjectBasedLogEntry> {
     generation: u64,
     num_chunks: u64,
     num_entries: u64,
     key: String,
+    entry_type: PhantomData<T>,
 }
 
-impl ObjectBasedLogPhys {
+impl<T: ObjectBasedLogEntry> ObjectBasedLogPhys<T> {
     pub async fn cleanup_older_generations(&self, object_access: &ObjectAccess) {
         let mut generations = object_access
             .collect_prefixes(&format!("{}/", self.key))
@@ -151,7 +153,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
 
     pub fn open_by_phys(
         shared_state: Arc<PoolSharedState>,
-        phys: &ObjectBasedLogPhys,
+        phys: &ObjectBasedLogPhys<T>,
     ) -> ObjectBasedLog<T> {
         ObjectBasedLog {
             shared_state,
@@ -222,12 +224,13 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         self.recovered = true;
     }
 
-    pub fn to_phys(&self) -> ObjectBasedLogPhys {
+    pub fn to_phys(&self) -> ObjectBasedLogPhys<T> {
         ObjectBasedLogPhys {
             generation: self.generation,
             num_chunks: self.num_chunks,
             num_entries: self.num_entries,
             key: self.name.clone(),
+            entry_type: PhantomData,
         }
     }
 

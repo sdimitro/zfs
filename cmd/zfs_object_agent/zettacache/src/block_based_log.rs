@@ -30,8 +30,8 @@ lazy_static! {
     static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct BlockBasedLogPhys {
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BlockBasedLogPhys<T: BlockBasedLogEntry> {
     // XXX on-disk format could just be array of extents; offset can be derived
     // from size of previous extents. We do need the btree in RAM though so that
     // we can do random reads on the Index (unless the ChunkSummary points
@@ -40,9 +40,25 @@ pub struct BlockBasedLogPhys {
     next_chunk: ChunkId,
     next_chunk_offset: LogOffset, // logical byte offset of next chunk to write
     num_entries: u64,
+    entry_type: PhantomData<T>,
 }
 
-impl BlockBasedLogPhys {
+// Unfortunately, #[derive(Default)] doesn't generate exactly this code; it
+// requires that T: Default, which is not the case, and is not necessary here.
+// See https://github.com/rust-lang/rust/issues/26925
+impl<T: BlockBasedLogEntry> Default for BlockBasedLogPhys<T> {
+    fn default() -> Self {
+        Self {
+            extents: Default::default(),
+            next_chunk: Default::default(),
+            next_chunk_offset: Default::default(),
+            num_entries: Default::default(),
+            entry_type: PhantomData,
+        }
+    }
+}
+
+impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
     pub fn clear(&mut self, extent_allocator: Arc<ExtentAllocator>) {
         for extent in self.extents.values() {
             extent_allocator.free(extent);
@@ -51,10 +67,24 @@ impl BlockBasedLogPhys {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct BlockBasedLogWithSummaryPhys {
-    this: BlockBasedLogPhys,
-    chunk_summary: BlockBasedLogPhys,
+#[derive(Serialize, Deserialize, Debug, Clone)]
+pub struct BlockBasedLogWithSummaryPhys<T: BlockBasedLogEntry> {
+    #[serde(bound(deserialize = "T: DeserializeOwned"))]
+    this: BlockBasedLogPhys<T>,
+    #[serde(bound(deserialize = "T: DeserializeOwned"))]
+    chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
+    #[serde(bound(deserialize = "T: DeserializeOwned"))]
+    entry_type: PhantomData<T>,
+}
+
+impl<T: BlockBasedLogEntry> Default for BlockBasedLogWithSummaryPhys<T> {
+    fn default() -> Self {
+        Self {
+            this: Default::default(),
+            chunk_summary: Default::default(),
+            entry_type: PhantomData,
+        }
+    }
 }
 
 pub trait BlockBasedLogEntry: 'static + OnDisk + Copy + Clone + Unpin + Send + Sync {}
@@ -71,7 +101,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogEntry for BlockBasedLogChunkSummaryEntr
 pub struct BlockBasedLog<T: BlockBasedLogEntry> {
     block_access: Arc<BlockAccess>,
     extent_allocator: Arc<ExtentAllocator>,
-    phys: BlockBasedLogPhys,
+    phys: BlockBasedLogPhys<T>,
     pending_entries: Vec<T>,
 }
 
@@ -93,7 +123,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     pub fn open(
         block_access: Arc<BlockAccess>,
         extent_allocator: Arc<ExtentAllocator>,
-        phys: BlockBasedLogPhys,
+        phys: BlockBasedLogPhys<T>,
     ) -> BlockBasedLog<T> {
         for (_offset, extent) in phys.extents.iter() {
             extent_allocator.claim(extent);
@@ -106,7 +136,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         }
     }
 
-    pub async fn flush(&mut self) -> BlockBasedLogPhys {
+    pub async fn flush(&mut self) -> BlockBasedLogPhys<T> {
         self.flush_impl(|_, _, _| {}).await;
         self.phys.clone()
     }
@@ -269,7 +299,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
     pub async fn open(
         block_access: Arc<BlockAccess>,
         extent_allocator: Arc<ExtentAllocator>,
-        phys: BlockBasedLogWithSummaryPhys,
+        phys: BlockBasedLogWithSummaryPhys<T>,
     ) -> BlockBasedLogWithSummary<T> {
         let chunk_summary = BlockBasedLog::open(
             block_access.clone(),
@@ -294,7 +324,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         }
     }
 
-    pub async fn flush(&mut self) -> BlockBasedLogWithSummaryPhys {
+    pub async fn flush(&mut self) -> BlockBasedLogWithSummaryPhys<T> {
         let chunks = &mut self.chunks;
         let chunk_summary = &mut self.chunk_summary;
         self.this
@@ -318,16 +348,18 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         BlockBasedLogWithSummaryPhys {
             this: new_this,
             chunk_summary: new_chunk_summary,
+            entry_type: PhantomData,
         }
     }
 
     // Works only if there are no pending entries
-    pub fn get_phys(&self) -> BlockBasedLogWithSummaryPhys {
+    pub fn get_phys(&self) -> BlockBasedLogWithSummaryPhys<T> {
         assert!(self.this.pending_entries.is_empty());
         assert!(self.chunk_summary.pending_entries.is_empty());
         BlockBasedLogWithSummaryPhys {
             this: self.this.phys.clone(),
             chunk_summary: self.chunk_summary.phys.clone(),
+            entry_type: PhantomData,
         }
     }
 
