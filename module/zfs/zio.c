@@ -3497,6 +3497,19 @@ zio_allocate_dispatch(spa_t *spa, int allocator)
 	zio_taskq_dispatch(zio, ZIO_TASKQ_ISSUE, B_TRUE);
 }
 
+static void
+zio_set_max_offset(zio_t *zio)
+{
+	blkptr_t *bp = zio->io_bp;
+	mutex_enter(&zio->io_lock);
+	for (int d = 0; d < BP_GET_NDVAS(bp); d++) {
+		zio->io_max_offset = MAX(zio->io_max_offset,
+		    DVA_GET_OFFSET(&bp->blk_dva[d]));
+	}
+	mutex_exit(&zio->io_lock);
+}
+
+
 static zio_t *
 zio_object_allocate(zio_t *zio)
 {
@@ -3518,6 +3531,8 @@ zio_object_allocate(zio_t *zio)
 	    zio->io_prop.zp_copies, zio->io_txg, NULL, flags,
 	    &zio->io_alloc_list, zio, zio->io_allocator);
 	VERIFY0(error);
+
+	zio_set_max_offset(zio);
 
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("zio=%px allocd %llu",
@@ -3637,6 +3652,7 @@ zio_dva_allocate(zio_t *zio)
 		zio->io_error = error;
 	}
 
+	zio_set_max_offset(zio);
 	return (zio);
 }
 
