@@ -175,6 +175,11 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
     }
     */
 
+    /// Return this log's parent prefix (e.g. zfs/15238822373695050151/PendingFreesLog)
+    pub fn parent_prefix(&self) -> String {
+        self.name.rsplitn(2, '/').last().unwrap().to_string()
+    }
+
     /// Recover after a system crash, where the kernel also crashed and we are discarding
     /// any changes after the current txg.
     pub async fn cleanup(&mut self) {

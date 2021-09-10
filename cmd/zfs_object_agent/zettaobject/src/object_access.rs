@@ -439,6 +439,21 @@ impl ObjectAccess {
         vec
     }
 
+    pub async fn collect_all_objects_after(&self, prefix: &str, start_after: &str) -> Vec<String> {
+        let mut vec = Vec::new();
+        for output in self
+            .list_objects_impl(prefix, Some(start_after.to_string()), None)
+            .await
+        {
+            if let Some(objects) = output.contents {
+                for object in objects {
+                    vec.push(object.key.unwrap());
+                }
+            }
+        }
+        vec
+    }
+
     pub async fn head_object(&self, key: &str) -> Option<HeadObjectOutput> {
         let res = retry(&format!("head {}", prefixed(key)), None, || async {
             let req = HeadObjectRequest {

@@ -14,9 +14,9 @@ use anyhow::Error;
 use anyhow::{Context, Result};
 use conv::ConvUtil;
 use futures::future;
-use futures::future::join3;
 use futures::future::Either;
 use futures::future::Future;
+use futures::future::{join3, join5};
 use futures::stream::*;
 use futures::FutureExt;
 use lazy_static::lazy_static;
@@ -28,7 +28,7 @@ use serde_bytes::ByteBuf;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::convert::TryFrom;
+use std::convert::{TryFrom, TryInto};
 use std::fmt;
 use std::fmt::Display;
 use std::mem;
@@ -626,22 +626,54 @@ impl PoolState {
         }
     }
 
-    /// Remove any log objects that are invalid (i.e. written as part of an
+    /// Remove log objects from log at prefix starting at next_id
+    async fn cleanup_orphaned_logs(&self, prefix: &str, next_id: ReclaimLogId) {
+        let shared_state = &self.shared_state.clone();
+        let objects = shared_state
+            .object_access
+            .collect_all_objects_after(prefix, &format!("{}/{}", prefix, next_id))
+            .await;
+
+        info!("cleanup: deleting orphaned log objects: {:?}", objects);
+        shared_state.object_access.delete_objects(&objects).await;
+    }
+
+    /// Remove any log objects that are invalid (i.e. created as part of an
     /// in-progress txg before the kernel or agent crashed)
     async fn cleanup_log_objects(&self) {
         let mut syncing_state = self.syncing_state.lock().unwrap().take().unwrap();
+        let next_log_id = ReclaimLogId(
+            syncing_state
+                .reclaim_info
+                .reclaim_logs
+                .len()
+                .try_into()
+                .unwrap(),
+        );
 
         let begin = Instant::now();
+
+        // Cleanup any orphaned pending_frees and object_size logs (from next_log_id and greater)
+        // This occurs if we crash after splitting a log but didn't complete syncing the txg
+        let pending_frees_log_prefix = syncing_state.reclaim_info.reclaim_logs[0]
+            .pending_frees_log
+            .parent_prefix();
+        let object_size_log_prefix = syncing_state.reclaim_info.reclaim_logs[0]
+            .object_size_log
+            .parent_prefix();
+
         let frees_log_stream = FuturesUnordered::new();
         let size_log_stream = FuturesUnordered::new();
         for log in syncing_state.reclaim_info.reclaim_logs.iter_mut() {
             frees_log_stream.push(log.pending_frees_log.cleanup());
             size_log_stream.push(log.object_size_log.cleanup());
         }
-        join3(
+        join5(
             syncing_state.storage_object_log.cleanup(),
             frees_log_stream.for_each(|_| future::ready(())),
             size_log_stream.for_each(|_| future::ready(())),
+            self.cleanup_orphaned_logs(&pending_frees_log_prefix, next_log_id),
+            self.cleanup_orphaned_logs(&object_size_log_prefix, next_log_id),
         )
         .await;
         assert!(self.syncing_state.lock().unwrap().is_none());
@@ -2053,7 +2085,6 @@ async fn try_split_reclaim_logs(state: Arc<PoolState>, syncing_state: &mut PoolS
     }
 
     // Create the new log files for the split
-    // XXX -- need to clean up these new logs if we crash (DOSE-613)
     let pool_guid = state.shared_state.guid;
     let new_log_id =
         ReclaimLogId(u16::try_from(syncing_state.reclaim_info.reclaim_logs.len()).unwrap());
@@ -2129,9 +2160,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     // txg.  Fortunately, the frees stream can't have any frees within object
     // created this txg, so this is not a problem.
 
-    // XXX Load the log with the most space freed
-    // for now just use the one with the most entries
-
+    // Load the log with the most space freed
     // XXX This can simplified even further with reduce() when we move to a more recent version of Rust
     let best_log = syncing_state
         .reclaim_info
