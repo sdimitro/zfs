@@ -176,6 +176,7 @@ typedef struct ztest_shared_opts {
 	char zo_obj_store_region[MAXNAMELEN];
 	char zo_obj_store_bucket[MAXNAMELEN];
 	char zo_obj_store_creds_profile[MAXNAMELEN];
+	int zo_use_zettacache;
 	char zo_alt_ztest[MAXNAMELEN];
 	char zo_alt_libpath[MAXNAMELEN];
 	uint64_t zo_vdevs;
@@ -531,6 +532,7 @@ typedef struct ztest_shared {
 
 static char ztest_dev_template[] = "%s/%s.%llua";
 static char ztest_aux_template[] = "%s/%s.%s.%llu";
+static char ztest_zcache_template[] = "%s/zcache.%d";
 ztest_shared_t *ztest_shared;
 
 static spa_t *ztest_spa = NULL;
@@ -789,6 +791,8 @@ static ztest_option_t option_table[] = {
 	{ 'z',	"object-credentials-profile", "STRING",
 	    "Object store credentials profile",
 	    NO_DEFAULT, DEFAULT_CREDS_PROFILE},
+	{ 'Z',	"use-zettacache", NULL, "use zettacache",
+	    NO_DEFAULT, NULL},
 #endif
 	{ 'M',	"multi-host", NULL,
 	    "Multi-host; simulate pool imported on remote host",
@@ -1065,6 +1069,10 @@ process_options(int argc, char **argv)
 		case 'z':
 			(void) strlcpy(zo->zo_obj_store_creds_profile, optarg,
 			    sizeof (zo->zo_obj_store_creds_profile));
+			zo->zo_obj_store = 1;
+			break;
+		case 'Z':
+			zo->zo_use_zettacache = 1;
 			zo->zo_obj_store = 1;
 			break;
 #endif
@@ -8097,6 +8105,27 @@ ztest_run_init(void)
 	}
 }
 
+static char *
+zoa_get_zettacache(ztest_shared_opts_t *ztest_opts)
+{
+	if (!ztest_opts->zo_use_zettacache) {
+		return (NULL);
+	}
+
+	char *path = umem_alloc(MAXPATHLEN, UMEM_NOFAIL);
+	(void) snprintf(path, MAXPATHLEN,
+	    ztest_zcache_template, ztest_opts->zo_dir, getpid());
+
+	int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0666);
+	if (fd == -1)
+		fatal(1, "can't open %s", path);
+	if (ftruncate(fd, ztest_opts->zo_vdev_size) != 0)
+		fatal(1, "can't ftruncate %s", path);
+	(void) close(fd);
+
+	return (path);
+}
+
 static void
 zoa_thread(void *arg)
 {
@@ -8105,7 +8134,8 @@ zoa_thread(void *arg)
 	char *dir = mkdtemp(ztest_sock_dir);
 	ASSERT3S(dir, !=, NULL);
 	set_object_agent_sock_dir(ztest_sock_dir);
-	libzoa_init(ztest_sock_dir, "/tmp/zoa.log");
+	char *zcache = zoa_get_zettacache(&ztest_opts);
+	libzoa_init(ztest_sock_dir, "/tmp/zoa.log", zcache);
 #else
 	fatal(0, "libzoa support missing.");
 #endif

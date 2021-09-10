@@ -8373,7 +8373,7 @@ zoa_thread(void *arg)
 	char *dir = mkdtemp(ztest_sock_dir);
 	ASSERT3S(dir, !=, NULL);
 	set_object_agent_sock_dir(ztest_sock_dir);
-	libzoa_init(ztest_sock_dir, "/tmp/zoa.log");
+	libzoa_init(ztest_sock_dir, "/tmp/zoa.log", NULL);
 #else
 	fatal(0, "libzoa support missing.");
 #endif

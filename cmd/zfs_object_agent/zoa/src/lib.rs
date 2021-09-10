@@ -5,7 +5,11 @@ use zettaobject::init;
 /// # Safety
 /// The pointers must be to actual C strings.
 #[no_mangle]
-pub unsafe extern "C" fn libzoa_init(socket_dir_ptr: *const c_char, log_file_ptr: *const c_char) {
+pub unsafe extern "C" fn libzoa_init(
+    socket_dir_ptr: *const c_char,
+    log_file_ptr: *const c_char,
+    cache_path_ptr: *const c_char,
+) {
     let socket_dir = CStr::from_ptr(socket_dir_ptr)
         .to_string_lossy()
         .into_owned();
@@ -13,5 +17,13 @@ pub unsafe extern "C" fn libzoa_init(socket_dir_ptr: *const c_char, log_file_ptr
 
     let verbosity = 2;
     init::setup_logging(verbosity, Some(log_file.as_str()));
-    init::start(&socket_dir, None);
+
+    if cache_path_ptr.is_null() {
+        init::start(&socket_dir, None);
+    } else {
+        let cache = CStr::from_ptr(cache_path_ptr)
+            .to_string_lossy()
+            .into_owned();
+        init::start(&socket_dir, Some(cache.as_str()));
+    }
 }
