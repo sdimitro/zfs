@@ -984,17 +984,17 @@ agent_reader(void *arg)
 		return (err);
 	}
 
-	void *buf = kmem_alloc(nvlist_len, KM_SLEEP);
+	void *buf = vmem_alloc(nvlist_len, KM_SLEEP);
 	err = agent_read_all(vos, buf, nvlist_len);
 	if (err != 0) {
 		zfs_dbgmsg("2 agent_reader(%px) got err %d", curthread, err);
-		kmem_free(buf, nvlist_len);
+		vmem_free(buf, nvlist_len);
 		return (err);
 	}
 
 	nvlist_t *nv;
 	err = nvlist_unpack(buf, nvlist_len, &nv, KM_SLEEP);
-	kmem_free(buf, nvlist_len);
+	vmem_free(buf, nvlist_len);
 	if (err != 0) {
 		zfs_dbgmsg("got error %d from nvlist_unpack(len=%d)",
 		    err, (int)nvlist_len);
