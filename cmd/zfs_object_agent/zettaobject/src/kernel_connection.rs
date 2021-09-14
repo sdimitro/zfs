@@ -73,7 +73,7 @@ impl KernelConnectionState {
         let bucket_name = nvl.lookup_string("bucket")?;
         let region_str = nvl.lookup_string("region")?;
         let endpoint = nvl.lookup_string("endpoint")?;
-        let readonly = nvl.lookup_string("readonly").is_ok();
+        let readonly = nvl.exists("readonly");
         let credentials_profile: Option<String> = nvl
             .lookup_string("credentials_profile")
             .ok()

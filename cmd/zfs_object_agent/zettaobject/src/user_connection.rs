@@ -45,7 +45,7 @@ impl UserConnectionState {
         let endpoint_cstr = nvl.lookup_string("endpoint")?;
         let region_str = region_cstr.to_str()?;
         let endpoint = endpoint_cstr.to_str()?;
-        let readonly = nvl.lookup_string("readonly").is_ok();
+        let readonly = nvl.exists("readonly");
         let credentials_profile: Option<String> = nvl
             .lookup_string("credentials_profile")
             .ok()
