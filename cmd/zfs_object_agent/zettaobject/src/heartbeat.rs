@@ -173,9 +173,7 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
                 lease_duration: *LEASE_DURATION,
                 id,
             };
-            let result = heartbeat
-                .put_timeout(&object_access, Some(*WRITE_TIMEOUT))
-                .await;
+            let result = heartbeat.put_timeout(&object_access, None).await;
             if lease_timed_out(&last_heartbeat) {
                 panic!("Suspending pools due to lease timeout");
             }
@@ -199,9 +197,11 @@ fn lease_timed_out(last_heartbeat: &Option<HeartbeatPhys>) -> bool {
                 .duration_since(heartbeat.timestamp)
                 .unwrap_or(heartbeat.lease_duration);
             if since > 2 * heartbeat.lease_duration / 3 {
-                warn!("Heartbeat delay: {:?}", since);
+                warn!("Extreme heartbeat delay: {:?}", since);
             } else if since > heartbeat.lease_duration / 3 {
-                info!("Heartbeat delay: {:?}", since);
+                info!("Long heartbeat delay: {:?}", since);
+            } else {
+                debug!("Short heartbeat delay: {:?}", since);
             }
             since >= heartbeat.lease_duration
         }
