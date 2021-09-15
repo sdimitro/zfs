@@ -68,6 +68,7 @@
 #define	AGENT_HOSTNAME		"hostname"
 #define	AGENT_READONLY		"readonly"
 #define	AGENT_RESUME		"resume"
+#define	AGENT_HEAL		"heal"
 
 /*
  * By default, the logical/physical ashift for object store vdevs is set to
@@ -408,6 +409,12 @@ agent_io_block_alloc(zio_t *zio)
 	}
 	fnvlist_add_uint64(nv, AGENT_SIZE, zio->io_size);
 	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
+
+	if ((zio->io_flags & ZIO_FLAG_IO_RETRY) ||
+	    (zio->io_flags & ZIO_FLAG_SCRUB)) {
+		fnvlist_add_boolean_value(nv, AGENT_HEAL, B_TRUE);
+	}
+
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("agent_io_block_alloc(guid=%llu blkid=%llu "
 		    "len=%llu) %s",
