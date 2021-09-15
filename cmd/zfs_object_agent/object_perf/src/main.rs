@@ -2,10 +2,10 @@ use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
 use std::time::Duration;
+use uuid::Uuid;
 use zettaobject::ObjectAccess;
 mod s3perf;
 
-// XXX this and the arg parsing copied from client/src/main.rs should be made common
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
 const BUCKET_NAME: &str = "cloudburst-data-2";
@@ -88,6 +88,7 @@ async fn main() {
                 .default_value("/var/tmp/perflog"),
         )
         .subcommand(SubCommand::with_name("write").about("write test"))
+        .subcommand(SubCommand::with_name("read").about("read test"))
         .get_matches();
 
     zettaobject::init::setup_logging(
@@ -100,13 +101,13 @@ async fn main() {
     let region_str = matches.value_of("region").unwrap();
     let bucket_name = matches.value_of("bucket").unwrap();
     let profile = matches.value_of("profile").unwrap();
-    let objsize_bytes: i32 = matches
+    let objsize_bytes: u64 = matches
         .value_of("object-size")
         .unwrap()
-        .parse::<i32>()
+        .parse::<u64>()
         .unwrap()
         * 1024;
-    let qdepth: i32 = matches.value_of("qdepth").unwrap().parse().unwrap();
+    let qdepth: u64 = matches.value_of("qdepth").unwrap().parse().unwrap();
     let duration = Duration::from_secs(matches.value_of("runtime").unwrap().parse().unwrap());
 
     println!(
@@ -122,9 +123,16 @@ async fn main() {
         false,
     );
 
+    let key_prefix = format!("zfs_object_perf/{}/", Uuid::new_v4());
+    println!("Using prefix: '{}'", key_prefix);
     match matches.subcommand() {
         ("write", Some(_matches)) => {
-            s3perf::write_test(&object_access, objsize_bytes, qdepth, duration)
+            s3perf::write_test(&object_access, &key_prefix, objsize_bytes, qdepth, duration)
+                .await
+                .unwrap();
+        }
+        ("read", Some(_matches)) => {
+            s3perf::read_test(&object_access, &key_prefix, objsize_bytes, qdepth, duration)
                 .await
                 .unwrap();
         }

@@ -2458,6 +2458,7 @@ dependencies = [
  "metered",
  "serde 1.0.127",
  "tokio",
+ "uuid",
  "zettaobject",
 ]
 

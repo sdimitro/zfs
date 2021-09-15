@@ -5,53 +5,17 @@ use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
 use metered::time_source::StdInstantMicros;
+use std::cmp::max;
 use std::convert::TryInto;
 use std::error::Error;
+use std::string::String;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use zettaobject::ObjectAccess;
 
-pub async fn write_test(
-    object_access: &ObjectAccess,
-    objsize: i32,
-    qdepth: i32,
-    duration: Duration,
-) -> Result<(), Box<dyn Error>> {
-    let perf = Perf::default();
-    let my_perf = perf.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(1));
-        loop {
-            interval.tick().await;
-            info!("metrics: {:#?}", my_perf.metrics);
-        }
-    });
-
-    let mut key_id: i32 = 0;
-    let start = Instant::now();
-    let data = vec![0; objsize.try_into().unwrap()];
-    stream::repeat_with(|| {
-        let my_object_access = object_access.clone();
-        let my_data = data.clone();
-        let my_perf = perf.clone();
-        key_id += 1;
-        tokio::spawn(async move {
-            my_perf
-                .put(
-                    &my_object_access,
-                    &format!("perftest/key{}", key_id),
-                    my_data,
-                )
-                .await;
-        })
-    })
-    .take_while(|_| future::ready(start.elapsed() < duration))
-    .buffer_unordered(qdepth.try_into().unwrap())
-    .for_each(|_| future::ready(()))
-    .await;
-
-    println!("metrics: {:#?}", perf.metrics);
-    Ok(())
+enum WriteTestBounds {
+    Time(Duration),
+    Objects(u64),
 }
 
 #[derive(Default, Clone)]
@@ -68,4 +32,159 @@ impl Perf {
     async fn put(&self, object_access: &ObjectAccess, key: &str, data: Vec<u8>) {
         object_access.put_object(&key.to_string(), data).await;
     }
+
+    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
+    #[measure(InFlight)]
+    #[measure(Throughput)]
+    #[measure(HitCount)]
+    async fn get(&self, object_access: &ObjectAccess, key: &str) {
+        object_access.get_object(&key.to_string()).await.unwrap();
+    }
+
+    fn log_metrics(&self, duration: Duration) {
+        let my_perf = self.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(duration);
+            loop {
+                interval.tick().await;
+                info!("{:#?}", my_perf.metrics);
+            }
+        });
+    }
+
+    async fn read_objects(
+        &self,
+        object_access: &ObjectAccess,
+        key_prefix: String,
+        qdepth: u64,
+        duration: Duration,
+    ) {
+        let num_objects = object_access.collect_objects(&key_prefix, None).await.len();
+        let mut key_id = 0;
+        let start = Instant::now();
+        stream::repeat_with(|| {
+            let my_perf = self.clone();
+            let my_object_access = object_access.clone();
+            let my_key_prefix = key_prefix.clone();
+            key_id += 1;
+            tokio::spawn(async move {
+                my_perf
+                    .get(
+                        &my_object_access,
+                        &format!("{}{}", my_key_prefix, key_id % num_objects + 1),
+                    )
+                    .await;
+            })
+        })
+        .take_while(|_| future::ready(start.elapsed() < duration))
+        .buffer_unordered(qdepth.try_into().unwrap())
+        .for_each(|_| future::ready(()))
+        .await;
+    }
+
+    async fn write_objects(
+        &self,
+        object_access: &ObjectAccess,
+        key_prefix: String,
+        objsize: u64,
+        qdepth: u64,
+        bounds: WriteTestBounds,
+    ) {
+        let data = vec![0; objsize.try_into().unwrap()];
+        let mut key_id: u64 = 0;
+        let start = Instant::now();
+        let put_lambda = || {
+            let my_data = data.clone();
+            let my_perf = self.clone();
+            let my_object_access = object_access.clone();
+            let my_key_prefix = key_prefix.clone();
+            key_id += 1;
+            tokio::spawn(async move {
+                my_perf
+                    .put(
+                        &my_object_access,
+                        &format!("{}{}", my_key_prefix, key_id),
+                        my_data,
+                    )
+                    .await
+            })
+        };
+        let put_stream = stream::repeat_with(put_lambda);
+
+        match bounds {
+            WriteTestBounds::Time(duration) => {
+                put_stream
+                    .take_while(|_| future::ready(start.elapsed() < duration))
+                    .buffer_unordered(qdepth.try_into().unwrap())
+                    .for_each(|_| future::ready(()))
+                    .await;
+            }
+            WriteTestBounds::Objects(num_objects) => {
+                put_stream
+                    .take(num_objects.try_into().unwrap())
+                    .buffer_unordered(qdepth.try_into().unwrap())
+                    .for_each(|_| future::ready(()))
+                    .await;
+            }
+        }
+    }
+}
+
+pub async fn write_test(
+    object_access: &ObjectAccess,
+    key_prefix: &str,
+    objsize: u64,
+    qdepth: u64,
+    duration: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let perf = Perf::default();
+    let bounds = WriteTestBounds::Time(duration);
+    perf.log_metrics(Duration::from_secs(1));
+
+    perf.write_objects(
+        object_access,
+        key_prefix.to_string(),
+        objsize,
+        qdepth,
+        bounds,
+    )
+    .await;
+
+    println!("{:#?}", perf.metrics.put);
+
+    let object_keys = object_access.collect_all_objects(key_prefix).await;
+    object_access.delete_objects(&object_keys).await;
+
+    Ok(())
+}
+
+pub async fn read_test(
+    object_access: &ObjectAccess,
+    key_prefix: &str,
+    objsize: u64,
+    qdepth: u64,
+    duration: Duration,
+) -> Result<(), Box<dyn Error>> {
+    let perf = Perf::default();
+    let bounds = WriteTestBounds::Objects(max(qdepth * 10, 200));
+    perf.log_metrics(Duration::from_secs(1));
+
+    perf.write_objects(
+        object_access,
+        key_prefix.to_string(),
+        objsize,
+        qdepth,
+        bounds,
+    )
+    .await;
+
+    perf.read_objects(object_access, key_prefix.to_string(), qdepth, duration)
+        .await;
+
+    println!("{:#?}", perf.metrics.get);
+
+    let object_keys = object_access.collect_all_objects(key_prefix).await;
+    object_access.delete_objects(&object_keys).await;
+
+    Ok(())
 }
