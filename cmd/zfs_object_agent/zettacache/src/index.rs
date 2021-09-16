@@ -19,7 +19,6 @@ pub struct IndexValue {
     // currently we need to return the right buffer size to the kernel, and it
     // isn't passing us the expected read size.  So we need to change some
     // interfaces to make that work right.
-    // XXX change to u32
     pub size: u32,
     pub atime: Atime,
 }

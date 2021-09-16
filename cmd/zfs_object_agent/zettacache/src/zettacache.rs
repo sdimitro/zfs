@@ -118,6 +118,7 @@ enum PendingChange {
 
 #[derive(Clone)]
 pub struct ZettaCache {
+    block_access: Arc<BlockAccess>,
     // lock ordering: index first then state
     index: Arc<tokio::sync::RwLock<ZettaCacheIndex>>,
     // XXX may need to break up this big lock.  At least we aren't holding it while doing i/o
@@ -422,7 +423,7 @@ struct ZettaCacheState {
 pub struct LockedKey(LockedItem<IndexKey>);
 
 pub enum LookupResponse {
-    Present(Vec<u8>),
+    Present((Vec<u8>, LockedKey, IndexValue)),
     Absent(LockedKey),
 }
 
@@ -563,6 +564,7 @@ impl ZettaCache {
         };
 
         let this = ZettaCache {
+            block_access,
             index: Arc::new(tokio::sync::RwLock::new(index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
             outstanding_lookups: LockSet::new(),
@@ -722,8 +724,9 @@ impl ZettaCache {
     #[measure(Throughput)]
     #[measure(HitCount)]
     pub async fn lookup(&self, guid: PoolGuid, block: BlockId) -> LookupResponse {
-        // We want to hold the index lock over the whole operation so that the index can't change after we get the value from it.
-        // Lock ordering requres that we lock the index before locking the state.
+        // We want to hold the index lock over the whole operation so that the
+        // on-disk index can't change after we get the value from it.  Lock
+        // ordering requres that we lock the index before locking the state.
         let key = IndexKey { guid, block };
         let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
         let index = self.index.read().await;
@@ -768,9 +771,9 @@ impl ZettaCache {
         if let Some(read_data_fut) = read_data_fut_opt {
             // pending state tells us what to do
             match read_data_fut.await {
-                Some(vec) => {
+                Some((vec, value)) => {
                     self.cache_hit_without_index_read(&key);
-                    return LookupResponse::Present(vec);
+                    return LookupResponse::Present((vec, locked_key, value));
                 }
                 None => {
                     self.cache_miss_without_index_read(&key);
@@ -799,9 +802,12 @@ impl ZettaCache {
                     .await
                     .lookup_with_value_from_index(key, Some(entry.value));
                 match read_data_fut.await {
-                    Some(vec) => {
+                    Some((vec, value)) => {
                         self.cache_hit_after_index_read(&key);
-                        LookupResponse::Present(vec)
+                        // We return the IndexValue from the DataReader, which
+                        // may be different from entry.value if we found it in a
+                        // PendingChange.
+                        LookupResponse::Present((vec, locked_key, value))
                     }
                     None => {
                         self.cache_miss_after_index_read(&key);
@@ -842,6 +848,48 @@ impl ZettaCache {
         state.insert(permit, index_key.guid, index_key.block, buf);
     }
 
+    pub async fn evict(&self, key: IndexKey, value: IndexValue) {
+        let mut state = self.state.lock().await;
+        state.remove_from_index(key, value);
+        state.block_allocator.free(value.extent());
+    }
+
+    #[measure(HitCount)]
+    fn healed_by_overwriting(&self, key: &IndexKey, value: &IndexValue) {
+        debug!("Healing by overwriting: {:?} {:?}", key, value);
+    }
+
+    #[measure(HitCount)]
+    fn healed_by_evicting(&self, key: &IndexKey, value: &IndexValue, new_size: usize) {
+        debug!(
+            "Healing wrong-size entry (new size {}) by evicting & reinserting: {:?} {:?}",
+            new_size, key, value
+        );
+    }
+
+    pub async fn heal(&self, guid: PoolGuid, block: BlockId, buf: &[u8]) {
+        if let LookupResponse::Present((cached_buf, locked_key, value)) =
+            self.lookup(guid, block).await
+        {
+            if cached_buf != buf {
+                if buf.len() == value.size as usize {
+                    // overwrite with correct data
+                    self.healed_by_overwriting(locked_key.0.value(), &value);
+                    self.block_access
+                        .write_raw(value.location, buf.to_owned())
+                        .await;
+                } else {
+                    // size differs; evict from cache and reinsert
+                    self.healed_by_evicting(locked_key.0.value(), &value, buf.len());
+                    let mut state = self.state.lock().await;
+                    state.remove_from_index(*locked_key.0.value(), value);
+                    state.block_allocator.free(value.extent());
+                    self.insert(locked_key, buf.to_owned()).await;
+                }
+            }
+        }
+    }
+
     async fn continuous_merge(&self) {
         let mut interval = tokio::time::interval(Duration::from_secs(60));
         loop {
@@ -878,7 +926,7 @@ impl ZettaCache {
     }
 }
 
-type DataReader = Pin<Box<dyn Future<Output = Option<Vec<u8>>> + Send>>;
+type DataReader = Pin<Box<dyn Future<Output = Option<(Vec<u8>, IndexValue)>> + Send>>;
 
 fn data_reader_none() -> DataReader {
     Box::pin(async move { None })
@@ -894,6 +942,8 @@ impl ZettaCacheState {
         // since we dropped the lock, a PendingChange may have been inserted
         // since then.  So we need to check for a PendingChange before using the
         // value from the index.
+        // XXX is this still true, given that now we have the LockedKey
+        // (outstanding_lookups lock)?
         let value = match self.pending_changes.get(&key) {
             Some(PendingChange::Insert(value_ref))
             | Some(PendingChange::RemoveThenInsert(value_ref))
@@ -923,7 +973,7 @@ impl ZettaCacheState {
             // Note: we could pass in the (mutable) pending_change reference,
             // which would let evict_block() avoid looking it up again.  But
             // this is not a common code path, and this interface seems cleaner.
-            self.evict_block(key, value);
+            self.remove_from_index(key, value);
             return data_reader_none();
         }
         trace!("cache hit: reading {:?} from {:?}", key, value);
@@ -975,11 +1025,11 @@ impl ZettaCacheState {
             let vec = block_access.read_raw(value.extent()).await;
             sem2.add_permits(1);
             // XXX we can easily handle an io error here by returning None
-            Some(vec)
+            Some((vec, value))
         })
     }
 
-    fn evict_block(&mut self, key: IndexKey, value: IndexValue) {
+    fn remove_from_index(&mut self, key: IndexKey, value: IndexValue) {
         match self.pending_changes.get_mut(&key) {
             Some(PendingChange::Insert(value_ref)) => {
                 // The operation_log has an Insert for this key, and the key

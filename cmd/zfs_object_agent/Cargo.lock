@@ -2411,6 +2411,7 @@ dependencies = [
  "bytes",
  "chrono",
  "conv",
+ "cstr-argument",
  "fern",
  "futures",
  "futures-core",

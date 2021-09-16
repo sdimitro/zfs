@@ -992,7 +992,7 @@ impl Pool {
                 for key in vec {
                     let shared_state = shared_state.clone();
                     sub_stream.push(future::ready(async move {
-                        DataObjectPhys::get_from_key(&shared_state.object_access, &key).await
+                        DataObjectPhys::get_from_key(&shared_state.object_access, &key, false).await
                     }));
                 }
                 sub_stream
@@ -1483,40 +1483,47 @@ impl Pool {
         }
     }
 
-    pub async fn read_block(&self, block: BlockId) -> Vec<u8> {
-        // check in ZettaCache
-        let key = match &self.state.zettacache {
-            Some(cache) => match cache.lookup(self.state.shared_state.guid, block).await {
-                LookupResponse::Present(v) => return v,
-                LookupResponse::Absent(l) => Some(l),
-            },
-            None => None,
-        };
-
+    async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Vec<u8> {
         let object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
 
         debug!("reading {:?} for {:?}", object, block);
-        let phys = DataObjectPhys::get(&shared_state.object_access, shared_state.guid, object)
-            .await
-            .unwrap();
+        let phys = DataObjectPhys::get(
+            &shared_state.object_access,
+            shared_state.guid,
+            object,
+            bypass_cache,
+        )
+        .await
+        .unwrap();
         // XXX consider using debug_assert_eq
         assert_eq!(phys.blocks_size, phys.calculate_blocks_size());
         // XXX to_owned() copies the data; would be nice to return a reference
-        let v = phys.get_block(block).to_owned();
+        phys.get_block(block).to_owned()
+    }
 
-        // add to ZettaCache
-        if let Some(key) = key {
-            // XXX clone() copies the data; would be nice to pass a reference
-            self.state
-                .zettacache
-                .as_ref()
-                .unwrap()
-                .insert(key, v.clone())
-                .await;
+    pub async fn read_block(&self, block: BlockId, heal: bool) -> Vec<u8> {
+        match &self.state.zettacache {
+            Some(cache) => match heal {
+                true => {
+                    let object_vec = self.read_block_impl(block, heal).await;
+                    cache
+                        .heal(self.state.shared_state.guid, block, &object_vec)
+                        .await;
+                    object_vec
+                }
+                false => match cache.lookup(self.state.shared_state.guid, block).await {
+                    LookupResponse::Present((cached_vec, _key, _value)) => cached_vec,
+                    LookupResponse::Absent(key) => {
+                        let vec = self.read_block_impl(block, heal).await;
+                        // XXX clone() copies the data; would be nice to pass a reference
+                        cache.insert(key, vec.clone()).await;
+                        vec
+                    }
+                },
+            },
+            None => self.read_block_impl(block, heal).await,
         }
-
-        v
     }
 
     pub fn free_block(&self, block: BlockId, size: u32) {
@@ -1840,7 +1847,7 @@ async fn reclaim_frees_object(
         let my_shared_state = shared_state.clone();
         stream.push(future::ready(async move {
             let mut phys =
-                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object)
+                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object, false)
                     .await
                     .unwrap();
 

@@ -7,6 +7,7 @@ use crate::server::SerialHandlerReturn;
 use crate::server::Server;
 use anyhow::anyhow;
 use anyhow::Result;
+use cstr_argument::CStrArgument;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::convert::TryFrom;
@@ -92,7 +93,7 @@ impl KernelConnectionState {
         Box::pin(async move {
             let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
             let name = nvl.lookup_string("name")?;
-            let object_access = Self::get_object_access(nvl.as_ref())?;
+            let object_access = Self::get_object_access(&nvl)?;
 
             Pool::create(&object_access, name.to_str()?, guid).await;
             let mut response = NvList::new_unique_names();
@@ -109,14 +110,9 @@ impl KernelConnectionState {
         info!("got request: {:?}", nvl);
         Box::pin(async move {
             let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
-            let resume_data = nvl.as_ref().lookup("resume").unwrap().data();
-            let resume = if let NvData::BoolV(resume) = resume_data {
-                resume
-            } else {
-                return Err(anyhow!("data {:?} not expected type", resume_data));
-            };
+            let resume = Self::bool_value(&nvl, "resume")?;
 
-            let object_access = Self::get_object_access(nvl.as_ref())?;
+            let object_access = Self::get_object_access(&nvl)?;
             let cache = self.cache.as_ref().cloned();
             let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
 
@@ -292,11 +288,30 @@ impl KernelConnectionState {
         handler_return_ok(None)
     }
 
+    /// Get the BoolV type value, or if not present then default to false.
+    /// Return Err if value is present but not BoolV type.
+    fn bool_value<S>(nvl: &NvListRef, name: S) -> Result<bool>
+    where
+        S: CStrArgument,
+    {
+        match nvl.lookup(name) {
+            Ok(pair) => {
+                if let NvData::BoolV(resume) = pair.data() {
+                    Ok(resume)
+                } else {
+                    Err(anyhow!("pair {:?} not expected type", pair))
+                }
+            }
+            Err(_) => Ok(false),
+        }
+    }
+
     fn read_block(&mut self, nvl: NvList) -> HandlerReturn {
         trace!("got request: {:?}", nvl);
         let block = BlockId(nvl.lookup_uint64("block")?);
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
+        let heal = Self::bool_value(&nvl, "heal")?;
 
         let pool = self
             .pool
@@ -304,7 +319,7 @@ impl KernelConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
         Ok(Box::pin(async move {
-            let data = pool.read_block(block).await;
+            let data = pool.read_block(block, heal).await;
             let mut nvl = NvList::new_unique_names();
             nvl.insert("Type", "read done").unwrap();
             nvl.insert("block", &block.0).unwrap();

@@ -294,6 +294,17 @@ impl ObjectAccess {
         Ok(v)
     }
 
+    pub async fn get_object_uncached(&self, key: &str) -> Result<Arc<Vec<u8>>> {
+        let vec = self.get_object_impl(key, None).await?;
+        // Note: we *should* have the same data from S3 (in the `vec`) and in
+        // the cache, so this invalidation is normally not necessary.  However,
+        // in case a bug (or undetected RAM error) resulted in incorrect cached
+        // data, we want to invalidate the cache so that we won't get the bad
+        // cached data again.
+        Self::invalidate_cache(key, &vec);
+        Ok(Arc::new(vec))
+    }
+
     pub async fn get_object(&self, key: &str) -> Result<Arc<Vec<u8>>> {
         let either = {
             // need this block separate so that we can drop the mutex before the .await

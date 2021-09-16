@@ -96,15 +96,27 @@ impl DataObjectPhys {
         }
     }
 
-    pub async fn get(object_access: &ObjectAccess, guid: PoolGuid, obj: ObjectId) -> Result<Self> {
-        let this = Self::get_from_key(object_access, &Self::key(guid, obj)).await?;
+    pub async fn get(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        obj: ObjectId,
+        bypass_cache: bool,
+    ) -> Result<Self> {
+        let this = Self::get_from_key(object_access, &Self::key(guid, obj), bypass_cache).await?;
         assert_eq!(this.guid, guid);
         assert_eq!(this.object, obj);
         Ok(this)
     }
 
-    pub async fn get_from_key(object_access: &ObjectAccess, key: &str) -> Result<Self> {
-        let buf = object_access.get_object(key).await?;
+    pub async fn get_from_key(
+        object_access: &ObjectAccess,
+        key: &str,
+        bypass_cache: bool,
+    ) -> Result<Self> {
+        let buf = match bypass_cache {
+            true => object_access.get_object_uncached(key).await?,
+            false => object_access.get_object(key).await?,
+        };
         let begin = Instant::now();
         let this: DataObjectPhys =
             bincode::deserialize(&buf).context(format!("Failed to decode contents of {}", key))?;
