@@ -172,3 +172,42 @@ tags = ['functional', 'cli_root', 'zpool_offline']
 [tests/functional/cli_root/zpool_online]
 tests = ['zpool_online_001_pos', 'zpool_online_002_neg']
 tags = ['functional', 'cli_root', 'zpool_online']
+
+[tests/functional/cli_root/zfs_clone]
+tests = ['zfs_clone_001_neg.ksh', 'zfs_clone_002_pos.ksh',
+	'zfs_clone_003_pos.ksh', 'zfs_clone_004_pos.ksh',
+	'zfs_clone_005_pos.ksh', 'zfs_clone_006_pos.ksh',
+	'zfs_clone_007_pos.ksh', 'zfs_clone_008_neg.ksh',
+	'zfs_clone_009_neg.ksh', 'zfs_clone_010_pos.ksh',
+	'zfs_clone_deeply_nested.ksh', 'zfs_clone_encrypted.ksh',
+	'zfs_clone_rm_nested.ksh']
+tags = ['functional', 'cli_root', 'zfs_clone']
+
+[tests/functional/cli_root/zfs_rename]
+tests = ['zfs_rename_001_pos.ksh', 'zfs_rename_002_pos.ksh',
+	'zfs_rename_003_pos.ksh', 'zfs_rename_004_neg.ksh',
+	'zfs_rename_005_neg.ksh', 'zfs_rename_006_pos.ksh',
+	'zfs_rename_007_pos.ksh', 'zfs_rename_008_pos.ksh',
+	'zfs_rename_009_neg.ksh', 'zfs_rename_010_neg.ksh',
+	'zfs_rename_011_pos.ksh', 'zfs_rename_012_neg.ksh',
+	'zfs_rename_013_pos.ksh', 'zfs_rename_014_neg.ksh',
+	'zfs_rename_encrypted_child.ksh', 'zfs_rename_mountpoint.ksh',
+	'zfs_rename_nounmount.ksh', 'zfs_rename_to_encrypted.ksh']
+tags = ['functional', 'cli_root', 'zfs_rename']
+
+[tests/functional/cli_root/zfs_share]
+tests = ['zfs_share_001_pos.ksh', 'zfs_share_002_pos.ksh',
+	'zfs_share_003_pos.ksh', 'zfs_share_004_pos.ksh',
+	'zfs_share_005_pos.ksh', 'zfs_share_006_pos.ksh',
+	'zfs_share_007_neg.ksh', 'zfs_share_008_neg.ksh',
+	'zfs_share_009_neg.ksh', 'zfs_share_010_neg.ksh',
+	'zfs_share_011_pos.ksh', 'zfs_share_012_pos.ksh',
+	'zfs_share_concurrent_shares.ksh']
+tags = ['functional', 'cli_root', 'zfs_share']
+
+[tests/functional/cli_root/zfs_unshare]
+tests = ['zfs_unshare_001_pos.ksh', 'zfs_unshare_002_pos.ksh',
+	'zfs_unshare_003_pos.ksh', 'zfs_unshare_004_neg.ksh',
+	'zfs_unshare_005_neg.ksh', 'zfs_unshare_006_pos.ksh',
+	'zfs_unshare_007_pos.ksh']
+tags = ['functional', 'cli_root', 'zfs_unshare']
