@@ -547,6 +547,9 @@ impl ObjectAccess {
     }
 
     pub async fn delete_objects(&self, keys: &[String]) {
+        // Note: we intentionally issue the delete calls serially because
+        // AWS doesn't like getting a lot of them at the same time (it
+        // returns HTTP 503 "Please reduce your request rate.")
         for chunk in keys.chunks(*OBJECT_DELETION_BATCH_SIZE) {
             let msg = format!(
                 "delete {} objects including {}",

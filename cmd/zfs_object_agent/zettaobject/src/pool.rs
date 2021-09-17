@@ -181,8 +181,9 @@ pub struct UberblockPhys {
     txg: Txg,         // redundant with key, for verification
     date: SystemTime, // for debugging
     storage_object_log: ObjectBasedLogPhys<StorageObjectLogEntry>,
-    reclaim_info: ReclaimInfoPhys, // Extendible hash structures for reclaiming free blocks
-    next_block: BlockId,           // next BlockID that can be allocated
+    reclaim_info: ReclaimInfoPhys, // Extendible hash structures for reclaiming free blocks.
+    next_block: BlockId,           // Next BlockID that can be allocated.
+    obsolete_objects: Vec<ObjectId>, // Objects that need to be deleted.
     stats: PoolStatsPhys,
     zfs_uberblock: TerseVec<u8>,
     zfs_config: TerseVec<u8>,
@@ -480,6 +481,7 @@ struct PoolSyncingState {
     // Flush immediately once we have one of these blocks (and all previous blocks)
     pending_flushes: BTreeSet<BlockId>,
     cleanup_handle: Option<JoinHandle<()>>,
+    delete_objects_handle: Option<JoinHandle<()>>,
 }
 
 type SyncTask =
@@ -685,8 +687,8 @@ impl PoolState {
         );
     }
 
-    /// Remove any data objects that are invalid (i.e. written as part of an
-    /// in-progress txg before the kernel crashed)
+    /// Remove any data objects that were created as part of an in-progress txg
+    /// before the kernel crashed.
     async fn cleanup_data_objects(&self) {
         let shared_state = self.shared_state.clone();
 
@@ -750,7 +752,7 @@ impl Pool {
         txg: Txg,
         cache: Option<ZettaCache>,
         heartbeat_guard: Option<HeartbeatGuard>,
-    ) -> (Pool, Option<UberblockPhys>, BlockId) {
+    ) -> (Pool, UberblockPhys, BlockId) {
         let phys = UberblockPhys::get(object_access, pool_phys.guid, txg)
             .await
             .unwrap();
@@ -804,6 +806,7 @@ impl Pool {
                     objects_to_delete: Default::default(),
                     pending_flushes: Default::default(),
                     cleanup_handle: None,
+                    delete_objects_handle: None,
                 })),
                 zettacache: cache,
                 object_block_map,
@@ -826,7 +829,7 @@ impl Pool {
         //println!("opened {:#?}", pool);
 
         *pool.state.syncing_state.lock().unwrap() = Some(syncing_state);
-        (pool, Some(phys), next_block)
+        (pool, phys, next_block)
     }
 
     pub async fn open(
@@ -891,6 +894,7 @@ impl Pool {
                         objects_to_delete: Default::default(),
                         pending_flushes: Default::default(),
                         cleanup_handle: None,
+                        delete_objects_handle: None,
                     })),
                     zettacache: cache,
                     object_block_map,
@@ -935,8 +939,18 @@ impl Pool {
                     let new_phys = PoolPhys { last_txg, ..phys };
                     new_phys.put(object_access).await;
                 }
-                // Note: cleanup_log_objects() takes the syncing_state, so the
-                // other concurrently-executed cleanups can not access the
+
+                // Clean up obsolete DataObject's before the next txg completes.
+                let shared_state = pool.state.shared_state.clone();
+                let obsolete_objects = ub.obsolete_objects.clone();
+                pool.state.with_syncing_state(|syncing_state| {
+                    syncing_state.delete_objects_handle = Some(tokio::spawn(async move {
+                        delete_data_objects(shared_state, obsolete_objects).await;
+                    }));
+                });
+
+                // Note: cleanup_log_objects() take()'s the syncing_state, so
+                // the other concurrently-executed cleanups can not access the
                 // syncing state.  That's why we need to pass in the last_txg.
                 join3(
                     pool.state.clone().cleanup_log_objects(),
@@ -949,7 +963,7 @@ impl Pool {
                 )
                 .await;
             }
-            Ok((pool, ub, next_block))
+            Ok((pool, Some(ub), next_block))
         }
     }
 
@@ -1240,11 +1254,20 @@ impl Pool {
             storage_object_log: syncing_state.storage_object_log.to_phys(),
             reclaim_info: syncing_state.reclaim_info.to_phys(),
             next_block: syncing_state.next_block(),
+            obsolete_objects: syncing_state.objects_to_delete.clone(),
             zfs_uberblock: TerseVec(uberblock),
             stats: syncing_state.stats,
             zfs_config: TerseVec(config),
         };
         u.put(&state.shared_state.object_access).await;
+
+        // The previous txg's object deletions need to complete before this txg
+        // completes, because if we crash, we only try to re-delete the objects
+        // that are in `obsolete_objects`, which was cleared at the end of the
+        // last txg.
+        if let Some(handle) = syncing_state.delete_objects_handle {
+            handle.await.unwrap();
+        }
 
         // write super
         PoolPhys {
@@ -1257,38 +1280,11 @@ impl Pool {
 
         // Now that the metadata state has been atomically moved forward, we
         // can delete objects that are no longer needed
-        // Note: we don't care about waiting for the frees to complete.
-        // XXX need some mechanism to clean up these objects if we crash Maybe
-        // we can look at the object log and look at the last txg's FREE
-        // records.  We would need to make sure the frees complete before the
-        // next txg.  We would need to make sure that those FREE records were
-        // not consolidated away.
-        // Note: we intentionally issue the delete calls serially because
-        // AWS doesn't like getting a lot of them at the same time (it
-        // returns HTTP 503 "Please reduce your request rate.")
-        // XXX move this code to its own function?
-        let objects_to_delete = syncing_state.objects_to_delete.split_off(0);
+        let objects_to_delete = mem::take(&mut syncing_state.objects_to_delete);
         let shared_state = state.shared_state.clone();
-        tokio::spawn(async move {
-            let begin = Instant::now();
-            let len = objects_to_delete.len();
-            shared_state
-                .object_access
-                .delete_objects(
-                    &objects_to_delete
-                        .iter()
-                        .map(|o| DataObjectPhys::key(shared_state.guid, *o))
-                        .collect::<Vec<_>>(),
-                )
-                .await;
-            if len != 0 {
-                info!(
-                    "reclaim: deleted {} objects in {}ms",
-                    len,
-                    begin.elapsed().as_millis()
-                );
-            }
-        });
+        syncing_state.delete_objects_handle = Some(tokio::spawn(async move {
+            delete_data_objects(shared_state, objects_to_delete).await;
+        }));
 
         // update txg
         syncing_state.last_txg = txg;
@@ -1660,6 +1656,27 @@ impl Pool {
 // Following routines deal with reclaiming free space
 //
 
+async fn delete_data_objects(shared_state: Arc<PoolSharedState>, objects: Vec<ObjectId>) {
+    let len = objects.len();
+    if len != 0 {
+        let begin = Instant::now();
+        shared_state
+            .object_access
+            .delete_objects(
+                &objects
+                    .iter()
+                    .map(|&o| DataObjectPhys::key(shared_state.guid, o))
+                    .collect::<Vec<_>>(),
+            )
+            .await;
+        info!(
+            "reclaim: deleted {} objects in {}ms",
+            len,
+            begin.elapsed().as_millis()
+        );
+    }
+}
+
 fn log_new_sizes(txg: Txg, reclaim_log: &mut ReclaimLog, rewritten_object_sizes: Vec<ObjectSize>) {
     let object_size_log = &mut reclaim_log.object_size_log;
 
@@ -1676,7 +1693,9 @@ fn log_deleted_objects(
     deleted_objects: Vec<ObjectId>,
 ) {
     let txg = syncing_state.syncing_txg.unwrap();
-    let begin = Instant::now();
+    syncing_state
+        .objects_to_delete
+        .reserve(deleted_objects.len());
     for object in deleted_objects {
         syncing_state
             .storage_object_log
@@ -1687,15 +1706,12 @@ fn log_deleted_objects(
             .object_size_log
             .append(txg, ObjectSizeLogEntry::Freed { object });
         syncing_state.stats.objects_count -= 1;
-        // XXX maybe use mem::replace to move our whole vector, since there
-        // aren't any other users of objects_to_delete?
         syncing_state.objects_to_delete.push(object);
     }
     info!(
-        "reclaim: {:?} logged {} deleted objects in {}ms",
+        "reclaim: {:?} logged {} deleted objects",
         txg,
         syncing_state.objects_to_delete.len(),
-        begin.elapsed().as_millis()
     );
 }
 
