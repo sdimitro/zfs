@@ -1844,22 +1844,54 @@ async fn reclaim_frees_object(
         objects.iter().map(|x| x.1.len()).sum::<usize>()
     );
 
+    struct FirstInfo {
+        object: ObjectId,
+        min_block: BlockId,
+        next_block: BlockId,
+    }
+
     let stream = FuturesUnordered::new();
     let mut to_delete = Vec::new();
     let mut first = None;
     for (object_size, frees) in objects {
-        // All but the first object need to be deleted.
         let object = object_size.object;
-        match first {
-            None => first = Some(object),
-            Some(first_obj) => {
-                assert_gt!(object, first_obj);
+        let min_block = state.object_block_map.object_to_min_block(object);
+        let next_block = state.object_block_map.object_to_next_block(object);
+
+        match &mut first {
+            None => {
+                // This is the first object.
+                first = Some(FirstInfo {
+                    object,
+                    min_block,
+                    next_block,
+                })
+            }
+            Some(first) => {
+                // This is not the first object.  It needs to be deleted, and
+                // its min/next_block needs to be folded into the FirstInfo.
+                // Note that the .reduce() below can't completely determine the
+                // min/next_block because if we skip the GET (because this
+                // object doesn't have any non-freed blocks), it won't be
+                // visited by the .reduce(), because we `continue` here.
+                assert_gt!(object, first.object);
                 to_delete.push(object);
+                first.min_block = min(first.min_block, min_block);
+                first.next_block = max(first.next_block, next_block);
+                if object_size.num_blocks == 0 {
+                    debug!(
+                        "reclaim: moving 0 blocks from {:?} (BlockID[{},{})) because all {} blocks were freed",
+                        object,
+                        min_block,
+                        next_block,
+                        frees.len(),
+                    );
+                    assert_eq!(object_size.num_bytes, 0);
+                    continue;
+                }
             }
         }
 
-        let min_block = state.object_block_map.object_to_min_block(object);
-        let next_block = state.object_block_map.object_to_next_block(object);
         let my_shared_state = shared_state.clone();
         stream.push(future::ready(async move {
             let mut phys =
@@ -1891,8 +1923,8 @@ async fn reclaim_frees_object(
             // correctly remove them from this object, undoing the previous,
             // uncommitted consolidation.  Therefore, if the expected size is
             // zero, we can remove this object without reading it because it
-            // doesn't have any required blocks.  Instead we fabricate an empty
-            // DataObjectPhys with the same metadata as what we expect.
+            // doesn't have any required blocks.  That happens above, where we
+            // `continue`.
 
             if phys.min_block != min_block || phys.next_block != next_block {
                 debug!("reclaim: {:?} expected range BlockID[{},{}), found BlockID[{},{}), trimming uncommitted consolidation",
@@ -1916,7 +1948,7 @@ async fn reclaim_frees_object(
             phys
         }));
     }
-    let new_phys = stream
+    let mut new_phys = stream
         .buffered(10)
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.guid, b.guid);
@@ -1965,6 +1997,14 @@ async fn reclaim_frees_object(
         .await
         .unwrap();
 
+    if let Some(first) = first {
+        // Fold in the min/next_block info which includes the skipped objects.
+        assert_eq!(new_phys.object, first.object);
+        assert_ge!(new_phys.min_block, first.min_block);
+        assert_le!(new_phys.next_block, first.next_block);
+        new_phys.min_block = first.min_block;
+        new_phys.next_block = first.next_block;
+    }
     assert_eq!(new_phys.object, first_object);
     // XXX would be nice to skip this if we didn't actually make any change
     // (because we already did it all before crashing)
