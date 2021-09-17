@@ -1,7 +1,7 @@
 use crate::object_access::{OAError, ObjectAccess};
 use anyhow::Context;
 use lazy_static::lazy_static;
-use log::{debug, info, warn};
+use log::{debug, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::HashMap,
@@ -144,11 +144,21 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
     let mut rx = rx_opt.unwrap();
     let tx = tx_opt.unwrap();
     tokio::spawn(async move {
-        let mut last_heartbeat = None;
+        let mut last_heartbeat: Option<HeartbeatPhys> = None;
         info!("Starting heartbeat with id {}", id);
         let mut interval = tokio::time::interval(*HEARTBEAT_INTERVAL);
         loop {
             interval.tick().await;
+            if let Some(ref heartbeat) = last_heartbeat {
+                let since = SystemTime::now()
+                    .duration_since(heartbeat.timestamp)
+                    .unwrap();
+                if since > *HEARTBEAT_INTERVAL {
+                    trace!("Heartbeat interval slightly over: {:?}", since);
+                } else if since > 2 * *HEARTBEAT_INTERVAL {
+                    debug!("Heartbeat interval significantly over: {:?}", since);
+                }
+            }
             {
                 let fut_opt = {
                     let mut heartbeats = HEARTBEAT.lock().unwrap();
@@ -165,6 +175,16 @@ pub async fn start_heartbeat(object_access: ObjectAccess, id: Uuid) -> Heartbeat
                 if let Some(fut) = fut_opt {
                     fut.await;
                     return;
+                }
+            }
+            if let Some(ref heartbeat) = last_heartbeat {
+                let since = SystemTime::now()
+                    .duration_since(heartbeat.timestamp)
+                    .unwrap();
+                if since > *HEARTBEAT_INTERVAL {
+                    trace!("Heartbeat locking slightly over: {:?}", since);
+                } else if since > 2 * *HEARTBEAT_INTERVAL {
+                    debug!("Heartbeat locking significantly over: {:?}", since);
                 }
             }
             let heartbeat = HeartbeatPhys {
