@@ -14,9 +14,9 @@ pub struct BitmapRangeIter<'a> {
 }
 
 impl<'a> BitmapRangeIter<'a> {
-    fn new(bitmap_iter: Fuse<Iter<'a>>) -> BitmapRangeIter<'a> {
+    fn new(bitmap: &RoaringBitmap) -> BitmapRangeIter {
         BitmapRangeIter {
-            bitmap_iter,
+            bitmap_iter: bitmap.iter().fuse(),
             current_range: None,
         }
     }
@@ -80,6 +80,6 @@ pub trait BitmapRangeIterator {
 
 impl BitmapRangeIterator for RoaringBitmap {
     fn iter_ranges(&self) -> BitmapRangeIter {
-        BitmapRangeIter::new(self.iter().fuse())
+        BitmapRangeIter::new(self)
     }
 }
