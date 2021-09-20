@@ -43,6 +43,7 @@ tags = ['functional', 'acl', 'posix-sa']
 # -------------------------------------------------------------
 # TODO: Pool checkpoint functionality hasn't been implemented yet. Uncomment the
 # below section once its done.
+# DOSE-596 - make 'zpool checkpoint' work with object store pools
 # -------------------------------------------------------------
 # [tests/functional/pool_checkpoint]
 # tests = ['checkpoint_after_rewind', 'checkpoint_big_rewind',
@@ -211,3 +212,73 @@ tests = ['zfs_unshare_001_pos.ksh', 'zfs_unshare_002_pos.ksh',
 	'zfs_unshare_005_neg.ksh', 'zfs_unshare_006_pos.ksh',
 	'zfs_unshare_007_pos.ksh']
 tags = ['functional', 'cli_root', 'zfs_unshare']
+
+[tests/functional/cli_root/zfs_copies]
+tests = ['zfs_copies_001_pos', 'zfs_copies_002_pos', 'zfs_copies_003_pos',
+    'zfs_copies_004_neg', 'zfs_copies_005_neg', 'zfs_copies_006_pos']
+tags = ['functional', 'cli_root', 'zfs_copies']
+
+[tests/functional/cli_root/zfs_create]
+tests = ['zfs_create_001_pos', 'zfs_create_002_pos', 'zfs_create_003_pos',
+	'zfs_create_004_pos', 'zfs_create_005_pos', 'zfs_create_006_pos',
+	'zfs_create_007_pos', 'zfs_create_008_neg', 'zfs_create_009_neg',
+	'zfs_create_010_neg', 'zfs_create_011_pos', 'zfs_create_012_pos',
+	'zfs_create_013_pos', 'zfs_create_014_pos', 'zfs_create_encrypted',
+	'zfs_create_crypt_combos', 'zfs_create_dryrun', 'zfs_create_nomount',
+	'zfs_create_verbose']
+tags = ['functional', 'cli_root', 'zfs_create']
+
+# -------------------------------------------------------------
+# TODO: Add the following tests back after relevant bug fixes.
+# zfs_clone_livelist_condense_and_disable - DOSE-650
+# zfs_destroy_clone_livelist - DOSE-652
+# -------------------------------------------------------------
+[tests/functional/cli_root/zfs_destroy]
+tests = ['zfs_clone_livelist_condense_races', 'zfs_clone_livelist_dedup',
+	'zfs_destroy_001_pos', 'zfs_destroy_002_pos', 'zfs_destroy_003_pos',
+	'zfs_destroy_004_pos', 'zfs_destroy_005_neg', 'zfs_destroy_006_neg',
+	'zfs_destroy_007_neg', 'zfs_destroy_008_pos', 'zfs_destroy_009_pos',
+	'zfs_destroy_010_pos', 'zfs_destroy_011_pos', 'zfs_destroy_012_pos',
+	'zfs_destroy_013_neg', 'zfs_destroy_014_pos', 'zfs_destroy_015_pos',
+	'zfs_destroy_016_pos',
+	'zfs_destroy_dev_removal', 'zfs_destroy_dev_removal_condense']
+tags = ['functional', 'cli_root', 'zfs_destroy']
+
+[tests/functional/cli_root/zfs_diff]
+tests = ['zfs_diff_changes', 'zfs_diff_cliargs', 'zfs_diff_timestamp',
+	'zfs_diff_types', 'zfs_diff_encrypted']
+tags = ['functional', 'cli_root', 'zfs_diff']
+
+[tests/functional/cli_root/zfs_get]
+tests = ['zfs_get_001_pos', 'zfs_get_002_pos', 'zfs_get_003_pos',
+	'zfs_get_004_pos', 'zfs_get_005_neg', 'zfs_get_006_neg', 'zfs_get_007_neg',
+	'zfs_get_008_pos', 'zfs_get_009_pos', 'zfs_get_010_neg']
+tags = ['functional', 'cli_root', 'zfs_get']
+
+[tests/functional/cli_root/zfs_ids_to_path]
+tests = ['zfs_ids_to_path_001_pos']
+tags = ['functional', 'cli_root', 'zfs_ids_to_path']
+
+[tests/functional/cli_root/zfs_inherit]
+tests = ['zfs_inherit_001_neg', 'zfs_inherit_002_neg', 'zfs_inherit_003_pos',
+	'zfs_inherit_mountpoint']
+tags = ['functional', 'cli_root', 'zfs_inherit']
+
+[tests/functional/cli_root/zfs_load-key]
+tests = ['zfs_load-key', 'zfs_load-key_all', 'zfs_load-key_file',
+	'zfs_load-key_https', 'zfs_load-key_location', 'zfs_load-key_noop',
+	'zfs_load-key_recursive']
+tags = ['functional', 'cli_root', 'zfs_load-key']
+
+# -------------------------------------------------------------
+# TODO: Add the following tests back after relevant bug fixes.
+# zfs_mount_remount - DOSE-654
+# -------------------------------------------------------------
+[tests/functional/cli_root/zfs_mount]
+tests = ['zfs_mount_001_pos', 'zfs_mount_002_pos', 'zfs_mount_003_pos',
+	'zfs_mount_004_pos', 'zfs_mount_005_pos', 'zfs_mount_007_pos',
+	'zfs_mount_009_neg', 'zfs_mount_010_neg', 'zfs_mount_011_neg',
+	'zfs_mount_012_pos', 'zfs_mount_all_001_pos', 'zfs_mount_encrypted',
+	'zfs_mount_all_fail', 'zfs_mount_all_mountpoints',
+	'zfs_mount_test_race']
+tags = ['functional', 'cli_root', 'zfs_mount']

@@ -49,6 +49,7 @@ ZFS_DBGMSG="$STF_SUITE/callbacks/zfs_dbgmsg.ksh"
 ZFS_DMESG="$STF_SUITE/callbacks/zfs_dmesg.ksh"
 UNAME=$(uname -s)
 ZOA_LOG="/var/zoa.log"
+ZOA_OUTPUT="/var/zoa.stdout"
 
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
@@ -613,10 +614,12 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	if [ -n "$ZETTA_CACHE_DEV" ]; then
 		dev=$(basename "$ZETTA_CACHE_DEV")
 		sudo -E /sbin/zfs_object_agent -vv -c "/dev/${dev}" \
-			--output-file=$ZOA_LOG >/dev/null 2>&1 &
+			--output-file=$ZOA_LOG 2>&1 | \
+			sudo tee $ZOA_OUTPUT > /dev/null &
 	else
 		sudo -E /sbin/zfs_object_agent -vv \
-			--output-file=$ZOA_LOG >/dev/null 2>&1 &
+			--output-file=$ZOA_LOG 2>&1 | \
+			sudo tee $ZOA_OUTPUT > /dev/null &
 	fi
 
 	# Verify connectivity before proceeding

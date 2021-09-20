@@ -1824,6 +1824,58 @@ function create_pool
 	return $?
 }
 
+# Return 0 if import completes successfully; $? otherwise
+# Note: In local zones, this function should return 0 silently.
+#
+# -p <pool name> - REQUIRED
+# -e "<extra options that need to be passed while importing pool>" - OPTIONAL
+
+function import_pool
+{
+	typeset pool=""
+	typeset extra_options=""
+
+	typeset opt=""
+	while getopts "p:e:" opt; do
+		case $opt in
+			p) pool=$OPTARG ;;
+			e) extra_options=$OPTARG ;;
+		esac
+	done
+
+	if [[ -z $pool ]]; then
+		log_note "Missing pool name."
+		return 1
+	fi
+
+	if poolexists $pool ; then
+		log_note "Pool named $pool already exists."
+		return 1
+	fi
+
+	if ! is_global_zone ; then
+		return 0
+	fi
+
+	typeset zpool_import_cmd=""
+	if use_object_store; then
+		zpool_import_cmd="zpool import \
+			-d $ZTS_BUCKET_NAME
+			-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
+			-o object-region=$ZTS_REGION \
+			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
+			$extra_options \
+			$pool"
+	else
+		zpool_import_cmd="zpool import $extra_options $pool"
+	fi
+
+	log_note $zpool_import_cmd
+	$zpool_import_cmd
+
+	return $?
+}
+
 # Return 0 if destroy successfully or the pool exists; $? otherwise
 # Note: In local zones, this function should return 0 silently.
 #

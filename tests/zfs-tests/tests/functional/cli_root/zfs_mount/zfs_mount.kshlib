@@ -59,11 +59,6 @@ function setup_filesystem #disklist #pool #fs #mntpoint #type #vdev
 		return 1
 	fi
 
-	if is_global_zone && [[ -z $disklist ]] ; then
-		log_note "Missing disklist."
-		return 1
-	fi
-
 	if [[ $vdev != "" && \
 		$vdev != "mirror" && \
 		$vdev != "raidz" && \
