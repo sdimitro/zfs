@@ -158,6 +158,10 @@ impl SlabTrait for BitmapSlab {
         assert!(inserted);
         self.allocatable.remove(slot);
 
+        // Cannot be allocating a block that's currently in the
+        // middle of being freed.
+        assert!(!self.freeing.contains(slot));
+
         Some(Extent {
             location: DiskLocation {
                 offset: self.to_offset(slot),
@@ -184,51 +188,79 @@ impl SlabTrait for BitmapSlab {
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
-        for (first, last) in self.freeing.iter_ranges() {
-            assert_ge!(last, first);
-            spacemap.free(
-                self.to_offset(first),
-                u64::from((last - first + 1) * self.slot_size),
-            );
-        }
-        for slot in self.freeing.iter() {
-            let inserted = self.allocatable.insert(slot);
-            assert!(inserted);
-        }
-        self.freeing.clear();
-
+        // XXX - Explain why allocating has to be recorded first
+        let mut total_segments = 0;
         for (first, last) in self.allocating.iter_ranges() {
             assert_ge!(last, first);
+            for slot in first..last + 1 {
+                assert!(self.allocating.contains(slot));
+            }
+            total_segments += last - first + 1;
+
             spacemap.alloc(
                 self.to_offset(first),
                 u64::from((last - first + 1) * self.slot_size),
             );
         }
+        assert_eq!(u64::from(total_segments), self.allocating.len());
         self.allocating.clear();
+
+        total_segments = 0;
+        for (first, last) in self.freeing.iter_ranges() {
+            assert_ge!(last, first);
+            for slot in first..last + 1 {
+                assert!(self.freeing.contains(slot));
+            }
+            total_segments += last - first + 1;
+
+            spacemap.free(
+                self.to_offset(first),
+                u64::from((last - first + 1) * self.slot_size),
+            );
+        }
+        assert_eq!(u64::from(total_segments), self.freeing.len());
+
+        for slot in self.freeing.iter() {
+            let inserted = self.allocatable.insert(slot);
+            assert!(inserted);
+        }
+        self.freeing.clear();
     }
 
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap) {
         // TODO: In the future we may want to check if writing the whole
         //       RoaringBitmap as a first-class spacemap entry is more
         //       practical here.
+        let mut total_segments = 0;
         let mut alloc_offset = self.to_offset(0);
         for slot in self.allocatable.iter() {
             let slot_offset = self.to_offset(slot);
             spacemap.alloc(alloc_offset, slot_offset - alloc_offset);
+
+            total_segments += (slot_offset - alloc_offset) / u64::from(self.slot_size);
+
             alloc_offset = slot_offset + u64::from(self.slot_size);
         }
         spacemap.alloc(alloc_offset, self.end_offset() - alloc_offset);
+        total_segments += (self.end_offset() - alloc_offset) / u64::from(self.slot_size);
+        assert_eq!(
+            total_segments,
+            u64::from(self.total_slots) - self.allocatable.len()
+        );
 
         // In our attempt to make this independent of flush_to_spacemap(), we do
         // not mutate any of the in-memory data structures and mark all entries
         // from the allocating bitmap as free. The latter is because these
         // entries will be later marked as allocated in flush_to_spacemap().
+        total_segments = 0;
         for (first, last) in self.allocating.iter_ranges() {
+            total_segments += u64::from(last - first + 1);
             spacemap.free(
                 self.to_offset(first),
                 u64::from((last - first + 1) * self.slot_size),
             );
         }
+        assert_eq!(total_segments, self.allocating.len());
     }
 
     fn get_max_size(&self) -> u32 {
@@ -350,6 +382,13 @@ impl SlabTrait for ExtentSlab {
         self.allocating.verify_space();
         self.allocatable.verify_space();
 
+        // XXX - Explain why allocating has to be recorded first
+        for (&start, &size) in self.allocating.iter() {
+            self.allocatable.verify_absent(start, size);
+            spacemap.alloc(start, size);
+        }
+        self.allocating.clear();
+
         // Space freed during this checkpoint is now available for reallocation.
         for (&start, &size) in self.freeing.iter() {
             self.allocating.verify_absent(start, size);
@@ -357,12 +396,6 @@ impl SlabTrait for ExtentSlab {
             self.allocatable.add(start, size);
         }
         self.freeing.clear();
-
-        for (&start, &size) in self.allocating.iter() {
-            self.allocatable.verify_absent(start, size);
-            spacemap.alloc(start, size);
-        }
-        self.allocating.clear();
     }
 
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap) {
