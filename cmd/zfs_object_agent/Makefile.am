@@ -1,8 +1,10 @@
 lib_LTLIBRARIES = libzoa.la
 
-sbin_PROGRAMS = zfs_object_agent zfs_object_perf zoa_test
+sbin_PROGRAMS = zcachedb zfs_object_agent zfs_object_perf zoa_test
 
 common_sources = $(wildcard zettacache/src/*.rs zettacache/Cargo.toml zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
+
+zcachedb_SOURCES = $(wildcard zcdb/src/*.rs zcdb/Cargo.toml) $(common_sources)
 
 zfs_object_agent_SOURCES = $(wildcard server/src/*.rs server/Cargo.toml) $(common_sources)
 
@@ -17,6 +19,7 @@ RUSTFLAGS = \
 	-L $(abs_top_builddir)/lib/libnvpair/.libs
 
 .PHONY: \
+	zcachedb$(EXEEXT) \
 	zfs_object_agent$(EXEEXT) \
 	zfs_object_perf$(EXEEXT) \
 	zoa_test$(EXEEXT) \
@@ -38,10 +41,15 @@ zoa_test$(EXEEXT) :
 	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa_test $(RUSTTARGET)
 	cp target/@RUSTDIR@/zoa_test .
 
+zcachedb$(EXEEXT) :
+	RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zcachedb $(RUSTTARGET)
+	cp target/@RUSTDIR@/zcachedb .
+
 all: build
 
 build: \
 	libzoa.la \
+	zcachedb$(EXEEXT) \
 	zfs_object_agent$(EXEEXT) \
 	zfs_object_perf$(EXEEXT) \
 	zoa_test$(EXEEXT)

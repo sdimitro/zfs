@@ -2567,6 +2567,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "zcachedb"
+version = "0.1.0"
+dependencies = [
+ "clap",
+ "libc",
+ "log",
+ "tokio",
+ "zettacache",
+]
+
+[[package]]
 name = "zeroize"
 version = "1.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

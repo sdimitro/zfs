@@ -11,6 +11,7 @@ incremental = true
 members = [
     "client",
     "server",
+    "zcdb",
     "zettacache",
     "zettaobject",
     "object_perf",
