@@ -1,5 +1,6 @@
 use crate::base_types::*;
 use crate::block_access::*;
+use crate::block_allocator::zcachedb_dump_spacemaps;
 use crate::block_allocator::BlockAllocator;
 use crate::block_allocator::BlockAllocatorPhys;
 use crate::block_based_log::*;
@@ -11,6 +12,7 @@ use crate::lock_set::LockSet;
 use crate::lock_set::LockedItem;
 use crate::maybe_die_with;
 use crate::mutex_ext::MutexExt;
+use crate::DumpStructuresOptions;
 use anyhow::Result;
 use conv::ConvUtil;
 use futures::future;
@@ -473,6 +475,35 @@ impl ZettaCache {
             last_checkpoint_id: CheckpointId(0),
         };
         phys.write(&block_access).await;
+    }
+
+    pub async fn zcachedb_dump_structures(path: &str, opts: DumpStructuresOptions) {
+        let block_access = Arc::new(BlockAccess::new(path).await);
+
+        let superblock = match ZettaSuperBlockPhys::read(&block_access).await {
+            Ok(phys) => phys,
+            Err(e) => {
+                println!("Couldn't read ZettaCache SuperBlock!");
+                println!("{:?}", e);
+                return;
+            }
+        };
+        if opts.dump_defaults {
+            println!("{:#?}", superblock);
+        }
+
+        let checkpoint =
+            ZettaCheckpointPhys::read(&block_access, superblock.last_checkpoint_extent).await;
+        if opts.dump_defaults {
+            println!("{:#?}", checkpoint);
+        }
+
+        let extent_allocator = Arc::new(ExtentAllocator::open(&checkpoint.extent_allocator));
+
+        if opts.dump_spacemaps {
+            zcachedb_dump_spacemaps(block_access, extent_allocator, checkpoint.block_allocator)
+                .await;
+        }
     }
 
     pub async fn open(path: &str) -> ZettaCache {

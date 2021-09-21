@@ -1311,3 +1311,29 @@ impl BlockAllocatorPhys {
         }
     }
 }
+
+pub async fn zcachedb_dump_spacemaps(
+    block_access: Arc<BlockAccess>,
+    extent_allocator: Arc<ExtentAllocator>,
+    phys: BlockAllocatorPhys,
+) {
+    println!("DUMP SPACEMAP");
+    println!("{:?}", phys.spacemap);
+    let spacemap = SpaceMap::open(
+        block_access.clone(),
+        extent_allocator.clone(),
+        phys.spacemap,
+    );
+    spacemap.load(|entry| println!("{:?}", entry)).await;
+
+    println!();
+
+    println!("DUMP SPACEMAP_NEXT");
+    println!("{:?}", phys.spacemap_next);
+    let spacemap_next = SpaceMap::open(
+        block_access.clone(),
+        extent_allocator.clone(),
+        phys.spacemap_next,
+    );
+    spacemap_next.load(|entry| println!("{:?}", entry)).await;
+}
