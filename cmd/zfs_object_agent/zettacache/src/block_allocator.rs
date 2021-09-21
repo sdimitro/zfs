@@ -1155,10 +1155,104 @@ impl BlockAllocator {
         self.available_space += self.freeing_space;
         self.freeing_space = 0;
 
+        let spacemap_phys = self.spacemap.flush().await;
+        let spacemap_next_phys = self.spacemap_next.flush().await;
+
+        //////////
+        let num_slabs = self.slabs.0.len();
+        let mut slabs_vec = Vec::with_capacity(num_slabs);
+        for slab in self.slabs.0.iter() {
+            assert_eq!(slab.id.0 as usize, slabs_vec.len());
+            match &slab.info {
+                SlabType::BitmapBased(info) => {
+                    slabs_vec.push(BitmapSlab::new_slab(
+                        slab.id,
+                        slab.generation,
+                        info.slab_offset,
+                        self.slab_size,
+                        info.slot_size,
+                    ));
+                }
+                SlabType::ExtentBased(info) => {
+                    slabs_vec.push(ExtentSlab::new_slab(
+                        slab.id,
+                        slab.generation,
+                        info.slab_offset,
+                        self.slab_size,
+                        info.max_allowed_alloc_size,
+                    ));
+                }
+                SlabType::Free(_) => {
+                    slabs_vec.push(FreeSlab::new_slab(slab.id, slab.generation));
+                }
+            }
+        }
+        let mut slabs = Slabs(slabs_vec);
+        let mut slab_import_generations = vec![0u64; num_slabs];
+        let mut import_cb = |entry| match entry {
+            SpaceMapEntry::Alloc(extent) => {
+                let extent = Extent {
+                    location: DiskLocation {
+                        offset: extent.offset,
+                    },
+                    size: extent.size,
+                };
+                let slab_id = BlockAllocator::slab_id_from_extent_impl(
+                    self.coverage.location.offset,
+                    self.slab_size,
+                    num_slabs as u64,
+                    extent,
+                );
+                trace!(
+                    "IMPORT-ALLOC: {:?} GEN:{} {:?}",
+                    slab_id,
+                    slab_import_generations[slab_id.as_index()],
+                    entry
+                );
+                if slabs.get(slab_id).generation == slab_import_generations[slab_id.as_index()] {
+                    slabs.get_mut(slab_id).import_alloc(extent)
+                }
+            }
+            SpaceMapEntry::Free(extent) => {
+                let extent = Extent {
+                    location: DiskLocation {
+                        offset: extent.offset,
+                    },
+                    size: extent.size,
+                };
+                let slab_id = BlockAllocator::slab_id_from_extent_impl(
+                    self.coverage.location.offset,
+                    self.slab_size,
+                    num_slabs as u64,
+                    extent,
+                );
+                trace!(
+                    "IMPORT-FREE: {:?} GEN:{} {:?}",
+                    slab_id,
+                    slab_import_generations[slab_id.as_index()],
+                    entry
+                );
+                if slabs.get(slab_id).generation == slab_import_generations[slab_id.as_index()] {
+                    slabs.get_mut(slab_id).import_free(extent)
+                }
+            }
+            SpaceMapEntry::MarkGeneration(mark) => {
+                assert_ge!(
+                    mark.generation,
+                    slab_import_generations[mark.slab_id.as_index()]
+                );
+                trace!("IMPORT-MARK: {:?} {:?}", mark.slab_id, mark.generation);
+                slab_import_generations[mark.slab_id.as_index()] = mark.generation;
+            }
+        };
+        self.spacemap.load(&mut import_cb).await;
+        self.spacemap_next.load(&mut import_cb).await;
+        /////
+
         BlockAllocatorPhys {
             slab_size: self.slab_size,
-            spacemap: self.spacemap.flush().await,
-            spacemap_next: self.spacemap_next.flush().await,
+            spacemap: spacemap_phys,
+            spacemap_next: spacemap_next_phys,
             next_slab_to_condense: self.next_slab_to_condense,
             slabs: self.slabs.0.iter().map(|slab| slab.get_phys()).collect(),
             slab_buckets: SlabAllocationBucketsPhys {
