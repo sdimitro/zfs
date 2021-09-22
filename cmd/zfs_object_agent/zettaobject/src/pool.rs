@@ -2097,42 +2097,38 @@ async fn split_object_sizes_log(
 
 /// Split logs that are getting full
 async fn try_split_reclaim_logs(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState) {
-    // Locate the largest log
-    // XXX This can simplified further with reduce() when we move to a more recent version of Rust
-    let (log_id, entries) = syncing_state.reclaim_info.reclaim_logs.iter().fold(
-        (ReclaimLogId(0), 0),
-        |(best_id, best_num_entries), ent| {
-            // find the largest log that is not being reclaimed
-            if !ent.reclaim_busy
-                && ent.num_bits != RECLAIM_TABLE_MAX_BITS
-                && ent.pending_frees_log.num_entries >= best_num_entries
-            {
-                (ent.id, ent.pending_frees_log.num_entries)
+    let reclaim_log = match syncing_state
+        .reclaim_info
+        .reclaim_logs
+        .iter_mut()
+        // Filter logs that are not candidates for splitting
+        .filter(|a| {
+            !a.reclaim_busy
+                && a.num_bits != RECLAIM_TABLE_MAX_BITS
+                && a.pending_frees_log.num_entries >= *RECLAIM_LOG_ENTRIES_LIMIT
+        })
+        // Locate the largest log remaining (if any)
+        .reduce(|a, b| {
+            if a.pending_frees_log.num_entries >= b.pending_frees_log.num_entries {
+                a
             } else {
-                (best_id, best_num_entries)
+                b
             }
-        },
-    );
-
-    // Split when largest log exceeds the upper limit
-    if entries < *RECLAIM_LOG_ENTRIES_LIMIT
-        || syncing_state.get_pending_frees_log(log_id).reclaim_busy
-    {
-        return;
-    }
+        }) {
+        Some(reclaim_log) => reclaim_log,
+        None => return,
+    };
 
     let begin = Instant::now();
-    let reclaim_log = syncing_state.get_pending_frees_log(log_id);
     let log_bits = reclaim_log.num_bits;
     let log_prefix = reclaim_log.prefix;
 
-    // Once a log reaches RECLAIM_TABLE_MAX_BITS it can no longer be split
-    if log_bits == RECLAIM_TABLE_MAX_BITS {
-        return;
-    }
     info!(
         "reclaim: splitting pending frees log {:?} with {} entries (bits = {}, limit = {})",
-        log_id, entries, log_bits, *RECLAIM_LOG_ENTRIES_LIMIT
+        reclaim_log.id,
+        reclaim_log.pending_frees_log.num_entries,
+        log_bits,
+        *RECLAIM_LOG_ENTRIES_LIMIT
     );
 
     // Expand log's prefix and bit count
@@ -2149,6 +2145,7 @@ async fn try_split_reclaim_logs(state: Arc<PoolState>, syncing_state: &mut PoolS
 
     // Create the new log files for the split
     let pool_guid = state.shared_state.guid;
+    let log_id = reclaim_log.id;
     let new_log_id =
         ReclaimLogId(u16::try_from(syncing_state.reclaim_info.reclaim_logs.len()).unwrap());
     let new_log = ReclaimLog {
@@ -2224,28 +2221,27 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     // created this txg, so this is not a problem.
 
     // Load the log with the most space freed
-    // XXX This can simplified even further with reduce() when we move to a more recent version of Rust
-    let best_log = syncing_state
+    let best_reclaim_log = syncing_state
         .reclaim_info
         .reclaim_logs
-        .iter()
-        .fold((ReclaimLogId(0), 0), |(best_id, best_bytes), ent| {
-            if ent.pending_free_bytes >= best_bytes {
-                (ent.id, ent.pending_free_bytes)
+        .iter_mut()
+        .reduce(|a, b| {
+            if a.pending_free_bytes >= b.pending_free_bytes {
+                a
             } else {
-                (best_id, best_bytes)
+                b
             }
         })
-        .0;
+        .unwrap();
 
-    let best_reclaim_log = syncing_state.get_pending_frees_log(best_log);
     info!(
         "reclaim: using {:?} with {} free entries, {}MiB free bytes",
-        best_log,
+        best_reclaim_log.id,
         best_reclaim_log.pending_frees_log.num_entries,
         best_reclaim_log.pending_free_bytes / ONE_MIB
     );
 
+    let best_log = best_reclaim_log.id;
     let (pending_frees_log_stream, frees_remainder) =
         best_reclaim_log.pending_frees_log.iter_most();
     let (object_size_log_stream, sizes_remainder) = best_reclaim_log.object_size_log.iter_most();
