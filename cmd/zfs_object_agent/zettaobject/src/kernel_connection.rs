@@ -110,7 +110,7 @@ impl KernelConnectionState {
         info!("got request: {:?}", nvl);
         Box::pin(async move {
             let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
-            let resume = Self::bool_value(&nvl, "resume")?;
+            let resume = bool_value(&nvl, "resume")?;
 
             let object_access = Self::get_object_access(&nvl)?;
             let cache = self.cache.as_ref().cloned();
@@ -226,17 +226,9 @@ impl KernelConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
         Ok(Box::pin(async move {
-            let uberblock = nvl.lookup("uberblock").unwrap().data();
-            let config = nvl.lookup("config").unwrap().data();
-            if let NvData::Uint8Array(slice) = uberblock {
-                if let NvData::Uint8Array(slice2) = config {
-                    Self::end_txg_impl(pool, slice.to_vec(), slice2.to_vec()).await
-                } else {
-                    panic!("config not expected type")
-                }
-            } else {
-                panic!("uberblock not expected type")
-            }
+            let uberblock = u8_array_value(&nvl, "uberblock")?.to_vec();
+            let config = u8_array_value(&nvl, "config")?.to_vec();
+            Self::end_txg_impl(pool, uberblock, config).await
         }))
     }
 
@@ -244,37 +236,33 @@ impl KernelConnectionState {
     /// completion may not happen until flush_pool() is called
     fn write_block(&mut self, nvl: NvList) -> HandlerReturn {
         let block = BlockId(nvl.lookup_uint64("block")?);
-        let data = nvl.lookup("data")?.data();
+        let slice = u8_array_value(&nvl, "data")?;
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
-        if let NvData::Uint8Array(slice) = data {
-            trace!(
-                "got write request id={}: {:?} len={}",
-                request_id,
-                block,
-                slice.len()
-            );
+        trace!(
+            "got write request id={}: {:?} len={}",
+            request_id,
+            block,
+            slice.len()
+        );
 
-            let pool = self
-                .pool
-                .as_ref()
-                .ok_or_else(|| anyhow!("no pool open"))?
-                .clone();
-            // Need to write_block() before spawning, so that the Pool knows what's been written before resume_complete()
-            let fut = pool.write_block(block, slice.to_vec());
-            Ok(Box::pin(async move {
-                fut.await;
-                let mut nvl = NvList::new_unique_names();
-                nvl.insert("Type", "write done").unwrap();
-                nvl.insert("block", &block.0).unwrap();
-                nvl.insert("request_id", &request_id).unwrap();
-                nvl.insert("token", &token).unwrap();
-                trace!("sending response: {:?}", nvl);
-                Ok(Some(nvl))
-            }))
-        } else {
-            Err(anyhow!("data {:?} not expected type", data))
-        }
+        let pool = self
+            .pool
+            .as_ref()
+            .ok_or_else(|| anyhow!("no pool open"))?
+            .clone();
+        // Need to write_block() before spawning, so that the Pool knows what's been written before resume_complete()
+        let fut = pool.write_block(block, slice.to_vec());
+        Ok(Box::pin(async move {
+            fut.await;
+            let mut nvl = NvList::new_unique_names();
+            nvl.insert("Type", "write done").unwrap();
+            nvl.insert("block", &block.0).unwrap();
+            nvl.insert("request_id", &request_id).unwrap();
+            nvl.insert("token", &token).unwrap();
+            trace!("sending response: {:?}", nvl);
+            Ok(Some(nvl))
+        }))
     }
 
     fn free_block(&mut self, nvl: NvList) -> HandlerReturn {
@@ -288,30 +276,12 @@ impl KernelConnectionState {
         handler_return_ok(None)
     }
 
-    /// Get the BoolV type value, or if not present then default to false.
-    /// Return Err if value is present but not BoolV type.
-    fn bool_value<S>(nvl: &NvListRef, name: S) -> Result<bool>
-    where
-        S: CStrArgument,
-    {
-        match nvl.lookup(name) {
-            Ok(pair) => {
-                if let NvData::BoolV(resume) = pair.data() {
-                    Ok(resume)
-                } else {
-                    Err(anyhow!("pair {:?} not expected type", pair))
-                }
-            }
-            Err(_) => Ok(false),
-        }
-    }
-
     fn read_block(&mut self, nvl: NvList) -> HandlerReturn {
         trace!("got request: {:?}", nvl);
         let block = BlockId(nvl.lookup_uint64("block")?);
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
-        let heal = Self::bool_value(&nvl, "heal")?;
+        let heal = bool_value(&nvl, "heal")?;
 
         let pool = self
             .pool
@@ -362,5 +332,37 @@ impl KernelConnectionState {
     fn exit_agent(&mut self, nvl: NvList) -> HandlerReturn {
         info!("got request: {:?}", nvl);
         Err(anyhow!("exit requested"))
+    }
+}
+
+/// Get the BoolV type value, or if not present then default to false.
+/// Return Err if value is present but not BoolV type.
+fn bool_value<S>(nvl: &NvListRef, name: S) -> Result<bool>
+where
+    S: CStrArgument,
+{
+    match nvl.lookup(name) {
+        Ok(pair) => {
+            if let NvData::BoolV(resume) = pair.data() {
+                Ok(resume)
+            } else {
+                Err(anyhow!("pair {:?} not expected type (boolean_value)", pair))
+            }
+        }
+        Err(_) => Ok(false),
+    }
+}
+
+/// Get the BoolV type value, or if not present then default to false.
+/// Return Err if value is present but not BoolV type.
+fn u8_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u8]>
+where
+    S: CStrArgument,
+{
+    let pair = nvl.lookup(name)?;
+    if let NvData::Uint8Array(slice) = pair.data() {
+        Ok(slice)
+    } else {
+        Err(anyhow!("pair {:?} not expected type (uint8_array)", pair))
     }
 }

@@ -53,7 +53,8 @@ impl UserConnectionState {
         let mut client = ObjectAccess::get_client(endpoint, region_str, credentials_profile);
         let mut response = NvList::new_unique_names();
         let mut buckets = vec![];
-        if let Ok(bucket) = nvl.lookup_string("bucket") {
+        let bucket_result = nvl.lookup_string("bucket");
+        if let Ok(bucket) = bucket_result {
             buckets.push(bucket.into_string()?);
         } else {
             buckets.append(
@@ -71,7 +72,8 @@ impl UserConnectionState {
         for buck in buckets {
             let object_access =
                 ObjectAccess::from_client(client, buck.as_str(), readonly, endpoint, region_str);
-            if let Ok(guid) = nvl.lookup_uint64("guid") {
+            let guid_result = nvl.lookup_uint64("guid");
+            if let Ok(guid) = guid_result {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {
                     client = object_access.release_client();
                     continue;
