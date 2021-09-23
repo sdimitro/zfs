@@ -18,8 +18,8 @@ mod space_map;
 mod tunable;
 mod zettacache;
 
+pub use crate::zettacache::LookupResponse;
+pub use crate::zettacache::ZettaCache;
 pub use die::maybe_die_with;
 pub use tunable::get_tunable;
 pub use tunable::read_tunable_config;
-pub use zettacache::LookupResponse;
-pub use zettacache::ZettaCache;
