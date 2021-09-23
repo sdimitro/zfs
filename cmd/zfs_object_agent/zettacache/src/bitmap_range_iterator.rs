@@ -36,7 +36,7 @@ impl<'a> Iterator for BitmapRangeIter<'a> {
                         self.current_range = Some((first, slot));
                     }
                     Some((first, last)) => {
-                        self.current_range = None;
+                        self.current_range = Some((slot, slot));
                         return Some((first, last));
                     }
                     None => {
@@ -58,28 +58,204 @@ pub trait BitmapRangeIterator {
     ///
     /// NOTE: The ranges returned are inclusive ranges (e.g. [start, end])
     /// where the start and end indeces are bundled in a tuple.
-    ///
-    /// # Example
-    ///
-    /// ```
-    /// use roaring::RoaringBitmap;
-    ///
-    /// let mut a = RoaringBitmap::new();
-    /// a.insert_range(0..5);
-    /// a.insert(7);
-    /// a.insert_range(10..12);
-    ///
-    /// let range_iter = a.iter_ranges();
-    /// assert_eq!(range_iter.next(), (0, 4));
-    /// assert_eq!(range_iter.next(), (7, 7));
-    /// assert_eq!(range_iter.next(), (10, 11));
-    /// assert_eq!(range_iter.next(), None);
-    /// ```
     fn iter_ranges(&self) -> BitmapRangeIter;
 }
 
 impl BitmapRangeIterator for RoaringBitmap {
     fn iter_ranges(&self) -> BitmapRangeIter {
         BitmapRangeIter::new(self)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use more_asserts::assert_ge;
+
+    fn validate_iter_ranges(a: &RoaringBitmap) {
+        let mut total_segments = 0;
+        for (first, last) in a.iter_ranges() {
+            assert_ge!(last, first);
+            for slot in first..last + 1 {
+                assert!(a.contains(slot));
+            }
+            total_segments += last - first + 1;
+        }
+        assert_eq!(u64::from(total_segments), a.len());
+    }
+
+    #[test]
+    fn test_empty() {
+        let a = RoaringBitmap::new();
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_single_start_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_single_start_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..2);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_single_start_range_2() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..3);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_single_middle_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert(5);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_single_middle_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(5..7);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_single_middle_range_2() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(5..8);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_two_slots_start_end() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_slot_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        a.insert_range(10..12);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_range_end_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..2);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_range_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..2);
+        a.insert_range(10..2);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_two_slots_middle_end() {
+        let mut a = RoaringBitmap::new();
+        a.insert(5);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_middle_slot_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert(5);
+        a.insert_range(10..12);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_middle_range_end_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(5..7);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_middle_range_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(5..7);
+        a.insert_range(10..2);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_three_slots_start_middle_end() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        a.insert(5);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_range_middle_slot_end_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..2);
+        a.insert(5);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_slot_middle_range_end_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        a.insert_range(5..7);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_slot_middle_slot_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        a.insert(5);
+        a.insert_range(10..12);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_slot_middle_range_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert(0);
+        a.insert_range(5..7);
+        a.insert_range(10..12);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_range_middle_range_end_slot() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..2);
+        a.insert_range(5..7);
+        a.insert(10);
+        validate_iter_ranges(&a);
+    }
+
+    #[test]
+    fn test_start_range_middle_range_end_range() {
+        let mut a = RoaringBitmap::new();
+        a.insert_range(0..2);
+        a.insert_range(5..7);
+        a.insert_range(10..12);
+        validate_iter_ranges(&a);
     }
 }
