@@ -74,7 +74,7 @@ pub struct BlockBasedLogWithSummaryPhys<T: BlockBasedLogEntry> {
     #[serde(bound(deserialize = "T: DeserializeOwned"))]
     chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
     #[serde(bound(deserialize = "T: DeserializeOwned"))]
-    entry_type: PhantomData<T>,
+    last_entry: Option<T>,
 }
 
 impl<T: BlockBasedLogEntry> Default for BlockBasedLogWithSummaryPhys<T> {
@@ -82,7 +82,7 @@ impl<T: BlockBasedLogEntry> Default for BlockBasedLogWithSummaryPhys<T> {
         Self {
             this: Default::default(),
             chunk_summary: Default::default(),
-            entry_type: PhantomData,
+            last_entry: Default::default(),
         }
     }
 }
@@ -109,6 +109,7 @@ pub struct BlockBasedLogWithSummary<T: BlockBasedLogEntry> {
     this: BlockBasedLog<T>,
     chunk_summary: BlockBasedLog<BlockBasedLogChunkSummaryEntry<T>>,
     chunks: Vec<BlockBasedLogChunkSummaryEntry<T>>,
+    last_entry: Option<T>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -321,6 +322,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
             this: BlockBasedLog::open(block_access.clone(), extent_allocator.clone(), phys.this),
             chunk_summary,
             chunks,
+            last_entry: phys.last_entry,
         }
     }
 
@@ -348,7 +350,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         BlockBasedLogWithSummaryPhys {
             this: new_this,
             chunk_summary: new_chunk_summary,
-            entry_type: PhantomData,
+            last_entry: self.last_entry,
         }
     }
 
@@ -359,7 +361,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         BlockBasedLogWithSummaryPhys {
             this: self.this.phys.clone(),
             chunk_summary: self.chunk_summary.phys.clone(),
-            entry_type: PhantomData,
+            last_entry: self.last_entry,
         }
     }
 
@@ -378,10 +380,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
     }
 
     pub fn append(&mut self, entry: T) {
-        self.this.append(entry)
+        self.last_entry = Some(entry);
+        self.this.append(entry);
     }
 
     pub fn clear(&mut self) {
+        self.last_entry = None;
         self.this.clear();
         self.chunk_summary.clear();
     }
@@ -416,9 +420,28 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         F: FnMut(&T) -> B,
     {
         assert_eq!(ChunkId(self.chunks.len() as u64), self.this.phys.next_chunk);
-        // XXX would be nice to also store last entry in the log, so that if we
-        // look for something after it, we can return None without reading the
-        // last chunk.
+
+        // Check if the key is after the last entry.
+        // XXX Note that this won't be very useful when there are multiple
+        // pools.  When doing writes to all but the "last" pool, this check will
+        // fail, and we'll have to read from the index for every write.  We
+        // could address this by having one index (BlockBasedLogWithSummary) per
+        // pool, or by replacing the last_entry optimization with a small cache
+        // of BlockBasedLogChunk's.
+        match self.last_entry {
+            Some(last_entry) => {
+                if key > &f(&last_entry) {
+                    assert_gt!(key, &f(&self.chunks.last().unwrap().first_entry));
+                    return None;
+                }
+            }
+            None => {
+                assert!(self.chunks.is_empty());
+                return None;
+            }
+        }
+
+        // Find the chunk_id that this key belongs in.
         let chunk_id = match self
             .chunks
             .binary_search_by_key(key, |chunk_summary| f(&chunk_summary.first_entry))
@@ -428,6 +451,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
             Err(index) => index - 1,
         };
 
+        // Read the chunk from disk.
         let chunk_extent = self.chunk_extent(chunk_id);
         trace!(
             "reading log chunk {} at {:?} to lookup {:?}",
@@ -439,8 +463,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) =
             self.this.block_access.chunk_from_raw(&chunk_bytes).unwrap();
         assert_eq!(chunk.id, ChunkId(chunk_id as u64));
-        // XXX can we assert that we are looking in the right chunk?
-        // XXX I think we'd want to the chunk to have the next chunk's first key as well
+
+        // XXX Can we assert that we are looking in the right chunk?  I think
+        // we'd need the chunk to have the next chunk's first key as well.
+
+        // Search within this chunk.
         match chunk.entries.binary_search_by_key(key, f) {
             Ok(index) => Some(chunk.entries[index]),
             Err(_) => None,

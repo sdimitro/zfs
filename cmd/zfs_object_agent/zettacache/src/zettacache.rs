@@ -818,14 +818,7 @@ impl ZettaCache {
         }
     }
 
-    /// Only to be used when the BlockId is sure to not be in the cache already;
-    /// otherwise use lookup().
-    #[measure(HitCount)]
-    pub async fn lock_key(&self, guid: PoolGuid, block: BlockId) -> LockedKey {
-        let key = IndexKey { guid, block };
-        LockedKey(self.outstanding_lookups.lock(key).await)
-    }
-
+    /// Initiates write to disk for this block; doesn't wait for the write to complete.
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]

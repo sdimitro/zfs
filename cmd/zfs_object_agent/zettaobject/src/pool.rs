@@ -1472,8 +1472,27 @@ impl Pool {
         };
         async move {
             if let Some(cache) = cache {
-                let key = cache.lock_key(guid, block).await;
-                cache.insert(key, data2).await;
+                match cache.lookup(guid, block).await {
+                    LookupResponse::Present(_) => {
+                        // Surprisingly, the BlockId may be in the cache even
+                        // when writing a "new" block, if the system crashed or
+                        // the pool rewound, causing a BlockId that was already
+                        // persisted to the cache to be reused.
+                        //
+                        // XXX Ideally we would force-evict it and then insert
+                        // again.  For now, we ignore the insertion request.
+                        // Subsequent lookups will return the wrong data, and we
+                        // rely on the checksum in the blkptr_t to catch it.
+                        // (Lookups without a preceeding insertion will also
+                        // return the wrong data, so this is no worse.)
+                        trace!(
+                            "writing block already in zettacache: {:?} {:?}",
+                            guid,
+                            block
+                        );
+                    }
+                    LookupResponse::Absent(key) => cache.insert(key, data2).await,
+                }
             }
             receiver.await.unwrap();
         }
