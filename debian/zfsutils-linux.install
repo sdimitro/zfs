@@ -18,6 +18,7 @@ debian/tmp/etc/default/zfs etc/default/
 debian/tmp/etc/zfs/zfs-functions etc/zfs/
 etc/zfs/zpool.d/
 debian/tmp/etc/zfs/zoa_config.toml etc/zfs/
+debian/tmp/etc/zfs/zoa_log4rs.yml etc/zfs/
 debian/tmp/etc/zfs/zoa.conf etc/zfs/
 usr/lib/*/zfs/zpool.d/
 usr/lib/*/zfs/zpool_influxdb

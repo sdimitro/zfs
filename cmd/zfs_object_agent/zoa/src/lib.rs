@@ -16,7 +16,7 @@ pub unsafe extern "C" fn libzoa_init(
     let log_file = CStr::from_ptr(log_file_ptr).to_string_lossy().into_owned();
 
     let verbosity = 2;
-    init::setup_logging(verbosity, Some(log_file.as_str()));
+    init::setup_logging(verbosity, Some(log_file.as_str()), None);
 
     if cache_path_ptr.is_null() {
         init::start(&socket_dir, None);

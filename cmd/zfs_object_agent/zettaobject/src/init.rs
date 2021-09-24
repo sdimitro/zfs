@@ -1,45 +1,91 @@
 use crate::kernel_connection::KernelServerState;
 use crate::user_connection::UserServerState;
+use lazy_static::lazy_static;
 use log::*;
+use log4rs::append::console::ConsoleAppender;
+use log4rs::append::file::FileAppender;
+use log4rs::config::{Appender, Config, Root};
+use log4rs::encode::pattern::PatternEncoder;
 use zettacache::ZettaCache;
 
-pub fn setup_logging(verbosity: u64, file_name: Option<&str>) {
-    let mut base_config = fern::Dispatch::new();
+lazy_static! {
+    static ref LOG_PATTERN: String = "[{d(%Y-%m-%d %H:%M:%S%.3f)}][{t}][{l}] {m}{n}".to_string();
+}
 
-    base_config = match verbosity {
-        0 => base_config.level(LevelFilter::Warn),
-        1 => base_config
-            .level(LevelFilter::Info)
-            .level_for("rusoto_core::request", LevelFilter::Info)
-            .level_for("want", LevelFilter::Debug),
-        2 => base_config
-            .level(LevelFilter::Debug)
-            .level_for("rusoto_core::request", LevelFilter::Info)
-            .level_for("want", LevelFilter::Debug),
-        3 => base_config
-            .level(LevelFilter::Trace)
-            .level_for("rusoto_core::request", LevelFilter::Info)
-            .level_for("want", LevelFilter::Debug),
-        _ => base_config.level(LevelFilter::Trace),
+pub fn get_logging_level(verbosity: u64) -> LevelFilter {
+    match verbosity {
+        0 => LevelFilter::Warn,
+        1 => LevelFilter::Info,
+        2 => LevelFilter::Debug,
+        _ => LevelFilter::Trace,
+    }
+}
+
+fn setup_console_logging(verbosity: u64) {
+    let config = Config::builder()
+        .appender(
+            Appender::builder().build(
+                "stdout",
+                Box::new(
+                    ConsoleAppender::builder()
+                        .encoder(Box::new(PatternEncoder::new(&*LOG_PATTERN)))
+                        .build(),
+                ),
+            ),
+        )
+        .build(
+            Root::builder()
+                .appender("stdout")
+                .build(get_logging_level(verbosity)),
+        )
+        .unwrap();
+
+    log4rs::init_config(config).unwrap();
+}
+
+fn setup_logfile(verbosity: u64, logfile: &str) {
+    let config = Config::builder()
+        .appender(
+            Appender::builder().build(
+                "logfile",
+                Box::new(
+                    FileAppender::builder()
+                        .encoder(Box::new(PatternEncoder::new(&*LOG_PATTERN)))
+                        .build(logfile)
+                        .unwrap(),
+                ),
+            ),
+        )
+        .build(
+            Root::builder()
+                .appender("logfile")
+                .build(get_logging_level(verbosity)),
+        )
+        .unwrap();
+
+    log4rs::init_config(config).unwrap();
+}
+
+pub fn setup_logging(verbosity: u64, file_name: Option<&str>, log_config: Option<&str>) {
+    match log_config {
+        Some(config) => {
+            log4rs::init_file(config, Default::default()).unwrap();
+        }
+        None => {
+            match file_name {
+                Some(logfile) => {
+                    setup_logfile(verbosity, logfile);
+                }
+                None => {
+                    /*
+                     * When neither the log_config nor a log file is specified
+                     * log to console.
+                     */
+                    setup_console_logging(verbosity);
+                }
+            }
+        }
     };
-
-    let mut config = fern::Dispatch::new().format(|out, message, record| {
-        let target = record.target();
-        let stripped_target = target.strip_prefix("zoa_common").unwrap_or(target);
-        out.finish(format_args!(
-            "[{}][{}][{}] {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-            stripped_target,
-            record.level(),
-            message
-        ))
-    });
-    config = match file_name {
-        None => config.chain(std::io::stdout()),
-        Some(file_name) => config.chain(fern::log_file(file_name).unwrap()),
-    };
-
-    base_config.chain(config).apply().unwrap();
 }
 
 pub fn start(socket_dir: &str, cache_path: Option<&str>) {

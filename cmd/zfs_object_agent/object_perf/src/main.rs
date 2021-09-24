@@ -87,6 +87,14 @@ async fn main() {
                 .takes_value(true)
                 .default_value("/var/tmp/perflog"),
         )
+        .arg(
+            Arg::with_name("log-config")
+                .short("l")
+                .long("log-config")
+                .value_name("FILE")
+                .help("Configuration yaml file logging")
+                .takes_value(true),
+        )
         .subcommand(SubCommand::with_name("write").about("write test"))
         .subcommand(SubCommand::with_name("read").about("read test"))
         .get_matches();
@@ -94,6 +102,7 @@ async fn main() {
     zettaobject::init::setup_logging(
         matches.occurrences_of("verbosity"),
         matches.value_of("output-file"),
+        matches.value_of("log-config"),
     );
 
     // Command line parameters

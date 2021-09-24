@@ -43,16 +43,26 @@ fn main() {
                 .help("Configuration file to set tunables (toml/json/yaml")
                 .takes_value(true),
         )
+        .arg(
+            Arg::with_name("log-config")
+                .short("l")
+                .long("log-config")
+                .value_name("FILE")
+                .help("Logging configuration yaml file")
+                .conflicts_with("output-file")
+                .conflicts_with("verbosity")
+                .takes_value(true),
+        )
         .get_matches();
 
     let socket_dir = matches.value_of("socket-dir").unwrap();
+    let cache_path = matches.value_of("cache-file");
 
     zettaobject::init::setup_logging(
         matches.occurrences_of("verbosity"),
         matches.value_of("output-file"),
+        matches.value_of("log-config"),
     );
-
-    let cache_path = matches.value_of("cache-file");
 
     if let Some(file_name) = matches.value_of("config-file") {
         zettacache::read_tunable_config(file_name);
