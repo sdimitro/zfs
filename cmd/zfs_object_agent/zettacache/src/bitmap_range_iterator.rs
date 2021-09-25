@@ -160,7 +160,7 @@ mod tests {
     fn test_start_range_end_range() {
         let mut a = RoaringBitmap::new();
         a.insert_range(0..2);
-        a.insert_range(10..2);
+        a.insert_range(10..12);
         validate_iter_ranges(&a);
     }
 
@@ -192,7 +192,7 @@ mod tests {
     fn test_middle_range_end_range() {
         let mut a = RoaringBitmap::new();
         a.insert_range(5..7);
-        a.insert_range(10..2);
+        a.insert_range(10..12);
         validate_iter_ranges(&a);
     }
 

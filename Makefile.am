@@ -149,6 +149,7 @@ rustclippy: $(RUSTDIRS)
 		set -e ; \
 		for dir in $(RUSTDIRS) ; do \
 			cargo clippy --workspace --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
+			cargo clippy --tests --workspace --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
 		done \
 	else \
 		echo "skipping rustclippy because cargo-clippy is not installed"; \
