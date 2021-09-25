@@ -1441,7 +1441,7 @@ impl Pool {
         Self::check_pending_flushes(state, syncing_state);
     }
 
-    pub fn write_block(&self, block: BlockId, data: Vec<u8>) -> impl Future<Output = ()> {
+    pub async fn write_block(&self, block: BlockId, data: Vec<u8>) {
         let data2 = data.clone(); // XXX copying
         let receiver = self.state.with_syncing_state(|syncing_state| {
             // XXX change to return error
@@ -1463,39 +1463,34 @@ impl Pool {
             receiver
         });
         let guid = self.state.shared_state.guid;
-        // XXX Cloning the zettacache has to clone several Arc's; maybe should
-        // have one that covers all the members?  Or find a way to use the
-        // Pool's zettacache?
         let cache = match *WRITES_INGEST_TO_ZETTACACHE {
-            true => self.state.zettacache.as_ref().cloned(),
+            true => self.state.zettacache.as_ref(),
             false => None,
         };
-        async move {
-            if let Some(cache) = cache {
-                match cache.lookup(guid, block).await {
-                    LookupResponse::Present(_) => {
-                        // Surprisingly, the BlockId may be in the cache even
-                        // when writing a "new" block, if the system crashed or
-                        // the pool rewound, causing a BlockId that was already
-                        // persisted to the cache to be reused.
-                        //
-                        // XXX Ideally we would force-evict it and then insert
-                        // again.  For now, we ignore the insertion request.
-                        // Subsequent lookups will return the wrong data, and we
-                        // rely on the checksum in the blkptr_t to catch it.
-                        // (Lookups without a preceeding insertion will also
-                        // return the wrong data, so this is no worse.)
-                        trace!(
-                            "writing block already in zettacache: {:?} {:?}",
-                            guid,
-                            block
-                        );
-                    }
-                    LookupResponse::Absent(key) => cache.insert(key, data2).await,
+        if let Some(cache) = cache {
+            match cache.lookup(guid, block).await {
+                LookupResponse::Present(_) => {
+                    // Surprisingly, the BlockId may be in the cache even
+                    // when writing a "new" block, if the system crashed or
+                    // the pool rewound, causing a BlockId that was already
+                    // persisted to the cache to be reused.
+                    //
+                    // XXX Ideally we would force-evict it and then insert
+                    // again.  For now, we ignore the insertion request.
+                    // Subsequent lookups will return the wrong data, and we
+                    // rely on the checksum in the blkptr_t to catch it.
+                    // (Lookups without a preceeding insertion will also
+                    // return the wrong data, so this is no worse.)
+                    trace!(
+                        "writing block already in zettacache: {:?} {:?}",
+                        guid,
+                        block
+                    );
                 }
+                LookupResponse::Absent(key) => cache.insert(key, data2).await,
             }
-            receiver.await.unwrap();
         }
+        receiver.await.unwrap();
     }
 
     async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Vec<u8> {

@@ -251,17 +251,17 @@ impl KernelConnectionState {
             .as_ref()
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
-        // Need to write_block() before spawning, so that the Pool knows what's been written before resume_complete()
-        let fut = pool.write_block(block, slice.to_vec());
+        // XXX copying data
+        let vec = slice.to_vec();
         Ok(Box::pin(async move {
-            fut.await;
-            let mut nvl = NvList::new_unique_names();
-            nvl.insert("Type", "write done").unwrap();
-            nvl.insert("block", &block.0).unwrap();
-            nvl.insert("request_id", &request_id).unwrap();
-            nvl.insert("token", &token).unwrap();
-            trace!("sending response: {:?}", nvl);
-            Ok(Some(nvl))
+            pool.write_block(block, vec).await;
+            let mut response = NvList::new_unique_names();
+            response.insert("Type", "write done").unwrap();
+            response.insert("block", &block.0).unwrap();
+            response.insert("request_id", &request_id).unwrap();
+            response.insert("token", &token).unwrap();
+            trace!("sending response: {:?}", response);
+            Ok(Some(response))
         }))
     }
 
