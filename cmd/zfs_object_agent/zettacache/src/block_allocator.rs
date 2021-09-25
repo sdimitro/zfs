@@ -227,8 +227,8 @@ impl SlabTrait for BitmapSlab {
         for slot in self.allocatable.iter() {
             let slot_offset = self.to_offset(slot);
             spacemap.alloc(alloc_offset, slot_offset - alloc_offset);
-            alloc_offset = slot_offset + u64::from(self.slot_size);
             written_segments += (slot_offset - alloc_offset) / u64::from(self.slot_size);
+            alloc_offset = slot_offset + u64::from(self.slot_size);
         }
         spacemap.alloc(alloc_offset, self.end_offset() - alloc_offset);
         written_segments += (self.end_offset() - alloc_offset) / u64::from(self.slot_size);
