@@ -5265,10 +5265,11 @@ top:
 		/*
 		 * Avoid writing single-copy data to a failing,
 		 * non-redundant vdev, unless we've already tried all
-		 * other vdevs.
+		 * other vdevs and it's not an object-based pool.
 		 */
 		if ((vd->vdev_stat.vs_write_errors > 0 ||
 		    vd->vdev_state < VDEV_STATE_HEALTHY) &&
+		    !vdev_is_object_based(mg->mg_vd) &&
 		    d == 0 && !try_hard && vd->vdev_children == 0) {
 			metaslab_trace_add(zal, mg, NULL, psize, d,
 			    TRACE_VDEV_ERROR, allocator);
