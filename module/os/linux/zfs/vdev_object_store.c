@@ -28,6 +28,7 @@
 #include <sys/abd.h>
 #include <sys/metaslab_impl.h>
 #include <sys/sock.h>
+#include <sys/zap.h>
 
 /*
  * Virtual device vector for object storage.
@@ -49,6 +50,7 @@
 #define	AGENT_TYPE_FLUSH_WRITES		"flush writes"
 #define	AGENT_TYPE_EXIT			"exit agent"
 #define	AGENT_TYPE_CLOSE_POOL		"close pool"
+#define	AGENT_TYPE_ENABLE_FEATURE	"enable feature"
 #define	AGENT_NAME		"name"
 #define	AGENT_SIZE		"size"
 #define	AGENT_TXG		"TXG"
@@ -69,6 +71,10 @@
 #define	AGENT_READONLY		"readonly"
 #define	AGENT_RESUME		"resume"
 #define	AGENT_HEAL		"heal"
+#define	AGENT_FEATURE		"feature"
+#define	AGENT_FEATURES		"features"
+#define	AGENT_REFCOUNT		"refcount"
+#define	AGENT_CAN_READONLY	"can_readonly"
 
 /*
  * By default, the logical/physical ashift for object store vdevs is set to
@@ -105,6 +111,7 @@ typedef enum {
 	VOS_SERIAL_OPEN_POOL,
 	VOS_SERIAL_END_TXG,
 	VOS_SERIAL_CLOSE_POOL,
+	VOS_SERIAL_ENABLE_FEATURE,
 	VOS_SERIAL_TYPES
 } vos_serial_types_t;
 
@@ -326,6 +333,14 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	return (sent == total_size ? 0 : SET_ERROR(EINTR));
 }
 
+static int
+agent_request_serial(vdev_object_store_t *vos, nvlist_t *nv, char *tag,
+    vos_serial_types_t wait_type)
+{
+	ASSERT(!vos->vos_serial_done[wait_type]);
+	return (agent_request(vos, nv, tag));
+}
+
 /*
  * Send request to agent; nvlist may be modified.
  */
@@ -385,7 +400,6 @@ static void
 agent_wait_serial(vdev_object_store_t *vos, vos_serial_types_t wait_type)
 {
 	mutex_enter(&vos->vos_outstanding_lock);
-	ASSERT(!vos->vos_serial_done[wait_type]);
 	while (!vos->vos_serial_done[wait_type])
 		cv_wait(&vos->vos_outstanding_cv, &vos->vos_outstanding_lock);
 	vos->vos_serial_done[wait_type] = B_FALSE;
@@ -476,7 +490,7 @@ object_store_stop_agent(vdev_t *vd)
 
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CLOSE_POOL);
-	agent_request(vos, nv, FTAG);
+	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CLOSE_POOL);
 	fnvlist_free(nv);
 	agent_wait_serial(vos, VOS_SERIAL_CLOSE_POOL);
 }
@@ -540,7 +554,7 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    spa_name(vd->vdev_spa),
 	    vd->vdev_path);
-	agent_request(vos, nv, FTAG);
+	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CREATE_POOL);
 
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
@@ -579,7 +593,7 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 	zfs_dbgmsg("agent_open_pool(guid=%llu bucket=%s)",
 	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    vd->vdev_path);
-	agent_request(vos, nv, FTAG);
+	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_OPEN_POOL);
 
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
@@ -654,7 +668,7 @@ agent_end_txg(vdev_object_store_t *vos, uint64_t txg, void *ub_buf,
 	zfs_dbgmsg("agent_end_txg(%llu), %u passes",
 	    (u_longlong_t)txg,
 	    vos->vos_vdev->vdev_spa->spa_sync_pass);
-	agent_request(vos, nv, FTAG);
+	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_END_TXG);
 	fnvlist_free(nv);
 }
 
@@ -672,6 +686,29 @@ agent_flush_writes(vdev_object_store_t *vos, uint64_t blockid)
 	agent_request(vos, nv, FTAG);
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
+}
+
+static void
+agent_set_feature(vdev_object_store_t *vos, zfeature_info_t *feature)
+{
+	mutex_enter(&vos->vos_sock_lock);
+	zfs_object_store_wait(vos, VOS_SOCK_READY);
+
+	nvlist_t *nv = fnvlist_alloc();
+	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_ENABLE_FEATURE);
+	fnvlist_add_string(nv, AGENT_FEATURE, feature->fi_guid);
+	zfs_dbgmsg("agent_set_feature: feature %s", feature->fi_guid);
+
+	/*
+	 * We do a serial operation here because we need to make sure that a
+	 * response is waited for before we proceed with the txg and
+	 * potentially finish it. This may be better suited for the upcoming
+	 * token-based approach planned for iostat.
+	 */
+	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_ENABLE_FEATURE);
+	mutex_exit(&vos->vos_sock_lock);
+	fnvlist_free(nv);
+	agent_wait_serial(vos, VOS_SERIAL_ENABLE_FEATURE);
 }
 
 static int
@@ -930,6 +967,19 @@ object_store_get_stats(vdev_t *vd, vdev_object_store_stats_t *vossp)
 	mutex_exit(&vos->vos_stats_lock);
 }
 
+static void
+update_features(spa_t *spa, nvlist_t *nv)
+{
+	for (nvpair_t *elem = nvlist_next_nvpair(nv, NULL);
+	     elem != NULL; elem = nvlist_next_nvpair(nv, elem) ) {
+		spa_feature_t feat;
+		if (zfeature_lookup_guid(nvpair_name(elem), &feat))
+			continue;
+
+		spa->spa_feat_refcount_cache[feat] = fnvpair_value_uint64(elem);
+	}
+}
+
 static int
 agent_read_all(vdev_object_store_t *vos, void *buf, size_t len)
 {
@@ -1044,6 +1094,9 @@ agent_reader(void *arg)
 		    vos->vos_vdev->vdev_spa->spa_normal_class,
 		    alloc_delta, 0, 0);
 
+		update_features(vos->vos_vdev->vdev_spa,
+		    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
+
 		mutex_enter(&vos->vos_outstanding_lock);
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_END_TXG]);
 		vos->vos_serial_done[VOS_SERIAL_END_TXG] = B_TRUE;
@@ -1060,6 +1113,9 @@ agent_reader(void *arg)
 			VERIFY0(nvlist_lookup_uint8_array(nv,
 			    AGENT_CONFIG, &arr, &len));
 			vos->vos_config = fnvlist_unpack((char *)arr, len);
+			
+			update_features(vos->vos_vdev->vdev_spa,
+			    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
 		}
 
 		uint64_t next_block = fnvlist_lookup_uint64(nv,
@@ -1079,17 +1135,31 @@ agent_reader(void *arg)
 		char *cause = fnvlist_lookup_string(nv, AGENT_CAUSE);
 		spa_t *spa = vos->vos_vdev->vdev_spa;
 		zfs_dbgmsg("got pool open failed cause=\"%s\"", cause);
-		ASSERT0(strcmp(cause, "MMP"));
-		fnvlist_add_string(spa->spa_load_info,
-		    ZPOOL_CONFIG_MMP_HOSTNAME, fnvlist_lookup_string(nv,
-		    AGENT_HOSTNAME));
-		fnvlist_add_uint64(spa->spa_load_info,
-		    ZPOOL_CONFIG_MMP_STATE, MMP_STATE_ACTIVE);
-		fnvlist_add_uint64(spa->spa_load_info,
-		    ZPOOL_CONFIG_MMP_TXG, 0);
+		if (strcmp(cause, "MMP") == 0) {
+			fnvlist_add_string(spa->spa_load_info,
+			    ZPOOL_CONFIG_MMP_HOSTNAME, fnvlist_lookup_string(nv,
+			    AGENT_HOSTNAME));
+			fnvlist_add_uint64(spa->spa_load_info,
+			    ZPOOL_CONFIG_MMP_STATE, MMP_STATE_ACTIVE);
+			fnvlist_add_uint64(spa->spa_load_info,
+			    ZPOOL_CONFIG_MMP_TXG, 0);
+			mutex_enter(&vos->vos_outstanding_lock);
+			vos->vos_result = SET_ERROR(EREMOTEIO);
+		} else {
+			ASSERT0(strcmp(cause, "feature"));
+			fnvlist_add_nvlist(spa->spa_load_info,
+			    ZPOOL_CONFIG_UNSUP_FEAT, fnvlist_lookup_nvlist(nv,
+			    AGENT_FEATURES));
+			if (fnvlist_lookup_boolean_value(nv,
+			    AGENT_CAN_READONLY)) {
+				fnvlist_add_boolean(spa->spa_load_info,
+				    ZPOOL_CONFIG_CAN_RDONLY);
+			}
 
-		mutex_enter(&vos->vos_outstanding_lock);
-		vos->vos_result = SET_ERROR(EREMOTEIO);
+			mutex_enter(&vos->vos_outstanding_lock);
+			vos->vos_result = SET_ERROR(ENOTSUP);
+		}
+
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_OPEN_POOL]);
 		vos->vos_serial_done[VOS_SERIAL_OPEN_POOL] = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
@@ -1138,6 +1208,12 @@ agent_reader(void *arg)
 		mutex_enter(&vos->vos_lock);
 		vos->vos_agent_thread_exit = B_TRUE;
 		mutex_exit(&vos->vos_lock);
+	} else if (strcmp(type, "enable feature done") == 0) {
+		mutex_enter(&vos->vos_outstanding_lock);
+		ASSERT(!vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE]);
+		vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE] = B_TRUE;
+		cv_broadcast(&vos->vos_outstanding_cv);
+		mutex_exit(&vos->vos_outstanding_lock);
 	} else {
 		zfs_dbgmsg("unrecognized response type!");
 	}
@@ -1539,6 +1615,12 @@ vdev_object_store_get_config(vdev_t *vd)
 	return (fnvlist_dup(vos->vos_config));
 }
 
+static void
+vdev_object_store_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
+{
+	agent_set_feature(vd->vdev_tsd, zfeature);
+}
+
 vdev_ops_t vdev_object_store_ops = {
 	.vdev_op_init = vdev_object_store_init,
 	.vdev_op_fini = vdev_object_store_fini,
@@ -1560,6 +1642,7 @@ vdev_ops_t vdev_object_store_ops = {
 	.vdev_op_config_generate = vdev_object_store_config_generate,
 	.vdev_op_nparity = NULL,
 	.vdev_op_ndisks = NULL,
+	.vdev_op_enable_feature = vdev_object_store_enable_feature,
 	.vdev_op_type = VDEV_TYPE_OBJSTORE,	/* name of this vdev type */
 	.vdev_op_leaf = B_TRUE			/* leaf vdev */
 };

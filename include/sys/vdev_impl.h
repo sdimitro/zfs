@@ -41,6 +41,7 @@
 #include <sys/vdev_rebuild.h>
 #include <sys/vdev_removal.h>
 #include <sys/zfs_ratelimit.h>
+#include <zfeature_common.h>
 
 #ifdef	__cplusplus
 extern "C" {
@@ -101,6 +102,7 @@ typedef void vdev_metaslab_init_func_t(vdev_t *vd, metaslab_t *msp,
 typedef void vdev_config_generate_func_t(vdev_t *vd, nvlist_t *nv);
 typedef uint64_t vdev_nparity_func_t(vdev_t *vd);
 typedef uint64_t vdev_ndisks_func_t(vdev_t *vd);
+typedef void vdev_enable_feature_func_t(vdev_t *vd, zfeature_info_t *zfeature);
 
 typedef const struct vdev_ops {
 	vdev_init_func_t		*vdev_op_init;
@@ -123,6 +125,7 @@ typedef const struct vdev_ops {
 	vdev_config_generate_func_t	*vdev_op_config_generate;
 	vdev_nparity_func_t		*vdev_op_nparity;
 	vdev_ndisks_func_t		*vdev_op_ndisks;
+	vdev_enable_feature_func_t	*vdev_op_enable_feature;
 	char				vdev_op_type[16];
 	boolean_t			vdev_op_leaf;
 } vdev_ops_t;

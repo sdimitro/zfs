@@ -59,6 +59,7 @@
 #include <sys/vdev_trim.h>
 #include <sys/zvol.h>
 #include <sys/zfs_ratelimit.h>
+#include <zfeature_common.h>
 
 /*
  * One metaslab from each (normal-class) vdev is used by the ZIL.  These are
@@ -313,6 +314,16 @@ uint64_t
 vdev_default_min_asize(vdev_t *vd)
 {
 	return (vd->vdev_min_asize);
+}
+
+void
+vdev_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
+{
+	for (int c = 0; c < vd->vdev_children; c++)
+		vdev_enable_feature(vd->vdev_child[c], zfeature);
+
+	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_ops->vdev_op_enable_feature != NULL)
+		vd->vdev_ops->vdev_op_enable_feature(vd, zfeature);
 }
 
 /*

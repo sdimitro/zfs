@@ -5,6 +5,7 @@
 
 pub mod base_types;
 mod data_object;
+mod features;
 mod heartbeat;
 pub mod init;
 mod kernel_connection;

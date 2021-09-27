@@ -1,4 +1,5 @@
 use crate::base_types::*;
+use crate::features::FeatureError;
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::server::handler_return_ok;
@@ -68,6 +69,7 @@ impl KernelConnectionState {
         server.register_handler("read block", Box::new(Self::read_block));
         server.register_handler("close pool", Box::new(Self::close_pool));
         server.register_handler("exit agent", Box::new(Self::exit_agent));
+        server.register_handler("enable feature", Box::new(Self::enable_feature));
     }
 
     fn get_object_access(nvl: &NvListRef) -> Result<ObjectAccess> {
@@ -118,11 +120,24 @@ impl KernelConnectionState {
 
             let (pool, phys_opt, next_block) =
                 match Pool::open(&object_access, guid, txg, cache, self.id, resume).await {
-                    Err(PoolOpenError::MmpError(hostname)) => {
+                    Err(PoolOpenError::Mmp(hostname)) => {
                         let mut response = NvList::new_unique_names();
                         response.insert("Type", "pool open failed").unwrap();
                         response.insert("cause", "MMP").unwrap();
                         response.insert("hostname", hostname.as_str()).unwrap();
+                        debug!("sending response: {:?}", response);
+                        return Ok(Some(response));
+                    }
+                    Err(PoolOpenError::Feature(FeatureError { features, readonly })) => {
+                        let mut response = NvList::new_unique_names();
+                        response.insert("Type", "pool open failed").unwrap();
+                        response.insert("cause", "feature").unwrap();
+                        let mut feature_nvl = NvList::new_unique_names();
+                        for feature in features {
+                            feature_nvl.insert(feature.name, "").unwrap();
+                        }
+                        response.insert("features", feature_nvl.as_ref()).unwrap();
+                        response.insert("can_readonly", &readonly).unwrap();
                         debug!("sending response: {:?}", response);
                         return Ok(Some(response));
                     }
@@ -139,6 +154,11 @@ impl KernelConnectionState {
                 response
                     .insert("config", &phys.get_zfs_config()[..])
                     .unwrap();
+                let mut feature_nvl = NvList::new_unique_names();
+                for (feature, refcount) in phys.features() {
+                    feature_nvl.insert(&feature.name, refcount).unwrap();
+                }
+                response.insert("features", feature_nvl.as_ref()).unwrap();
             }
 
             response.insert("next_block", &next_block.0).unwrap();
@@ -194,7 +214,11 @@ impl KernelConnectionState {
         uberblock: Vec<u8>,
         config: Vec<u8>,
     ) -> Result<Option<NvList>> {
-        let stats = pool.end_txg(uberblock, config).await;
+        let (stats, features) = pool.end_txg(uberblock, config).await;
+        let mut feature_nvl = NvList::new_unique_names();
+        for (feature, refcount) in features {
+            feature_nvl.insert(feature.name, &refcount).unwrap();
+        }
         let mut response = NvList::new_unique_names();
         response.insert("Type", "end txg done").unwrap();
         response
@@ -212,6 +236,7 @@ impl KernelConnectionState {
         response
             .insert("objects_count", &stats.objects_count)
             .unwrap();
+        response.insert("features", feature_nvl.as_ref()).unwrap();
         maybe_die_with(|| format!("before sending response: {:?}", response));
         debug!("sending response: {:?}", response);
         Ok(Some(response))
@@ -332,6 +357,22 @@ impl KernelConnectionState {
     fn exit_agent(&mut self, nvl: NvList) -> HandlerReturn {
         info!("got request: {:?}", nvl);
         Err(anyhow!("exit requested"))
+    }
+
+    fn enable_feature(&mut self, nvl: NvList) -> HandlerReturn {
+        debug!("got request: {:?}", nvl);
+        let pool = self
+            .pool
+            .as_ref()
+            .expect("Attempted to set feature with no pool")
+            .clone();
+        let feature_name = nvl.lookup_string("feature").unwrap().into_string().unwrap();
+        pool.enable_feature(&feature_name);
+        let mut response = NvList::new_unique_names();
+        response.insert("Type", "enable feature done").unwrap();
+        response.insert("feature", feature_name.as_str()).unwrap();
+        debug!("sending response: {:?}", response);
+        handler_return_ok(Some(response))
     }
 }
 

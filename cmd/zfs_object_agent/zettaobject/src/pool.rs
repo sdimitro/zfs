@@ -1,5 +1,8 @@
 use crate::base_types::*;
 use crate::data_object::DataObjectPhys;
+use crate::features;
+use crate::features::FeatureError;
+use crate::features::FeatureFlag;
 use crate::heartbeat;
 use crate::heartbeat::HeartbeatGuard;
 use crate::heartbeat::HeartbeatPhys;
@@ -27,6 +30,7 @@ use serde::{Deserialize, Serialize};
 use serde_bytes::ByteBuf;
 use std::borrow::Borrow;
 use std::cmp::{max, min};
+use std::collections::hash_map;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::convert::{TryFrom, TryInto};
 use std::fmt;
@@ -132,13 +136,14 @@ impl PoolOwnerPhys {
 }
 #[derive(Debug)]
 pub enum PoolOpenError {
-    MmpError(String),
-    GetError(Error),
+    Mmp(String),
+    Feature(FeatureError),
+    Get(Error),
 }
 
 impl From<anyhow::Error> for PoolOpenError {
     fn from(e: anyhow::Error) -> Self {
-        PoolOpenError::GetError(e)
+        PoolOpenError::Get(e)
     }
 }
 
@@ -185,6 +190,7 @@ pub struct UberblockPhys {
     next_block: BlockId,           // Next BlockID that can be allocated.
     obsolete_objects: Vec<ObjectId>, // Objects that need to be deleted.
     stats: PoolStatsPhys,
+    features: Vec<(FeatureFlag, u64)>, // Each pair is a feature and its refcount
     zfs_uberblock: TerseVec<u8>,
     zfs_config: TerseVec<u8>,
 }
@@ -293,6 +299,11 @@ impl UberblockPhys {
 
     pub fn get_zfs_config(&self) -> &Vec<u8> {
         &self.zfs_config.0
+    }
+
+    // Each pair is a featureflag and its refcount.
+    pub fn features(&self) -> &Vec<(FeatureFlag, u64)> {
+        &self.features
     }
 
     async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
@@ -482,6 +493,7 @@ struct PoolSyncingState {
     pending_flushes: BTreeSet<BlockId>,
     cleanup_handle: Option<JoinHandle<()>>,
     delete_objects_handle: Option<JoinHandle<()>>,
+    features: HashMap<FeatureFlag, u64>,
 }
 
 type SyncTask =
@@ -600,6 +612,36 @@ impl PoolSyncingState {
     fn get_pending_frees_log_for_obj(&mut self, object: ObjectId) -> &mut ReclaimLog {
         let log = self.get_log_id(object);
         &mut self.reclaim_info.reclaim_logs[log.as_index()]
+    }
+
+    #[allow(dead_code)]
+    fn feature_is_enabled(&mut self, flag: &FeatureFlag) -> bool {
+        self.features.contains_key(flag)
+    }
+
+    #[allow(dead_code)]
+    fn feature_is_active(&mut self, flag: &FeatureFlag) -> bool {
+        self.features.get(flag).map_or(false, |x| *x > 0)
+    }
+
+    #[allow(dead_code)]
+    fn feature_enable(&mut self, flag: FeatureFlag) {
+        assert!(self.features.insert(flag, 0).is_none());
+    }
+
+    #[allow(dead_code)]
+    fn feature_disable(&mut self, flag: &FeatureFlag) {
+        assert!(self.features.remove(flag).unwrap() == 0);
+    }
+
+    #[allow(dead_code)]
+    fn feature_increment_refcount(&mut self, flag: &FeatureFlag) {
+        *self.features.get_mut(flag).unwrap() += 1;
+    }
+
+    #[allow(dead_code)]
+    fn feature_decrement_refcount(&mut self, flag: &FeatureFlag) {
+        *self.features.get_mut(flag).unwrap() -= 1;
     }
 }
 
@@ -752,10 +794,11 @@ impl Pool {
         txg: Txg,
         cache: Option<ZettaCache>,
         heartbeat_guard: Option<HeartbeatGuard>,
-    ) -> (Pool, UberblockPhys, BlockId) {
-        let phys = UberblockPhys::get(object_access, pool_phys.guid, txg)
-            .await
-            .unwrap();
+        readonly: bool,
+    ) -> Result<(Pool, UberblockPhys, BlockId), PoolOpenError> {
+        let phys = UberblockPhys::get(object_access, pool_phys.guid, txg).await?;
+
+        features::check_features(phys.features.iter().map(|(f, _)| f), readonly)?;
 
         let shared_state = Arc::new(PoolSharedState {
             object_access: object_access.clone(),
@@ -807,6 +850,7 @@ impl Pool {
                     pending_flushes: Default::default(),
                     cleanup_handle: None,
                     delete_objects_handle: None,
+                    features: phys.features.iter().cloned().collect(),
                 })),
                 zettacache: cache,
                 object_block_map,
@@ -829,7 +873,7 @@ impl Pool {
         //println!("opened {:#?}", pool);
 
         *pool.state.syncing_state.lock().unwrap() = Some(syncing_state);
-        (pool, phys, next_block)
+        Ok((pool, phys, next_block))
     }
 
     pub async fn open(
@@ -895,6 +939,7 @@ impl Pool {
                         pending_flushes: Default::default(),
                         cleanup_handle: None,
                         delete_objects_handle: None,
+                        features: Default::default(),
                     })),
                     zettacache: cache,
                     object_block_map,
@@ -921,8 +966,9 @@ impl Pool {
                 } else {
                     None
                 },
+                object_access.readonly(),
             )
-            .await;
+            .await?;
 
             pool.claim(id).await?;
 
@@ -1165,7 +1211,11 @@ impl Pool {
         })
     }
 
-    pub async fn end_txg(&self, uberblock: Vec<u8>, config: Vec<u8>) -> PoolStatsPhys {
+    pub async fn end_txg(
+        &self,
+        uberblock: Vec<u8>,
+        config: Vec<u8>,
+    ) -> (PoolStatsPhys, Vec<(FeatureFlag, u64)>) {
         let state = &self.state;
 
         let mut syncing_state = state.syncing_state.lock().unwrap().take().unwrap();
@@ -1190,11 +1240,17 @@ impl Pool {
 
             let stats = syncing_state.stats;
 
+            let feature_vec = syncing_state
+                .features
+                .iter()
+                .map(|(f, r)| (f.clone(), *r))
+                .collect();
+
             // put syncing_state back in the Option
             assert!(state.syncing_state.lock().unwrap().is_none());
             *state.syncing_state.lock().unwrap() = Some(syncing_state);
 
-            return stats;
+            return (stats, feature_vec);
         }
 
         // should have already been flushed; no pending writes
@@ -1258,6 +1314,11 @@ impl Pool {
             zfs_uberblock: TerseVec(uberblock),
             stats: syncing_state.stats,
             zfs_config: TerseVec(config),
+            features: syncing_state
+                .features
+                .iter()
+                .map(|(x, y)| (x.clone(), *y))
+                .collect(),
         };
         u.put(&state.shared_state.object_access).await;
 
@@ -1292,11 +1353,17 @@ impl Pool {
 
         let stats = syncing_state.stats;
 
+        let feature_vec = syncing_state
+            .features
+            .iter()
+            .map(|(f, r)| (f.clone(), *r))
+            .collect();
+
         // put syncing_state back in the Option
         assert!(state.syncing_state.lock().unwrap().is_none());
         *state.syncing_state.lock().unwrap() = Some(syncing_state);
 
-        stats
+        (stats, feature_vec)
     }
 
     fn check_pending_flushes(state: &PoolState, syncing_state: &mut PoolSyncingState) {
@@ -1642,7 +1709,7 @@ impl Pool {
                     return Ok(());
                 }
                 OwnResult::Failure(heartbeat) => {
-                    return Err(PoolOpenError::MmpError(heartbeat.hostname));
+                    return Err(PoolOpenError::Mmp(heartbeat.hostname));
                 }
                 OwnResult::Retry => {
                     continue;
@@ -1663,6 +1730,20 @@ impl Pool {
 
     pub async fn close(self) {
         self.unclaim().await;
+    }
+
+    pub fn enable_feature(&self, feature_name: &str) {
+        let feature = crate::features::get_feature(feature_name).unwrap_or_else(|| {
+            panic!(
+                "Unknown feature {} requested by kernel; update agent",
+                feature_name
+            )
+        });
+        self.state.with_syncing_state(|syncing_state| {
+            if let hash_map::Entry::Vacant(e) = syncing_state.features.entry(feature) {
+                e.insert(0);
+            }
+        });
     }
 }
 
