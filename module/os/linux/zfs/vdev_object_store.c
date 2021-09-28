@@ -971,7 +971,7 @@ static void
 update_features(spa_t *spa, nvlist_t *nv)
 {
 	for (nvpair_t *elem = nvlist_next_nvpair(nv, NULL);
-	     elem != NULL; elem = nvlist_next_nvpair(nv, elem) ) {
+	    elem != NULL; elem = nvlist_next_nvpair(nv, elem)) {
 		spa_feature_t feat;
 		if (zfeature_lookup_guid(nvpair_name(elem), &feat))
 			continue;
@@ -1113,7 +1113,7 @@ agent_reader(void *arg)
 			VERIFY0(nvlist_lookup_uint8_array(nv,
 			    AGENT_CONFIG, &arr, &len));
 			vos->vos_config = fnvlist_unpack((char *)arr, len);
-			
+
 			update_features(vos->vos_vdev->vdev_spa,
 			    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
 		}

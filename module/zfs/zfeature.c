@@ -310,7 +310,7 @@ feature_sync(spa_t *spa, zfeature_info_t *feature, uint64_t refcount,
 	    (feature->fi_flags & ZFEATURE_FLAG_READONLY_COMPAT) ?
 	    spa->spa_feat_for_write_obj : spa->spa_feat_for_read_obj;
 	VERIFY0(zap_update(spa->spa_meta_objset, zapobj,
-		feature->fi_guid, sizeof (uint64_t), 1, &refcount, tx));
+	    feature->fi_guid, sizeof (uint64_t), 1, &refcount, tx));
 
 	/*
 	 * feature_sync is called directly from zhack, allowing the
@@ -356,7 +356,7 @@ feature_enable_sync(spa_t *spa, zfeature_info_t *feature, dmu_tx_t *tx)
 
 	for (int i = 0; feature->fi_depends[i] != SPA_FEATURE_NONE; i++)
 		spa_feature_enable(spa, feature->fi_depends[i], tx);
-	
+
 	if (feature->fi_flags & ZFEATURE_FLAG_AGENT) {
 		vdev_enable_feature(spa->spa_root_vdev, feature);
 		return;

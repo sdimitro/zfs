@@ -322,8 +322,10 @@ vdev_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
 	for (int c = 0; c < vd->vdev_children; c++)
 		vdev_enable_feature(vd->vdev_child[c], zfeature);
 
-	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_ops->vdev_op_enable_feature != NULL)
+	if (vd->vdev_ops->vdev_op_leaf &&
+	    vd->vdev_ops->vdev_op_enable_feature != NULL) {
 		vd->vdev_ops->vdev_op_enable_feature(vd, zfeature);
+	}
 }
 
 /*
