@@ -106,6 +106,8 @@
  */
 int zfs_ccw_retry_interval = 300;
 
+int zfs_freeing_includes_agent = 0;
+
 typedef enum zti_modes {
 	ZTI_MODE_FIXED,			/* value is # of threads (min 1) */
 	ZTI_MODE_BATCH,			/* cpu-intensive; value is ignored */
@@ -362,7 +364,7 @@ spa_prop_get_config(spa_t *spa, nvlist_t **nvp)
 			freeing +=
 			    dsl_dir_phys(pool->dp_free_dir)->dd_used_bytes;
 		}
-		if (spa_is_object_based(spa)) {
+		if (spa_is_object_based(spa) && zfs_freeing_includes_agent) {
 			vdev_object_store_stats_t voss;
 			object_store_get_stats(rvd->vdev_child[0], &voss);
 			freeing += voss.voss_pending_frees_bytes;
@@ -10081,4 +10083,7 @@ ZFS_MODULE_PARAM(zfs_livelist_condense, zfs_livelist_condense_, zthr_cancel, INT
 ZFS_MODULE_PARAM(zfs_livelist_condense, zfs_livelist_condense_, new_alloc, INT, ZMOD_RW,
 	"Whether extra ALLOC blkptrs were added to a livelist entry while it "
 	"was being condensed");
+
+ZFS_MODULE_PARAM(zfs, zfs_, freeing_includes_agent, INT, ZMOD_RW,
+	"Does freeing property include zfs_object_agent's pending frees?");
 /* END CSTYLED */
