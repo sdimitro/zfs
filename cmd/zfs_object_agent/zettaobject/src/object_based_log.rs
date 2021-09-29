@@ -43,30 +43,28 @@ pub struct ObjectBasedLogPhys<T: ObjectBasedLogEntry> {
 
 impl<T: ObjectBasedLogEntry> ObjectBasedLogPhys<T> {
     pub async fn cleanup_older_generations(&self, object_access: &ObjectAccess) {
-        let mut generations = object_access
-            .collect_prefixes(&format!("{}/", self.key))
-            .await;
+        // Stream<Item=String> of generation prefixes
+        let generations = object_access
+            .list_prefixes(&format!("{}/", self.key))
+            .filter(|key| {
+                future::ready(
+                    key.rsplit('/').collect::<Vec<&str>>()[1]
+                        .parse::<u64>()
+                        .unwrap()
+                        < self.generation,
+                )
+            })
+            .inspect(|key| debug!("cleanup: old generation {}", key));
 
-        generations.retain(|gen| {
-            gen.rsplit('/').collect::<Vec<&str>>()[1]
-                .parse::<u64>()
-                .unwrap()
-                < self.generation
-        });
-        if generations.is_empty() {
-            return;
-        }
-        debug!(
-            "Retreiving old generations of {}: {:?}",
-            self.key, generations
-        );
-        let mut object_list = Vec::new();
-        for generation in generations {
-            object_list.append(&mut object_access.collect_all_objects(generation.as_str()).await);
-        }
-        trace!("All old generation objects: {:?}", object_list);
-        assert!(!object_list.is_empty());
-        object_access.delete_objects(&object_list).await;
+        object_access
+            .delete_objects(
+                generations
+                    .flat_map(|generation| {
+                        Box::pin(object_access.list_objects(&generation, None, false))
+                    })
+                    .inspect(|key| trace!("cleanup: old generation chunk {}", key)),
+            )
+            .await;
     }
 }
 
@@ -198,31 +196,37 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
             ))
         };
         let current_generation_cleanup = async move {
-            let objects = shared_state
+            shared_state
                 .object_access
-                .collect_objects(&last_generation_key, start_after)
+                .delete_objects(
+                    shared_state
+                        .object_access
+                        .list_objects(&last_generation_key, start_after, true)
+                        .inspect(|key| {
+                            info!(
+                                "cleanup: deleting future chunk of current generation: {}",
+                                key
+                            )
+                        }),
+                )
                 .await;
-            for chunk in objects.chunks(900) {
-                info!(
-                    "cleanup: deleting future chunks of current generation: {:?}",
-                    chunk
-                );
-                shared_state.object_access.delete_objects(chunk).await;
-            }
         };
 
         // collect chunks from the partially-complete future generation
         let shared_state = self.shared_state.clone();
         let next_generation_key = format!("{}/{:020}/", self.name, self.generation + 1);
         let next_generation_cleanup = async move {
-            let objects = shared_state
+            shared_state
                 .object_access
-                .collect_objects(&next_generation_key, None)
+                .delete_objects(
+                    shared_state
+                        .object_access
+                        .list_objects(&next_generation_key, None, true)
+                        .inspect(|key| {
+                            info!("cleanup: deleting chunk of future generation: {}", key)
+                        }),
+                )
                 .await;
-            for chunk in objects.chunks(900) {
-                info!("cleanup: deleting chunks of future generation: {:?}", chunk);
-                shared_state.object_access.delete_objects(chunk).await;
-            }
         };
 
         // execute both cleanup's concurrently

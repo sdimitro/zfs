@@ -20,6 +20,8 @@ use futures::future;
 use futures::future::Either;
 use futures::future::Future;
 use futures::future::{join3, join5};
+use futures::stream;
+use futures::stream::select_all::select_all;
 use futures::stream::*;
 use futures::FutureExt;
 use lazy_static::lazy_static;
@@ -333,8 +335,11 @@ impl UberblockPhys {
     }
 
     async fn delete_many(object_access: &ObjectAccess, guid: PoolGuid, txgs: Vec<Txg>) {
-        let keys: Vec<String> = txgs.iter().map(|txg| Self::key(guid, *txg)).collect();
-        object_access.delete_objects(&keys).await;
+        object_access
+            .delete_objects(stream::iter(
+                txgs.into_iter().map(|txg| Self::key(guid, txg)),
+            ))
+            .await;
     }
 
     async fn cleanup_older_uberblocks(object_access: &ObjectAccess, ub: UberblockPhys) {
@@ -666,26 +671,29 @@ impl PoolState {
         let shared_state = &self.shared_state;
         let txg_key = format!("zfs/{}/txg/", shared_state.guid);
         let start_after = Some(UberblockPhys::key(shared_state.guid, last_txg));
-        let objects = shared_state
+        shared_state
             .object_access
-            .collect_objects(&txg_key, start_after)
+            .delete_objects(
+                shared_state
+                    .object_access
+                    .list_objects(&txg_key, start_after, true)
+                    .inspect(|key| info!("cleanup: deleting future uberblock: {}", key)),
+            )
             .await;
-        for chunk in objects.chunks(900) {
-            info!("cleanup: deleting future uberblocks: {:?}", chunk);
-            shared_state.object_access.delete_objects(chunk).await;
-        }
     }
 
     /// Remove log objects from log at prefix starting at next_id
     async fn cleanup_orphaned_logs(&self, prefix: &str, next_id: ReclaimLogId) {
         let shared_state = &self.shared_state.clone();
-        let objects = shared_state
+        shared_state
             .object_access
-            .collect_all_objects_after(prefix, &format!("{}/{}", prefix, next_id))
+            .delete_objects(
+                shared_state
+                    .object_access
+                    .list_objects(prefix, Some(format!("{}/{}", prefix, next_id)), false)
+                    .inspect(|key| info!("cleanup: deleting orphaned log object: {}", key)),
+            )
             .await;
-
-        info!("cleanup: deleting orphaned log objects: {:?}", objects);
-        shared_state.object_access.delete_objects(&objects).await;
     }
 
     /// Remove any log objects that are invalid (i.e. created as part of an
@@ -739,33 +747,30 @@ impl PoolState {
     /// before the kernel crashed.
     async fn cleanup_data_objects(&self) {
         let shared_state = self.shared_state.clone();
-
+        let oa = &shared_state.object_access;
         let begin = Instant::now();
         let last_obj = self.object_block_map.last_object();
-        let list_stream = FuturesUnordered::new();
-        for prefix in DataObjectPhys::prefixes(shared_state.guid) {
-            let shared_state = shared_state.clone();
-            list_stream.push(async move {
-                shared_state
-                    .object_access
-                    .collect_objects(&prefix, Some(format!("{}{}", prefix, last_obj)))
-                    .await
-            });
-        }
+        let mut count = 0;
 
-        let objects = list_stream
-            .fold(Vec::new(), |mut vec, mut x| async move {
-                vec.append(&mut x);
-                vec
-            })
-            .await;
-        for chunk in objects.chunks(900) {
-            shared_state.object_access.delete_objects(chunk).await;
-        }
+        oa.delete_objects(
+            select_all(
+                DataObjectPhys::prefixes(shared_state.guid)
+                    .iter()
+                    .map(|prefix| {
+                        Box::pin(oa.list_objects(
+                            prefix,
+                            Some(format!("{}{}", prefix, last_obj)),
+                            true,
+                        ))
+                    }),
+            )
+            .inspect(|_| count += 1),
+        )
+        .await;
 
         info!(
             "cleanup: found and deleted {} data objects in {}ms",
-            objects.len(),
+            count,
             begin.elapsed().as_millis()
         );
     }
@@ -1763,12 +1768,11 @@ async fn delete_data_objects(shared_state: Arc<PoolSharedState>, objects: Vec<Ob
         let begin = Instant::now();
         shared_state
             .object_access
-            .delete_objects(
-                &objects
-                    .iter()
-                    .map(|&o| DataObjectPhys::key(shared_state.guid, o))
-                    .collect::<Vec<_>>(),
-            )
+            .delete_objects(stream::iter(
+                objects
+                    .into_iter()
+                    .map(|o| DataObjectPhys::key(shared_state.guid, o)),
+            ))
             .await;
         info!(
             "reclaim: deleted {} objects in {}ms",

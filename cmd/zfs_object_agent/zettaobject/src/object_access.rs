@@ -3,7 +3,9 @@ use async_stream::stream;
 use bytes::Bytes;
 use core::time::Duration;
 use futures::future::Either;
+use futures::stream::{self, StreamExt};
 use futures::{future, Future, TryStreamExt};
+use futures_core::Stream;
 use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
@@ -13,6 +15,7 @@ use rusoto_core::{ByteStream, RusotoError};
 use rusoto_credential::{AutoRefreshingProvider, ChainProvider, ProfileProvider};
 use rusoto_s3::*;
 use std::convert::TryFrom;
+use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
@@ -362,110 +365,82 @@ impl ObjectAccess {
         };
         either.await
     }
-    pub async fn list_objects(
-        &self,
-        prefix: &str,
-        start_after: Option<String>,
-    ) -> Vec<ListObjectsV2Output> {
-        self.list_objects_impl(prefix, start_after, Some("/".to_owned()))
-            .await
-    }
 
-    pub async fn list_objects_impl(
+    fn list_impl(
         &self,
         prefix: &str,
         start_after: Option<String>,
-        delimiter: Option<String>,
-    ) -> Vec<ListObjectsV2Output> {
+        use_delimiter: bool,
+        list_prefixes: bool,
+    ) -> impl Stream<Item = String> {
         let full_prefix = prefixed(prefix);
         let full_start_after = start_after.map(|sa| prefixed(&sa));
-        let mut results = Vec::new();
         let mut continuation_token = None;
-        loop {
-            continuation_token = match retry(
-                &format!("list {} (after {:?})", full_prefix, full_start_after),
-                None,
-                || async {
-                    let req = ListObjectsV2Request {
-                        bucket: self.bucket_str.clone(),
-                        continuation_token: continuation_token.clone(),
-                        delimiter: delimiter.clone(),
-                        fetch_owner: Some(false),
-                        prefix: Some(full_prefix.clone()),
-                        start_after: full_start_after.clone(),
-                        ..Default::default()
-                    };
-                    // Note: Ok(...?) converts the RusotoError to an OAError for us
-                    Ok(self.client.list_objects_v2(req).await?)
-                },
-            )
-            .await
-            .unwrap()
-            {
-                #[rustfmt::skip]
-                output @ ListObjectsV2Output {next_continuation_token: Some(_), ..} => {
-                    let next_token = output.next_continuation_token.clone();
-                    results.push(output);
-                    next_token
+        // XXX ObjectAccess should really be refcounted (behind Arc)
+        let client = self.client.clone();
+        let bucket = self.bucket_str.clone();
+        let delimiter = match use_delimiter {
+            true => Some("/".to_string()),
+            false => None,
+        };
+        stream! {
+            loop {
+                let output = retry(
+                    &format!("list {} (after {:?})", full_prefix, full_start_after),
+                    None,
+                    || async {
+                        let req = ListObjectsV2Request {
+                            bucket: bucket.clone(),
+                            continuation_token: continuation_token.clone(),
+                            delimiter: delimiter.clone(),
+                            fetch_owner: Some(false),
+                            prefix: Some(full_prefix.clone()),
+                            start_after: full_start_after.clone(),
+                            ..Default::default()
+                        };
+                        // Note: Ok(...?) converts the RusotoError to an OAError for us
+                        Ok(client.list_objects_v2(req).await?)
+                    },
+                )
+                .await
+                .unwrap();
+
+                if list_prefixes {
+                    if let Some(prefixes) = output.common_prefixes {
+                        for prefix in prefixes {
+                            yield prefix.prefix.unwrap();
+                        }
+                    }
+                } else {
+                    if let Some(objects) = output.contents {
+                        for object in objects {
+                            yield object.key.unwrap();
+                        }
+                    }
                 }
-                output => {
-                    results.push(output);
+                if output.next_continuation_token.is_none() {
                     break;
                 }
-            };
+                continuation_token = output.next_continuation_token;
+            }
         }
-        results
+    }
+
+    pub fn list_objects(
+        &self,
+        prefix: &str,
+        start_after: Option<String>,
+        use_delimiter: bool,
+    ) -> impl Stream<Item = String> {
+        self.list_impl(prefix, start_after, use_delimiter, false)
+    }
+
+    pub fn list_prefixes(&self, prefix: &str) -> impl Stream<Item = String> {
+        self.list_impl(prefix, None, true, true)
     }
 
     pub async fn collect_objects(&self, prefix: &str, start_after: Option<String>) -> Vec<String> {
-        let mut vec = Vec::new();
-        for output in self.list_objects(prefix, start_after).await {
-            if let Some(objects) = output.contents {
-                for object in objects {
-                    vec.push(object.key.unwrap());
-                }
-            }
-        }
-        vec
-    }
-
-    pub async fn collect_prefixes(&self, prefix: &str) -> Vec<String> {
-        let mut vec = Vec::new();
-        for output in self.list_objects(prefix, None).await {
-            if let Some(prefixes) = output.common_prefixes {
-                for prefix in prefixes {
-                    vec.push(prefix.prefix.unwrap());
-                }
-            }
-        }
-        vec
-    }
-
-    pub async fn collect_all_objects(&self, prefix: &str) -> Vec<String> {
-        let mut vec = Vec::new();
-        for output in self.list_objects_impl(prefix, None, None).await {
-            if let Some(objects) = output.contents {
-                for object in objects {
-                    vec.push(object.key.unwrap());
-                }
-            }
-        }
-        vec
-    }
-
-    pub async fn collect_all_objects_after(&self, prefix: &str, start_after: &str) -> Vec<String> {
-        let mut vec = Vec::new();
-        for output in self
-            .list_objects_impl(prefix, Some(start_after.to_string()), None)
-            .await
-        {
-            if let Some(objects) = output.contents {
-                for object in objects {
-                    vec.push(object.key.unwrap());
-                }
-            }
-        }
-        vec
+        self.list_objects(prefix, start_after, true).collect().await
     }
 
     pub async fn head_object(&self, key: &str) -> Option<HeadObjectOutput> {
@@ -546,48 +521,48 @@ impl ObjectAccess {
     }
 
     pub async fn delete_object(&self, key: &str) {
-        self.delete_objects(&[key.to_string()]).await;
+        self.delete_objects(stream::iter(iter::once(key.to_string())))
+            .await;
     }
 
-    pub async fn delete_objects(&self, keys: &[String]) {
-        // Note: we intentionally issue the delete calls serially because
-        // AWS doesn't like getting a lot of them at the same time (it
-        // returns HTTP 503 "Please reduce your request rate.")
-        for chunk in keys.chunks(*OBJECT_DELETION_BATCH_SIZE) {
-            let msg = format!(
-                "delete {} objects including {}",
-                chunk.len(),
-                prefixed(&chunk[0])
-            );
-            assert!(!self.readonly);
-            retry(&msg, None, || async {
-                let v: Vec<_> = chunk
-                    .iter()
-                    .map(|x| ObjectIdentifier {
-                        key: prefixed(x),
+    // Note: Stream is of raw keys (with prefix)
+    pub async fn delete_objects<S: Stream<Item = String>>(&self, stream: S) {
+        // Note: we intentionally issue the delete calls serially because it
+        // doesn't seem to improve performance if we issue them in parallel
+        // (using StreamExt::for_each_concurrent()).
+        stream
+            .chunks(*OBJECT_DELETION_BATCH_SIZE)
+            .for_each(|chunk| async move {
+                let msg = format!("delete {} objects including {}", chunk.len(), &chunk[0]);
+                assert!(!self.readonly);
+                retry(&msg, None, || async {
+                    let req = DeleteObjectsRequest {
+                        bucket: self.bucket_str.clone(),
+                        delete: Delete {
+                            objects: chunk
+                                .iter()
+                                .map(|key| ObjectIdentifier {
+                                    key: key.clone(),
+                                    ..Default::default()
+                                })
+                                .collect(),
+                            quiet: Some(true),
+                        },
                         ..Default::default()
-                    })
-                    .collect();
-                let req = DeleteObjectsRequest {
-                    bucket: self.bucket_str.clone(),
-                    delete: Delete {
-                        objects: v,
-                        quiet: Some(true),
-                    },
-                    ..Default::default()
-                };
-                let output = self.client.delete_objects(req).await?;
-                if let Some(errs) = output.errors {
-                    match errs.get(0) {
-                        Some(e) => return Err(OAError::Other(anyhow!("{:?}", e))),
-                        None => return Ok(()),
+                    };
+                    let output = self.client.delete_objects(req).await?;
+                    match output.errors {
+                        Some(errs) => match errs.get(0) {
+                            Some(e) => Err(OAError::Other(anyhow!("{:?}", e))),
+                            None => Ok(()),
+                        },
+                        None => Ok(()),
                     }
-                }
-                Ok(())
+                })
+                .await
+                .unwrap();
             })
-            .await
-            .unwrap();
-        }
+            .await;
     }
 
     pub fn bucket(&self) -> String {

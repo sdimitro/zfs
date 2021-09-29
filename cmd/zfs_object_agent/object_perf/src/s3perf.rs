@@ -59,7 +59,10 @@ impl Perf {
         qdepth: u64,
         duration: Duration,
     ) {
-        let num_objects = object_access.collect_objects(&key_prefix, None).await.len();
+        let num_objects = object_access
+            .list_objects(&key_prefix, None, true)
+            .fold(0, |count, _key| async move { count + 1 })
+            .await;
         let mut key_id = 0;
         let start = Instant::now();
         stream::repeat_with(|| {
@@ -152,8 +155,9 @@ pub async fn write_test(
 
     println!("{:#?}", perf.metrics.put);
 
-    let object_keys = object_access.collect_all_objects(key_prefix).await;
-    object_access.delete_objects(&object_keys).await;
+    object_access
+        .delete_objects(object_access.list_objects(key_prefix, None, false))
+        .await;
 
     Ok(())
 }
@@ -183,8 +187,9 @@ pub async fn read_test(
 
     println!("{:#?}", perf.metrics.get);
 
-    let object_keys = object_access.collect_all_objects(key_prefix).await;
-    object_access.delete_objects(&object_keys).await;
+    object_access
+        .delete_objects(object_access.list_objects(key_prefix, None, false))
+        .await;
 
     Ok(())
 }

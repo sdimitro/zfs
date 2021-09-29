@@ -3,6 +3,7 @@ use chrono::DateTime;
 use clap::Arg;
 use clap::SubCommand;
 use client::Client;
+use futures::stream::StreamExt;
 use lazy_static::lazy_static;
 use nvpair::*;
 use rand::prelude::*;
@@ -345,19 +346,7 @@ fn strip_prefix(prefix: &str) -> &str {
 }
 
 async fn find_old_pools(object_access: &ObjectAccess, min_age: Duration) -> Vec<String> {
-    let mut pool_keys = object_access.collect_prefixes("zfs/").await;
-
-    let aws_prefix: &String = &AWS_PREFIX;
-    if aws_prefix.is_empty() {
-        for prefix in object_access.collect_prefixes("").await {
-            pool_keys.append(
-                &mut object_access
-                    .collect_prefixes(&format!("{}zfs/", prefix))
-                    .await,
-            );
-        }
-    }
-
+    let pool_keys: Vec<String> = object_access.list_prefixes("zfs/").collect().await;
     let mut vec = Vec::new();
     for pool_key in pool_keys {
         match object_access
@@ -389,12 +378,13 @@ async fn do_list_pools(
     object_access: &ObjectAccess,
     list_all_objects: bool,
 ) -> Result<(), Box<dyn Error>> {
-    for pool_keys in find_old_pools(object_access, Duration::from_secs(0)).await {
+    for pool_key in find_old_pools(object_access, Duration::from_secs(0)).await {
         // Lookup all objects in the pool.
         if list_all_objects {
-            for object in object_access.collect_all_objects(&pool_keys).await {
-                println!("    {}", object);
-            }
+            object_access
+                .list_objects(&pool_key, None, false)
+                .for_each(|object| async move { println!("    {}", object) })
+                .await;
         }
     }
     Ok(())
@@ -405,14 +395,8 @@ async fn do_destroy_old_pools(
     min_age: Duration,
 ) -> Result<(), Box<dyn Error>> {
     for pool_keys in find_old_pools(object_access, min_age).await {
-        let object_keys = object_access.collect_all_objects(&pool_keys).await;
         object_access
-            .delete_objects(
-                &object_keys
-                    .iter()
-                    .map(|o| strip_prefix(o).to_string())
-                    .collect::<Vec<_>>(),
-            )
+            .delete_objects(object_access.list_objects(&pool_keys, None, false))
             .await;
     }
     Ok(())
@@ -447,7 +431,7 @@ async fn do_test_connectivity(object_access: &ObjectAccess) {
     let content = "test connectivity to S3".as_bytes().to_vec();
 
     object_access.put_object(&file, content).await;
-    object_access.delete_objects(&[file.to_string()]).await;
+    object_access.delete_object(&file).await;
 }
 
 async fn test_connectivity(object_access: &ObjectAccess) -> Result<(), Box<dyn Error>> {
