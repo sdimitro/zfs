@@ -72,6 +72,12 @@ lazy_static! {
     // Therefore this setting should be >2M.
     static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = get_tunable("reclaim_log_entries_limit", 10_000_000);
 
+    // When reclaiming free blocks, allow this many concurrent
+    // GetObject+PutObject requests.
+    static ref RECLAIM_QUEUE_DEPTH: usize = get_tunable("reclaim_queue_depth", 200);
+    // Max concurrent GetObject's for a single object consolidation.
+    static ref RECLAIM_ONE_BUFFERED: usize = *RECLAIM_QUEUE_DEPTH / 10 + 1;
+
     // minimum number of chunks before we consider condensing
     static ref LOG_CONDENSE_MIN_CHUNKS: usize = get_tunable("log_condense_min_chunks", 30);
     // when log is 5x as large as the condensed version
@@ -2047,7 +2053,7 @@ async fn reclaim_frees_object(
         }));
     }
     let mut new_phys = stream
-        .buffered(10)
+        .buffered(*RECLAIM_ONE_BUFFERED)
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.guid, b.guid);
             debug!(
@@ -2389,7 +2395,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         let mut rewritten_object_sizes: Vec<ObjectSize> = Vec::new();
         let mut deleted_objects: Vec<ObjectId> = Vec::new();
         let mut writing: HashSet<ObjectId> = HashSet::new();
-        let outstanding = Arc::new(tokio::sync::Semaphore::new(30));
+        let outstanding = Arc::new(tokio::sync::Semaphore::new(*RECLAIM_QUEUE_DEPTH));
         for (_, object) in objects_by_frees {
             if !frees_per_object.contains_key(&object) {
                 // this object is being removed by a multi-object consolidation
@@ -2451,12 +2457,15 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
             // we calculate the size based on the object contents, and
             // return it from the spawned task.
 
-            let sem2 = outstanding.clone();
+            // Reclaim_frees_object reads all its objects in parallel, up to
+            // RECLAIM_ONE_BUFFERED.
+            let num_permits: u32 = min(*RECLAIM_ONE_BUFFERED, objects_to_consolidate.len())
+                .try_into()
+                .unwrap();
+            let permit = outstanding.clone().acquire_many_owned(num_permits).await;
             let state2 = state.clone();
             join_handles.push(tokio::spawn(async move {
-                // limits the amount of outstanding get/put requests (roughly).
-                // XXX would be nice to do this based on number of objs to consolidate
-                let _permit = sem2.acquire().await.unwrap();
+                let _permit = permit; // force permit to be moved & dropped in the task
                 reclaim_frees_object(state2, objects_to_consolidate).await
             }));
             if freed_blocks_bytes > required_free_bytes {

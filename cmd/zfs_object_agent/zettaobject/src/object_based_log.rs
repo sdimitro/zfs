@@ -20,6 +20,8 @@ use zettacache::get_tunable;
 
 lazy_static! {
     pub static ref ENTRIES_PER_OBJECT: usize = get_tunable("entries_per_object", 100_000);
+    pub static ref OBJECT_LOG_ITERATE_QUEUE_DEPTH: usize =
+        get_tunable("object_log_iterate_queue_depth", 100);
 }
 
 /*
@@ -327,7 +329,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         // Note: buffered() is needed because rust-s3 creates one connection for
         // each request, rather than using a connection pool. If we created 1000
         // connections we'd run into the open file descriptor limit.
-        let mut buffered_stream = stream.buffered(50);
+        let mut buffered_stream = stream.buffered(*OBJECT_LOG_ITERATE_QUEUE_DEPTH);
         (
             stream! {
                 while let Some(chunk) = buffered_stream.next().await {
