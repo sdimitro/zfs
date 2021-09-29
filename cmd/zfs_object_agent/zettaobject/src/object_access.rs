@@ -264,11 +264,13 @@ impl ObjectAccess {
             let begin = Instant::now();
             let mut v =
                 Vec::with_capacity(usize::try_from(output.content_length.unwrap_or(0)).unwrap());
+            let mut count = 0;
             match output
                 .body
                 .unwrap()
                 .try_for_each(|b| {
                     v.extend_from_slice(&b);
+                    count += 1;
                     future::ready(Ok(()))
                 })
                 .await
@@ -279,9 +281,10 @@ impl ObjectAccess {
                 }
                 Ok(_) => {
                     debug!(
-                        "{}: got {} bytes of data in {}ms",
+                        "{}: got {} bytes of data in {} chunks in {}ms",
                         msg,
                         v.len(),
+                        count,
                         begin.elapsed().as_millis()
                     );
                     Ok(v)
