@@ -1989,8 +1989,11 @@ async fn reclaim_frees_object(
 
         let my_shared_state = shared_state.clone();
         stream.push(future::ready(async move {
+            // Bypass object cache so that it isn't added, so that when we
+            // overwrite it with put(), we don't need to copy the data into the
+            // cache to invalidate.
             let mut phys =
-                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object, false)
+                DataObjectPhys::get(&my_shared_state.object_access, my_shared_state.guid, object, true)
                     .await
                     .unwrap();
 
