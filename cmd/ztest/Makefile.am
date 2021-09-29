@@ -21,12 +21,13 @@ ztest_LDADD = \
 	$(abs_top_builddir)/lib/libzfs_core/libzfs_core.la \
 	$(abs_top_builddir)/lib/libnvpair/libnvpair.la
 
-if BUILD_RUST
-ztest_LDADD += $(abs_top_builddir)/cmd/zfs_object_agent/libzoa.so
-ztest_CFLAGS = -DHAVE_LIBZOA
-endif
-
 ztest_LDADD += -lm
 ztest_LDFLAGS = -pthread
+
+if BUILD_RUST
+ztest_LDADD += -lzoa
+ztest_LDFLAGS += -L$(abs_top_builddir)/cmd/zfs_object_agent
+ztest_CFLAGS = -DHAVE_LIBZOA
+endif
 
 include $(top_srcdir)/config/CppCheck.am

@@ -16,7 +16,8 @@ zdb_LDADD = \
 	$(abs_top_builddir)/lib/libnvpair/libnvpair.la
 
 if BUILD_RUST
-zdb_LDADD += $(abs_top_builddir)/cmd/zfs_object_agent/libzoa.so
+zdb_LDADD += -lzoa
+zdb_LDFLAGS = -L$(abs_top_builddir)/cmd/zfs_object_agent
 zdb_CFLAGS = -DHAVE_LIBZOA
 endif
 
