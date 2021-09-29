@@ -1,9 +1,10 @@
 use crate::kernel_connection::KernelServerState;
 use crate::user_connection::UserServerState;
 use lazy_static::lazy_static;
-use log::*;
+use log::LevelFilter;
 use log4rs::append::console::ConsoleAppender;
 use log4rs::append::file::FileAppender;
+use log4rs::config::Logger;
 use log4rs::config::{Appender, Config, Root};
 use log4rs::encode::pattern::PatternEncoder;
 use zettacache::ZettaCache;
@@ -33,6 +34,8 @@ fn setup_console_logging(verbosity: u64) {
                 ),
             ),
         )
+        // rusoto_core::request is very chatty when set to debug. So, set it to info.
+        .logger(Logger::builder().build("rusoto_core::request", LevelFilter::Info))
         .build(
             Root::builder()
                 .appender("stdout")
@@ -56,6 +59,8 @@ fn setup_logfile(verbosity: u64, logfile: &str) {
                 ),
             ),
         )
+        // rusoto_core::request is very chatty when set to debug. So, set it to info.
+        .logger(Logger::builder().build("rusoto_core::request", LevelFilter::Info))
         .build(
             Root::builder()
                 .appender("logfile")
