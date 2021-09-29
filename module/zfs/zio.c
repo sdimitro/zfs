@@ -3787,6 +3787,47 @@ zio_alloc_zil(spa_t *spa, objset_t *os, uint64_t txg, blkptr_t *new_bp,
  * ==========================================================================
  */
 
+static void
+zio_spa_config_enter(zio_t *zio)
+{
+	spa_t *spa = zio->io_spa;
+
+	metaslab_class_t *mc = spa_normal_class(spa);
+	if (mc->mc_ops->msop_block_based || zio->io_type != ZIO_TYPE_WRITE) {
+		spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
+		return;
+	}
+
+	/*
+	 * Object based pools may need to continue to push I/Os even
+	 * if there is writer waiting for the SCL_ZIO lock because
+	 * we need to ensure that the agent receives all pending
+	 * writes up to a specific allocated block (see comment at
+	 * vdev_object_store_enable_passthru). When a thread waits
+	 * for the spa_config_lock as writer, it will remember this
+	 * last allocated block. Any zio with an already-allocated blocks
+	 * will be allowed to bypass the normal writer priority logic
+	 * and acquire the reader lock even though a writer is waiting.
+	 * This limited reader priority will not starve writes because it
+	 * only applies to zios that are already in progress (have already
+	 * allocated their blocks). New zios will have to wait for the
+	 * writer to acquire and drop the lock before they can acquire a
+	 * read lock.
+	 */
+	vdev_t *rvd = spa->spa_root_vdev;
+	ASSERT3U(zio->io_type, ==, ZIO_TYPE_WRITE);
+	ASSERT(vdev_is_object_based(rvd));
+
+	if (!spa_config_tryenter(spa, SCL_ZIO, zio, RW_READER)) {
+		uint64_t offset = vdev_object_store_flush_point(rvd);
+		if (offset != -1ULL && zio->io_max_offset <= offset) {
+			spa_config_enter_read_priority(spa, SCL_ZIO, zio);
+		} else {
+			spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
+		}
+	}
+}
+
 /*
  * Issue an I/O to the underlying vdev. Typically the issue pipeline
  * stops after this stage and will resume upon I/O completion.
@@ -3810,8 +3851,9 @@ zio_vdev_io_start(zio_t *zio)
 	ASSERT(zio->io_child_error[ZIO_CHILD_VDEV] == 0);
 
 	if (vd == NULL) {
-		if (!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER))
-			spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
+		if (!(zio->io_flags & ZIO_FLAG_CONFIG_WRITER)) {
+			zio_spa_config_enter(zio);
+		}
 
 		/*
 		 * The mirror_ops handle multiple DVAs in a single BP.

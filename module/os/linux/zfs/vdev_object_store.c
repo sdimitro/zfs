@@ -156,6 +156,7 @@ typedef struct vdev_object_store {
 	uint64_t vos_next_block;
 	uberblock_t vos_uberblock;
 	nvlist_t *vos_config;
+	uint64_t vos_flush_point;
 
 	list_t vos_free_list;
 } vdev_object_store_t;
@@ -1333,6 +1334,7 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	vos->vos_sock = INVALID_SOCKET;
 	vos->vos_vdev = NULL;
 	vos->vos_send_txg_selector = VOS_TXG_NONE;
+	vos->vos_flush_point = -1ULL;
 	mutex_init(&vos->vos_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_stats_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_sock_lock, NULL, MUTEX_DEFAULT, NULL);
@@ -1600,12 +1602,41 @@ vdev_object_store_config_generate(vdev_t *vd, nvlist_t *nv)
 }
 
 static void
-vdev_object_store_metaslab_init(vdev_t *vd, metaslab_t *msp, uint64_t *ms_start,
-    uint64_t *ms_size)
+vdev_object_store_metaslab_init(vdev_t *vd, metaslab_t *msp,
+    uint64_t *ms_start, uint64_t *ms_size)
 {
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	msp->ms_lbas[0] = vos->vos_next_block;
 }
+
+/*
+ * Lockout allocations and find highest allocated block.
+ */
+uint64_t
+vdev_object_store_metaslab_offset(vdev_t *vd)
+{
+	boolean_t lock_held = spa_config_held(vd->vdev_spa,
+	    SCL_ALLOC, RW_WRITER);
+	if (!lock_held)
+		spa_config_enter(vd->vdev_spa, SCL_ALLOC, FTAG, RW_WRITER);
+
+	uint64_t blockid = 0;
+	for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
+		metaslab_t *msp = vd->vdev_ms[m];
+		blockid = MAX(blockid, msp->ms_lbas[0]);
+	}
+
+	if (!lock_held)
+		spa_config_exit(vd->vdev_spa, SCL_ALLOC, FTAG);
+
+	/*
+	 * The blockid represents the next block that will be allocated
+	 * so we need to subtract one to get the last allocated block
+	 * and then convert it to an offset.
+	 */
+	return (blockid > 0 ? (blockid - 1) << SPA_MINBLOCKSHIFT: 0);
+}
+
 
 uberblock_t *
 vdev_object_store_get_uberblock(vdev_t *vd)
@@ -1626,6 +1657,69 @@ static void
 vdev_object_store_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
 {
 	agent_set_feature(vd->vdev_tsd, zfeature);
+}
+
+/*
+ * This function defines the flush point that will be use whenever
+ * the SCL_ZIO spa_config_lock is obtained as writer. Any write
+ * that is grabbing the SCL_ZIO spa_confg_lock as reader will not
+ * block if the allocated block it is issuing is less than or equal
+ * to that flush point. This is required since the agent must
+ * be told when to flush writes to the backend and must receive
+ * all blocks up to that point.
+ *
+ * Once the flush point is established, we notify the agent and
+ * then use that value as a way to allow in-flight writes to
+ * "passthru" the normal spa_config_lock semantics. This means
+ * spa_config_log writers will be starved momentarily while we finish
+ * issuing writes to the agent.
+ */
+void
+vdev_object_store_enable_passthru(vdev_t *vd)
+{
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_object_store_enable_passthru(vd->vdev_child[c]);
+	}
+
+	if (vd->vdev_ops->vdev_op_leaf && vdev_is_object_based(vd)) {
+		ASSERT3P(vd, ==, vd->vdev_top);
+		vdev_object_store_t *vos = vd->vdev_tsd;
+
+		/*
+		 * Get the highest offset that we've allocated.
+		 */
+		uint64_t offset = vdev_object_store_metaslab_offset(vd);
+
+		mutex_enter(&vos->vos_lock);
+		vos->vos_flush_point = offset;
+		mutex_exit(&vos->vos_lock);
+
+		zfs_dbgmsg("flush point set to %llu",
+		    (u_longlong_t)vos->vos_flush_point);
+		object_store_flush_writes(vd->vdev_spa, vos->vos_flush_point);
+	}
+}
+
+/*
+ * Return the established flush point or -1ULL if one is does not exist.
+ * Note, the flush point may be for blockid in the past, which is fine.
+ */
+uint64_t
+vdev_object_store_flush_point(vdev_t *vd)
+{
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_t *cvd = vd->vdev_child[c];
+		if (cvd->vdev_islog || cvd->vdev_aux != NULL)
+			continue;
+
+		if (vdev_is_object_based(cvd)) {
+			ASSERT3P(cvd, ==, cvd->vdev_top);
+			ASSERT(cvd->vdev_ops->vdev_op_leaf);
+			vdev_object_store_t *vos = cvd->vdev_tsd;
+			return (vos->vos_flush_point);
+		}
+	}
+	return (-1ULL);
 }
 
 vdev_ops_t vdev_object_store_ops = {
