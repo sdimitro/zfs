@@ -141,7 +141,31 @@ impl KernelConnectionState {
                         debug!("sending response: {:?}", response);
                         return Ok(Some(response));
                     }
-                    x => x.unwrap(),
+                    Err(PoolOpenError::Get(e)) => {
+                        /*
+                         * It would be really nice to bring up the exact error type from the
+                         * object_access layer here and case on it properly. Unfortunately,
+                         * attempting to do so is best described as... fraught. Errors come from a
+                         * number of sources, and are implicitly converted frequently. Ultimately,
+                         * the blocker is that most of the error types produced by our dependencies
+                         * do not implement Clone, and so cannot be easily propogated up the chain
+                         * when multiple people may be fetching the same object.
+                         *
+                         * If we ever decide to implement our own error types instead of using the
+                         * underlying ones, we could handle this situation more cleanly. Until
+                         * then, we just pass the root cause error message back to the kernel, and
+                         * hope that it can present a usable error to the user.
+                         */
+                        let mut response = NvList::new_unique_names();
+                        response.insert("Type", "pool open failed").unwrap();
+                        response.insert("cause", "IO").unwrap();
+                        response
+                            .insert("message", e.root_cause().to_string().as_str())
+                            .unwrap();
+                        debug!("sending response: {:?}", response);
+                        return Ok(Some(response));
+                    }
+                    Ok(x) => x,
                 };
 
             let mut response = NvList::new_unique_names();

@@ -1145,6 +1145,13 @@ agent_reader(void *arg)
 			    ZPOOL_CONFIG_MMP_TXG, 0);
 			mutex_enter(&vos->vos_outstanding_lock);
 			vos->vos_result = SET_ERROR(EREMOTEIO);
+		} else if (strcmp(cause, "IO") == 0) {
+			mutex_enter(&vos->vos_outstanding_lock);
+			if (strstr(cause, "does not exist") != NULL) {
+				vos->vos_result = SET_ERROR(ENOENT);
+			} else {
+				vos->vos_result = SET_ERROR(EIO);
+			}
 		} else {
 			ASSERT0(strcmp(cause, "feature"));
 			fnvlist_add_nvlist(spa->spa_load_info,
