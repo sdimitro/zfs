@@ -35,48 +35,6 @@
  */
 
 /*
- * Possible keys in nvlist requests / responses to/from the Agent
- */
-#define	AGENT_TYPE		"Type"
-#define	AGENT_TYPE_CREATE_POOL		"create pool"
-#define	AGENT_TYPE_OPEN_POOL		"open pool"
-#define	AGENT_TYPE_READ_BLOCK		"read block"
-#define	AGENT_TYPE_WRITE_BLOCK		"write block"
-#define	AGENT_TYPE_FREE_BLOCK		"free block"
-#define	AGENT_TYPE_BEGIN_TXG		"begin txg"
-#define	AGENT_TYPE_RESUME_TXG		"resume txg"
-#define	AGENT_TYPE_RESUME_COMPLETE	"resume complete"
-#define	AGENT_TYPE_END_TXG		"end txg"
-#define	AGENT_TYPE_FLUSH_WRITES		"flush writes"
-#define	AGENT_TYPE_EXIT			"exit agent"
-#define	AGENT_TYPE_CLOSE_POOL		"close pool"
-#define	AGENT_TYPE_ENABLE_FEATURE	"enable feature"
-#define	AGENT_NAME		"name"
-#define	AGENT_SIZE		"size"
-#define	AGENT_TXG		"TXG"
-#define	AGENT_GUID		"GUID"
-#define	AGENT_BUCKET		"bucket"
-#define	AGENT_CRED_PROFILE	"credentials_profile"
-#define	AGENT_ENDPOINT		"endpoint"
-#define	AGENT_REGION		"region"
-#define	AGENT_BLKID		"block"
-#define	AGENT_DATA		"data"
-#define	AGENT_REQUEST_ID	"request_id"
-#define	AGENT_UBERBLOCK		"uberblock"
-#define	AGENT_CONFIG		"config"
-#define	AGENT_NEXT_BLOCK	"next_block"
-#define	AGENT_TOKEN		"token"
-#define	AGENT_CAUSE		"cause"
-#define	AGENT_HOSTNAME		"hostname"
-#define	AGENT_READONLY		"readonly"
-#define	AGENT_RESUME		"resume"
-#define	AGENT_HEAL		"heal"
-#define	AGENT_FEATURE		"feature"
-#define	AGENT_FEATURES		"features"
-#define	AGENT_REFCOUNT		"refcount"
-#define	AGENT_CAN_READONLY	"can_readonly"
-
-/*
  * By default, the logical/physical ashift for object store vdevs is set to
  * SPA_MINBLOCKSHIFT (9). This allows all object store vdevs to use
  * 512B (1 << 9) blocksizes. Users may opt to change one or both of these
@@ -86,8 +44,8 @@
  */
 unsigned long vdev_object_store_logical_ashift = SPA_MINBLOCKSHIFT;
 unsigned long vdev_object_store_physical_ashift = SPA_MINBLOCKSHIFT;
-struct sockaddr_un zfs_kernel_socket = {
-	AF_UNIX, "/run/zfs_kernel_socket"
+struct sockaddr_un zfs_root_socket = {
+	AF_UNIX, "/etc/zfs/zfs_root_socket"
 };
 
 typedef enum {
@@ -220,8 +178,8 @@ zfs_object_store_open(vdev_object_store_t *vos)
 		return (rc);
 	}
 
-	rc = ksock_connect(s, (struct sockaddr *)&zfs_kernel_socket,
-	    sizeof (zfs_kernel_socket));
+	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
+	    sizeof (zfs_root_socket));
 	if (rc != 0) {
 		zfs_dbgmsg("zfs_object_store_open failed to "
 		    "connect: %d", rc);
@@ -480,17 +438,23 @@ object_store_stop_agent(vdev_t *vd)
 	if (vos->vos_sock == INVALID_SOCKET)
 		return;
 
+	spa_t *spa = vd->vdev_spa;
+	boolean_t destroy = spa_state(spa) == POOL_STATE_DESTROYED;
+
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 	/*
 	 * We need to ensure that we only issue a request when the
 	 * socket is ready. Otherwise, we block here since the agent
 	 * might be in recovery.
 	 */
-	zfs_dbgmsg("stop_agent()");
+	zfs_dbgmsg("stop_agent() destroy=%d", destroy);
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
+
+	// Tell agent to destroy if needed.
 
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CLOSE_POOL);
+	fnvlist_add_boolean_value(nv, AGENT_DESTROY, destroy);
 	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CLOSE_POOL);
 	fnvlist_free(nv);
 	agent_wait_serial(vos, VOS_SERIAL_CLOSE_POOL);
@@ -1064,13 +1028,13 @@ agent_reader(void *arg)
 		zfs_dbgmsg("got response from agent type=%s", type);
 	}
 	// XXX debug message the nvlist
-	if (strcmp(type, "pool create done") == 0) {
+	if (strcmp(type, AGENT_TYPE_CREATE_POOL_DONE) == 0) {
 		mutex_enter(&vos->vos_outstanding_lock);
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_CREATE_POOL]);
 		vos->vos_serial_done[VOS_SERIAL_CREATE_POOL] = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
 		mutex_exit(&vos->vos_outstanding_lock);
-	} else if (strcmp(type, "end txg done") == 0) {
+	} else if (strcmp(type, AGENT_TYPE_END_TXG_DONE) == 0) {
 		mutex_enter(&vos->vos_stats_lock);
 		vos->vos_stats.voss_blocks_count =
 		    fnvlist_lookup_uint64(nv, "blocks_count");
@@ -1103,7 +1067,7 @@ agent_reader(void *arg)
 		vos->vos_serial_done[VOS_SERIAL_END_TXG] = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
 		mutex_exit(&vos->vos_outstanding_lock);
-	} else if (strcmp(type, "pool open done") == 0) {
+	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_DONE) == 0) {
 		uint_t len;
 		uint8_t *arr;
 		int err = nvlist_lookup_uint8_array(nv, AGENT_UBERBLOCK,
@@ -1132,10 +1096,10 @@ agent_reader(void *arg)
 		vos->vos_serial_done[VOS_SERIAL_OPEN_POOL] = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
 		mutex_exit(&vos->vos_outstanding_lock);
-	} else if (strcmp(type, "pool open failed") == 0) {
+	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_FAILED) == 0) {
 		char *cause = fnvlist_lookup_string(nv, AGENT_CAUSE);
 		spa_t *spa = vos->vos_vdev->vdev_spa;
-		zfs_dbgmsg("got pool open failed cause=\"%s\"", cause);
+		zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
 		if (strcmp(cause, "MMP") == 0) {
 			fnvlist_add_string(spa->spa_load_info,
 			    ZPOOL_CONFIG_MMP_HOSTNAME, fnvlist_lookup_string(nv,
@@ -1173,7 +1137,7 @@ agent_reader(void *arg)
 		cv_broadcast(&vos->vos_outstanding_cv);
 		mutex_exit(&vos->vos_outstanding_lock);
 		fnvlist_free(nv);
-	} else if (strcmp(type, "read done") == 0) {
+	} else if (strcmp(type, AGENT_TYPE_READ_DONE) == 0) {
 		uint64_t req = fnvlist_lookup_uint64(nv,
 		    AGENT_REQUEST_ID);
 		uintptr_t token = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
@@ -1193,7 +1157,7 @@ agent_reader(void *arg)
 		abd_copy_from_buf(zio->io_abd, data, len);
 		fnvlist_free(nv);
 		zio_delay_interrupt(zio);
-	} else if (strcmp(type, "write done") == 0) {
+	} else if (strcmp(type, AGENT_TYPE_WRITE_DONE) == 0) {
 		uint64_t req = fnvlist_lookup_uint64(nv,
 		    AGENT_REQUEST_ID);
 		uintptr_t token = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
@@ -1206,8 +1170,8 @@ agent_reader(void *arg)
 		    zio->io_offset >> SPA_MINBLOCKSHIFT);
 		fnvlist_free(nv);
 		zio_delay_interrupt(zio);
-	} else if (strcmp(type, "pool close done") == 0) {
-		zfs_dbgmsg("got pool close done");
+	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL_DONE) == 0) {
+		zfs_dbgmsg("got %s", type);
 		mutex_enter(&vos->vos_outstanding_lock);
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_CLOSE_POOL]);
 		vos->vos_serial_done[VOS_SERIAL_CLOSE_POOL] = B_TRUE;
@@ -1216,7 +1180,7 @@ agent_reader(void *arg)
 		mutex_enter(&vos->vos_lock);
 		vos->vos_agent_thread_exit = B_TRUE;
 		mutex_exit(&vos->vos_lock);
-	} else if (strcmp(type, "enable feature done") == 0) {
+	} else if (strcmp(type, AGENT_TYPE_ENABLE_FEATURE_DONE) == 0) {
 		mutex_enter(&vos->vos_outstanding_lock);
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE]);
 		vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE] = B_TRUE;

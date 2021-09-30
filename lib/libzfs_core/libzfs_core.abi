@@ -280,6 +280,9 @@
     <elf-symbol name='zpool_label_disk_wait' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zpool_read_label' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
     <elf-symbol name='zpool_search_import' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='zoa_list_destroying_pools' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='zoa_list_destroyed_pools' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
+    <elf-symbol name='zoa_clear_destroyed_pools' type='func-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
   </elf-function-symbols>
   <elf-variable-symbols>
     <elf-symbol name='efi_debug' size='4' type='object-type' binding='global-binding' visibility='default-visibility' is-defined='yes'/>
@@ -2034,6 +2037,15 @@
       <parameter type-id='type-id-161' name='import'/>
       <parameter type-id='type-id-172' name='pco'/>
       <return type-id='type-id-29'/>
+    </function-decl>
+    <function-decl name='zoa_list_destroying_pools' mangled-name='zoa_list_destroying_pools' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='zoa_list_destroying_pools'>
+      <return type-id='type-id-17'/>
+    </function-decl>
+    <function-decl name='zoa_list_destroyed_pools' mangled-name='zoa_list_destroyed_pools' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='zoa_list_destroying_pools'>
+      <return type-id='type-id-17'/>
+    </function-decl>
+    <function-decl name='zoa_clear_destroyed_pools' mangled-name='zoa_clear_destroyed_pools' visibility='default' binding='global' size-in-bits='64' elf-symbol-id='zoa_clear_destroyed_pools'>
+      <return type-id='type-id-17'/>
     </function-decl>
     <function-decl name='dcgettext' visibility='default' binding='global' size-in-bits='64'>
       <parameter type-id='type-id-16'/>

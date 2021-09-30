@@ -49,7 +49,7 @@ lazy_static! {
     // log operations that take longer than this with info!()
     static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
 
-    static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
+    pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
 }
 
 #[derive(Clone)]
@@ -59,6 +59,7 @@ pub struct ObjectAccess {
     readonly: bool,
     region_str: String,
     endpoint_str: String,
+    credentials_profile: Option<String>,
 }
 
 /*
@@ -68,7 +69,7 @@ pub struct ObjectAccess {
  * prefix an object if it isn't already prefixed. We do the latter here, for conciseness, but in
  * the future we may want to revisit this decision.
  */
-pub fn prefixed(key: &str) -> String {
+fn prefixed(key: &str) -> String {
     match key.starts_with(format!("{}zfs", *PREFIX).as_str()) {
         true => key.to_string(),
         false => format!("{}{}", *PREFIX, key),
@@ -230,6 +231,7 @@ impl ObjectAccess {
             readonly,
             region_str: region.to_string(),
             endpoint_str: endpoint.to_string(),
+            credentials_profile: None,
         }
     }
 
@@ -240,6 +242,7 @@ impl ObjectAccess {
         profile: Option<String>,
         readonly: bool,
     ) -> Self {
+        let credentials_profile = profile.clone();
         let client = ObjectAccess::get_client(endpoint, region_str, profile);
 
         ObjectAccess {
@@ -248,6 +251,7 @@ impl ObjectAccess {
             readonly,
             region_str: region_str.to_string(),
             endpoint_str: endpoint.to_string(),
+            credentials_profile,
         }
     }
 
@@ -577,7 +581,18 @@ impl ObjectAccess {
         self.endpoint_str.clone()
     }
 
+    pub fn credentials_profile(&self) -> Option<String> {
+        self.credentials_profile.clone()
+    }
+
     pub fn readonly(&self) -> bool {
         self.readonly
+    }
+
+    pub fn strip_prefix(key: &str) -> &str {
+        match key.strip_prefix(PREFIX.as_str()) {
+            Some(stripped_key) => stripped_key,
+            None => key,
+        }
     }
 }

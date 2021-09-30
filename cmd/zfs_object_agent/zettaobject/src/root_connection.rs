@@ -2,6 +2,7 @@ use crate::base_types::*;
 use crate::features::FeatureError;
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
+use crate::pool_destroy;
 use crate::server::handler_return_ok;
 use crate::server::HandlerReturn;
 use crate::server::SerialHandlerReturn;
@@ -9,30 +10,37 @@ use crate::server::Server;
 use anyhow::anyhow;
 use anyhow::Result;
 use cstr_argument::CStrArgument;
+use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::convert::TryFrom;
 use std::sync::Arc;
 use uuid::Uuid;
 use zettacache::base_types::*;
+use zettacache::get_tunable;
 use zettacache::maybe_die_with;
 use zettacache::ZettaCache;
 
-pub struct KernelServerState {
+lazy_static! {
+    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
+        get_tunable("die_before_end_txg_response_pct", 0.0);
+}
+
+pub struct RootServerState {
     cache: Option<ZettaCache>,
     id: Uuid,
 }
 
 #[derive(Default)]
-struct KernelConnectionState {
+struct RootConnectionState {
     pool: Option<Arc<Pool>>,
     cache: Option<ZettaCache>,
     id: Uuid,
 }
 
-impl KernelServerState {
-    fn connection_handler(&self) -> KernelConnectionState {
-        KernelConnectionState {
+impl RootServerState {
+    fn connection_handler(&self) -> RootConnectionState {
+        RootConnectionState {
             cache: self.cache.as_ref().cloned(),
             id: self.id,
             ..Default::default()
@@ -40,23 +48,23 @@ impl KernelServerState {
     }
 
     pub fn start(socket_dir: &str, cache: Option<ZettaCache>) {
-        let socket_path = format!("{}/zfs_kernel_socket", socket_dir);
+        let socket_path = format!("{}/zfs_root_socket", socket_dir);
         let mut server = Server::new(
             &socket_path,
-            KernelServerState {
+            RootServerState {
                 cache,
                 id: Uuid::new_v4(),
             },
             Box::new(Self::connection_handler),
         );
 
-        KernelConnectionState::register(&mut server);
+        RootConnectionState::register(&mut server);
         server.start();
     }
 }
 
-impl KernelConnectionState {
-    fn register(server: &mut Server<KernelServerState, KernelConnectionState>) {
+impl RootConnectionState {
+    fn register(server: &mut Server<RootServerState, RootConnectionState>) {
         server.register_serial_handler("create pool", Box::new(Self::create_pool));
         server.register_serial_handler("open pool", Box::new(Self::open_pool));
         server.register_serial_handler("resume complete", Box::new(Self::resume_complete));
@@ -70,6 +78,7 @@ impl KernelConnectionState {
         server.register_handler("close pool", Box::new(Self::close_pool));
         server.register_handler("exit agent", Box::new(Self::exit_agent));
         server.register_handler("enable feature", Box::new(Self::enable_feature));
+        server.register_handler("resume destroy pool", Box::new(Self::resume_destroy_pool));
     }
 
     fn get_object_access(nvl: &NvListRef) -> Result<ObjectAccess> {
@@ -357,6 +366,11 @@ impl KernelConnectionState {
 
     fn close_pool(&mut self, nvl: NvList) -> HandlerReturn {
         info!("got request: {:?}", nvl);
+        let destroy = match nvl.lookup("destroy").unwrap().data() {
+            NvData::BoolV(destroy) => destroy,
+            _ => panic!("destroy not expected type"),
+        };
+
         let pool_opt = self.pool.take();
         Ok(Box::pin(async move {
             if let Some(pool) = pool_opt {
@@ -364,7 +378,7 @@ impl KernelConnectionState {
                     .map_err(|_| {
                         anyhow!("pool close request while there are other operations in progress")
                     })?
-                    .close()
+                    .close(destroy)
                     .await;
             }
             let mut response = NvList::new_unique_names();
@@ -397,6 +411,32 @@ impl KernelConnectionState {
         response.insert("feature", feature_name.as_str()).unwrap();
         debug!("sending response: {:?}", response);
         handler_return_ok(Some(response))
+    }
+
+    fn resume_destroy_pool(&mut self, nvl: NvList) -> HandlerReturn {
+        Ok(Box::pin(async move {
+            debug!("got request: {:?}", nvl);
+
+            let guid = PoolGuid(nvl.lookup_uint64("GUID").unwrap());
+            let object_access = RootConnectionState::get_object_access(&nvl).unwrap();
+
+            let mut response = NvList::new_unique_names();
+
+            match pool_destroy::resume_destroy(object_access, guid).await {
+                Ok(_) => {
+                    response.insert("Type", "resume destroy pool done").unwrap();
+                }
+                Err(error) => {
+                    error!("resume destroy pool failed, {:?}", error);
+                    response
+                        .insert("Type", "resume destroy pool failed")
+                        .unwrap();
+                }
+            };
+
+            debug!("sending response: {:?}", response);
+            Ok(Some(response))
+        }))
     }
 }
 

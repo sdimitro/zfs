@@ -17,7 +17,7 @@ fn main() {
                 .value_name("DIR")
                 .help("Directory for unix-domain sockets")
                 .takes_value(true)
-                .default_value("/run"),
+                .default_value("/etc/zfs"),
         )
         .arg(
             Arg::with_name("output-file")

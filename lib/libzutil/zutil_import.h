@@ -54,6 +54,7 @@ int zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
     avl_tree_t **slice_cache);
 void zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
     pthread_mutex_t *lock, avl_tree_t *cache);
+int zoa_resume_destroy(importargs_t *iarg);
 
 void * zutil_alloc(libpc_handle_t *hdl, size_t size);
 char *zutil_strdup(libpc_handle_t *hdl, const char *str);

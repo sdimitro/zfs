@@ -13,6 +13,8 @@ use crate::object_access::ObjectAccess;
 use crate::object_based_log::*;
 use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
+use crate::pool_destroy;
+use crate::pool_destroy::PoolDestroyingPhys;
 use anyhow::Error;
 use anyhow::{Context, Result};
 use conv::ConvUtil;
@@ -156,10 +158,11 @@ impl From<anyhow::Error> for PoolOpenError {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
-struct PoolPhys {
-    guid: PoolGuid, // redundant with key, for verification
-    name: String,
+pub struct PoolPhys {
+    pub guid: PoolGuid, // redundant with key, for verification
+    pub name: String,
     last_txg: Txg,
+    pub destroying_state: Option<PoolDestroyingPhys>,
 }
 impl OnDisk for PoolPhys {}
 
@@ -270,15 +273,15 @@ impl ObjectBasedLogEntry for PendingFreesLogEntry {}
  */
 
 impl PoolPhys {
-    fn key(guid: PoolGuid) -> String {
+    pub fn key(guid: PoolGuid) -> String {
         format!("zfs/{}/super", guid)
     }
 
-    async fn exists(object_access: &ObjectAccess, guid: PoolGuid) -> bool {
+    pub async fn exists(object_access: &ObjectAccess, guid: PoolGuid) -> bool {
         object_access.object_exists(&Self::key(guid)).await
     }
 
-    async fn get(object_access: &ObjectAccess, guid: PoolGuid) -> Result<Self> {
+    pub async fn get(object_access: &ObjectAccess, guid: PoolGuid) -> Result<Self> {
         let key = Self::key(guid);
         let buf = object_access.get_object(&key).await?;
         let this: Self = serde_json::from_slice(&buf)
@@ -288,7 +291,7 @@ impl PoolPhys {
         Ok(this)
     }
 
-    async fn put(&self, object_access: &ObjectAccess) {
+    pub async fn put(&self, object_access: &ObjectAccess) {
         maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
@@ -794,6 +797,7 @@ impl Pool {
             guid,
             name: name.to_string(),
             last_txg: Txg(0),
+            destroying_state: None,
         };
         // XXX make sure it doesn't already exist
         phys.put(object_access).await;
@@ -1346,6 +1350,7 @@ impl Pool {
             guid: state.shared_state.guid,
             name: state.shared_state.name.clone(),
             last_txg: txg,
+            destroying_state: None,
         }
         .put(&state.shared_state.object_access)
         .await;
@@ -1739,7 +1744,21 @@ impl Pool {
         }
     }
 
-    pub async fn close(self) {
+    pub async fn close(self, destroy: bool) {
+        if destroy {
+            // Kick off a task to destroy the pool's zettaobjects.
+            info!(
+                "Pool marked for destroying {}",
+                self.state.shared_state.guid
+            );
+            pool_destroy::destroy_pool(
+                self.state.shared_state.object_access.clone(),
+                self.state.shared_state.guid,
+                self.state.object_block_map.len() as u64,
+            )
+            .await;
+        }
+
         self.unclaim().await;
     }
 

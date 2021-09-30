@@ -19,24 +19,28 @@
  * CDDL HEADER END
  */
 /*
+ * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2021 by Delphix. All rights reserved.
  */
 
-#include <stdio.h>
-#include <sys/un.h>
-#include <sys/socket.h>
-#include <object_agent.h>
+#include <libzutil.h>
 
-extern struct sockaddr_un zfs_root_socket;
-extern struct sockaddr_un zfs_public_socket;
+#include "zutil_zoa.h"
 
 void
-set_object_agent_sock_dir(char *sock_dir)
+zoa_list_destroying_pools(void)
 {
-	snprintf(zfs_root_socket.sun_path,
-	    sizeof (zfs_root_socket.sun_path),
-	    "%s/zfs_root_socket", sock_dir);
-	snprintf(zfs_public_socket.sun_path,
-	    sizeof (zfs_public_socket.sun_path),
-	    "%s/zfs_public_socket", sock_dir);
+
+}
+
+void
+zoa_list_destroyed_pools(void)
+{
+
+}
+
+void
+zoa_clear_destroyed_pools(void)
+{
+
 }

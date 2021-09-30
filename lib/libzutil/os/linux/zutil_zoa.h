@@ -21,22 +21,14 @@
 /*
  * Copyright (c) 2021 by Delphix. All rights reserved.
  */
+#ifndef _LIBZUTIL_ZUTIL_ZOA_H_
+#define	_LIBZUTIL_ZUTIL_ZOA_H_
 
-#include <stdio.h>
-#include <sys/un.h>
-#include <sys/socket.h>
-#include <object_agent.h>
+typedef enum zoa_socket {
+	ZFS_PUBLIC_SOCKET,
+	ZFS_ROOT_SOCKET,
+} zoa_socket_t;
 
-extern struct sockaddr_un zfs_root_socket;
-extern struct sockaddr_un zfs_public_socket;
+nvlist_t *zoa_send_recv_msg(nvlist_t *msg, zoa_socket_t zoa_sock);
 
-void
-set_object_agent_sock_dir(char *sock_dir)
-{
-	snprintf(zfs_root_socket.sun_path,
-	    sizeof (zfs_root_socket.sun_path),
-	    "%s/zfs_root_socket", sock_dir);
-	snprintf(zfs_public_socket.sun_path,
-	    sizeof (zfs_public_socket.sun_path),
-	    "%s/zfs_public_socket", sock_dir);
-}
+#endif /* _LIBZUTIL_ZUTIL_ZOA_H_ */

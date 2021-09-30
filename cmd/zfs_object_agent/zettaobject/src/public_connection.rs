@@ -1,5 +1,9 @@
+use std::fs;
+use std::os::unix::prelude::PermissionsExt;
+
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
+use crate::pool_destroy;
 use crate::server::{HandlerReturn, Server};
 use anyhow::Result;
 use futures::stream::StreamExt;
@@ -15,32 +19,42 @@ lazy_static! {
     pub static ref GET_POOLS_QUEUE_DEPTH: usize = get_tunable("get_pools_queue_depth", 100);
 }
 
-pub struct UserServerState {}
+pub struct PublicServerState {}
 
-struct UserConnectionState {}
+struct PublicConnectionState {}
 
-impl UserServerState {
-    fn connection_handler(&self) -> UserConnectionState {
-        UserConnectionState {}
+impl PublicServerState {
+    fn connection_handler(&self) -> PublicConnectionState {
+        PublicConnectionState {}
     }
 
     pub fn start(socket_dir: &str) {
-        let socket_path = format!("{}/zfs_user_socket", socket_dir);
+        let socket_path = format!("{}/zfs_public_socket", socket_dir);
         let mut server = Server::new(
             &socket_path,
-            UserServerState {},
+            PublicServerState {},
             Box::new(Self::connection_handler),
         );
 
-        UserConnectionState::register(&mut server);
+        PublicConnectionState::register(&mut server);
 
         server.start();
+
+        // Set the socket to world writable.
+        let mut perms = fs::metadata(&socket_path).unwrap().permissions();
+        perms.set_mode(0o666);
+        fs::set_permissions(&socket_path, perms).unwrap();
     }
 }
 
-impl UserConnectionState {
-    fn register(server: &mut Server<UserServerState, UserConnectionState>) {
+impl PublicConnectionState {
+    fn register(server: &mut Server<PublicServerState, PublicConnectionState>) {
         server.register_handler("get pools", Box::new(Self::get_pools));
+        server.register_handler("get destroying pools", Box::new(Self::get_destroying_pools));
+        server.register_handler(
+            "clear destroyed pools",
+            Box::new(Self::clear_destroyed_pools),
+        );
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -80,7 +94,7 @@ impl UserConnectionState {
         for buck in buckets {
             let object_access =
                 ObjectAccess::from_client(client, buck.as_str(), readonly, endpoint, region_str);
-            let guid_result = nvl.lookup_uint64("guid");
+            let guid_result = nvl.lookup_uint64("GUID");
             if let Ok(guid) = guid_result {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {
                     client = object_access.release_client();
@@ -135,5 +149,36 @@ impl UserConnectionState {
         let owned_response = Arc::try_unwrap(response).unwrap().into_inner().unwrap();
         info!("sending response: {:?}", owned_response);
         Ok(Some(owned_response))
+    }
+
+    fn get_destroying_pools(&mut self, nvl: NvList) -> HandlerReturn {
+        Ok(Box::pin(async move {
+            debug!("got request: {:?}", nvl);
+            let pools = pool_destroy::get_destroy_list().await;
+
+            let mut response = NvList::new_unique_names();
+            response
+                .insert("Type", "get destroying pools done")
+                .unwrap();
+            response.insert("pools", pools.as_ref()).unwrap();
+
+            debug!("sending response: {:?}", response);
+            Ok(Some(response))
+        }))
+    }
+
+    fn clear_destroyed_pools(&mut self, nvl: NvList) -> HandlerReturn {
+        Ok(Box::pin(async move {
+            debug!("got request: {:?}", nvl);
+            pool_destroy::remove_not_in_progress().await;
+
+            let mut response = NvList::new_unique_names();
+            response
+                .insert("Type", "clear destroying pools done")
+                .unwrap();
+
+            debug!("sending response: {:?}", response);
+            Ok(Some(response))
+        }))
     }
 }

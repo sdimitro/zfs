@@ -8,13 +8,14 @@ mod data_object;
 mod features;
 mod heartbeat;
 pub mod init;
-mod kernel_connection;
 mod object_access;
 mod object_based_log;
 mod object_block_map;
 mod pool;
+mod pool_destroy;
+mod public_connection;
+mod root_connection;
 mod server;
-mod user_connection;
 
 pub use object_access::ObjectAccess;
 pub use pool::Pool;

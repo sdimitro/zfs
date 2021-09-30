@@ -64,12 +64,14 @@
 #include <sys/dktp/fdisk.h>
 #include <sys/vdev_impl.h>
 #include <sys/fs/zfs.h>
+#include <sys/vdev_object_store.h>
 
 #include <thread_pool.h>
 #include <libzutil.h>
 #include <libnvpair.h>
 
 #include "zutil_import.h"
+#include "zutil_zoa.h"
 
 #ifdef HAVE_LIBUDEV
 #include <libudev.h>
@@ -380,23 +382,55 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 	return (0);
 }
 
-struct sockaddr_un zfs_user_socket = {
-	AF_UNIX, "/run/zfs_user_socket"
-};
-
-static int
-read_all(int fd, void *buf, size_t len)
+int
+zoa_resume_destroy(importargs_t *iarg)
 {
-	size_t read_total = 0;
-	while (read_total < len) {
-		size_t rc = read(fd, buf + read_total, len - read_total);
-		if (rc > 0) {
-			read_total += rc;
-		} else if (rc < 0) {
-			return (rc);
-		}
+	char *endpoint = NULL;
+	char *region = NULL;
+	char *bucket = NULL;
+	char *profile = NULL;
+
+	nvlist_lookup_string(iarg->props, "path", &bucket);
+	if (bucket == NULL && iarg->path != NULL) {
+		bucket = iarg->path[0];
 	}
-	return (read_total);
+	if (bucket == NULL) {
+		return (-1);
+	}
+	if (nvlist_lookup_string(iarg->props, "object-endpoint", &endpoint)
+	    != 0) {
+		return (-1);
+	}
+	if (nvlist_lookup_string(iarg->props, "object-region", &region) != 0) {
+		return (-1);
+	}
+	nvlist_lookup_string(iarg->props, "object-credentials-profile",
+	    &profile);
+
+	// Resume destroy
+	nvlist_t *msg = fnvlist_alloc();
+	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_RESUME_DESTROY_POOL);
+	fnvlist_add_string(msg, AGENT_BUCKET, bucket);
+	fnvlist_add_string(msg, AGENT_REGION, region);
+	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
+	if (profile != NULL) {
+		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
+	}
+	fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
+	if (iarg->poolname != NULL) {
+		fnvlist_add_string(msg, AGENT_NAME, iarg->poolname);
+	}
+
+	nvlist_t *resp = zoa_send_recv_msg(msg, ZFS_ROOT_SOCKET);
+	if (resp == NULL)
+		return (-1);
+
+	const char *type = fnvlist_lookup_string(resp, AGENT_TYPE);
+	if (strcmp(type, AGENT_TYPE_RESUME_DESTROY_POOL_DONE) == 0) {
+		return (0);
+	}
+
+	return (-1);
 }
 
 void
@@ -422,69 +456,18 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 	    &profile);
 
 	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, "Type", "get pools");
+	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_POOLS);
 	if (bucket != NULL)
-		fnvlist_add_string(msg, "bucket", bucket);
-	fnvlist_add_string(msg, "region", region);
-	fnvlist_add_string(msg, "endpoint", endpoint);
+		fnvlist_add_string(msg, AGENT_BUCKET, bucket);
+	fnvlist_add_string(msg, AGENT_REGION, region);
+	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
 	if (profile != NULL) {
-		fnvlist_add_string(msg, "credentials_profile", profile);
+		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
 	}
 	if (iarg->guid != 0)
-		fnvlist_add_uint64(msg, "guid", iarg->guid);
-	int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-	int err = connect(sock, (struct sockaddr *)&zfs_user_socket,
-	    sizeof (zfs_user_socket));
-	if (err != 0) {
-		fnvlist_free(msg);
-		close(sock);
-		return;
-	}
+		fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
 
-	size_t len;
-	char *buf = fnvlist_pack(msg, &len);
-	fnvlist_free(msg);
-
-	uint64_t len_le = htole64(len);
-	ssize_t rv = write(sock, &len_le, sizeof (len_le));
-	if (rv < 0) {
-		fnvlist_pack_free(buf, len);
-		close(sock);
-		return;
-	}
-	ASSERT3U(rv, ==, sizeof (len_le));
-
-	rv = write(sock, buf, len);
-	fnvlist_pack_free(buf, len);
-
-	if (rv < 0) {
-		close(sock);
-		return;
-	}
-	VERIFY3U(rv, ==, len); // XXX We need to handle partial writes here.
-
-	uint64_t resp_size;
-	size_t size;
-	rv = read_all(sock, &resp_size, sizeof (resp_size));
-	if (rv < 0) {
-		close(sock);
-		return;
-	}
-	VERIFY3U(rv, ==, sizeof (resp_size));
-
-	size = le64toh(resp_size);
-	buf = malloc(size);
-
-	rv = read_all(sock, buf, size);
-	close(sock);
-	if (rv < 0) {
-		free(buf);
-		return;
-	}
-	ASSERT3U(rv, ==, size);
-
-	nvlist_t *resp = fnvlist_unpack(buf, size);
-	free(buf);
+	nvlist_t *resp = zoa_send_recv_msg(msg, ZFS_PUBLIC_SOCKET);
 
 	nvpair_t *elem = NULL;
 	while ((elem = nvlist_next_nvpair(resp, elem)) != NULL) {
