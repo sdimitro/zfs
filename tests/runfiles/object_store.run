@@ -99,9 +99,9 @@ tests = ['zfs_bookmark_cliargs']
 tags = ['functional', 'cli_root', 'zfs_bookmark']
 
 [tests/functional/cli_root/zfs_change-key]
-tests = ['zfs_change-key.ksh', 'zfs_change-key_child.ksh', 'zfs_change-key_clones.ksh',
-	'zfs_change-key_format.ksh', 'zfs_change-key_inherit.ksh', 'zfs_change-key_load.ksh',
-	'zfs_change-key_location.ksh', 'zfs_change-key_pbkdf2iters.ksh']
+tests = ['zfs_change-key', 'zfs_change-key_child', 'zfs_change-key_clones',
+	'zfs_change-key_format', 'zfs_change-key_inherit', 'zfs_change-key_load',
+	'zfs_change-key_location', 'zfs_change-key_pbkdf2iters']
 tags = ['functional', 'cli_root', 'zfs_change-key']
 
 # -------------------------------------------------------------
@@ -175,42 +175,42 @@ tests = ['zpool_online_001_pos', 'zpool_online_002_neg']
 tags = ['functional', 'cli_root', 'zpool_online']
 
 [tests/functional/cli_root/zfs_clone]
-tests = ['zfs_clone_001_neg.ksh', 'zfs_clone_002_pos.ksh',
-	'zfs_clone_003_pos.ksh', 'zfs_clone_004_pos.ksh',
-	'zfs_clone_005_pos.ksh', 'zfs_clone_006_pos.ksh',
-	'zfs_clone_007_pos.ksh', 'zfs_clone_008_neg.ksh',
-	'zfs_clone_009_neg.ksh', 'zfs_clone_010_pos.ksh',
-	'zfs_clone_deeply_nested.ksh', 'zfs_clone_encrypted.ksh',
-	'zfs_clone_rm_nested.ksh']
+tests = ['zfs_clone_001_neg', 'zfs_clone_002_pos',
+	'zfs_clone_003_pos', 'zfs_clone_004_pos',
+	'zfs_clone_005_pos', 'zfs_clone_006_pos',
+	'zfs_clone_007_pos', 'zfs_clone_008_neg',
+	'zfs_clone_009_neg', 'zfs_clone_010_pos',
+	'zfs_clone_deeply_nested', 'zfs_clone_encrypted',
+	'zfs_clone_rm_nested']
 tags = ['functional', 'cli_root', 'zfs_clone']
 
 [tests/functional/cli_root/zfs_rename]
-tests = ['zfs_rename_001_pos.ksh', 'zfs_rename_002_pos.ksh',
-	'zfs_rename_003_pos.ksh', 'zfs_rename_004_neg.ksh',
-	'zfs_rename_005_neg.ksh', 'zfs_rename_006_pos.ksh',
-	'zfs_rename_007_pos.ksh', 'zfs_rename_008_pos.ksh',
-	'zfs_rename_009_neg.ksh', 'zfs_rename_010_neg.ksh',
-	'zfs_rename_011_pos.ksh', 'zfs_rename_012_neg.ksh',
-	'zfs_rename_013_pos.ksh', 'zfs_rename_014_neg.ksh',
-	'zfs_rename_encrypted_child.ksh', 'zfs_rename_mountpoint.ksh',
-	'zfs_rename_nounmount.ksh', 'zfs_rename_to_encrypted.ksh']
+tests = ['zfs_rename_001_pos', 'zfs_rename_002_pos',
+	'zfs_rename_003_pos', 'zfs_rename_004_neg',
+	'zfs_rename_005_neg', 'zfs_rename_006_pos',
+	'zfs_rename_007_pos', 'zfs_rename_008_pos',
+	'zfs_rename_009_neg', 'zfs_rename_010_neg',
+	'zfs_rename_011_pos', 'zfs_rename_012_neg',
+	'zfs_rename_013_pos', 'zfs_rename_014_neg',
+	'zfs_rename_encrypted_child', 'zfs_rename_mountpoint',
+	'zfs_rename_nounmount', 'zfs_rename_to_encrypted']
 tags = ['functional', 'cli_root', 'zfs_rename']
 
 [tests/functional/cli_root/zfs_share]
-tests = ['zfs_share_001_pos.ksh', 'zfs_share_002_pos.ksh',
-	'zfs_share_003_pos.ksh', 'zfs_share_004_pos.ksh',
-	'zfs_share_005_pos.ksh', 'zfs_share_006_pos.ksh',
-	'zfs_share_007_neg.ksh', 'zfs_share_008_neg.ksh',
-	'zfs_share_009_neg.ksh', 'zfs_share_010_neg.ksh',
-	'zfs_share_011_pos.ksh', 'zfs_share_012_pos.ksh',
-	'zfs_share_concurrent_shares.ksh']
+tests = ['zfs_share_001_pos', 'zfs_share_002_pos',
+	'zfs_share_003_pos', 'zfs_share_004_pos',
+	'zfs_share_005_pos', 'zfs_share_006_pos',
+	'zfs_share_007_neg', 'zfs_share_008_neg',
+	'zfs_share_009_neg', 'zfs_share_010_neg',
+	'zfs_share_011_pos', 'zfs_share_012_pos',
+	'zfs_share_concurrent_shares']
 tags = ['functional', 'cli_root', 'zfs_share']
 
 [tests/functional/cli_root/zfs_unshare]
-tests = ['zfs_unshare_001_pos.ksh', 'zfs_unshare_002_pos.ksh',
-	'zfs_unshare_003_pos.ksh', 'zfs_unshare_004_neg.ksh',
-	'zfs_unshare_005_neg.ksh', 'zfs_unshare_006_pos.ksh',
-	'zfs_unshare_007_pos.ksh']
+tests = ['zfs_unshare_001_pos', 'zfs_unshare_002_pos',
+	'zfs_unshare_003_pos', 'zfs_unshare_004_neg',
+	'zfs_unshare_005_neg', 'zfs_unshare_006_pos',
+	'zfs_unshare_007_pos']
 tags = ['functional', 'cli_root', 'zfs_unshare']
 
 [tests/functional/cli_root/zfs_copies]
@@ -282,3 +282,50 @@ tests = ['zfs_mount_001_pos', 'zfs_mount_002_pos', 'zfs_mount_003_pos',
 	'zfs_mount_all_fail', 'zfs_mount_all_mountpoints',
 	'zfs_mount_test_race']
 tags = ['functional', 'cli_root', 'zfs_mount']
+
+[tests/functional/cli_root/zfs_set]
+tests = ['cache_001_pos', 'cache_002_neg', 'canmount_001_pos',
+    'canmount_002_pos', 'canmount_003_pos', 'canmount_004_pos',
+    'checksum_001_pos', 'compression_001_pos', 'mountpoint_001_pos',
+    'mountpoint_002_pos', 'mountpoint_003_pos', 'onoffs_001_pos',
+    'property_alias_001_pos', 'readonly_001_pos', 'reservation_001_neg',
+    'ro_props_001_pos', 'share_mount_001_neg', 'snapdir_001_pos',
+    'user_property_001_pos', 'user_property_002_pos', 'user_property_003_neg',
+    'user_property_004_pos', 'version_001_neg', 'zfs_set_001_neg',
+    'zfs_set_002_neg', 'zfs_set_003_neg', 'zfs_set_feature_activation',
+    'zfs_set_keylocation']
+tags = ['functional', 'cli_root', 'zfs_set']
+
+[tests/functional/mv_files]
+tests = ["mv_files_001_pos", "mv_files_002_pos"]
+tags = ['functional', 'mv_files']
+
+[tests/functional/cli_root/zfs_snapshot]
+tests = ['zfs_snapshot_001_neg', 'zfs_snapshot_002_neg', 'zfs_snapshot_003_neg',
+        'zfs_snapshot_004_neg', 'zfs_snapshot_005_neg', 'zfs_snapshot_006_pos',
+        'zfs_snapshot_007_neg', 'zfs_snapshot_008_neg', 'zfs_snapshot_009_pos']
+tags = ['functional', 'cli_root', 'zfs_snapshot']
+
+[tests/functional/cli_root/zfs_sysfs]
+tests = ['zfeature_set_unsupported', 'zfs_get_unsupported', 'zfs_set_unsupported',
+        'zpool_get_unsupported', 'zpool_set_unsupported']
+tags = ['functional', 'cli_root', 'zfs_sysfs']
+
+[tests/functional/cli_root/zfs_unmount]
+tests = ['zfs_unmount_001_pos', 'zfs_unmount_002_pos', 'zfs_unmount_003_pos',
+        'zfs_unmount_004_pos', 'zfs_unmount_005_pos', 'zfs_unmount_006_pos',
+        'zfs_unmount_007_neg', 'zfs_unmount_008_neg', 'zfs_unmount_009_pos',
+        'zfs_unmount_all_001_pos', 'zfs_unmount_nested', 'zfs_unmount_unload_keys']
+tags = ['functional', 'cli_root', 'zfs_unmount']
+
+[tests/functional/cli_root/zfs_unload-key]
+tests = ['zfs_unload-key', 'zfs_unload-key_all', 'zfs_unload-key_recursive']
+tags = ['functional', 'cli_root', 'zfs_unload-key']
+
+[tests/functional/cli_root/zfs_send]
+tests = ['zfs_send_001_pos', 'zfs_send_002_pos', 'zfs_send_003_pos',
+        'zfs_send_004_neg', 'zfs_send_005_pos', 'zfs_send_006_pos',
+        'zfs_send_007_pos', 'zfs_send_encrypted_unloaded',
+        'zfs_send_encrypted', 'zfs_send_raw', 'zfs_send_skip_missing',
+        'zfs_send_sparse', 'zfs_send-b']
+tags = ['functional', 'cli_root', 'zfs_send']

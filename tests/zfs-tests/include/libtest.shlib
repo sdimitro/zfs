@@ -2206,7 +2206,7 @@ function verify_filesys # pool filesystem dir
 		done
 	fi
 
-	log_must zpool import $search_path $pool
+	log_must import_pool -p $pool -e "$search_path"
 
 	zdb -cudi $filesys > $zdbout 2>&1
 	if [[ $? != 0 ]]; then
