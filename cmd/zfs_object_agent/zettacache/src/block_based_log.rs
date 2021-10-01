@@ -354,7 +354,8 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         }
     }
 
-    // Works only if there are no pending entries
+    /// Works only if there are no pending entries.
+    /// Use flush() to retrieve the phys when there are pending entries.
     pub fn get_phys(&self) -> BlockBasedLogWithSummaryPhys<T> {
         assert!(self.this.pending_entries.is_empty());
         assert!(self.chunk_summary.pending_entries.is_empty());
