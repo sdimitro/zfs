@@ -15,11 +15,11 @@ use rusoto_core::{ByteStream, RusotoError};
 use rusoto_credential::{AutoRefreshingProvider, ChainProvider, ProfileProvider};
 use rusoto_s3::*;
 use std::convert::TryFrom;
+use std::error::Error;
 use std::iter;
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
-use std::{env, error::Error};
 use tokio::{sync::watch, time::error::Elapsed};
 use zettacache::get_tunable;
 
@@ -34,10 +34,6 @@ lazy_static! {
         cache: LruCache::new(100),
         reading: HashMap::new(),
     });
-    static ref PREFIX: String = match env::var("AWS_PREFIX") {
-        Ok(val) => format!("{}/", val),
-        Err(_) => "".to_string(),
-    };
     static ref NON_RETRYABLE_ERRORS: Vec<StatusCode> = vec![
         StatusCode::BAD_REQUEST,
         StatusCode::FORBIDDEN,
@@ -60,20 +56,6 @@ pub struct ObjectAccess {
     region_str: String,
     endpoint_str: String,
     credentials_profile: Option<String>,
-}
-
-/*
- * For testing, prefix all object keys with this string. In cases where objects are returned from
- * a call like list_objects and then fetched with get, we could end up doubling the prefix. We
- * could either strip the prefix from the beginning of every object we return, or we can only
- * prefix an object if it isn't already prefixed. We do the latter here, for conciseness, but in
- * the future we may want to revisit this decision.
- */
-fn prefixed(key: &str) -> String {
-    match key.starts_with(format!("{}zfs", *PREFIX).as_str()) {
-        true => key.to_string(),
-        false => format!("{}{}", *PREFIX, key),
-    }
 }
 
 #[derive(Debug)]
@@ -259,12 +241,12 @@ impl ObjectAccess {
         self.client
     }
 
-    pub async fn get_object_impl(&self, key: &str, timeout: Option<Duration>) -> Result<Vec<u8>> {
-        let msg = format!("get {}", prefixed(key));
+    pub async fn get_object_impl(&self, key: String, timeout: Option<Duration>) -> Result<Vec<u8>> {
+        let msg = format!("get {}", key);
         let v = retry(&msg, timeout, || async {
             let req = GetObjectRequest {
                 bucket: self.bucket_str.clone(),
-                key: prefixed(key),
+                key: key.clone(),
                 ..Default::default()
             };
             let output = self.client.get_object(req).await?;
@@ -304,8 +286,8 @@ impl ObjectAccess {
         Ok(v)
     }
 
-    pub async fn get_object_uncached(&self, key: &str) -> Result<Arc<Vec<u8>>> {
-        let vec = self.get_object_impl(key, None).await?;
+    pub async fn get_object_uncached(&self, key: String) -> Result<Arc<Vec<u8>>> {
+        let vec = self.get_object_impl(key.clone(), None).await?;
         // Note: we *should* have the same data from S3 (in the `vec`) and in
         // the cache, so this invalidation is normally not necessary.  However,
         // in case a bug (or undetected RAM error) resulted in incorrect cached
@@ -315,26 +297,25 @@ impl ObjectAccess {
         Ok(Arc::new(vec))
     }
 
-    pub async fn get_object(&self, key: &str) -> Result<Arc<Vec<u8>>> {
+    pub async fn get_object(&self, key: String) -> Result<Arc<Vec<u8>>> {
         let either = {
             // need this block separate so that we can drop the mutex before the .await
             let mut c = CACHE.lock().unwrap();
-            let mykey = key.to_string();
-            match c.cache.get(&mykey) {
+            match c.cache.get(&key) {
                 Some(v) => {
                     debug!("found {} in cache", key);
                     return Ok(v.clone());
                 }
-                None => match c.reading.get(key) {
+                None => match c.reading.get(&key) {
                     None => {
                         let (tx, rx) = watch::channel::<Option<Arc<Vec<u8>>>>(None);
-                        c.reading.insert(mykey, rx);
+                        c.reading.insert(key.clone(), rx);
                         Either::Left(async move {
-                            let v = Arc::new(self.get_object_impl(key, None).await?);
+                            let v = Arc::new(self.get_object_impl(key.clone(), None).await?);
                             let mut myc = CACHE.lock().unwrap();
                             tx.send(Some(v.clone())).unwrap();
                             myc.cache.put(key.to_string(), v.clone());
-                            myc.reading.remove(key);
+                            myc.reading.remove(&key);
                             Ok(v)
                         })
                     }
@@ -372,13 +353,11 @@ impl ObjectAccess {
 
     fn list_impl(
         &self,
-        prefix: &str,
+        prefix: String,
         start_after: Option<String>,
         use_delimiter: bool,
         list_prefixes: bool,
     ) -> impl Stream<Item = String> {
-        let full_prefix = prefixed(prefix);
-        let full_start_after = start_after.map(|sa| prefixed(&sa));
         let mut continuation_token = None;
         // XXX ObjectAccess should really be refcounted (behind Arc)
         let client = self.client.clone();
@@ -390,7 +369,7 @@ impl ObjectAccess {
         stream! {
             loop {
                 let output = retry(
-                    &format!("list {} (after {:?})", full_prefix, full_start_after),
+                    &format!("list {} (after {:?})", prefix, start_after),
                     None,
                     || async {
                         let req = ListObjectsV2Request {
@@ -398,8 +377,8 @@ impl ObjectAccess {
                             continuation_token: continuation_token.clone(),
                             delimiter: delimiter.clone(),
                             fetch_owner: Some(false),
-                            prefix: Some(full_prefix.clone()),
-                            start_after: full_start_after.clone(),
+                            prefix: Some(prefix.clone()),
+                            start_after: start_after.clone(),
                             ..Default::default()
                         };
                         // Note: Ok(...?) converts the RusotoError to an OAError for us
@@ -432,26 +411,30 @@ impl ObjectAccess {
 
     pub fn list_objects(
         &self,
-        prefix: &str,
+        prefix: String,
         start_after: Option<String>,
         use_delimiter: bool,
     ) -> impl Stream<Item = String> {
         self.list_impl(prefix, start_after, use_delimiter, false)
     }
 
-    pub fn list_prefixes(&self, prefix: &str) -> impl Stream<Item = String> {
+    pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> {
         self.list_impl(prefix, None, true, true)
     }
 
-    pub async fn collect_objects(&self, prefix: &str, start_after: Option<String>) -> Vec<String> {
+    pub async fn collect_objects(
+        &self,
+        prefix: String,
+        start_after: Option<String>,
+    ) -> Vec<String> {
         self.list_objects(prefix, start_after, true).collect().await
     }
 
-    pub async fn head_object(&self, key: &str) -> Option<HeadObjectOutput> {
-        let res = retry(&format!("head {}", prefixed(key)), None, || async {
+    pub async fn head_object(&self, key: String) -> Option<HeadObjectOutput> {
+        let res = retry(&format!("head {}", key), None, || async {
             let req = HeadObjectRequest {
                 bucket: self.bucket_str.clone(),
-                key: prefixed(key),
+                key: key.clone(),
                 ..Default::default()
             };
             // Note: Ok(...?) converts the RusotoError to an OAError for us
@@ -461,72 +444,66 @@ impl ObjectAccess {
         res.ok()
     }
 
-    pub async fn object_exists(&self, key: &str) -> bool {
+    pub async fn object_exists(&self, key: String) -> bool {
         self.head_object(key).await.is_some()
     }
 
     async fn put_object_impl(
         &self,
-        key: &str,
+        key: String,
         data: Vec<u8>,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
         let len = data.len();
         let bytes = Bytes::from(data);
         assert!(!self.readonly);
-        retry(
-            &format!("put {} ({} bytes)", prefixed(key), len),
-            timeout,
-            || async {
-                let my_bytes = bytes.clone();
-                let stream = ByteStream::new_with_size(stream! { yield Ok(my_bytes)}, len);
+        retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
+            let my_bytes = bytes.clone();
+            let stream = ByteStream::new_with_size(stream! { yield Ok(my_bytes)}, len);
 
-                let req = PutObjectRequest {
-                    bucket: self.bucket_str.clone(),
-                    key: prefixed(key),
-                    body: Some(stream),
-                    ..Default::default()
-                };
-                // Note: Ok(...?) converts the RusotoError to an OAError for us
-                Ok(self.client.put_object(req).await?)
-            },
-        )
+            let req = PutObjectRequest {
+                bucket: self.bucket_str.clone(),
+                key: key.clone(),
+                body: Some(stream),
+                ..Default::default()
+            };
+            // Note: Ok(...?) converts the RusotoError to an OAError for us
+            Ok(self.client.put_object(req).await?)
+        })
         .await
     }
 
-    fn invalidate_cache(key: &str, data: &[u8]) {
+    fn invalidate_cache(key: String, data: &[u8]) {
         let mut c = CACHE.lock().unwrap();
-        let mykey = key.to_string();
-        if c.cache.contains(&mykey) {
+        if c.cache.contains(&key) {
             debug!("found {} in cache when putting - invalidating", key);
             // XXX unfortuate to be copying; this happens every time when
             // freeing (we get/modify/put the object).  Maybe when freeing,
             // the get() should not add to the cache since it's probably
             // just polluting.
-            c.cache.put(mykey, Arc::new(data.to_vec()));
+            c.cache.put(key, Arc::new(data.to_vec()));
         }
     }
 
-    pub async fn put_object(&self, key: &str, data: Vec<u8>) {
-        Self::invalidate_cache(key, &data);
+    pub async fn put_object(&self, key: String, data: Vec<u8>) {
+        Self::invalidate_cache(key.clone(), &data);
 
         self.put_object_impl(key, data, None).await.unwrap();
     }
 
     pub async fn put_object_timed(
         &self,
-        key: &str,
+        key: String,
         data: Vec<u8>,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
-        Self::invalidate_cache(key, &data);
+        Self::invalidate_cache(key.clone(), &data);
 
         self.put_object_impl(key, data, timeout).await
     }
 
-    pub async fn delete_object(&self, key: &str) {
-        self.delete_objects(stream::iter(iter::once(key.to_string())))
-            .await;
+    pub async fn delete_object(&self, key: String) {
+        self.delete_objects(stream::iter(iter::once(key))).await;
     }
 
     // Note: Stream is of raw keys (with prefix)
@@ -587,12 +564,5 @@ impl ObjectAccess {
 
     pub fn readonly(&self) -> bool {
         self.readonly
-    }
-
-    pub fn strip_prefix(key: &str) -> &str {
-        match key.strip_prefix(PREFIX.as_str()) {
-            Some(stripped_key) => stripped_key,
-            None => key,
-        }
     }
 }

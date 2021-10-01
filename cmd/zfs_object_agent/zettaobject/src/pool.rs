@@ -118,10 +118,9 @@ impl PoolOwnerPhys {
     }
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
-        let key = Self::key(id);
-        let buf = object_access.get_object_impl(&key, None).await?;
+        let buf = object_access.get_object_impl(Self::key(id), None).await?;
         let this: Self = serde_json::from_slice(&buf)
-            .context(format!("Failed to decode contents of {}", key))?;
+            .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.id, id);
         Ok(this)
@@ -136,12 +135,12 @@ impl PoolOwnerPhys {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object_timed(&Self::key(self.id), buf, timeout)
+            .put_object_timed(Self::key(self.id), buf, timeout)
             .await
     }
 
     async fn delete(object_access: &ObjectAccess, id: PoolGuid) {
-        object_access.delete_object(&Self::key(id)).await;
+        object_access.delete_object(Self::key(id)).await;
     }
 }
 #[derive(Debug)]
@@ -278,14 +277,13 @@ impl PoolPhys {
     }
 
     pub async fn exists(object_access: &ObjectAccess, guid: PoolGuid) -> bool {
-        object_access.object_exists(&Self::key(guid)).await
+        object_access.object_exists(Self::key(guid)).await
     }
 
     pub async fn get(object_access: &ObjectAccess, guid: PoolGuid) -> Result<Self> {
-        let key = Self::key(guid);
-        let buf = object_access.get_object(&key).await?;
+        let buf = object_access.get_object(Self::key(guid)).await?;
         let this: Self = serde_json::from_slice(&buf)
-            .context(format!("Failed to decode contents of {}", key))?;
+            .with_context(|| format!("Failed to decode contents of {}", Self::key(guid)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.guid, guid);
         Ok(this)
@@ -295,7 +293,7 @@ impl PoolPhys {
         maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
-        object_access.put_object(&Self::key(self.guid), buf).await;
+        object_access.put_object(Self::key(self.guid), buf).await;
     }
 }
 
@@ -318,10 +316,9 @@ impl UberblockPhys {
     }
 
     async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
-        let key = Self::key(guid, txg);
-        let buf = object_access.get_object(&key).await?;
+        let buf = object_access.get_object(Self::key(guid, txg)).await?;
         let this: Self = serde_json::from_slice(&buf)
-            .context(format!("Failed to decode contents of {}", key))?;
+            .with_context(|| format!("Failed to decode contents of {}", Self::key(guid, txg)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.guid, guid);
         assert_eq!(this.txg, txg);
@@ -333,7 +330,7 @@ impl UberblockPhys {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object(&Self::key(self.guid, self.txg), buf)
+            .put_object(Self::key(self.guid, self.txg), buf)
             .await;
     }
 
@@ -347,7 +344,7 @@ impl UberblockPhys {
 
     async fn cleanup_older_uberblocks(object_access: &ObjectAccess, ub: UberblockPhys) {
         let mut txgs: Vec<Txg> = object_access
-            .collect_objects(&format!("zfs/{}/txg/", ub.guid), None)
+            .collect_objects(format!("zfs/{}/txg/", ub.guid), None)
             .await
             .iter()
             .map(|prefix| {
@@ -679,21 +676,22 @@ impl PoolState {
             .delete_objects(
                 shared_state
                     .object_access
-                    .list_objects(&txg_key, start_after, true)
+                    .list_objects(txg_key, start_after, true)
                     .inspect(|key| info!("cleanup: deleting future uberblock: {}", key)),
             )
             .await;
     }
 
     /// Remove log objects from log at prefix starting at next_id
-    async fn cleanup_orphaned_logs(&self, prefix: &str, next_id: ReclaimLogId) {
+    async fn cleanup_orphaned_logs(&self, prefix: String, next_id: ReclaimLogId) {
         let shared_state = &self.shared_state.clone();
+        let start_after = Some(format!("{}/{}", prefix, next_id));
         shared_state
             .object_access
             .delete_objects(
                 shared_state
                     .object_access
-                    .list_objects(prefix, Some(format!("{}/{}", prefix, next_id)), false)
+                    .list_objects(prefix, start_after, false)
                     .inspect(|key| info!("cleanup: deleting orphaned log object: {}", key)),
             )
             .await;
@@ -733,8 +731,8 @@ impl PoolState {
             syncing_state.storage_object_log.cleanup(),
             frees_log_stream.for_each(|_| future::ready(())),
             size_log_stream.for_each(|_| future::ready(())),
-            self.cleanup_orphaned_logs(&pending_frees_log_prefix, next_log_id),
-            self.cleanup_orphaned_logs(&object_size_log_prefix, next_log_id),
+            self.cleanup_orphaned_logs(pending_frees_log_prefix, next_log_id),
+            self.cleanup_orphaned_logs(object_size_log_prefix, next_log_id),
         )
         .await;
         assert!(self.syncing_state.lock().unwrap().is_none());
@@ -758,13 +756,10 @@ impl PoolState {
         oa.delete_objects(
             select_all(
                 DataObjectPhys::prefixes(shared_state.guid)
-                    .iter()
+                    .into_iter()
                     .map(|prefix| {
-                        Box::pin(oa.list_objects(
-                            prefix,
-                            Some(format!("{}{}", prefix, last_obj)),
-                            true,
-                        ))
+                        let start_after = Some(format!("{}{}", prefix, last_obj));
+                        Box::pin(oa.list_objects(prefix, start_after, true))
                     }),
             )
             .inspect(|_| count += 1),
@@ -1054,9 +1049,10 @@ impl Pool {
         for prefix in DataObjectPhys::prefixes(shared_state.guid) {
             let shared_state = shared_state.clone();
             list_stream.push(async move {
+                let start_after = Some(format!("{}{}", prefix, last_obj));
                 shared_state
                     .object_access
-                    .collect_objects(&prefix, Some(format!("{}{}", prefix, last_obj)))
+                    .collect_objects(prefix, start_after)
                     .await
             });
         }
@@ -1067,7 +1063,7 @@ impl Pool {
                 for key in vec {
                     let shared_state = shared_state.clone();
                     sub_stream.push(future::ready(async move {
-                        DataObjectPhys::get_from_key(&shared_state.object_access, &key, false).await
+                        DataObjectPhys::get_from_key(&shared_state.object_access, key, false).await
                     }));
                 }
                 sub_stream

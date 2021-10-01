@@ -333,7 +333,7 @@ fn delete_pool_objects(
     let oa: ObjectAccess = object_access.clone();
 
     tokio::spawn(async move {
-        let prefix = &format!("zfs/{}/", guid);
+        let prefix = format!("zfs/{}/", guid);
         let super_object = PoolPhys::key(guid);
         let batch_size = *OBJECT_DELETION_BATCH_SIZE * *DESTROY_PROGRESS_FREQUENCY;
         let mut count = 0;
@@ -395,7 +395,7 @@ async fn destroy_task(object_access: ObjectAccess, guid: PoolGuid) {
     }
 
     // The super object is destroyed last as it is used to keep track of the progress made.
-    object_access.delete_object(&PoolPhys::key(guid)).await;
+    object_access.delete_object(PoolPhys::key(guid)).await;
 
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     let pool_destroyer = maybe_pool_destroyer.as_mut().unwrap();

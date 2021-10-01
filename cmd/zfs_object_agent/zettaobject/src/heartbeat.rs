@@ -35,10 +35,9 @@ impl HeartbeatPhys {
     }
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
-        let key = Self::key(id);
-        let buf = object_access.get_object_impl(&key, None).await?;
+        let buf = object_access.get_object_impl(Self::key(id), None).await?;
         let this: Self = serde_json::from_slice(&buf)
-            .context(format!("Failed to decode contents of {}", key))?;
+            .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.id, id);
         Ok(this)
@@ -53,12 +52,12 @@ impl HeartbeatPhys {
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
         object_access
-            .put_object_timed(&Self::key(self.id), buf, timeout)
+            .put_object_timed(Self::key(self.id), buf, timeout)
             .await
     }
 
     pub async fn delete(object_access: &ObjectAccess, id: Uuid) {
-        object_access.delete_object(&Self::key(id)).await;
+        object_access.delete_object(Self::key(id)).await;
     }
 }
 

@@ -277,7 +277,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                     // XXX handle checksum error here
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
                         .chunk_from_raw(&extent_bytes[total_consumed..])
-                        .context(format!("{:?} at {:?}", chunk_id, chunk_location))
+                        .with_context(|| format!("{:?} at {:?}", chunk_id, chunk_location))
                         .unwrap();
                     assert_eq!(chunk.id, chunk_id);
                     for entry in chunk.entries {

@@ -99,27 +99,45 @@ impl DataObjectPhys {
     pub async fn get(
         object_access: &ObjectAccess,
         guid: PoolGuid,
-        obj: ObjectId,
+        object: ObjectId,
         bypass_cache: bool,
     ) -> Result<Self> {
-        let this = Self::get_from_key(object_access, &Self::key(guid, obj), bypass_cache).await?;
+        let buf = match bypass_cache {
+            true => {
+                object_access
+                    .get_object_uncached(Self::key(guid, object))
+                    .await?
+            }
+            false => object_access.get_object(Self::key(guid, object)).await?,
+        };
+        let begin = Instant::now();
+        let this: DataObjectPhys = bincode::deserialize(&buf)
+            .with_context(|| format!("Failed to decode contents of {}", Self::key(guid, object)))?;
+        trace!(
+            "{:?}: deserialized {} blocks from {} bytes in {}ms",
+            this.object,
+            this.blocks.len(),
+            buf.len(),
+            begin.elapsed().as_millis()
+        );
         assert_eq!(this.guid, guid);
-        assert_eq!(this.object, obj);
+        assert_eq!(this.object, object);
+        this.verify();
         Ok(this)
     }
 
     pub async fn get_from_key(
         object_access: &ObjectAccess,
-        key: &str,
+        key: String,
         bypass_cache: bool,
     ) -> Result<Self> {
         let buf = match bypass_cache {
-            true => object_access.get_object_uncached(key).await?,
-            false => object_access.get_object(key).await?,
+            true => object_access.get_object_uncached(key.clone()).await?,
+            false => object_access.get_object(key.clone()).await?,
         };
         let begin = Instant::now();
-        let this: DataObjectPhys =
-            bincode::deserialize(&buf).context(format!("Failed to decode contents of {}", key))?;
+        let this: DataObjectPhys = bincode::deserialize(&buf)
+            .with_context(|| format!("Failed to decode contents of {}", key))?;
         trace!(
             "{:?}: deserialized {} blocks from {} bytes in {}ms",
             this.object,
@@ -143,7 +161,7 @@ impl DataObjectPhys {
         );
         self.verify();
         object_access
-            .put_object(&Self::key(self.guid, self.object), contents)
+            .put_object(Self::key(self.guid, self.object), contents)
             .await;
     }
 

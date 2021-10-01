@@ -4,7 +4,6 @@ use clap::Arg;
 use clap::SubCommand;
 use client::Client;
 use futures::stream::StreamExt;
-use lazy_static::lazy_static;
 use nvpair::*;
 use rand::prelude::*;
 use rusoto_core::ByteStream;
@@ -15,7 +14,6 @@ use rusoto_credential::ProfileProvider;
 use rusoto_credential::ProvideAwsCredentials;
 use rusoto_s3::*;
 use std::collections::BTreeSet;
-use std::env;
 use std::error::Error;
 use std::fs;
 use std::fs::File;
@@ -34,13 +32,6 @@ const REGION: &str = "us-west-2";
 const BUCKET_NAME: &str = "cloudburst-data-2";
 const POOL_NAME: &str = "testpool";
 const POOL_GUID: u64 = 1234;
-
-lazy_static! {
-    static ref AWS_PREFIX: String = match env::var("AWS_PREFIX") {
-        Ok(val) => format!("{}/", val),
-        Err(_) => "".to_string(),
-    };
-}
 
 async fn do_rusoto_provider<P>(credentials_provider: P, file: &str)
 where
@@ -323,34 +314,21 @@ async fn print_super(
                 );
             }
             Err(_e) => {
-                /*
-                 * XXX Pool::get_config() only works for pools under the AWS_PREFIX because it assumes the
-                 * path to the "super" object.
-                 */
-                if AWS_PREFIX.len() == 0 && !pool_key.starts_with("zfs/") {
-                    println!("\t(pool inside an alt AWS_PREFIX)");
-                } else {
-                    println!("\t-unknown format-");
-                };
+                println!("\t-unknown format-");
             }
         }
     }
 }
 
-fn strip_prefix(prefix: &str) -> &str {
-    if prefix.starts_with(AWS_PREFIX.as_str()) {
-        &prefix[AWS_PREFIX.len()..]
-    } else {
-        prefix
-    }
-}
-
 async fn find_old_pools(object_access: &ObjectAccess, min_age: Duration) -> Vec<String> {
-    let pool_keys: Vec<String> = object_access.list_prefixes("zfs/").collect().await;
+    let pool_keys: Vec<String> = object_access
+        .list_prefixes("zfs/".to_string())
+        .collect()
+        .await;
     let mut vec = Vec::new();
     for pool_key in pool_keys {
         match object_access
-            .head_object(strip_prefix(&format!("{}super", pool_key)))
+            .head_object(format!("{}super", pool_key))
             .await
         {
             Some(output) => {
@@ -358,7 +336,7 @@ async fn find_old_pools(object_access: &ObjectAccess, min_age: Duration) -> Vec<
                     DateTime::parse_from_rfc2822(output.last_modified.as_ref().unwrap()).unwrap();
                 print_super(object_access, &pool_key, &mod_time).await;
                 if has_expired(&mod_time, min_age) {
-                    vec.push(strip_prefix(&pool_key).to_string());
+                    vec.push(pool_key);
                 } else {
                     println!(
                         "Skipping pool as it is not {} days old.",
@@ -382,7 +360,7 @@ async fn do_list_pools(
         // Lookup all objects in the pool.
         if list_all_objects {
             object_access
-                .list_objects(&pool_key, None, false)
+                .list_objects(pool_key, None, false)
                 .for_each(|object| async move { println!("    {}", object) })
                 .await;
         }
@@ -396,7 +374,7 @@ async fn do_destroy_old_pools(
 ) -> Result<(), Box<dyn Error>> {
     for pool_keys in find_old_pools(object_access, min_age).await {
         object_access
-            .delete_objects(object_access.list_objects(&pool_keys, None, false))
+            .delete_objects(object_access.list_objects(pool_keys, None, false))
             .await;
     }
     Ok(())
@@ -430,8 +408,8 @@ async fn do_test_connectivity(object_access: &ObjectAccess) {
     let file = format!("test/test_connectivity_{}", num);
     let content = "test connectivity to S3".as_bytes().to_vec();
 
-    object_access.put_object(&file, content).await;
-    object_access.delete_object(&file).await;
+    object_access.put_object(file.clone(), content).await;
+    object_access.delete_object(file).await;
 }
 
 async fn test_connectivity(object_access: &ObjectAccess) -> Result<(), Box<dyn Error>> {

@@ -120,7 +120,7 @@ impl PublicConnectionState {
             }
 
             object_access
-                .list_prefixes("zfs/")
+                .list_prefixes("zfs/".to_string())
                 .for_each_concurrent(*GET_POOLS_QUEUE_DEPTH, |prefix| {
                     let my_object_access = object_access.clone();
                     let my_response = response.clone();

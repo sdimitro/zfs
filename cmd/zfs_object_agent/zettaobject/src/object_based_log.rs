@@ -45,7 +45,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogPhys<T> {
     pub async fn cleanup_older_generations(&self, object_access: &ObjectAccess) {
         // Stream<Item=String> of generation prefixes
         let generations = object_access
-            .list_prefixes(&format!("{}/", self.key))
+            .list_prefixes(format!("{}/", self.key))
             .filter(|key| {
                 future::ready(
                     key.rsplit('/').collect::<Vec<&str>>()[1]
@@ -60,7 +60,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogPhys<T> {
             .delete_objects(
                 generations
                     .flat_map(|generation| {
-                        Box::pin(object_access.list_objects(&generation, None, false))
+                        Box::pin(object_access.list_objects(generation, None, false))
                     })
                     .inspect(|key| trace!("cleanup: old generation chunk {}", key)),
             )
@@ -90,11 +90,16 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
         generation: u64,
         chunk: u64,
     ) -> Result<Self> {
-        let key = Self::key(name, generation, chunk);
-        let buf = object_access.get_object(&key).await?;
+        let buf = object_access
+            .get_object(Self::key(name, generation, chunk))
+            .await?;
         let begin = Instant::now();
-        let this: Self = serde_json::from_slice(&buf)
-            .context(format!("Failed to decode contents of {}", key))?;
+        let this: Self = serde_json::from_slice(&buf).with_context(|| {
+            format!(
+                "Failed to decode contents of {}",
+                Self::key(name, generation, chunk)
+            )
+        })?;
         debug!(
             "deserialized {} log entries in {}ms",
             this.entries.len(),
@@ -114,7 +119,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
             begin.elapsed().as_millis()
         );
         object_access
-            .put_object(&Self::key(name, self.generation, self.chunk), buf)
+            .put_object(Self::key(name, self.generation, self.chunk), buf)
             .await;
     }
 }
@@ -201,7 +206,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
                 .delete_objects(
                     shared_state
                         .object_access
-                        .list_objects(&last_generation_key, start_after, true)
+                        .list_objects(last_generation_key, start_after, true)
                         .inspect(|key| {
                             info!(
                                 "cleanup: deleting future chunk of current generation: {}",
@@ -221,7 +226,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
                 .delete_objects(
                     shared_state
                         .object_access
-                        .list_objects(&next_generation_key, None, true)
+                        .list_objects(next_generation_key, None, true)
                         .inspect(|key| {
                             info!("cleanup: deleting chunk of future generation: {}", key)
                         }),

@@ -29,16 +29,16 @@ impl Perf {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    async fn put(&self, object_access: &ObjectAccess, key: &str, data: Vec<u8>) {
-        object_access.put_object(&key.to_string(), data).await;
+    async fn put(&self, object_access: &ObjectAccess, key: String, data: Vec<u8>) {
+        object_access.put_object(key, data).await;
     }
 
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    async fn get(&self, object_access: &ObjectAccess, key: &str) {
-        object_access.get_object(&key.to_string()).await.unwrap();
+    async fn get(&self, object_access: &ObjectAccess, key: String) {
+        object_access.get_object(key).await.unwrap();
     }
 
     fn log_metrics(&self, duration: Duration) {
@@ -60,7 +60,7 @@ impl Perf {
         duration: Duration,
     ) {
         let num_objects = object_access
-            .list_objects(&key_prefix, None, true)
+            .list_objects(key_prefix.clone(), None, true)
             .fold(0, |count, _key| async move { count + 1 })
             .await;
         let mut key_id = 0;
@@ -74,7 +74,7 @@ impl Perf {
                 my_perf
                     .get(
                         &my_object_access,
-                        &format!("{}{}", my_key_prefix, key_id % num_objects + 1),
+                        format!("{}{}", my_key_prefix, key_id % num_objects + 1),
                     )
                     .await;
             })
@@ -106,7 +106,7 @@ impl Perf {
                 my_perf
                     .put(
                         &my_object_access,
-                        &format!("{}{}", my_key_prefix, key_id),
+                        format!("{}{}", my_key_prefix, key_id),
                         my_data,
                     )
                     .await
@@ -135,7 +135,7 @@ impl Perf {
 
 pub async fn write_test(
     object_access: &ObjectAccess,
-    key_prefix: &str,
+    key_prefix: String,
     objsize: u64,
     qdepth: u64,
     duration: Duration,
@@ -144,14 +144,8 @@ pub async fn write_test(
     let bounds = WriteTestBounds::Time(duration);
     perf.log_metrics(Duration::from_secs(1));
 
-    perf.write_objects(
-        object_access,
-        key_prefix.to_string(),
-        objsize,
-        qdepth,
-        bounds,
-    )
-    .await;
+    perf.write_objects(object_access, key_prefix.clone(), objsize, qdepth, bounds)
+        .await;
 
     println!("{:#?}", perf.metrics.put);
 
@@ -164,7 +158,7 @@ pub async fn write_test(
 
 pub async fn read_test(
     object_access: &ObjectAccess,
-    key_prefix: &str,
+    key_prefix: String,
     objsize: u64,
     qdepth: u64,
     duration: Duration,
@@ -173,16 +167,10 @@ pub async fn read_test(
     let bounds = WriteTestBounds::Objects(max(qdepth * 10, 200));
     perf.log_metrics(Duration::from_secs(1));
 
-    perf.write_objects(
-        object_access,
-        key_prefix.to_string(),
-        objsize,
-        qdepth,
-        bounds,
-    )
-    .await;
+    perf.write_objects(object_access, key_prefix.clone(), objsize, qdepth, bounds)
+        .await;
 
-    perf.read_objects(object_access, key_prefix.to_string(), qdepth, duration)
+    perf.read_objects(object_access, key_prefix.clone(), qdepth, duration)
         .await;
 
     println!("{:#?}", perf.metrics.get);
