@@ -13,6 +13,7 @@
 //! caller and having it "always" die on that caller.
 
 use crate::get_tunable;
+use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
 use std::{
@@ -69,8 +70,10 @@ where
             }
             if location == *DIE_LOCATION {
                 let msg = f();
-                warn!("exiting to test failure handling: {}", msg);
-                panic!("exiting to test failure handling: {}", msg);
+                let backtrace = Backtrace::new();
+                warn!("exiting to test failure handling: {} {:?}", msg, backtrace);
+                println!("exiting to test failure handling: {} {:?}", msg, backtrace);
+                std::process::exit(0);
             }
         }
     }
