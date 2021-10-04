@@ -1314,9 +1314,9 @@ impl Pool {
             reclaim_info: syncing_state.reclaim_info.to_phys(),
             next_block: syncing_state.next_block(),
             obsolete_objects: syncing_state.objects_to_delete.clone(),
-            zfs_uberblock: TerseVec(uberblock),
+            zfs_uberblock: uberblock.into(),
             stats: syncing_state.stats,
-            zfs_config: TerseVec(config),
+            zfs_config: config.into(),
             features: syncing_state
                 .features
                 .iter()

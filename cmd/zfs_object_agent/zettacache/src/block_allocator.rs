@@ -14,11 +14,12 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::convert::TryFrom;
 use std::ops::Bound::*;
 use std::sync::Arc;
+use std::time::Instant;
 use std::{iter, mem};
-use util::get_tunable;
 use util::BitmapRangeIterator;
 use util::From64;
 use util::RangeTree;
+use util::{get_tunable, TerseVec};
 
 lazy_static! {
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =
@@ -783,11 +784,11 @@ impl BlockAllocator {
         let coverage = spacemap.get_coverage();
         let slab_size = phys.slab_size;
         let num_slabs = usize::from64(coverage.size / u64::from(slab_size));
-        assert_eq!(num_slabs, phys.slabs.len());
+        assert_eq!(num_slabs, phys.slabs.0.len());
         let mut available_space = 0u64;
 
         let mut slabs_vec = Vec::with_capacity(num_slabs);
-        for (slab_id, phys_slab) in phys.slabs.iter().enumerate() {
+        for (slab_id, phys_slab) in phys.slabs.0.iter().enumerate() {
             // ensure that we are pushing at the right offset of the Vec
             assert_eq!(slab_id, slabs_vec.len());
 
@@ -1061,6 +1062,7 @@ impl BlockAllocator {
         // We first condense any slabs so later when we flush any of them that
         // are dirty we've already migrated their entries of this checkpoint to
         // spacemap_next.
+        let begin = Instant::now();
         let slabs_to_condense = min(
             *SLAB_CONDENSE_PER_CHECKPOINT,
             (self.slabs.0.len() - self.next_slab_to_condense.as_index()) as u64,
@@ -1146,12 +1148,18 @@ impl BlockAllocator {
         self.available_space += self.freeing_space;
         self.freeing_space = 0;
 
-        BlockAllocatorPhys {
+        let phys = BlockAllocatorPhys {
             slab_size: self.slab_size,
             spacemap: self.spacemap.flush().await,
             spacemap_next: self.spacemap_next.flush().await,
             next_slab_to_condense: self.next_slab_to_condense,
-            slabs: self.slabs.0.iter().map(|slab| slab.get_phys()).collect(),
+            slabs: self
+                .slabs
+                .0
+                .iter()
+                .map(|slab| slab.get_phys())
+                .collect::<Vec<_>>()
+                .into(),
             slab_buckets: SlabAllocationBucketsPhys {
                 buckets: self
                     .slab_buckets
@@ -1160,7 +1168,12 @@ impl BlockAllocator {
                     .map(|(&bucket_size, bucket)| (bucket_size, bucket.is_extent_based))
                     .collect(),
             },
-        }
+        };
+        debug!(
+            "flushed BlockAllocator in {}ms",
+            begin.elapsed().as_millis()
+        );
+        phys
     }
 
     pub fn get_available(&self) -> u64 {
@@ -1282,7 +1295,7 @@ pub struct BlockAllocatorPhys {
 
     // TODO: if this is too big to be writing every checkpoint,
     //       we could use a BlockBasedLog<(SlabId, SlabPhysType)>
-    slabs: Vec<SlabPhys>,
+    slabs: TerseVec<SlabPhys>,
     slab_buckets: SlabAllocationBucketsPhys,
 }
 impl OnDisk for BlockAllocatorPhys {}
@@ -1306,7 +1319,7 @@ impl BlockAllocatorPhys {
             spacemap: SpaceMapPhys::new(offset, size),
             spacemap_next: SpaceMapPhys::new(offset, size),
             next_slab_to_condense: SlabId(0),
-            slabs,
+            slabs: slabs.into(),
             slab_buckets: DEFAULT_SLAB_BUCKETS.clone(),
         }
     }
