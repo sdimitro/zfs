@@ -800,9 +800,9 @@ impl ZettaCache {
         mut merge_rx: Option<tokio::sync::mpsc::Receiver<MergeMessage>>,
         mut next_index: Option<ZettaCacheIndexPhys>,
     ) {
-        let next_tick = tokio::time::Instant::now();
+        let mut next_tick = tokio::time::Instant::now();
         loop {
-            let next_tick = std::cmp::max(
+            next_tick = std::cmp::max(
                 tokio::time::Instant::now(),
                 next_tick + *CHECKPOINT_INTERVAL,
             );
