@@ -2,7 +2,7 @@ lib_LTLIBRARIES = libzoa.la
 
 sbin_PROGRAMS = zcachedb zfs_object_agent zfs_object_perf zoa_test
 
-common_sources = $(wildcard zettacache/src/*.rs zettacache/Cargo.toml zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
+common_sources = $(wildcard util/src/*.rs util/Cargo.toml zettacache/src/*.rs zettacache/Cargo.toml zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
 
 zcachedb_SOURCES = $(wildcard zcdb/src/*.rs zcdb/Cargo.toml) $(common_sources)
 

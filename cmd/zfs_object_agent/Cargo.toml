@@ -10,10 +10,11 @@ incremental = true
 [workspace]
 members = [
     "client",
+    "object_perf",
     "server",
+    "util",
     "zcdb",
     "zettacache",
     "zettaobject",
-    "object_perf",
     "zoa",
 ]

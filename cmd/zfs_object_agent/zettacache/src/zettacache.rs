@@ -6,12 +6,7 @@ use crate::block_allocator::BlockAllocatorPhys;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorPhys;
-use crate::get_tunable;
 use crate::index::*;
-use crate::lock_set::LockSet;
-use crate::lock_set::LockedItem;
-use crate::maybe_die_with;
-use crate::mutex_ext::MutexExt;
 use crate::DumpStructuresOptions;
 use anyhow::Result;
 use conv::ConvUtil;
@@ -37,6 +32,12 @@ use std::time::Instant;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep_until, timeout_at};
+use util::get_tunable;
+use util::maybe_die_with;
+use util::From64;
+use util::LockSet;
+use util::LockedItem;
+use util::MutexExt;
 
 lazy_static! {
     static ref SUPERBLOCK_SIZE: u64 = get_tunable("superblock_size", 4 * 1024);

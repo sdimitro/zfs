@@ -1,7 +1,5 @@
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
-use crate::base_types::From64;
-use crate::get_tunable;
 use anyhow::{anyhow, Result};
 use bincode::Options;
 use lazy_static::lazy_static;
@@ -24,6 +22,8 @@ use std::time::Instant;
 use tokio::fs::File;
 use tokio::fs::OpenOptions;
 use tokio::sync::Semaphore;
+use util::get_tunable;
+use util::From64;
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);

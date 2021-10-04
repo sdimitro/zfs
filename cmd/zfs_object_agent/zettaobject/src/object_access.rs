@@ -13,7 +13,11 @@ use lru::LruCache;
 use rand::prelude::*;
 use rusoto_core::{ByteStream, RusotoError};
 use rusoto_credential::{AutoRefreshingProvider, ChainProvider, ProfileProvider};
-use rusoto_s3::*;
+use rusoto_s3::{
+    Delete, DeleteObjectsRequest, GetObjectRequest, HeadObjectOutput, HeadObjectRequest,
+    ListObjectsV2Request, ObjectIdentifier, PutObjectError, PutObjectOutput, PutObjectRequest,
+    S3Client, S3,
+};
 use std::convert::TryFrom;
 use std::error::Error;
 use std::iter;
@@ -21,7 +25,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
 use tokio::{sync::watch, time::error::Elapsed};
-use zettacache::get_tunable;
+use util::get_tunable;
 
 struct ObjectCache {
     // XXX cache key should include Bucket

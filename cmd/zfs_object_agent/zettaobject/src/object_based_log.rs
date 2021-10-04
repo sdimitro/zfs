@@ -15,8 +15,8 @@ use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
 use tokio::task::JoinHandle;
+use util::get_tunable;
 use zettacache::base_types::*;
-use zettacache::get_tunable;
 
 lazy_static! {
     pub static ref ENTRIES_PER_OBJECT: usize = get_tunable("entries_per_object", 100_000);

@@ -2379,6 +2379,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "util"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "backtrace",
+ "config",
+ "lazy_static",
+ "log",
+ "more-asserts",
+ "rand",
+ "roaring",
+ "serde 1.0.130",
+ "tokio",
+]
+
+[[package]]
 name = "uuid"
 version = "0.8.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2589,11 +2605,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
- "async-trait",
- "backtrace",
  "bincode",
  "chrono",
- "config",
  "conv",
  "futures",
  "futures-core",
@@ -2605,12 +2618,12 @@ dependencies = [
  "more-asserts",
  "nix",
  "num",
- "rand",
  "roaring",
  "seahash",
  "serde 1.0.130",
  "serde_json",
  "tokio",
+ "util",
 ]
 
 [[package]]
@@ -2648,6 +2661,7 @@ dependencies = [
  "stream-reduce",
  "tokio",
  "tokio-stream",
+ "util",
  "uuid",
  "zettacache",
 ]
@@ -2659,6 +2673,7 @@ dependencies = [
  "chrono",
  "clap",
  "log",
+ "util",
  "zettacache",
  "zettaobject",
 ]

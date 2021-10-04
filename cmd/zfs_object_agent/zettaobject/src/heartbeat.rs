@@ -9,8 +9,9 @@ use std::{
     time::{Duration, Instant, SystemTime},
 };
 use tokio::sync::watch::{self, Receiver};
+use util::get_tunable;
+use util::maybe_die_with;
 use uuid::Uuid;
-use zettacache::{get_tunable, maybe_die_with};
 
 lazy_static! {
     pub static ref LEASE_DURATION: Duration =

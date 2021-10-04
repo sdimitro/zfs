@@ -15,10 +15,10 @@ use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::convert::TryFrom;
 use std::sync::Arc;
+use util::get_tunable;
+use util::maybe_die_with;
 use uuid::Uuid;
 use zettacache::base_types::*;
-use zettacache::get_tunable;
-use zettacache::maybe_die_with;
 use zettacache::ZettaCache;
 
 lazy_static! {

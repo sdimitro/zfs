@@ -49,10 +49,11 @@ use stream_reduce::Reduce;
 use tokio::sync::oneshot;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use util::get_tunable;
+use util::maybe_die_with;
+use util::TerseVec;
 use uuid::Uuid;
 use zettacache::base_types::*;
-use zettacache::get_tunable;
-use zettacache::maybe_die_with;
 use zettacache::LookupResponse;
 use zettacache::ZettaCache;
 
@@ -205,15 +206,6 @@ pub struct UberblockPhys {
     zfs_config: TerseVec<u8>,
 }
 impl OnDisk for UberblockPhys {}
-
-/// exists just to reduce Debug output on fields we don't really care about
-#[derive(Serialize, Deserialize)]
-pub struct TerseVec<T>(Vec<T>);
-impl<T> fmt::Debug for TerseVec<T> {
-    fn fmt(&self, fmt: &mut fmt::Formatter) -> fmt::Result {
-        fmt.write_fmt(format_args!("[...{} elements...]", self.0.len()))
-    }
-}
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy)]
 pub struct PoolStatsPhys {

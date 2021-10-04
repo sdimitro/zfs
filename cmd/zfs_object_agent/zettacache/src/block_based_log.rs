@@ -2,7 +2,6 @@ use crate::base_types::*;
 use crate::block_access::BlockAccess;
 use crate::block_access::EncodeType;
 use crate::extent_allocator::ExtentAllocator;
-use crate::get_tunable;
 use anyhow::Context;
 use async_stream::stream;
 use futures::stream::FuturesUnordered;
@@ -23,6 +22,7 @@ use std::ops::Bound::*;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Instant;
+use util::get_tunable;
 
 lazy_static! {
     // XXX maybe this is wasteful for the smaller logs?

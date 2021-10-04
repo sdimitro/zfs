@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
-use zettacache::base_types::From64;
+use util::From64;
 
 // Ss: ServerState (consumer's state associated with the server)
 // Cs: ConnectionState (consumer's state associated with the connection)

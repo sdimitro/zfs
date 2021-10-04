@@ -1,10 +1,10 @@
 use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::convert::TryInto;
 use std::fmt::*;
 use std::ops::Add;
 use std::ops::Sub;
+use util::From64;
 
 /*
  * Things that are stored on disk.
@@ -105,16 +105,5 @@ impl Display for ReclaimLogId {
 impl ReclaimLogId {
     pub fn as_index(self) -> usize {
         usize::from(self.0)
-    }
-}
-
-/// Conversions that are safe assuming that we are on LP64 (usize == u64)
-pub trait From64<A> {
-    fn from64(a: A) -> Self;
-}
-
-impl From64<u64> for usize {
-    fn from64(a: u64) -> usize {
-        a.try_into().unwrap()
     }
 }

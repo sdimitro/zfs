@@ -1,10 +1,6 @@
 use crate::base_types::*;
-use crate::base_types::{Extent, OnDisk};
-use crate::bitmap_range_iterator::BitmapRangeIterator;
 use crate::block_access::BlockAccess;
 use crate::extent_allocator::ExtentAllocator;
-use crate::get_tunable;
-use crate::range_tree::RangeTree;
 use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
 use crate::zettacache::DEFAULT_SLAB_SIZE;
 use lazy_static::lazy_static;
@@ -19,6 +15,10 @@ use std::convert::TryFrom;
 use std::ops::Bound::*;
 use std::sync::Arc;
 use std::{iter, mem};
+use util::get_tunable;
+use util::BitmapRangeIterator;
+use util::From64;
+use util::RangeTree;
 
 lazy_static! {
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =

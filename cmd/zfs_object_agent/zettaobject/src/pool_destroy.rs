@@ -17,8 +17,8 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
+use util::get_tunable;
 use zettacache::base_types::*;
-use zettacache::get_tunable;
 
 lazy_static! {
     static ref POOL_DESTROYER: Mutex<Option<PoolDestroyer>> = Default::default();

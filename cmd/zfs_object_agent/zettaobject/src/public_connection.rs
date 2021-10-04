@@ -1,6 +1,3 @@
-use std::fs;
-use std::os::unix::prelude::PermissionsExt;
-
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::pool_destroy;
@@ -11,9 +8,11 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
+use std::fs;
+use std::os::unix::prelude::PermissionsExt;
 use std::sync::{Arc, Mutex};
+use util::get_tunable;
 use zettacache::base_types::*;
-use zettacache::get_tunable;
 
 lazy_static! {
     pub static ref GET_POOLS_QUEUE_DEPTH: usize = get_tunable("get_pools_queue_depth", 100);

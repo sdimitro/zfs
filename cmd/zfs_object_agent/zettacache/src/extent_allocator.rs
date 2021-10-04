@@ -1,10 +1,10 @@
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
-use crate::range_tree::RangeTree;
 use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::mem;
+use util::RangeTree;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub struct ExtentAllocatorPhys {

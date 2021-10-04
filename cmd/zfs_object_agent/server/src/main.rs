@@ -65,7 +65,7 @@ fn main() {
     );
 
     if let Some(file_name) = matches.value_of("config-file") {
-        zettacache::read_tunable_config(file_name);
+        util::read_tunable_config(file_name);
     }
 
     error!(

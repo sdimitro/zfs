@@ -10,5 +10,6 @@ edition = "2018"
 chrono = "0.4"
 clap = "2"
 log = "0.4"
+util = { path = "../util" }
 zettacache = { path = "../zettacache" }
 zettaobject = { path = "../zettaobject" }
