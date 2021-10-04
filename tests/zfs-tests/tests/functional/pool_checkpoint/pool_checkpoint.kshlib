@@ -181,10 +181,10 @@ function cleanup_test_pool
 	# data from old pools.
 	#
 	if ! use_object_store; then
-        for disk in $DISKS; do
-            zpool labelclear -f $disk
-        done
-    fi
+		for disk in $DISKS; do
+			zpool labelclear -f $disk
+		done
+	fi
 }
 
 function cleanup_nested_pools
