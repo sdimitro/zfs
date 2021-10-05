@@ -143,7 +143,7 @@ impl BlockAccess {
         let begin = Instant::now();
         let _permit = self.outstanding_reads.acquire().await.unwrap();
         let vec = tokio::task::spawn_blocking(move || {
-            let mut v = Vec::new();
+            let mut v: Vec<u8> = Vec::new();
             // XXX use unsafe code to avoid double initializing it?
             // XXX directio requires the pointer to be sector-aligned, requiring this grossness
             v.resize(usize::from64(extent.size) + sector_size, 0);
@@ -184,7 +184,7 @@ impl BlockAccess {
         let begin = Instant::now();
         let _permit = self.outstanding_writes.acquire().await.unwrap();
         tokio::task::spawn_blocking(move || {
-            let mut v = Vec::new();
+            let mut v: Vec<u8> = Vec::new();
             // XXX directio requires the pointer to be sector-aligned, requiring this grossness
             v.resize(length + sector_size, 0);
             let aligned = unsafe {
