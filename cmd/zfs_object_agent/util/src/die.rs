@@ -18,8 +18,10 @@ use lazy_static::lazy_static;
 use log::*;
 use std::{
     collections::HashSet,
+    ffi::OsStr,
     fmt::Display,
     panic::Location,
+    path::Path,
     sync::RwLock,
     time::{Duration, Instant},
 };
@@ -32,6 +34,9 @@ lazy_static! {
         .map(|secs: f64| Duration::from_secs_f64(secs * rand::random::<f64>() * 2.0));
     static ref LOCATIONS: RwLock<HashSet<&'static Location<'static>>> = Default::default();
     static ref BEGIN: Instant = Instant::now();
+    // tunable should be the "basename" (e.g. zettacache.rs)
+    static ref DIE_FILE: Option<String> = get_tunable("die_file", None);
+    static ref DIE_LINE: Option<u32> = get_tunable("die_line", None);
 }
 
 // Instead of taking a string (or Display) to print, this takes a function which
@@ -54,21 +59,42 @@ where
             // DIE_LOCATION here so that we're sure to not evaluate it until
             // RUN_TIME has elapsed, so that LOCATIONS has been filled in.
             lazy_static! {
-                static ref DIE_LOCATION: &'static Location<'static> = {
-                    let locations = LOCATIONS.read().unwrap();
-                    let die_location = *locations
+                static ref DIE_LOCATION: Option<&'static Location<'static>> = {
+                    let possible_locations = LOCATIONS
+                        .read()
+                        .unwrap()
                         .iter()
-                        .nth(rand::random::<usize>() % locations.len())
-                        .unwrap();
-                    warn!(
-                        "after running {} seconds, selected site to die: {}",
-                        RUN_TIME.unwrap().as_secs(),
-                        die_location
-                    );
-                    die_location
+                        .filter(|location| {
+                            DIE_LINE.map_or(true, |line| location.line() == line)
+                                && DIE_FILE.as_ref().map_or(true, |file| {
+                                    Path::new(location.file()).file_name().unwrap()
+                                        == OsStr::new(file)
+                                })
+                        })
+                        .copied()
+                        .collect::<Vec<_>>();
+
+                    if possible_locations.is_empty() {
+                        warn!(
+                            "after running {} seconds, no valid site to die; file:{:?} line:{:?}",
+                            RUN_TIME.unwrap().as_secs(),
+                            *DIE_FILE,
+                            *DIE_LINE,
+                        );
+                        None
+                    } else {
+                        let die_location =
+                            possible_locations[rand::random::<usize>() % possible_locations.len()];
+                        warn!(
+                            "after running {} seconds, selected site to die: {}",
+                            RUN_TIME.unwrap().as_secs(),
+                            die_location
+                        );
+                        Some(die_location)
+                    }
                 };
             }
-            if location == *DIE_LOCATION {
+            if Some(location) == *DIE_LOCATION {
                 let msg = f();
                 let backtrace = Backtrace::new();
                 warn!("exiting to test failure handling: {} {:?}", msg, backtrace);
