@@ -58,20 +58,15 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <fcntl.h>
-#include <sys/types.h>
-#include <sys/socket.h>
-#include <sys/un.h>
 #include <sys/dktp/fdisk.h>
 #include <sys/vdev_impl.h>
 #include <sys/fs/zfs.h>
-#include <sys/vdev_object_store.h>
 
 #include <thread_pool.h>
 #include <libzutil.h>
 #include <libnvpair.h>
 
 #include "zutil_import.h"
-#include "zutil_zoa.h"
 
 #ifdef HAVE_LIBUDEV
 #include <libudev.h>
@@ -381,143 +376,6 @@ zpool_find_import_blkid(libpc_handle_t *hdl, pthread_mutex_t *lock,
 
 	return (0);
 }
-
-int
-zoa_resume_destroy(importargs_t *iarg)
-{
-	char *endpoint = NULL;
-	char *region = NULL;
-	char *bucket = NULL;
-	char *profile = NULL;
-
-	nvlist_lookup_string(iarg->props, "path", &bucket);
-	if (bucket == NULL && iarg->path != NULL) {
-		bucket = iarg->path[0];
-	}
-	if (bucket == NULL) {
-		return (-1);
-	}
-	if (nvlist_lookup_string(iarg->props, "object-endpoint", &endpoint)
-	    != 0) {
-		return (-1);
-	}
-	if (nvlist_lookup_string(iarg->props, "object-region", &region) != 0) {
-		return (-1);
-	}
-	nvlist_lookup_string(iarg->props, "object-credentials-profile",
-	    &profile);
-
-	// Resume destroy
-	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_RESUME_DESTROY_POOL);
-	fnvlist_add_string(msg, AGENT_BUCKET, bucket);
-	fnvlist_add_string(msg, AGENT_REGION, region);
-	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
-	if (profile != NULL) {
-		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
-	}
-	fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
-	if (iarg->poolname != NULL) {
-		fnvlist_add_string(msg, AGENT_NAME, iarg->poolname);
-	}
-
-	nvlist_t *resp = zoa_send_recv_msg(msg, ZFS_ROOT_SOCKET);
-	if (resp == NULL)
-		return (-1);
-
-	const char *type = fnvlist_lookup_string(resp, AGENT_TYPE);
-	if (strcmp(type, AGENT_TYPE_RESUME_DESTROY_POOL_DONE) == 0) {
-		return (0);
-	}
-
-	return (-1);
-}
-
-void
-zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
-    pthread_mutex_t *lock, avl_tree_t *cache)
-{
-	char *profile = NULL, *bucket = NULL, *endpoint, *region;
-
-	// TODO: We don't handle multiple search paths yet
-	nvlist_lookup_string(iarg->props, "path", &bucket);
-	if (bucket == NULL && iarg->path != NULL) {
-		bucket = iarg->path[0];
-	}
-	if ((nvlist_lookup_string(iarg->props, "object-endpoint",
-	    &endpoint)) != 0) {
-		return;
-	}
-	if ((nvlist_lookup_string(iarg->props, "object-region",
-	    &region)) != 0) {
-		return;
-	}
-	nvlist_lookup_string(iarg->props, "object-credentials-profile",
-	    &profile);
-
-	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_POOLS);
-	if (bucket != NULL)
-		fnvlist_add_string(msg, AGENT_BUCKET, bucket);
-	fnvlist_add_string(msg, AGENT_REGION, region);
-	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
-	if (profile != NULL) {
-		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
-	}
-	if (iarg->guid != 0)
-		fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
-
-	nvlist_t *resp = zoa_send_recv_msg(msg, ZFS_PUBLIC_SOCKET);
-
-	nvpair_t *elem = NULL;
-	while ((elem = nvlist_next_nvpair(resp, elem)) != NULL) {
-		avl_index_t where;
-		rdsk_node_t *slice;
-		nvlist_t *config;
-		VERIFY0(nvpair_value_nvlist(elem, &config));
-
-		nvlist_t *tree = fnvlist_lookup_nvlist(config,
-		    ZPOOL_CONFIG_VDEV_TREE);
-
-		char *type;
-		if (profile != NULL &&
-		    nvlist_lookup_string(tree, ZPOOL_CONFIG_TYPE, &type) == 0 &&
-		    strcmp(type, VDEV_TYPE_OBJSTORE) == 0) {
-			fnvlist_add_string(tree,
-			    ZPOOL_CONFIG_CRED_PROFILE, profile);
-		}
-		uint64_t guid;
-		if (nvlist_lookup_uint64(tree, ZPOOL_CONFIG_GUID, &guid) != 0) {
-			continue;
-		}
-
-		slice = zutil_alloc(hdl, sizeof (rdsk_node_t));
-		if (asprintf(&slice->rn_name, "%s", fnvlist_lookup_string(tree,
-		    ZPOOL_CONFIG_PATH)) == -1) {
-			free(slice);
-			return;
-		}
-		slice->rn_vdev_guid = guid;
-		slice->rn_lock = lock;
-		slice->rn_avl = cache;
-		slice->rn_hdl = hdl;
-		slice->rn_order = IMPORT_ORDER_PREFERRED_1;
-		slice->rn_labelpaths = B_FALSE;
-		slice->rn_config = fnvlist_dup(config);
-		slice->rn_external = B_TRUE;
-
-		pthread_mutex_lock(lock);
-		if (avl_find(cache, slice, &where)) {
-			free(slice->rn_name);
-			free(slice);
-		} else {
-			avl_insert(cache, slice, where);
-		}
-		pthread_mutex_unlock(lock);
-	}
-	fnvlist_free(resp);
-}
-
 
 /*
  * Linux persistent device strings for vdev labels

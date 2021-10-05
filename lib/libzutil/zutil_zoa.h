@@ -29,6 +29,8 @@ typedef enum zoa_socket {
 	ZFS_ROOT_SOCKET,
 } zoa_socket_t;
 
-nvlist_t *zoa_send_recv_msg(nvlist_t *msg, zoa_socket_t zoa_sock);
+nvlist_t *zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
+    zoa_socket_t zoa_sock);
+int zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock);
 
 #endif /* _LIBZUTIL_ZUTIL_ZOA_H_ */

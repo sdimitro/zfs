@@ -3756,7 +3756,7 @@ zpool_do_import(int argc, char **argv)
 			usage(B_FALSE);
 		}
 
-		if (zoa_resume_destroy(&idata) != 0) {
+		if (zoa_resume_destroy(g_zfs, &idata) != 0) {
 			(void) fprintf(stderr,
 			    gettext("Error resuming destroy\n"));
 			return (1);
@@ -8747,9 +8747,9 @@ zpool_do_status(int argc, char **argv)
 			print_timestamp(timestamp_fmt);
 
 		if (cb.cb_print_destroyed)
-			zoa_list_destroyed_pools();
+			zoa_list_destroyed_pools(g_zfs);
 		if (cb.cb_clear_destroyed)
-			zoa_clear_destroyed_pools();
+			zoa_clear_destroyed_pools(g_zfs);
 		if (cb.cb_clear_destroyed || cb.cb_print_destroyed)
 			return (0);
 
@@ -8761,7 +8761,7 @@ zpool_do_status(int argc, char **argv)
 		    status_callback, &cb);
 
 		if (cb.cb_allpools)
-			zoa_list_destroying_pools();
+			zoa_list_destroying_pools(g_zfs);
 
 		if (cb.vcdl != NULL)
 			free_vdev_cmd_data_list(cb.vcdl);

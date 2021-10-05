@@ -25,12 +25,19 @@
 #include <sys/stat.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <libintl.h>
 #include <libzutil.h>
 #include <libnvpair.h>
 #include <sys/vdev_impl.h>
 #include <sys/vdev_object_store.h>
 
+#include "zutil_import.h"
 #include "zutil_zoa.h"
+
+/*
+ * Number of times we try to connect to agent before failing.
+ */
+#define	ZOA_MAX_RETRIES	15
 
 struct sockaddr_un zfs_public_socket = {
 	AF_UNIX, "/etc/zfs/zfs_public_socket"
@@ -71,15 +78,51 @@ get_zfs_socket(zoa_socket_t zoa_sock)
 	}
 }
 
-nvlist_t *
-zoa_send_recv_msg(nvlist_t *msg, zoa_socket_t zoa_sock)
+int
+zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock)
 {
-	int sock = socket(AF_UNIX, SOCK_STREAM, 0);
-	int err = connect(sock, get_zfs_socket(zoa_sock),
-	    sizeof (struct sockaddr_un));
-	if (err != 0) {
-		fnvlist_free(msg);
+	int sock;
+	int retries = 0;
+
+	for (;;) {
+		sock = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (sock < 0) {
+			zutil_error_aux(hdl, "%s", strerror(errno));
+			zutil_error(hdl, EZFS_SOCKETFAILURE,
+			    dgettext(TEXT_DOMAIN, "failed to create socket"));
+			return (-1);
+		}
+
+		if (connect(sock, get_zfs_socket(zoa_sock),
+		    sizeof (struct sockaddr_un)) == 0) {
+			break;
+		}
+
+		if (errno == ECONNREFUSED && retries < ZOA_MAX_RETRIES) {
+			zutil_error(hdl, EZFS_CONNECT_RETRY,
+			    dgettext(TEXT_DOMAIN,
+			    "failed to connect to object agent process:"));
+			retries++;
+			sleep(1);
+		} else {
+			zutil_error_aux(hdl, "%s", strerror(errno));
+			zutil_error(hdl, EZFS_CONNECT_REFUSED,
+			    dgettext(TEXT_DOMAIN,
+			    "connection to object agent process failed"));
+			close(sock);
+			return (-1);
+		}
 		close(sock);
+	}
+	return (sock);
+}
+
+nvlist_t *
+zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
+{
+	int sock = zoa_connect_agent(hdl, zoa_sock);
+	if (sock == -1) {
+		fnvlist_free(msg);
 		return (NULL);
 	}
 
@@ -187,12 +230,12 @@ print_destroying_item(struct destroying_pool item)
 }
 
 static void
-zoa_list_destroy_pools(boolean_t destroy_complete)
+zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 {
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_DESTROYING_POOLS);
 
-	nvlist_t *resp = zoa_send_recv_msg(msg, ZFS_PUBLIC_SOCKET);
+	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, ZFS_PUBLIC_SOCKET);
 	if (resp == NULL)
 		return;
 
@@ -240,28 +283,43 @@ zoa_list_destroy_pools(boolean_t destroy_complete)
  */
 
 void
-zoa_list_destroyed_pools(void)
+zoa_list_destroyed_pools(void *hdl)
 {
-	zoa_list_destroy_pools(B_TRUE);
+	libpc_handle_t handle = { 0 };
+
+	handle.lpc_lib_handle = hdl;
+	handle.lpc_printerr = B_TRUE;
+
+	zoa_list_destroy_pools(&handle, B_TRUE);
 }
 
 /*
  * Print a status message for pools that are being destroyed.
  */
 void
-zoa_list_destroying_pools(void)
+zoa_list_destroying_pools(void *hdl)
 {
-	zoa_list_destroy_pools(B_FALSE);
+	libpc_handle_t handle = { 0 };
+
+	handle.lpc_lib_handle = hdl;
+	handle.lpc_printerr = B_TRUE;
+
+	zoa_list_destroy_pools(&handle, B_FALSE);
 }
 
 /*
  * Clear the destroyed pools so that they are not listed going forward.
  */
 void
-zoa_clear_destroyed_pools(void)
+zoa_clear_destroyed_pools(void *hdl)
 {
+	libpc_handle_t handle = { 0 };
+
+	handle.lpc_lib_handle = hdl;
+	handle.lpc_printerr = B_TRUE;
+
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_CLEAR_DESTROYED_POOLS);
 
-	zoa_send_recv_msg(msg, ZFS_PUBLIC_SOCKET);
+	zoa_send_recv_msg(&handle, msg, ZFS_PUBLIC_SOCKET);
 }

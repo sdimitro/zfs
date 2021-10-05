@@ -74,10 +74,10 @@ typedef struct importargs {
 
 _LIBZUTIL_H nvlist_t *zpool_search_import(void *, importargs_t *,
     const pool_config_ops_t *);
-_LIBZUTIL_H void zoa_list_destroying_pools(void);
-_LIBZUTIL_H void zoa_list_destroyed_pools(void);
-_LIBZUTIL_H void zoa_clear_destroyed_pools(void);
-_LIBZUTIL_H int zoa_resume_destroy(importargs_t *import);
+_LIBZUTIL_H void zoa_list_destroying_pools(void *);
+_LIBZUTIL_H void zoa_list_destroyed_pools(void *);
+_LIBZUTIL_H void zoa_clear_destroyed_pools(void *);
+_LIBZUTIL_H int zoa_resume_destroy(void *, importargs_t *import);
 
 _LIBZUTIL_H int zpool_find_config(void *, const char *, nvlist_t **,
     importargs_t *, const pool_config_ops_t *);
