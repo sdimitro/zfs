@@ -1135,9 +1135,7 @@ impl Pool {
                         syncing_state.pending_object = PendingObjectState::NotPending(next_block);
 
                         // skip over writes that were moved to pending_object and written out
-                        while peekable_next_if(&mut ordered_writes_iter, |b| b < &next_block)
-                            .is_some()
-                        {}
+                        while ordered_writes_iter.next_if(|&b| b < next_block).is_some() {}
                     }
                     _ => {
                         // already-written object is next
@@ -1153,9 +1151,7 @@ impl Pool {
                         // case we will not create an object, since the blocks are
                         // already persistent, so we need to notify the waiter now.
                         while let Some(obsolete_write) =
-                            peekable_next_if(&mut ordered_writes_iter, |b| {
-                                b < &recovered_obj.next_block
-                            })
+                            ordered_writes_iter.next_if(|&b| b < recovered_obj.next_block)
                         {
                             trace!(
                                 "resume: {:?} is obsoleted by existing {:?}",
@@ -2640,17 +2636,6 @@ async fn try_condense_object_sizes(
         object_size_log.num_chunks,
         begin.elapsed().as_millis()
     );
-}
-
-// This works like Peekable::next_if(), which isn't available in the version of Rust that we use.
-fn peekable_next_if<I: Iterator>(
-    this: &mut std::iter::Peekable<I>,
-    func: impl FnOnce(&I::Item) -> bool,
-) -> Option<I::Item> {
-    match this.peek() {
-        Some(matched) if func(matched) => this.next(),
-        _ => None,
-    }
 }
 
 fn clean_metadata(
