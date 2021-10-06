@@ -205,7 +205,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 assert_ge!(extent.size, raw_size);
             }
             // XXX add name of this log for debug purposes?
-            debug!(
+            trace!(
                 "flushing BlockBasedLog: writing {:?} ({:?}) with {} entries ({} bytes) to {:?}",
                 chunk.id,
                 chunk.offset,

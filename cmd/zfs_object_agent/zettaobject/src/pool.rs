@@ -1459,7 +1459,7 @@ impl Pool {
 
         Self::account_new_object(state, syncing_state, &phys);
 
-        debug!("{:?}: writing {}", txg, phys);
+        trace!("{:?}: writing {}", txg, phys);
 
         // write to object store and wake up waiters
         let shared_state = state.shared_state.clone();
@@ -1564,7 +1564,7 @@ impl Pool {
         let object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
 
-        debug!("reading {:?} for {:?}", object, block);
+        trace!("reading {:?} for {:?}", object, block);
         let phys = DataObjectPhys::get(
             &shared_state.object_access,
             shared_state.guid,
@@ -1945,7 +1945,7 @@ async fn reclaim_frees_object(
 ) -> ObjectSize {
     let first_object = objects[0].0.object;
     let shared_state = state.shared_state.clone();
-    debug!(
+    trace!(
         "reclaim: consolidating {} objects into {:?} to free {} blocks",
         objects.len(),
         first_object,
@@ -1987,7 +1987,7 @@ async fn reclaim_frees_object(
                 first.min_block = min(first.min_block, min_block);
                 first.next_block = max(first.next_block, next_block);
                 if object_size.num_blocks == 0 {
-                    debug!(
+                    trace!(
                         "reclaim: moving 0 blocks from {:?} (BlockID[{},{})) because all {} blocks were freed",
                         object,
                         min_block,
@@ -2063,7 +2063,7 @@ async fn reclaim_frees_object(
         .buffered(*RECLAIM_ONE_BUFFERED)
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.guid, b.guid);
-            debug!(
+            trace!(
                 "reclaim: moving {} blocks from {:?} (TXG[{},{}] BlockID[{},{})) to {:?} (TXG[{},{}] BlockID[{},{}))",
                 b.blocks_len(),
                 b.object,
@@ -2119,7 +2119,7 @@ async fn reclaim_frees_object(
     assert_eq!(new_phys.object, first_object);
     // XXX would be nice to skip this if we didn't actually make any change
     // (because we already did it all before crashing)
-    debug!("reclaim: rewriting {}", new_phys);
+    trace!("reclaim: rewriting {}", new_phys);
     new_phys.put(&shared_state.object_access).await;
 
     (&new_phys).into()

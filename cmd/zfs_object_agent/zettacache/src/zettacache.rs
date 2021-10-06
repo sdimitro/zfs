@@ -47,6 +47,7 @@ lazy_static! {
     static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
     static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
     static ref MERGE_PROGRESS_MESSAGE_INTERVAL: Duration = Duration::from_millis(get_tunable("merge_progress_message_interval_ms", 1000));
+    static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
     static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
 
@@ -307,14 +308,22 @@ impl MergeState {
 
         let mut index_stream = Box::pin(old_index.log.iter());
         let mut index_skips = 0;
+        let mut count = 0;
         while let Some(entry) = index_stream.next().await {
-            if timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL {
+            count += 1;
+            // This can be a tight loop, so only check the elapsed time every
+            // 100 times through, so that .elapsed() doesn't take significant
+            // CPU time.
+            if count >= *MERGE_PROGRESS_CHECK_COUNT
+                && timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL
+            {
                 // send free_list and current index phys to checkpointer
                 tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
                     .await
                     .unwrap_or_else(|e| panic!("couldn't send: {}", e));
                 free_list = Vec::new();
                 timer = Instant::now();
+                count = 0;
             }
             // If the next index is already "started", advance the old index to the start point
             // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
@@ -419,14 +428,19 @@ impl MergeState {
                 }
             }
         }
+        let mut count = 0;
         while let Some((&pc_key, &PendingChange::Insert(pc_value))) = pending_changes_iter.peek() {
-            if timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL {
+            count += 1;
+            if count >= *MERGE_PROGRESS_CHECK_COUNT
+                && timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL
+            {
                 // send free_list and current index phys to checkpointer
                 tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
                     .await
                     .unwrap_or_else(|e| panic!("couldn't send: {}", e));
                 free_list = Vec::new();
                 timer = Instant::now();
+                count = 0;
             }
             // Add this new entry to the index
             trace!(

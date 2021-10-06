@@ -136,7 +136,7 @@ where
     E: core::fmt::Debug,
     F: Future<Output = Result<O, OAError<E>>>,
 {
-    debug!("{}: begin", msg);
+    trace!("{}: begin", msg);
     let begin = Instant::now();
     let result = match timeout_opt {
         Some(timeout) => match tokio::time::timeout(timeout, retry_impl(msg, f)).await {
@@ -146,7 +146,7 @@ where
         None => retry_impl(msg, f).await,
     };
     let elapsed = begin.elapsed();
-    debug!("{}: returned in {}ms", msg, elapsed.as_millis());
+    trace!("{}: returned in {}ms", msg, elapsed.as_millis());
     if elapsed > *LONG_OPERATION_DURATION {
         info!(
             "long completion: {}: returned in {:.1}s",
@@ -273,7 +273,7 @@ impl ObjectAccess {
                     Err(OAError::RequestError(e.into()))
                 }
                 Ok(_) => {
-                    debug!(
+                    trace!(
                         "{}: got {} bytes of data in {} chunks in {}ms",
                         msg,
                         v.len(),
@@ -307,7 +307,7 @@ impl ObjectAccess {
             let mut c = CACHE.lock().unwrap();
             match c.cache.get(&key) {
                 Some(v) => {
-                    debug!("found {} in cache", key);
+                    trace!("found {} in cache", key);
                     return Ok(v.clone());
                 }
                 None => match c.reading.get(&key) {
@@ -480,7 +480,7 @@ impl ObjectAccess {
     fn invalidate_cache(key: String, data: &[u8]) {
         let mut c = CACHE.lock().unwrap();
         if c.cache.contains(&key) {
-            debug!("found {} in cache when putting - invalidating", key);
+            trace!("found {} in cache - invalidating", key);
             // XXX unfortuate to be copying; this happens every time when
             // freeing (we get/modify/put the object).  Maybe when freeing,
             // the get() should not add to the cache since it's probably
