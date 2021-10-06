@@ -1554,7 +1554,7 @@ impl Pool {
                         block
                     );
                 }
-                LookupResponse::Absent(key) => cache.insert(key, data2).await,
+                LookupResponse::Absent(key) => cache.insert(key, data2),
             }
         }
         receiver.await.unwrap();
@@ -1594,7 +1594,7 @@ impl Pool {
                     LookupResponse::Absent(key) => {
                         let vec = self.read_block_impl(block, heal).await;
                         // XXX clone() copies the data; would be nice to pass a reference
-                        cache.insert(key, vec.clone()).await;
+                        cache.insert(key, vec.clone());
                         vec
                     }
                 },

@@ -453,12 +453,12 @@ impl MergeState {
             "next={:?}",
             pending_changes_iter.peek().unwrap()
         );
-        info!("skipped {} index entries", index_skips);
+        debug!("skipped {} index entries", index_skips);
 
         drop(old_index);
         next_index.flush().await;
 
-        debug!("new histogram: {:#?}", next_index.atime_histogram);
+        trace!("new histogram: {:#?}", next_index.atime_histogram);
         info!(
             "wrote next index with {} entries ({} MB) in {:.1}s ({:.1}MB/s)",
             next_index.log.len(),
@@ -703,7 +703,6 @@ impl ZettaCache {
                 interval.tick().await;
                 let mut state = my_cache.state.lock().await;
                 state.atime = state.atime.next();
-                drop(state);
             }
         });
 
@@ -1015,16 +1014,16 @@ impl ZettaCache {
         }
     }
 
-    /// Initiates write to disk for this block; doesn't wait for the write to complete.
+    /// Initiates insertion of this block; doesn't wait for the write to disk.
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn insert(&self, locked_key: LockedKey, buf: Vec<u8>) {
+    pub fn insert(&self, locked_key: LockedKey, buf: Vec<u8>) {
         // This permit will be dropped when the write to disk completes.  It
         // serves to limit the number of insert()'s that we can buffer before
         // dropping (ignoring) insertion requests.
-        let permit = match self.outstanding_inserts.clone().try_acquire_owned() {
+        let insert_permit = match self.outstanding_inserts.clone().try_acquire_owned() {
             Ok(permit) => permit,
             Err(tokio::sync::TryAcquireError::NoPermits) => {
                 self.insert_failed_max_queue_depth(locked_key.0.value());
@@ -1033,13 +1032,32 @@ impl ZettaCache {
             Err(e) => panic!("unexpected error from try_acquire: {:?}", e),
         };
 
-        let mut state = self.state.lock().await;
-        let index_key = locked_key.0.value();
-        state.insert(permit, index_key.guid, index_key.block, buf);
+        let block_access = self.block_access.clone();
+        let state = self.state.clone();
+        tokio::spawn(async move {
+            // Get a permit to write to disk before waiting on the state lock.
+            // This ensures that once we assign this insertion to a checkpoint,
+            // the insertion will complete relatively quickly (e.g.
+            // milliseconds).  This way, we don't have outstanding_writes that
+            // take a long time to complete, preventing a checkpoint from making
+            // progress.  Acquiring the WritePermit may take a long time,
+            // because we have to wait for any in-progress insertions (up to
+            // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
+            let write_permit = block_access.acquire_write().await;
+            // Now that we are ready to issue the write to disk, insert to the
+            // cache in the current checkpoint (allocate a block, add to
+            // pending_changes and outstanding_writes).
+            let fut =
+                state
+                    .lock_non_send()
+                    .await
+                    .insert(insert_permit, write_permit, locked_key, buf);
+            fut.await;
+        });
     }
 
     pub async fn evict(&self, key: IndexKey, value: IndexValue) {
-        let mut state = self.state.lock().await;
+        let mut state = self.state.lock_non_send().await;
         state.remove_from_index(key, value);
         state.block_allocator.free(value.extent());
     }
@@ -1071,10 +1089,12 @@ impl ZettaCache {
                 } else {
                     // size differs; evict from cache and reinsert
                     self.healed_by_evicting(locked_key.0.value(), &value, buf.len());
-                    let mut state = self.state.lock().await;
-                    state.remove_from_index(*locked_key.0.value(), value);
-                    state.block_allocator.free(value.extent());
-                    self.insert(locked_key, buf.to_owned()).await;
+                    {
+                        let mut state = self.state.lock_non_send().await;
+                        state.remove_from_index(*locked_key.0.value(), value);
+                        state.block_allocator.free(value.extent());
+                    }
+                    self.insert(locked_key, buf.to_owned());
                 }
             }
         }
@@ -1180,8 +1200,7 @@ impl ZettaCacheState {
             .map(|arc| arc.clone());
 
         let sem = Arc::new(Semaphore::new(0));
-        let sem2 = sem.clone();
-        self.outstanding_reads.insert(value, sem);
+        self.outstanding_reads.insert(value, sem.clone());
         let block_access = self.block_access.clone();
         Box::pin(async move {
             if let Some(write_sem) = write_sem_opt {
@@ -1190,7 +1209,7 @@ impl ZettaCacheState {
             }
 
             let vec = block_access.read_raw(value.extent()).await;
-            sem2.add_permits(1);
+            sem.add_permits(1);
             // XXX we can easily handle an io error here by returning None
             Some((vec, value))
         })
@@ -1249,13 +1268,14 @@ impl ZettaCacheState {
 
     /// Insert this block to the cache, if space and performance parameters
     /// allow.  It may be a recent cache miss, or a recently-written block.
+    /// Returns a Future to be executed after the state lock has been dropped.
     fn insert(
         &mut self,
-        permit: OwnedSemaphorePermit,
-        guid: PoolGuid,
-        block: BlockId,
+        insert_permit: OwnedSemaphorePermit,
+        write_permit: WritePermit,
+        locked_key: LockedKey,
         buf: Vec<u8>,
-    ) {
+    ) -> impl Future {
         let buf_size = buf.len();
         let aligned_size = self.block_access.round_up_to_sector(buf_size);
 
@@ -1272,14 +1292,14 @@ impl ZettaCacheState {
         };
         let location_opt = self.allocate_block(u32::try_from(aligned_buf.len()).unwrap());
         if location_opt.is_none() {
-            return;
+            return future::Either::Left(async {});
         }
         let location = location_opt.unwrap();
 
         // XXX if this is past the last block of the main index, we can write it
         // there (and location_dirty:false) instead of logging it
 
-        let key = IndexKey { guid, block };
+        let key = *locked_key.0.value();
         let value = IndexValue {
             atime: self.atime,
             location,
@@ -1319,17 +1339,22 @@ impl ZettaCacheState {
             .append(OperationLogEntry::Insert(key, value));
 
         let sem = Arc::new(Semaphore::new(0));
-        let sem2 = sem.clone();
+        self.outstanding_writes.insert(value, sem.clone());
+
         let block_access = self.block_access.clone();
-        tokio::spawn(async move {
-            block_access.write_raw(location, aligned_buf).await;
-            sem2.add_permits(1);
-            drop(permit);
-        });
-        // note: we don't need to insert before initiating the write, because we
-        // have exclusive access to the State, so nobody can see the
-        // outstanding_writes until we are done
-        self.outstanding_writes.insert(value, sem);
+        // Note: locked_key can be dropped before the i/o completes, since the
+        // changes to the State have already been made.  We want to hold onto
+        // the insert_permit until the write completes because it represents the
+        // memory that's required to buffer this insertion, which isn't released
+        // until the io completes.
+        future::Either::Right(async move {
+            block_access
+                .write_raw_permit(write_permit, location, aligned_buf)
+                .await
+                .unwrap();
+            sem.add_permits(1);
+            drop(insert_permit);
+        })
     }
 
     /// returns offset, or None if there's no space
@@ -1350,8 +1375,7 @@ impl ZettaCacheState {
             "flushing checkpoint {:?}",
             self.super_phys.last_checkpoint_id.next()
         );
-
-        let begin = Instant::now();
+        let begin_checkpoint = Instant::now();
 
         // Wait for all outstanding reads, so that if the ExtentAllocator needs
         // to overwrite some blocks, there aren't any outstanding i/os to that
@@ -1365,17 +1389,29 @@ impl ZettaCacheState {
         // run every second and remove completed entries.  Or have the read task
         // lock the outstanding_reads and remove itself (which might perform
         // worse due to contention on the global lock).
+        let begin = Instant::now();
         for sem in self.outstanding_reads.values_mut() {
             let _permit = sem.acquire().await.unwrap();
         }
+        debug!(
+            "waited for {} outstanding_reads in {}ms",
+            self.outstanding_reads.len(),
+            begin.elapsed().as_millis()
+        );
         self.outstanding_reads.clear();
 
         // Wait for all outstanding writes, for the same reason as reads, and
         // also so that if we crash, the blocks referenced by the
         // index/operation_log will actually have the correct contents.
+        let begin = Instant::now();
         for sem in self.outstanding_writes.values_mut() {
             let _permit = sem.acquire().await.unwrap();
         }
+        debug!(
+            "waited for {} outstanding_writes in {}ms",
+            self.outstanding_writes.len(),
+            begin.elapsed().as_millis()
+        );
         self.outstanding_writes.clear();
 
         trace!(
@@ -1383,7 +1419,17 @@ impl ZettaCacheState {
             self.pending_changes.len()
         );
 
+        let begin = Instant::now();
+        let operation_log_len = self.operation_log.pending_len();
+        let bytes = self.operation_log.num_bytes();
         let operation_log_phys = self.operation_log.flush().await;
+        let operation_log_bytes = self.operation_log.num_bytes() - bytes;
+        debug!(
+            "operation log: flushed {} entries to {} KB in {}ms",
+            operation_log_len,
+            operation_log_bytes / 1024,
+            begin.elapsed().as_millis()
+        );
 
         // Note that it is possible to have a merge in progress with no next_index available.
         // This can happen if we have not yet received any progress messages from the merge task.
@@ -1447,10 +1493,12 @@ impl ZettaCacheState {
 
         self.extent_allocator.checkpoint_done();
 
-        debug!(
-            "completed checkpoint {:?} in {}ms",
+        info!(
+            "completed {:?} in {}ms; flushed {} operations ({}KB) to log",
             self.super_phys.last_checkpoint_id,
-            begin.elapsed().as_millis()
+            begin_checkpoint.elapsed().as_millis(),
+            operation_log_len,
+            operation_log_bytes / 1024,
         );
     }
 

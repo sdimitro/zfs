@@ -156,6 +156,10 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.phys.next_chunk_offset.0
     }
 
+    pub fn pending_len(&self) -> u64 {
+        self.pending_entries.len() as u64
+    }
+
     pub fn append(&mut self, entry: T) {
         self.pending_entries.push(entry);
         // XXX if too many pending, initiate flush?

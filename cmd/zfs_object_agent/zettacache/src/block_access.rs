@@ -18,16 +18,21 @@ use std::convert::TryFrom;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
+use std::sync::Arc;
 use std::time::Instant;
 use tokio::fs::File;
 use tokio::fs::OpenOptions;
+use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
+use tokio::task::JoinHandle;
 use util::get_tunable;
 use util::From64;
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
     static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = get_tunable("disk_write_max_queue_depth", 32);
+    static ref DISK_WRITE_METADATA_MAX_QUEUE_DEPTH: usize =
+        get_tunable("disk_write_metadata_max_queue_depth", 32);
     static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
 }
 
@@ -46,7 +51,8 @@ pub struct BlockAccess {
     sector_size: usize,
     metrics: BlockAccessMetrics,
     outstanding_reads: Semaphore,
-    outstanding_writes: Semaphore,
+    outstanding_data_writes: Arc<Semaphore>,
+    outstanding_metadata_writes: Arc<Semaphore>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -60,6 +66,8 @@ pub enum EncodeType {
     Json,
     Bincode,
 }
+
+pub struct WritePermit(OwnedSemaphorePermit);
 
 // Generate ioctl function
 nix::ioctl_read!(ioctl_blkgetsize64, 0x12u8, 114u8, u64);
@@ -101,7 +109,6 @@ impl BlockAccess {
                 ioctl_blksszget(disk.as_raw_fd(), ssz_ptr).unwrap();
                 ssz
             };
-            //sector_size = MIN_SECTOR_SIZE;
         } else if mode.contains(SFlag::S_IFREG) {
             size = u64::try_from(stat.st_size).unwrap();
             sector_size = *MIN_SECTOR_SIZE;
@@ -115,7 +122,10 @@ impl BlockAccess {
             sector_size,
             metrics: Default::default(),
             outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
-            outstanding_writes: Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH),
+            outstanding_data_writes: Arc::new(Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH)),
+            outstanding_metadata_writes: Arc::new(Semaphore::new(
+                *DISK_WRITE_METADATA_MAX_QUEUE_DEPTH,
+            )),
         };
         info!("opening cache file {}: {:?}", disk_path, this);
 
@@ -168,6 +178,18 @@ impl BlockAccess {
         vec
     }
 
+    // Acquire a permit to write later.  This should be used only for data
+    // writes.  See the comment in write_raw() for details.
+    pub async fn acquire_write(&self) -> WritePermit {
+        WritePermit(
+            self.outstanding_data_writes
+                .clone()
+                .acquire_owned()
+                .await
+                .unwrap(),
+        )
+    }
+
     // offset and data.len() must be sector-aligned
     // maybe this should take Bytes?
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
@@ -175,6 +197,33 @@ impl BlockAccess {
     #[measure(Throughput)]
     #[measure(HitCount)]
     pub async fn write_raw(&self, location: DiskLocation, data: Vec<u8>) {
+        // We need a different semaphore for metadata writes, so that
+        // outstanding data write permits can't starve/deadlock metadata writes.
+        // We may block on locks (e.g. waiting on the ZettaCacheState lock)
+        // while holding a data write permit, but we can't while holding a
+        // metadata write permit.
+        let permit = WritePermit(
+            self.outstanding_metadata_writes
+                .clone()
+                .acquire_owned()
+                .await
+                .unwrap(),
+        );
+        self.write_raw_permit(permit, location, data).await.unwrap();
+    }
+
+    // offset and data.len() must be sector-aligned
+    // maybe this should take Bytes?
+    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
+    #[measure(InFlight)]
+    #[measure(Throughput)]
+    #[measure(HitCount)]
+    pub fn write_raw_permit(
+        &self,
+        permit: WritePermit,
+        location: DiskLocation,
+        data: Vec<u8>,
+    ) -> JoinHandle<()> {
         let fd = self.disk.as_raw_fd();
         let sector_size = self.sector_size;
         let length = data.len();
@@ -182,7 +231,6 @@ impl BlockAccess {
         assert_eq!(offset, self.round_up_to_sector(offset));
         assert_eq!(length, self.round_up_to_sector(length));
         let begin = Instant::now();
-        let _permit = self.outstanding_writes.acquire().await.unwrap();
         tokio::task::spawn_blocking(move || {
             let mut v: Vec<u8> = Vec::new();
             // XXX directio requires the pointer to be sector-aligned, requiring this grossness
@@ -196,15 +244,14 @@ impl BlockAccess {
             // XXX copying
             aligned.copy_from_slice(&data);
             nix::sys::uio::pwrite(fd, aligned, i64::try_from(offset).unwrap()).unwrap();
+            drop(permit);
+            trace!(
+                "write({:?} len={}) returned in {}us",
+                location,
+                length,
+                begin.elapsed().as_micros()
+            );
         })
-        .await
-        .unwrap();
-        trace!(
-            "write({:?} len={}) returned in {}us",
-            location,
-            length,
-            begin.elapsed().as_micros()
-        );
     }
 
     pub fn round_up_to_sector<N: Num + NumCast + Copy>(&self, n: N) -> N {
