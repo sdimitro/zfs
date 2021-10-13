@@ -2,6 +2,7 @@ use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
 use git_version::git_version;
+use zettacache::DumpSlabsOptions;
 use zettacache::DumpStructuresOptions;
 use zettacache::ZettaCacheDBCommand;
 
@@ -59,6 +60,14 @@ async fn main() {
                         .help("dump index log"),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("slabs").about("dump slab info").arg(
+                Arg::with_name("v")
+                    .short("v")
+                    .multiple(true)
+                    .help("sets the level of verbosity"),
+            ),
+        )
         .get_matches();
 
     let device = matches.value_of("device").unwrap();
@@ -71,6 +80,15 @@ async fn main() {
                         .spacemaps(subcommand_matches.is_present("spacemaps"))
                         .operation_log_raw(subcommand_matches.is_present("operation-log-raw"))
                         .index_log_raw(subcommand_matches.is_present("index-log-raw")),
+                ),
+                device,
+            )
+            .await;
+        }
+        ("slabs", Some(subcommand_matches)) => {
+            ZettaCacheDBCommand::issue_command(
+                ZettaCacheDBCommand::DumpSlabs(
+                    DumpSlabsOptions::default().verbosity(subcommand_matches.occurrences_of("v")),
                 ),
                 device,
             )
