@@ -1,5 +1,6 @@
 use crate::base_types::*;
 use crate::block_access::*;
+use crate::block_allocator::zcachedb_dump_slabs;
 use crate::block_allocator::zcachedb_dump_spacemaps;
 use crate::block_allocator::BlockAllocator;
 use crate::block_allocator::BlockAllocatorPhys;
@@ -9,6 +10,7 @@ use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::extent_allocator::ExtentAllocatorPhys;
 use crate::index::*;
+use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 use anyhow::Result;
 use conv::ConvUtil;
@@ -578,72 +580,6 @@ impl ZettaCache {
         phys.write(&block_access).await;
     }
 
-    pub async fn zcachedb_dump_structures(path: &str, opts: DumpStructuresOptions) {
-        let block_access = Arc::new(BlockAccess::new(path, true).await);
-
-        let superblock = match ZettaSuperBlockPhys::read(&block_access).await {
-            Ok(phys) => phys,
-            Err(e) => {
-                println!("Couldn't read ZettaCache SuperBlock!");
-                println!("{:?}", e);
-                return;
-            }
-        };
-        if opts.dump_defaults {
-            println!("{:#?}", superblock);
-        }
-
-        let checkpoint =
-            ZettaCheckpointPhys::read(&block_access, superblock.last_checkpoint_extent).await;
-        if opts.dump_defaults {
-            println!("{:#?}", checkpoint);
-        }
-
-        let mut builder = ExtentAllocatorBuilder::new(checkpoint.extent_allocator);
-        // We should be able to get away without claiming the metadata space,
-        // since we aren't allocating anything, but we may also want to do this
-        // for verification (e.g. that there aren't overlapping Extents).
-        checkpoint.claim(&mut builder);
-        let extent_allocator = Arc::new(ExtentAllocator::open(builder));
-
-        if opts.dump_spacemaps {
-            zcachedb_dump_spacemaps(
-                checkpoint.block_allocator,
-                block_access.clone(),
-                extent_allocator.clone(),
-            )
-            .await;
-        }
-
-        if opts.dump_operation_log_raw {
-            checkpoint
-                .operation_log
-                .iter_chunks(block_access.clone())
-                .for_each(|chunk| async move {
-                    println!("{:#?}", chunk);
-                })
-                .await;
-        }
-
-        if opts.dump_index_log_raw {
-            checkpoint
-                .index
-                .iter_log_chunks(block_access.clone())
-                .for_each(|chunk| async move {
-                    println!("{:#?}", chunk);
-                })
-                .await;
-
-            checkpoint
-                .index
-                .iter_log_summary(block_access.clone())
-                .for_each(|chunk| async move {
-                    println!("{:#?}", chunk);
-                })
-                .await
-        }
-    }
-
     pub async fn open(path: &str) -> ZettaCache {
         let block_access = Arc::new(BlockAccess::new(path, false).await);
 
@@ -1186,6 +1122,98 @@ impl ZettaCache {
 
     pub fn sector_size(&self) -> usize {
         self.block_access.round_up_to_sector(1)
+    }
+}
+
+pub struct ZCacheDBHandle {
+    block_access: Arc<BlockAccess>,
+    superblock: ZettaSuperBlockPhys,
+    checkpoint: Arc<ZettaCheckpointPhys>,
+    extent_allocator: Arc<ExtentAllocator>,
+}
+
+impl ZCacheDBHandle {
+    pub async fn open(path: &str) -> Option<ZCacheDBHandle> {
+        let block_access = Arc::new(BlockAccess::new(path, false).await);
+        let superblock = match ZettaSuperBlockPhys::read(&block_access).await {
+            Ok(phys) => phys,
+            Err(e) => {
+                println!("Couldn't read ZettaCache SuperBlock!");
+                println!("{:?}", e);
+                return None;
+            }
+        };
+        let checkpoint = Arc::new(
+            ZettaCheckpointPhys::read(&block_access, superblock.last_checkpoint_extent).await,
+        );
+
+        let mut builder = ExtentAllocatorBuilder::new(checkpoint.extent_allocator);
+        // We should be able to get away without claiming the metadata space,
+        // since we aren't allocating anything, but we may also want to do this
+        // for verification (e.g. that there aren't overlapping Extents).
+        checkpoint.claim(&mut builder);
+        let extent_allocator = Arc::new(ExtentAllocator::open(builder));
+
+        Some(ZCacheDBHandle {
+            block_access,
+            superblock,
+            checkpoint,
+            extent_allocator,
+        })
+    }
+
+    pub async fn dump_structures(&self, opts: DumpStructuresOptions) {
+        if opts.dump_defaults {
+            println!("{:#?}", self.superblock);
+            println!("{:#?}", self.checkpoint);
+        }
+
+        if opts.dump_spacemaps {
+            zcachedb_dump_spacemaps(
+                self.checkpoint.block_allocator.clone(),
+                self.block_access.clone(),
+                self.extent_allocator.clone(),
+            )
+            .await;
+        }
+
+        if opts.dump_operation_log_raw {
+            self.checkpoint
+                .operation_log
+                .iter_chunks(self.block_access.clone())
+                .for_each(|chunk| async move {
+                    println!("{:#?}", chunk);
+                })
+                .await;
+        }
+
+        if opts.dump_index_log_raw {
+            self.checkpoint
+                .index
+                .iter_log_chunks(self.block_access.clone())
+                .for_each(|chunk| async move {
+                    println!("{:#?}", chunk);
+                })
+                .await;
+
+            self.checkpoint
+                .index
+                .iter_log_summary(self.block_access.clone())
+                .for_each(|chunk| async move {
+                    println!("{:#?}", chunk);
+                })
+                .await
+        }
+    }
+
+    pub async fn dump_slabs(&self, opts: DumpSlabsOptions) {
+        zcachedb_dump_slabs(
+            self.block_access.clone(),
+            self.extent_allocator.clone(),
+            self.checkpoint.block_allocator.clone(),
+            opts,
+        )
+        .await;
     }
 }
 

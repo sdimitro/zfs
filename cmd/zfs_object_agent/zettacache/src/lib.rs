@@ -16,5 +16,6 @@ mod zettacache;
 pub use crate::zettacache::InsertSource;
 pub use crate::zettacache::LookupResponse;
 pub use crate::zettacache::ZettaCache;
+pub use zcachedb::DumpSlabsOptions;
 pub use zcachedb::DumpStructuresOptions;
 pub use zcachedb::ZettaCacheDBCommand;
