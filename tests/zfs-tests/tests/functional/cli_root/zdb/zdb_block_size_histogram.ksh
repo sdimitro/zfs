@@ -78,10 +78,10 @@ function histo_populate_test_pool
 	# In order to expedite testing, we will only fill 2G (of 4G)
 	# of the test pool.  You may want to modify this for
 	# standalone testing.
-	# 
+	#
 	# In filling only 50% of the pool, we create one object on
 	# each "pass" below to achieve multiple objects per record
-	# size.  Creating one file per object would lead to 
+	# size.  Creating one file per object would lead to
 	# excessive file creation time.
 	###################
 	# for pass in 10 20 30 31  # 91%
@@ -96,7 +96,7 @@ function histo_populate_test_pool
 			if [ ${this_rs} -gt ${max_pool_record_size} ]; then
 				continue
 			fi
-	
+
 			if [ ! -d /${pool}/B_${this_rs} ]; then
 				zfs create ${pool}/B_${this_rs}
 				zfs set recordsize=${this_rs} \
@@ -122,10 +122,10 @@ function histo_populate_test_pool
 	done
 
 	####################
-	# Testing showed that on some devices, unless the pool is 
-	# synchronized, that the block counts will be below the 
+	# Testing showed that on some devices, unless the pool is
+	# synchronized, that the block counts will be below the
 	# anticipated sizes since not all of the blocks will be flushed
-	# to the device.  This 'sync' command prevents that from 
+	# to the device.  This 'sync' command prevents that from
 	# happening.
 	####################
 	log_must zpool sync ${pool}
@@ -135,7 +135,7 @@ function histo_check_test_pool
 	if [ $# -ne 1 ]; then
 		log_note "histo_check_test_pool: insufficient parameters"
 		log_fail "hctp: 1 requested $# received"
-	fi	
+	fi
 	typeset pool=$1
 
 	set -A recordsizes
@@ -180,10 +180,10 @@ function histo_check_test_pool
 	# In order to expedite testing, we will only fill 2G (of 4G)
 	# of the test pool.  You may want to modify this for
 	# standalone testing.
-	# 
+	#
 	# In filling only 50% of the pool, we create one object on
 	# each "pass" below to achieve multiple objects per record
-	# size.  Creating one file per object would lead to 
+	# size.  Creating one file per object would lead to
 	# excessive file creation time.
 	###################
 	# for pass in 10 20 30 31  # 91%
@@ -205,7 +205,7 @@ function histo_check_test_pool
 	# lsize count.  Since some devices have a minimum hardware
 	# blocksize > 512, we cannot compare against the asize count.
 	# E.G., if the HWBlocksize = 4096, then the asize counts for
-	# 512, 1024 and 2048 will be zero and rolled up into the 
+	# 512, 1024 and 2048 will be zero and rolled up into the
 	# 4096 blocksize count for asize.   For verification we stick
 	# to just lsize counts.
 	#
@@ -261,9 +261,8 @@ function histo_check_test_pool
 log_assert "Verify zdb -Pbbb (block histogram) works as expected"
 log_onexit cleanup
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 
 histo_populate_test_pool $TESTPOOL
 

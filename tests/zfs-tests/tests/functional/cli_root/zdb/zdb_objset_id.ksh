@@ -28,7 +28,7 @@
 # 4. Run zdb -d to get the objset ID of the dataset
 # 5. Run zdb -dddddd pool/objsetID objectID (decimal)
 # 6. Confirm names
-# 7. Run zdb -dddddd pool/objsetID objectID (hex) 
+# 7. Run zdb -dddddd pool/objsetID objectID (hex)
 # 8. Confirm names
 # 9. Obtain objsetID from /proc/spl/kstat/zfs/testpool/obset-0x<ID>
 #    (linux only)
@@ -47,9 +47,8 @@ init_data=$TESTDIR/file1
 write_count=8
 blksize=131072
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 file_write -o create -w -f $init_data -b $blksize -c $write_count
 
 # get object number of file

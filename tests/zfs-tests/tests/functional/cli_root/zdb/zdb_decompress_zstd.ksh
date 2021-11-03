@@ -47,10 +47,9 @@ init_data=$TESTDIR/file1
 write_count=128
 blksize=131072
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 random_level=$((RANDOM%19 + 1))
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 log_must zfs set recordsize=$blksize $TESTPOOL/$TESTFS
 log_must zfs set compression=zstd-$random_level $TESTPOOL/$TESTFS
 

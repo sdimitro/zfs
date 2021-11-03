@@ -60,7 +60,7 @@ function test_imported_pool
 	typeset -a args=("-A" "-b" "-C" "-c" "-d" "-D" "-G" "-h" "-i" "-L" \
             "-M" "-P" "-s" "-v" "-Y" "-y")
         for i in ${args[@]}; do
-		log_must eval "zdb $i $TESTPOOL >/dev/null"
+		log_must eval "run_zdb -e '$i' -p $TESTPOOL >/dev/null"
 	done
 }
 
@@ -70,9 +70,9 @@ function test_exported_pool
 	typeset -a args=("-A" "-b" "-C" "-c" "-d" "-D" "-F" "-G" "-h" "-i" "-L" "-M" \
             "-P" "-s" "-v" "-X" "-Y" "-y")
         for i in ${args[@]}; do
-		log_must eval "zdb -e $i $TESTPOOL >/dev/null"
+		log_must eval "run_zdb -e '-e $i' -p $TESTPOOL >/dev/null"
 	done
-	log_must zpool import $TESTPOOL
+	log_must import_pool -p $TESTPOOL
 }
 
 function test_vdev
@@ -94,11 +94,14 @@ function test_metaslab
 	done
 }
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 
 test_imported_pool
 test_exported_pool
-test_vdev
-test_metaslab
+
+if ! use_object_store; then
+	test_vdev
+	test_metaslab
+fi
 
 log_pass "Valid zdb parameters pass as expected."

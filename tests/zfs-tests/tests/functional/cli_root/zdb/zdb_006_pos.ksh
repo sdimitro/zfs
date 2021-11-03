@@ -31,18 +31,19 @@
 function cleanup
 {
 	datasetexists $TESTPOOL && destroy_pool $TESTPOOL
-	for DISK in $DISKS; do
-		zpool labelclear -f $DEV_RDSKDIR/$DISK
-	done
+	if ! use_object_store; then
+		for DISK in $DISKS; do
+			zpool labelclear -f $DEV_RDSKDIR/$DISK
+		done
+	fi
 }
 
 log_assert "Verify zdb -d works on imported/exported pool with pool/dataset argument"
 log_onexit cleanup
 
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 log_must zfs snap $TESTPOOL/$TESTFS@snap
 
 log_must zdb -d $TESTPOOL
@@ -52,12 +53,12 @@ log_must zdb -d $TESTPOOL/$TESTFS@snap
 
 log_must zpool export $TESTPOOL
 
-log_must zdb -ed $TESTPOOL
-log_must zdb -ed $TESTPOOL/
-log_must zdb -ed $TESTPOOL/$TESTFS
-log_must zdb -ed $TESTPOOL/$TESTFS@snap
+log_must run_zdb -e "-ed" -p $TESTPOOL
+log_must run_zdb -e "-ed" -p $TESTPOOL/
+log_must run_zdb -e "-ed" -p $TESTPOOL/$TESTFS
+log_must run_zdb -e "-ed" -p $TESTPOOL/$TESTFS@snap
 
-log_must zpool import $TESTPOOL
+log_must import_pool -p $TESTPOOL
 
 cleanup
 

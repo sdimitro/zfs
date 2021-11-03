@@ -45,9 +45,8 @@ write_count=256
 blksize=4096
 pattern="_match__pattern_"
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 log_must zfs set recordsize=$blksize $TESTPOOL/$TESTFS
 log_must zfs set compression=lzjb $TESTPOOL/$TESTFS
 

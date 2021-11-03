@@ -33,6 +33,11 @@
 #
 
 log_assert "Verify zdb produces unique dumps of uberblocks"
+
+if use_object_store; then
+	log_unsupported "Not applicable for object storage run."
+fi
+
 log_onexit cleanup
 
 function cleanup

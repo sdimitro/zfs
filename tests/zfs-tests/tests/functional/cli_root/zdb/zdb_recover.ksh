@@ -43,9 +43,8 @@ tmpfile="$TEST_BASE_DIR/zdb-recover"
 write_count=8
 blksize=131072
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 file_write -o create -w -f $init_data -b $blksize -c $write_count
 log_must zpool sync $TESTPOOL
 

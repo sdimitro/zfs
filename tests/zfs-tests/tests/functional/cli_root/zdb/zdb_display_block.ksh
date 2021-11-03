@@ -33,7 +33,7 @@
 # 7. Run zdb -R with :db80 displays 2nd L0
 # 8. Run zdb -R with :id flag displays indirect block
 #     (similar to zdb -ddddddbbbbbb output)
-# 9. Run zdb -R with :id flag and .0 vdev
+# 9. Run zdb -R with :id flag and .0 vdev (Applicable for block based run only)
 #
 
 
@@ -53,9 +53,13 @@ blksize=4096
 l1_read_size="8000"
 
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+if use_object_store; then
+	default_setup_noexit "$DISKS"
+else
+	default_mirror_setup_noexit $DISKS
+fi
+
 log_must zfs set recordsize=$blksize $TESTPOOL/$TESTFS
 log_must zfs set compression=lzjb $TESTPOOL/$TESTFS
 
@@ -116,13 +120,15 @@ if [ $block_cnt -ne $write_count ]; then
 fi
 
 # read from specific half of mirror
-vdev="$vdev.0"
-log_note "Reading from DVA $vdev:$offset:$l1_read_size"
-output=$(export ZDB_NO_ZLE=\"true\";\
-    zdb -R $TESTPOOL $vdev:$offset:$l1_read_size:id 2> /dev/null)
-block_cnt=$(echo "$output" | grep 'L0' | wc -l)
-if [ $block_cnt -ne $write_count ]; then
-        log_fail "zdb -R 0.0:offset:length:id (indirect block display) failed"
+if ! use_object_store; then
+	vdev="$vdev.0"
+	log_note "Reading from DVA $vdev:$offset:$l1_read_size"
+	output=$(export ZDB_NO_ZLE=\"true\";\
+	    zdb -R $TESTPOOL $vdev:$offset:$l1_read_size:id 2> /dev/null)
+	block_cnt=$(echo "$output" | grep 'L0' | wc -l)
+	if [ $block_cnt -ne $write_count ]; then
+		log_fail "zdb -R 0.0:offset:length:id (indirect block display) failed"
+	fi
 fi
 
 log_pass "zdb -R :b flag (block display) works as expected"

@@ -251,8 +251,11 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
             ['SKIP', object_store_skip],
         'cli_root/zpool_online/zpool_online_002_neg':
             ['SKIP', object_store_skip],
-    	'pool_checkpoint/checkpoint_removal': ['SKIP', object_store_skip],
-    	'pool_checkpoint/checkpoint_vdev_add': ['SKIP', object_store_skip],
+        'pool_checkpoint/checkpoint_removal': ['SKIP', object_store_skip],
+        'pool_checkpoint/checkpoint_vdev_add': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_003_pos': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_004_pos': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_005_pos': ['SKIP', object_store_skip],
     })
 
 #
@@ -378,6 +381,10 @@ elif sys.platform.startswith('linux'):
 if os.environ.get('ZTS_OBJECT_STORE') == 'true':
     maybe.update({
         'cli_root/zpool_create/zpool_create_003_pos': ['FAIL', 'DOSE-545'],
+        'cli_root/zdb/zdb_checksum': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_decompress': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
+        'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
     })
 
 # Not all Github actions runners have scsi_debug module, so we may skip

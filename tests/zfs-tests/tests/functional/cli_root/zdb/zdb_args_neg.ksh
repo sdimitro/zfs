@@ -56,7 +56,7 @@ set -A args "create" "add" "destroy" "import fakepool" \
     "add mirror fakepool" "add raidz fakepool" \
     "add raidz1 fakepool" "add raidz2 fakepool" \
     "setvprop" "blah blah" "-%" "--?" "-*" "-=" \
-    "-a" "-f" "-g" "-j" "-n" "-o" "-p" "-p /tmp" \
+    "-j" "-n" "-o" "-p" "-p /tmp" \
     "-t" "-w" "-z" "-E" "-H" "-I" "-J" "-K" \
     "-N" "-Q" "-R" "-T" "-W"
 
@@ -71,13 +71,45 @@ function cleanup
 
 function test_imported_pool
 {
-	for i in ${args[@]}; do
+	for i in "${args[@]}"; do
 		log_mustnot zdb $i $TESTPOOL
 	done
 }
 
-default_mirror_setup_noexit $DISKS
+function test_exported_pool
+{
+	if use_object_store; then
+		args+=(
+			"-B blah -a $ZTS_OBJECT_ENDPOINT \
+			-g $ZTS_REGION -f $ZTS_CREDS_PROFILE" \
+			"-B $ZTS_BUCKET_NAME -a blah \
+			-g $ZTS_REGION -f $ZTS_CREDS_PROFILE" \
+			"-B $ZTS_BUCKET_NAME -a $ZTS_OBJECT_ENDPOINT \
+			-g $ZTS_REGION -f blah"
+		)
+
+		# Testing with invalid region is not applicable for minio.
+		# Minio ignores object-region value and hence, the command will
+		# pass instead of failing. We should add this test case for just
+		# AWS S3.
+		if endpoint_is_s3; then
+			args+=(
+				"-B $ZTS_BUCKET_NAME -a $ZTS_OBJECT_ENDPOINT \
+				-g blah -f $ZTS_CREDS_PROFILE"
+			)
+		fi
+	fi
+
+	log_must zpool export $TESTPOOL
+	for i in "${args[@]}"; do
+		log_mustnot zdb $i $TESTPOOL
+	done
+	log_must import_pool -p $TESTPOOL
+}
+
+default_setup_noexit "$DISKS"
 
 test_imported_pool
+test_exported_pool
 
 log_pass "Badly formed zdb parameters fail as expected."

@@ -40,9 +40,8 @@ init_data=$TESTDIR/file1
 write_count=8
 blksize=131072
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 file_write -o create -w -f $init_data -b $blksize -c $write_count
 
 # get object number of file
