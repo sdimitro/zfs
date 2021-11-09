@@ -747,13 +747,6 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 		    --output-file=$ZOA_LOG 2>&1 | \
 		    sudo tee $ZOA_OUTPUT > /dev/null &
 	fi
-
-	# Verify connectivity before proceeding
-	/sbin/zoa_test -p "$ZTS_CREDS_PROFILE" -b "$ZTS_BUCKET_NAME" \
-		-e "$ZTS_OBJECT_ENDPOINT" \
-		test_connectivity >/dev/null 2>&1 || \
-		fail "Unable to connect to $ZTS_BUCKET_NAME"
-
 elif [ -z "${DISKS}" ]; then
 	#
 	# If this is a performance run, prevent accidental use of

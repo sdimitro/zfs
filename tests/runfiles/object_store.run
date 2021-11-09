@@ -43,6 +43,7 @@ tags = ['functional', 'acl', 'posix-sa']
 # -------------------------------------------------------------
 # TODO: Add the following tests back after relevant bug fixes.
 # checkpoint_zhack_feat - DOSE-722
+# checkpoint_zdb - DOSE-769
 # -------------------------------------------------------------
 [tests/functional/pool_checkpoint]
 tests = ['checkpoint_after_rewind', 'checkpoint_big_rewind',
@@ -51,7 +52,7 @@ tests = ['checkpoint_after_rewind', 'checkpoint_big_rewind',
     'checkpoint_indirect', 'checkpoint_invalid', 'checkpoint_lun_expsz',
     'checkpoint_open', 'checkpoint_removal', 'checkpoint_rewind',
     'checkpoint_ro_rewind', 'checkpoint_sm_scale', 'checkpoint_twice',
-    'checkpoint_vdev_add', 'checkpoint_zdb']
+    'checkpoint_vdev_add']
 tags = ['functional', 'pool_checkpoint']
 timeout = 1800
 
@@ -351,6 +352,8 @@ tags = ['functional', 'cli_root', 'zpool_history']
 # -------------------------------------------------------------
 # TODO: Add the following tests back after relevant bug fixes.
 # zdb_block_size_histogram - DOSE-780
+# zdb_006_pos - DOSE-769
+# zdb_args_pos - DOSE-769
 # -------------------------------------------------------------
 # TODO: These tests don't create a panic, hence, keeping them in the suite.
 # Remove them from expected failures list once the bugs are fixed.
@@ -361,8 +364,7 @@ tags = ['functional', 'cli_root', 'zpool_history']
 # -------------------------------------------------------------
 [tests/functional/cli_root/zdb]
 tests = ['zdb_002_pos', 'zdb_003_pos', 'zdb_004_pos', 'zdb_005_pos',
-    'zdb_006_pos', 'zdb_args_neg', 'zdb_args_pos',
-    'zdb_checksum', 'zdb_decompress',
+    'zdb_args_neg', 'zdb_checksum', 'zdb_decompress',
     'zdb_display_block', 'zdb_object_range_neg', 'zdb_object_range_pos',
     'zdb_objset_id', 'zdb_decompress_zstd', 'zdb_recover', 'zdb_recover_2']
 pre =

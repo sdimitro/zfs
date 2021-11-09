@@ -26,7 +26,7 @@
 #
 
 #
-# Copyright (c) 2016 by Delphix. All rights reserved.
+# Copyright (c) 2021 by Delphix. All rights reserved.
 #
 
 . $STF_SUITE/include/libtest.shlib
@@ -41,11 +41,6 @@
 # 1. For all properties, verify zpool get retrieves a value
 #
 
-function cleanup
-{
-        rm -f $values
-}
-
 log_assert "Zpool get returns values for all known properties"
 log_onexit cleanup
 
@@ -53,25 +48,12 @@ if ! is_global_zone ; then
 	TESTPOOL=${TESTPOOL%%/*}
 fi
 
-typeset -i i=0;
-typeset values=$TEST_BASE_DIR/values.$$
+typeset tmpfile=$(mktemp)
 
-while [ $i -lt "${#properties[@]}" ]
-do
-	log_note "Checking for ${properties[$i]} property"
-	log_must eval "zpool get ${properties[$i]} $TESTPOOL > $values"
-	grep "${properties[$i]}" $values > /dev/null 2>&1
-	if [ $? -ne 0 ]
-	then
-		log_fail "${properties[$i]} not seen in output"
-	fi
-	grep "^NAME " $values > /dev/null 2>&1
-	# only need to check this once.
-	if [ $i -eq 0 ] && [ $? -ne 0 ]
-	then
-		log_fail "Header not seen in zpool get output"
-	fi
-	i=$(( $i + 1 ))
+for prop in $(get_pool_props); do
+	log_must eval "zpool get $prop $TESTPOOL > $tmpfile"
+	log_must grep -q "$prop" $tmpfile
+	log_must grep -q "^NAME" $tmpfile
 done
 
 log_pass "Zpool get returns values for all known properties"
