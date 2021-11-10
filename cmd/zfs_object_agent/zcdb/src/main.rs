@@ -68,6 +68,7 @@ async fn main() {
                     .help("sets the level of verbosity"),
             ),
         )
+        .subcommand(SubCommand::with_name("space-usage").about("dump space usage statistics"))
         .get_matches();
 
     let device = matches.value_of("device").unwrap();
@@ -93,6 +94,9 @@ async fn main() {
                 device,
             )
             .await;
+        }
+        ("space-usage", Some(_)) => {
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, device).await;
         }
         _ => {
             matches.usage();

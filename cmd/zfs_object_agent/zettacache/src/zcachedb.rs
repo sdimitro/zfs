@@ -35,6 +35,7 @@ pub enum ZettaCacheDBCommand {
     // if there is a double-ALLOC on a spacemap).
     DumpStructures(DumpStructuresOptions),
     DumpSlabs(DumpSlabsOptions),
+    DumpSpaceUsage,
 }
 
 #[derive(Debug)]
@@ -110,6 +111,7 @@ impl ZettaCacheDBCommand {
             match command {
                 ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
                 ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
+                ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_free_space().await,
             }
         }
     }
