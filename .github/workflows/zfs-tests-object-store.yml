@@ -69,6 +69,8 @@ jobs:
         ZTS_BUCKET_NAME: testbucket
         ZTS_OBJECT_ENDPOINT: http://127.0.0.1:9000
         ZTS_REGION: us-west-2
+        AWS_ACCESS_KEY_ID: minioadmin
+        AWS_SECRET_ACCESS_KEY: minioadmin
     - name: Prepare artifacts
       if: failure()
       run: |
