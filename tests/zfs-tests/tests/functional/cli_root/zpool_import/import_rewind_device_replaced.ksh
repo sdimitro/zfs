@@ -55,6 +55,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import rewind after device replacement" \
+		"not supported for object store run."
+fi
+
 ZFS_TXG_TIMEOUT=""
 
 function custom_cleanup

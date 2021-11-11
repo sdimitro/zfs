@@ -80,10 +80,10 @@ log_onexit cleanup
 
 poolA=poolA.$$; poolB=poolB.$$;
 
-log_must zpool create $poolA $VDEV0
+log_must create_pool -p $poolA -d $VDEV0
 log_must zpool export $poolA
 
-log_must zpool import -t $poolA $poolB -d $DEVICE_DIR
+log_must import_pool -e "-t $poolA" -p $poolB -s "-d $DEVICE_DIR"
 log_must zpool export $poolB
 
 log_must eval "verify_pool_name $VDEV0 $poolA"

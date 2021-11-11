@@ -33,6 +33,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import for cachefile with device removed" \
+		"not supported for object store run."
+fi
+
 function custom_cleanup
 {
 	cleanup

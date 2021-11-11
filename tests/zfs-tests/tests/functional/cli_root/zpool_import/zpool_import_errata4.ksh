@@ -37,6 +37,10 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import not supported from local search directories for object store run."
+fi
+
 POOL_NAME=missing_ivset
 POOL_FILE=missing_ivset.dat
 

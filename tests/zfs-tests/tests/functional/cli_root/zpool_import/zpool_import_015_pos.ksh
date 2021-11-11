@@ -40,15 +40,15 @@ function cleanup
 log_assert "Pool can be imported with '-d <device>'"
 log_onexit cleanup
 
-log_must zpool create $TESTPOOL1 $VDEV0 $VDEV1
+log_must create_pool -p $TESTPOOL1 -d "$VDEV0 $VDEV1"
 log_must zpool export $TESTPOOL1
 
-log_must zpool import -d $VDEV0 -d $VDEV1 $TESTPOOL1
+log_must import_pool -s "-d $VDEV0 -d $VDEV1" -p $TESTPOOL1
 log_must zpool export $TESTPOOL1
 
 # mix -d <dir> and -d <device>
 log_must mkdir $DEVICE_DIR/test_dir
 log_must ln -s $VDEV0 $DEVICE_DIR/test_dir/disk
-log_must zpool import -d $DEVICE_DIR/test_dir -d $VDEV1 $TESTPOOL1
+log_must import_pool -s "-d $DEVICE_DIR/test_dir -d $VDEV1" -p $TESTPOOL1
 
 log_pass "Pool can be imported with '-d <device>'"

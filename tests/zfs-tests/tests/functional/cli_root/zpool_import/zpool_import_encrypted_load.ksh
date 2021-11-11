@@ -47,10 +47,10 @@ log_onexit cleanup
 log_assert "'zpool import -l' should import a pool with an encrypted dataset" \
 	"and load its key"
 
-log_must eval "echo $PASSPHRASE | zpool create -O encryption=on" \
-	"-O keyformat=passphrase -O keylocation=prompt $TESTPOOL1 $VDEV0"
+log_must eval "echo $PASSPHRASE | create_pool -e '-O encryption=on" \
+	"-O keyformat=passphrase -O keylocation=prompt' -p $TESTPOOL1 -d $VDEV0"
 log_must zpool export $TESTPOOL1
-log_must eval "echo $PASSPHRASE | zpool import -l -d $DEVICE_DIR $TESTPOOL1"
+log_must eval "echo $PASSPHRASE | import_pool -e '-l' -s '-d $DEVICE_DIR' -p $TESTPOOL1"
 log_must poolexists $TESTPOOL1
 log_must key_available $TESTPOOL1
 log_must mounted $TESTPOOL1

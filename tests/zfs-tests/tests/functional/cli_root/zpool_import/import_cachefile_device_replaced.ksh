@@ -51,6 +51,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import for cachefile with device replaced" \
+		"not supported for object store run."
+fi
+
 ZFS_TXG_TIMEOUT=""
 
 function custom_cleanup
