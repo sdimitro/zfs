@@ -45,6 +45,10 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import from exported rawfile not supported for object store run."
+fi
+
 POOL_NAME=unclean_export
 POOL_FILE=unclean_export.dat
 

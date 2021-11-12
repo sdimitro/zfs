@@ -826,14 +826,22 @@ impl Pool {
         cache: Option<ZettaCache>,
         heartbeat_guard: Option<HeartbeatGuard>,
         readonly: bool,
-        syncing_txg: Option<Txg>,
+        mut syncing_txg: Option<Txg>,
     ) -> Result<(Pool, UberblockPhys, BlockId), PoolOpenError> {
         let phys = UberblockPhys::get(&object_access, pool_phys.guid, txg).await?;
 
         features::check_features(phys.features.iter().map(|(f, _)| f), readonly)?;
 
         if let Some(resume_txg) = syncing_txg {
-            assert_gt!(resume_txg, phys.txg);
+            assert_ge!(resume_txg, phys.txg);
+            if resume_txg == phys.txg {
+                // The TXG that we're resuming was already synced.  The agent
+                // must have died before the "end txg done" message got to the
+                // kernel.  To ensure that the next message is "end txg" (not
+                // "write block"), we set the syncing_txg to None.  See
+                // end_txg() for details.
+                syncing_txg = None;
+            }
         }
 
         let shared_state = Arc::new(PoolSharedState {

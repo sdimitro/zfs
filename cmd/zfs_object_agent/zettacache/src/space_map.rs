@@ -1,6 +1,7 @@
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
 use crate::block_access::*;
+use crate::block_allocator::SlabGeneration;
 use crate::block_allocator::SlabId;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
@@ -23,7 +24,7 @@ pub struct SpaceMapExtent {
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct MarkGenerationEntry {
     pub slab_id: SlabId,
-    pub generation: u64,
+    pub generation: SlabGeneration,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -107,7 +108,7 @@ impl SpaceMap {
         }
     }
 
-    pub fn mark_generation(&mut self, slab_id: SlabId, generation: u64) {
+    pub fn mark_generation(&mut self, slab_id: SlabId, generation: SlabGeneration) {
         self.log
             .append(SpaceMapEntry::MarkGeneration(MarkGenerationEntry {
                 slab_id,

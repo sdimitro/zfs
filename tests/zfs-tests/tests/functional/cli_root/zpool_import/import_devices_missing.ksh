@@ -37,6 +37,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import with missing devices" \
+		"not supported for object store run."
+fi
+
 function custom_cleanup
 {
 	log_must set_spa_load_verify_metadata 1

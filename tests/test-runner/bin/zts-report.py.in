@@ -251,8 +251,63 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
             ['SKIP', object_store_skip],
         'cli_root/zpool_online/zpool_online_002_neg':
             ['SKIP', object_store_skip],
-    	'pool_checkpoint/checkpoint_removal': ['SKIP', object_store_skip],
-    	'pool_checkpoint/checkpoint_vdev_add': ['SKIP', object_store_skip],
+        'pool_checkpoint/checkpoint_removal': ['SKIP', object_store_skip],
+        'pool_checkpoint/checkpoint_vdev_add': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_003_pos': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_004_pos': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_005_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_device_added':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_device_removed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_device_replaced':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_mirror_attached':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_mirror_detached':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_paths_changed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_shared_device':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_devices_missing':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_paths_changed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_rewind_config_changed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_rewind_device_replaced':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_003_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_004_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_005_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_006_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_007_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_008_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_010_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_011_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_013_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_016_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_017_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_errata3':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_errata4':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_missing_001_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_missing_002_pos':
+            ['SKIP', object_store_skip],
     })
 
 #
@@ -378,6 +433,10 @@ elif sys.platform.startswith('linux'):
 if os.environ.get('ZTS_OBJECT_STORE') == 'true':
     maybe.update({
         'cli_root/zpool_create/zpool_create_003_pos': ['FAIL', 'DOSE-545'],
+        'cli_root/zdb/zdb_checksum': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_decompress': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
+        'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
     })
 
 # Not all Github actions runners have scsi_debug module, so we may skip

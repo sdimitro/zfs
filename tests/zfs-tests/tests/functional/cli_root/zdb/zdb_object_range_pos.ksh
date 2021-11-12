@@ -68,8 +68,7 @@ function get_object_list
 log_assert "Verify zdb -dd object range arguments work correctly."
 log_onexit cleanup
 verify_runnable "both"
-verify_disk_count "$DISKS" 2
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 
 for x in $(seq 0 7); do
 	touch $TESTDIR/file$x

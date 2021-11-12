@@ -58,6 +58,7 @@ HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
 
 ZOA_TUNABLE_LIST="die_mtbf_secs die_file"
 ZOA_DIE_MTBF_SECS_DEFAULT_VALUE="150"
+
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
 	TESTFAIL_CALLBACKS=${TESTFAIL_CALLBACKS:-"$ZFS_DMESG"}
@@ -473,6 +474,56 @@ check_and_set_zoa_tunables() {
     fi
 }
 
+
+# Checks if the S3 credentials are available
+# for the connectivity test
+are_s3_credentials_available() {
+	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
+		return 0 || return 1
+}
+
+
+# Tests the S3 connectivity using the s3 credentials
+# or the instance profile.
+# To test using instance profile pass "true"
+# as the first positional argument
+test_s3_connectivity() {
+	# Flag to check if connectivity should be
+	# tested using the instance profile
+	# Defaults to false
+	use_instance_profile="${1:-false}"
+
+	# Build the common part
+	zoa_cmd="/sbin/zfs_object_agent test_connectivity"
+	zoa_cmd="$zoa_cmd --region $ZTS_REGION"
+	zoa_cmd="$zoa_cmd --endpoint $ZTS_OBJECT_ENDPOINT"
+	zoa_cmd="$zoa_cmd --bucket $ZTS_BUCKET_NAME"
+
+	if [ "$use_instance_profile" = "true" ]; then
+		zoa_cmd="$zoa_cmd --aws_instance_profile"
+	elif [ "$use_instance_profile" = "false" ]; then
+		zoa_cmd="$zoa_cmd --aws_access_key_id $AWS_ACCESS_KEY_ID"
+		zoa_cmd="$zoa_cmd --aws_secret_access_key $AWS_SECRET_ACCESS_KEY"
+	fi
+	$zoa_cmd >/dev/null 2>&1 || fail "Unable to connect to S3"
+}
+
+# Configures and sets the S3 credentials to the disk
+configure_and_set_s3_credentials() {
+	# Check and comment out the AWS_ environment variables
+	# from the /etc/environment file
+	if grep -q "^AWS" /etc/environment 2>/dev/null; then
+		sudo sed -i "s/^AWS/# AWS/g" /etc/environment
+	fi
+	# If aws cli is installed and is in path
+	if command -v aws >/dev/null 2>&1; then
+		aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+		aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+		sudo mkdir -p /root/.aws && \
+			sudo cp ~/.aws/credentials /root/.aws/credentials
+	fi
+}
+
 while getopts 'hvqxkfScn:d:s:r:?t:T:u:I:' OPTION; do
 	case $OPTION in
 	h)
@@ -748,11 +799,28 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 		    sudo tee $ZOA_OUTPUT > /dev/null &
 	fi
 
-	# Verify connectivity before proceeding
-	/sbin/zoa_test -p "$ZTS_CREDS_PROFILE" -b "$ZTS_BUCKET_NAME" \
-		-e "$ZTS_OBJECT_ENDPOINT" \
-		test_connectivity >/dev/null 2>&1 || \
-		fail "Unable to connect to $ZTS_BUCKET_NAME"
+	#
+	# Check connectivity to s3 and configure the system
+	# to correctly run test either by using the S3 creds
+	# or the instance profile role.
+	#
+	if are_s3_credentials_available; then
+		test_s3_connectivity
+		configure_and_set_s3_credentials
+		msg "zfs-test for object storage configured" \
+			"to run via S3 credentials"
+	else
+		# Test using instance profile
+		test_s3_connectivity "true"
+		# For running test using instance profile
+		# we need to remove the underlying credentials
+		# stored in the disk
+		rm -f ~/.aws/credentials
+
+		sudo rm -f /root/.aws/credentials
+		msg "zfs-test for object storage configured" \
+			"to run via the instance profile role"
+	fi
 
 elif [ -z "${DISKS}" ]; then
 	#

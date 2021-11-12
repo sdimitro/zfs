@@ -155,10 +155,10 @@ impl<'a> OpInProgress<'a> {
         }
     }
 
-    fn end(self, bytes: u64) {
+    fn end_impl(self, bytes: u64, operations: u64) {
         let latency = self.begin.elapsed().as_nanos();
         let counters = &self.stats.counters[self.stat_type];
-        counters.operations.fetch_add(1, Ordering::Relaxed);
+        counters.operations.fetch_add(operations, Ordering::Relaxed);
         counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
 
         // This bucket mapping is equivalent to L_HISTO() macro in zfs.h
@@ -191,9 +191,17 @@ impl<'a> OpInProgress<'a> {
             ),
         };
         self.stats.latency_histograms[latency_type].0[latency_bucket]
-            .fetch_add(1, Ordering::Relaxed);
+            .fetch_add(operations, Ordering::Relaxed);
         self.stats.request_size_histograms[request_type].0[request_bucket]
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn end(self, bytes: u64) {
+        self.end_impl(bytes, 1)
+    }
+
+    fn end_multiple(self, bytes: u64, operations: u64) {
+        self.end_impl(bytes, operations)
     }
 }
 
@@ -771,7 +779,7 @@ impl ObjectAccess {
                 })
                 .await
                 .unwrap();
-                op.end(0);
+                op.end_multiple(0, chunk.len() as u64);
             })
             .await;
     }

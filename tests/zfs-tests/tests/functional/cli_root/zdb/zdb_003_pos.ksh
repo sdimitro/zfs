@@ -29,6 +29,11 @@
 #
 
 log_assert "Verify zdb does not produce redundant dumps of configurations"
+
+if use_object_store; then
+	log_unsupported "Not applicable for object storage run."
+fi
+
 log_onexit cleanup
 
 function cleanup

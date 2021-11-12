@@ -43,6 +43,7 @@ tags = ['functional', 'acl', 'posix-sa']
 # -------------------------------------------------------------
 # TODO: Add the following tests back after relevant bug fixes.
 # checkpoint_zhack_feat - DOSE-722
+# checkpoint_zdb - DOSE-769
 # -------------------------------------------------------------
 [tests/functional/pool_checkpoint]
 tests = ['checkpoint_after_rewind', 'checkpoint_big_rewind',
@@ -51,7 +52,7 @@ tests = ['checkpoint_after_rewind', 'checkpoint_big_rewind',
     'checkpoint_indirect', 'checkpoint_invalid', 'checkpoint_lun_expsz',
     'checkpoint_open', 'checkpoint_removal', 'checkpoint_rewind',
     'checkpoint_ro_rewind', 'checkpoint_sm_scale', 'checkpoint_twice',
-    'checkpoint_vdev_add', 'checkpoint_zdb']
+    'checkpoint_vdev_add']
 tags = ['functional', 'pool_checkpoint']
 timeout = 1800
 
@@ -347,3 +348,53 @@ tags = ['functional', 'cli_root', 'zpool_sync']
 [tests/functional/cli_root/zpool_history]
 tests = ['zpool_history_001_neg', 'zpool_history_002_pos']
 tags = ['functional', 'cli_root', 'zpool_history']
+
+# -------------------------------------------------------------
+# TODO: Add the following tests back after relevant bug fixes.
+# zdb_block_size_histogram - DOSE-780
+# zdb_006_pos - DOSE-769
+# zdb_args_pos - DOSE-769
+# -------------------------------------------------------------
+# TODO: These tests don't create a panic, hence, keeping them in the suite.
+# Remove them from expected failures list once the bugs are fixed.
+# zdb_checksum - DOSE-737
+# zdb_decompress - DOSE-737
+# zdb_display_block - DOSE-737
+# zdb_decompress_zstd - DOSE-738
+# -------------------------------------------------------------
+[tests/functional/cli_root/zdb]
+tests = ['zdb_002_pos', 'zdb_003_pos', 'zdb_004_pos', 'zdb_005_pos',
+    'zdb_args_neg', 'zdb_checksum', 'zdb_decompress',
+    'zdb_display_block', 'zdb_object_range_neg', 'zdb_object_range_pos',
+    'zdb_objset_id', 'zdb_decompress_zstd', 'zdb_recover', 'zdb_recover_2']
+pre =
+post =
+tags = ['functional', 'cli_root', 'zdb']
+#------------------------------------------------------------------------
+# TODO: Some test requires zhack support(DOSE-722) with object storage
+# Uncomment and test after following is implemented
+#  - zpool_import_features_001_pos
+#  - zpool_import_features_002_neg
+#  - zpool_import_features_003_pos
+#-------------------------------------------------------------------------
+[tests/functional/cli_root/zpool_import]
+tests = ['import_cachefile_device_added', 'import_cachefile_device_removed',
+	'import_cachefile_device_replaced', 'import_cachefile_mirror_attached',
+	'import_cachefile_mirror_detached', 'import_cachefile_paths_changed',
+	'import_cachefile_shared_device', 'import_devices_missing',
+	'import_paths_changed', 'import_rewind_config_changed',
+	'import_rewind_device_replaced', 'zpool_import_001_pos',
+	'zpool_import_002_pos', 'zpool_import_003_pos',
+	'zpool_import_004_pos', 'zpool_import_005_pos',
+	'zpool_import_006_pos', 'zpool_import_007_pos',
+	'zpool_import_008_pos', 'zpool_import_009_neg',
+	'zpool_import_010_pos', 'zpool_import_011_neg',
+	'zpool_import_012_pos', 'zpool_import_013_neg',
+	'zpool_import_014_pos', 'zpool_import_015_pos',
+	'zpool_import_016_pos', 'zpool_import_017_pos',
+	'zpool_import_all_001_pos', 'zpool_import_encrypted',
+	'zpool_import_encrypted_load', 'zpool_import_errata3',
+	'zpool_import_errata4', 'zpool_import_missing_001_pos',
+	'zpool_import_missing_002_pos', 'zpool_import_missing_003_pos',
+	'zpool_import_rename_001_pos']
+tags = ['functional', 'cli_root', 'zpool_import']

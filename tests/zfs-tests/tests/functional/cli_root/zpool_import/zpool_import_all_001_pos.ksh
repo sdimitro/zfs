@@ -76,12 +76,12 @@ function cleanup_all
 	#
 	# Try import individually if 'import -a' failed.
 	#
-	for pool in `zpool import | grep "pool:" | awk '{print $2}'`; do
-		zpool import -f $pool
+	for pool in `import_pool | grep "pool:" | awk '{print $2}'`; do
+		import_pool -e "-f" -p $pool
 	done
 
-	for pool in `zpool import -d $DEVICE_DIR | grep "pool:" | awk '{print $2}'`; do
-		log_must zpool import -d $DEVICE_DIR -f $pool
+	for pool in `import_pool -s "-d $DEVICE_DIR" | grep "pool:" | awk '{print $2}'`; do
+		log_must import_pool -s "-d $DEVICE_DIR" -e "-f" -p "$pool"
 	done
 
 	while (( id < number )); do
@@ -141,7 +141,7 @@ done
 
 while (( i < ${#options[*]} )); do
 
-	log_must zpool import -d $DEVICE_DIR ${options[i]} -a -f
+	log_must import_pool -s "-d $DEVICE_DIR" -e "${options[i]} -a -f"
 
 	# export unintentionally imported pools
 	for poolname in $(get_all_pools); do

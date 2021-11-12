@@ -37,8 +37,7 @@ function cleanup
 log_assert "Execute zdb using invalid object range parameters."
 log_onexit cleanup
 verify_runnable "both"
-verify_disk_count "$DISKS" 2
-default_mirror_setup_noexit $DISKS
+default_setup_noexit "$DISKS"
 
 log_must zpool sync
 

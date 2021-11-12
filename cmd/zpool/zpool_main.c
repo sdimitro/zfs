@@ -4884,7 +4884,7 @@ print_one_oss(nvlist_t *oldnv, nvlist_t *newnv, const char *type,
 
 	format = cb->cb_literal ? ZFS_NICENUM_RAW : ZFS_NICENUM_1024;
 
-	if (nvlist_lookup_nvlist(oldnv, type, &nv) == 0)
+	if (oldnv != NULL && nvlist_lookup_nvlist(oldnv, type, &nv) == 0)
 		oldval = fnvlist_lookup_uint64(nv, stat);
 	if (nvlist_lookup_nvlist(newnv, type, &nv) == 0)
 		newval = fnvlist_lookup_uint64(nv, stat);
@@ -4935,10 +4935,9 @@ print_iostat_object_storage(nvlist_t *oldnv, nvlist_t *newnv,
 	nvlist_t *oldoss = NULL, *newoss;
 
 	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
-	if (oldnv == NULL ||
-	    nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS,
-	    &oldoss) != 0) {
-		oldoss = fnvlist_alloc();
+	if (oldnv != NULL) {
+		oldoss = fnvlist_lookup_nvlist(oldnv,
+		    ZPOOL_CONFIG_OBJECT_STORE_STATS);
 	}
 
 	double scale = get_iostat_object_storage_scale(oldoss, newoss);
@@ -5477,9 +5476,10 @@ static int
 get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 {
 	uint64_t *mask = data;
-	nvlist_t *config, *nvroot, *nvx, *nvo = NULL;
+	nvlist_t *config, *nvroot, *nvx, *nvo;
 	uint64_t flags = 0;
 	int i, j;
+	boolean_t free_nvo;
 
 	config = zpool_get_config(zhp, NULL);
 	verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
@@ -5493,6 +5493,10 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 	if (nvlist_lookup_nvlist(nvroot, ZPOOL_CONFIG_OBJECT_STORE_STATS,
 	    &nvo) == 0) {
 		flags |= IOS_OBJECT_ANY_M;
+		free_nvo = B_FALSE;
+	} else {
+		nvo = fnvlist_alloc();
+		free_nvo = B_TRUE;
 	}
 
 	/* Get our extended stats nvlist from the main list */
@@ -5514,7 +5518,9 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 		flags |= (1ULL << j);
 		for (i = 0; vsx_type_to_nvlist[j][i]; i++) {
 			const char *nv_name = vsx_type_to_nvlist[j][i];
-			if (!nvlist_exists(nvx, nv_name) && nvo != NULL &&
+
+			/* Look in both nvx and nvo */
+			if (!nvlist_exists(nvx, nv_name) &&
 			    !nvlist_exists(nvo, nv_name)) {
 				/* flag isn't supported */
 				flags = flags & ~(1ULL  << j);
@@ -5524,6 +5530,8 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 	}
 end:
 	*mask = *mask & flags;
+	if (free_nvo)
+		nvlist_free(nvo);
 	return (0);
 }
 

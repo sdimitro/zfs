@@ -31,6 +31,11 @@
 #
 
 log_assert "Verify zdb -l exit codes are correct"
+
+if use_object_store; then
+	log_unsupported "Not applicable for object storage run."
+fi
+
 log_onexit cleanup
 
 function cleanup

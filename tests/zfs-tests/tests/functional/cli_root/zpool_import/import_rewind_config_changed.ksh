@@ -44,6 +44,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import rewind after configuration change" \
+		"not supported for object store run."
+fi
+
 function custom_cleanup
 {
 	set_vdev_validate_skip 0

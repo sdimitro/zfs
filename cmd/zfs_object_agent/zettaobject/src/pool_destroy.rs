@@ -104,8 +104,8 @@ impl DestroyingPoolsMap {
         destroying_phys.destroyed_objects += delta;
 
         trace!(
-            "Updating zpool destroy list: guid={} total objects={} destroyed_objects={}.",
-            &guid,
+            "Updating zpool destroy list: {:?} total objects={} destroyed_objects={}.",
+            guid,
             destroying_phys.total_data_objects,
             destroying_phys.destroyed_objects
         );
@@ -116,9 +116,8 @@ impl DestroyingPoolsMap {
         destroying_pool.cache_phys.state = PoolDestroyState::Complete;
 
         debug!(
-            "update_destroy_complete: guid={} total objects={}.",
-            &guid,
-            destroying_pool.destroying_phys.unwrap().total_data_objects
+            "update_destroy_complete: {:?} {:?}.",
+            guid, destroying_pool.destroying_phys
         );
     }
 
@@ -309,13 +308,10 @@ impl PoolDestroyer {
             }),
         };
 
-        info!(
-            "marking pool {} destroyed; total_data_objects: {} destroyed_objects: {}",
-            guid, destroyed_pool.total_data_objects, destroyed_pool.destroyed_objects
-        );
+        info!("marking pool {:?} destroyed; {:?}", guid, destroyed_pool);
 
         if self.destroying_pools_map.pools.contains_key(&guid) {
-            return Err(anyhow!("pool {} already in destroying_pools_map", guid));
+            return Err(anyhow!("pool {:?} already in destroying_pools_map", guid));
         }
         self.destroying_pools_map
             .pools
@@ -359,46 +355,52 @@ fn delete_pool_objects(
 }
 
 async fn destroy_task(object_access: Arc<ObjectAccess>, guid: PoolGuid) {
-    info!("destroying pool {}", guid);
+    info!("destroying pool {:?}", guid);
 
-    // There can only be one destroy task for any given pool and
-    let mut pool_phys = PoolPhys::get(&object_access, guid).await.unwrap();
-    POOL_DESTROYER
-        .lock()
-        .await
-        .as_mut()
-        .unwrap()
-        .destroying_pools_map
-        .pools
-        .get_mut(&guid)
-        .unwrap()
-        .destroying_phys = pool_phys.destroying_state;
+    // There can only be one destroy task for any given pool.
+    // It is possible that the pool has been destroyed
+    match PoolPhys::get(&object_access, guid).await {
+        Ok(mut pool_phys) => {
+            POOL_DESTROYER
+                .lock()
+                .await
+                .as_mut()
+                .unwrap()
+                .destroying_pools_map
+                .pools
+                .get_mut(&guid)
+                .unwrap()
+                .destroying_phys = pool_phys.destroying_state;
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
-    delete_pool_objects(object_access.clone(), guid, tx);
+            let (tx, mut rx) = mpsc::unbounded_channel();
+            delete_pool_objects(object_access.clone(), guid, tx);
 
-    // Wait for the delete_prefix task to send progress updates.
-    while let Some(object_count) = rx.recv().await {
-        POOL_DESTROYER
-            .lock()
-            .await
-            .as_mut()
-            .unwrap()
-            .destroying_pools_map
-            .increment_destroyed_objects(guid, object_count as u64);
+            // Wait for the delete_prefix task to send progress updates.
+            while let Some(object_count) = rx.recv().await {
+                POOL_DESTROYER
+                    .lock()
+                    .await
+                    .as_mut()
+                    .unwrap()
+                    .destroying_pools_map
+                    .increment_destroyed_objects(guid, object_count as u64);
 
-        // Update PoolPhys
-        pool_phys
-            .destroying_state
-            .as_mut()
-            .unwrap()
-            .destroyed_objects += object_count as u64;
-        pool_phys.put(&object_access).await;
+                // Update PoolPhys
+                pool_phys
+                    .destroying_state
+                    .as_mut()
+                    .unwrap()
+                    .destroyed_objects += object_count as u64;
+                pool_phys.put(&object_access).await;
+            }
+
+            // The super object is destroyed last as it is used to keep track of the progress made.
+            object_access.delete_object(PoolPhys::key(guid)).await;
+        }
+        Err(err) => {
+            info!("pool {:?} already destroyed, {:?}", guid, err);
+        }
     }
-
-    // The super object is destroyed last as it is used to keep track of the progress made.
-    object_access.delete_object(PoolPhys::key(guid)).await;
-
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     let pool_destroyer = maybe_pool_destroyer.as_mut().unwrap();
     pool_destroyer
@@ -449,9 +451,9 @@ pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) ->
 
                 Ok(())
             }
-            None => Err(anyhow!("pool {} not in destroyed state", guid)),
+            None => Err(anyhow!("pool {:?} not in destroyed state", guid)),
         },
-        Err(error) => Err(anyhow!("pool {} not found, {:?}", guid, error)),
+        Err(error) => Err(anyhow!("pool {:?} not found, {:?}", guid, error)),
     }
 }
 

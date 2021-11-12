@@ -53,14 +53,14 @@ function cleanup
 log_assert "Pool with inactive unsupported features can be imported."
 log_onexit cleanup
 
-log_must zpool create $TESTPOOL1 $VDEV0
+log_must create_pool -p $TESTPOOL1 -d $VDEV0
 log_must zpool export $TESTPOOL1
 
 for feature in $features; do
 	log_must zhack -d $DEVICE_DIR feature enable $TESTPOOL1 $feature
 done
 
-log_must zpool import -d $DEVICE_DIR $TESTPOOL1
+log_must import_pool -s "-d $DEVICE_DIR" -p $TESTPOOL1
 for feature in $features; do
 	state=$(zpool list -Ho unsupported@$feature $TESTPOOL1)
         if [[ "$state" != "inactive" ]]; then
