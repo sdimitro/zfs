@@ -9185,12 +9185,46 @@ spa_sync_condense_indirect(spa_t *spa, dmu_tx_t *tx)
 }
 
 static void
+spa_sync_restore_mos_stats(spa_t *spa)
+{
+	dsl_pool_t *dp = spa->spa_dsl_pool;
+	uberblock_t *ub = &spa->spa_uberblock;
+
+	ASSERT0(dp->dp_mos_used_delta);
+	ASSERT0(dp->dp_mos_compressed_delta);
+	ASSERT0(dp->dp_mos_uncompressed_delta);
+	dp->dp_mos_used_delta = ub->ub_dp_mos_used_delta;
+	dp->dp_mos_compressed_delta = ub->ub_dp_mos_compressed_delta;
+	dp->dp_mos_uncompressed_delta = ub->ub_dp_mos_uncompressed_delta;
+}
+
+static void
+spa_sync_save_mos_stats(spa_t *spa)
+{
+	dsl_pool_t *dp = spa->spa_dsl_pool;
+	uberblock_t *ub = &spa->spa_uberblock;
+
+	ub->ub_dp_mos_used_delta = dp->dp_mos_used_delta;
+	ub->ub_dp_mos_compressed_delta = dp->dp_mos_compressed_delta;
+	ub->ub_dp_mos_uncompressed_delta = dp->dp_mos_uncompressed_delta;
+
+	dp->dp_mos_used_delta = 0;
+	dp->dp_mos_compressed_delta = 0;
+	dp->dp_mos_uncompressed_delta = 0;
+}
+
+
+static void
 spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 {
 	objset_t *mos = spa->spa_meta_objset;
 	dsl_pool_t *dp = spa->spa_dsl_pool;
 	uint64_t txg = tx->tx_txg;
 	bplist_t *free_bpl = &spa->spa_free_bplist[txg & TXG_MASK];
+
+	if (spa_is_object_based(spa)) {
+		spa_sync_restore_mos_stats(spa);
+	}
 
 	do {
 		int pass = ++spa->spa_sync_pass;
@@ -9261,6 +9295,11 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 
 		spa_sync_deferred_frees(spa, tx);
 	} while (dmu_objset_is_dirty(mos, txg));
+
+	if (spa_is_object_based(spa)) {
+		spa_sync_save_mos_stats(spa);
+	}
+
 }
 
 /*
@@ -9503,6 +9542,15 @@ spa_sync(spa_t *spa, uint64_t txg)
 		delay(1);
 
 	spa->spa_sync_pass = 0;
+
+	/*
+	 * The mos stats should have been written out this txg,
+	 * so verify that they are now zero indicating that any
+	 * updates have been persisted to the pool.
+	 */
+	VERIFY0(dp->dp_mos_used_delta);
+	VERIFY0(dp->dp_mos_compressed_delta);
+	VERIFY0(dp->dp_mos_uncompressed_delta);
 
 	/*
 	 * Update the last synced uberblock here. We want to do this at

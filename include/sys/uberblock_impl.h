@@ -136,6 +136,20 @@ struct uberblock {
 	 * the ZIL block is not allocated [see uses of spa_min_claim_txg()].
 	 */
 	uint64_t	ub_checkpoint_txg;
+
+	/*
+	 * The stats below are part of the MOS dsl_dir and
+	 * are typically written out in later passes of spa_sync
+	 * when we are overwriting blocks.
+	 *
+	 * Since object-based pools do not allow block overwrites,
+	 * store these stats temporarily in the uberblock when
+	 * we finalize the txg. These stats will be synced out to
+	 * the dsl_dir in a subsequent txg when the dsl_dir is dirtied.
+	 */
+	uint64_t	ub_dp_mos_used_delta;
+	uint64_t	ub_dp_mos_compressed_delta;
+	uint64_t	ub_dp_mos_uncompressed_delta;
 };
 
 #ifdef	__cplusplus

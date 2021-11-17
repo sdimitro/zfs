@@ -1293,8 +1293,19 @@ agent_reader(void *arg)
 		int err = nvlist_lookup_uint8_array(nv, AGENT_UBERBLOCK,
 		    &arr, &len);
 		if (err == 0) {
-			ASSERT3U(len, ==, sizeof (uberblock_t));
+			ASSERT3U(len, <=, sizeof (uberblock_t));
 			bcopy(arr, &vos->vos_uberblock, len);
+
+			/*
+			 * We may be opening an uberblock from a pool
+			 * with an older on-disk format. To handle this,
+			 * we just zero out any uberblock members that
+			 * did not exist when the uberblock was written.
+			 */
+			if (len < sizeof (uberblock_t)) {
+				bzero(&vos->vos_uberblock + len,
+				    sizeof (uberblock_t) - len);
+			}
 			VERIFY0(nvlist_lookup_uint8_array(nv,
 			    AGENT_CONFIG, &arr, &len));
 			vos->vos_config = fnvlist_unpack((char *)arr, len);
