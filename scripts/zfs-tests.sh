@@ -58,6 +58,14 @@ HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
 
 ZOA_TUNABLE_LIST="die_mtbf_secs die_file"
 ZOA_DIE_MTBF_SECS_DEFAULT_VALUE="150"
+#
+# Create a marker file for finding crash dumps that
+# was created during the test run.
+# The find command can take this with argument -newer
+# to print crashes whose timestamp was greater than
+# the marker file
+#
+MARKER_FILE=$(mktemp)
 
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
@@ -144,6 +152,97 @@ cleanup() {
 	if [ -n "$ZTS_OBJECT_STORE" ]; then
 		sudo pkill -f -TERM zfs_object_agent
 	fi
+
+	# Find all the crash files that were created after the start
+	# of the test
+	crash_files=$(find /var/crash -name "core.*" -newer "$MARKER_FILE")
+
+	# If the list is not empty we try to find the binary name that
+	# caused the crash & copy it to the $RESULTS_DIR
+	if [ -n "$crash_files" ]; then
+		# Try to infer from the output of file command
+		crash_binaries=$(echo "$crash_files" | xargs sudo file | \
+			sed -n 's/.*execfn: .\(.*\).,.*/\1/p' | sort | uniq
+		)
+
+		# Try figure out from the crash file name
+		# The crash file name is of following format
+		# core.<name>.<pid>.<timestamp>
+		if [ -z "$crash_binaries" ]; then
+			crash_binaries=$(echo "$crash_files" | cut -d '.' -f2 | \
+				sort | uniq | xargs which
+			)
+		fi
+
+		# Get the list of shared dependencies from the binaries
+		dependencies=$(echo "$crash_binaries" | xargs ldd | \
+			awk '/=>/ {print $3 }'
+		)
+		# Add the binaries to the list of dependencies
+		# as those were not included in the previous step
+		dependencies="$crash_binaries $dependencies"
+		# Copy the shared files and its dependencies
+		for dependency in $dependencies; do
+			[ -e "$dependency" ] || continue
+			cp "$dependency" "$RESULTS_DIR"
+
+			[ -d "$RESULTS_DIR/.build-id" ] || \
+				mkdir -p  "$RESULTS_DIR/.build-id"
+
+			uuid=$(readelf -n "$dependency" | awk '/Build ID/ {print $3}')
+			[ -n "$uuid" ] || continue
+
+			prefix="$(echo "$uuid" | cut -c1-2)"
+			debug_file="$(echo "$uuid" | cut -c3-40).debug"
+
+			[ -f "/usr/lib/debug/.build-id/$prefix/$debug_file" ] || continue
+
+			mkdir -p "$RESULTS_DIR/.build-id/$prefix"
+			cp "/usr/lib/debug/.build-id/$prefix/$debug_file" \
+				"$RESULTS_DIR/.build-id/$prefix"
+		done
+
+		# Copy the crash files to $RESULTS_DIR/crash
+		mkdir -p "$RESULTS_DIR/crash"
+		echo "$crash_files" | xargs -I{} sudo cp {} "$RESULTS_DIR/crash"
+		# Change the ownership of core files from root to current user
+		sudo chown "$(id -un):$(id -gn)" -R "$RESULTS_DIR/crash"
+
+		# Create a convenience script to launch a gdb debugging session
+		# with options to load the debug information just gathered
+		cat >"$RESULTS_DIR/run-gdb.sh" <<-EOF
+			#!/usr/bin/env bash
+			crash_dir="\$(realpath \$(dirname \$0))/crash"
+			debug_dir="\$(realpath \$(dirname \$0))"
+			core_file="\$1"
+
+			if [ ! -f "\$core_file" ]; then
+			    core_file="\$crash_dir/\$(basename \$core_file)"
+			    [ ! -f "\$core_file" ] && echo "Not a valid core file" && exit 1
+			fi
+
+			core_prog=\$(file \$core_file | \\
+			    sed -n 's/.*execfn: .\\(.*\\).,.*/\\1/p' | \\
+			    xargs basename
+			)
+			# Fallback to find core name from the prog itself
+			if [ -z "\$core_prog" ]; then
+			    core_prog=\$(basename \$core_file | cut -d '.' -f2)
+			fi
+
+			gdb -iex "set print thread-events off" \\
+			    -iex "set sysroot /dev/null" \\
+			    -iex "set debug-file-directory \$debug_dir" \\
+			    -iex "set solib-search-path \$debug_dir" \\
+			    -iex "file \$debug_dir/\$core_prog" \\
+			    -iex "core-file \$core_file"
+
+		EOF
+		chmod +x "$RESULTS_DIR/run-gdb.sh"
+	fi
+
+	# Finally remove the marker file
+	rm -f "$MARKER_FILE"
 
 	# From this point onwards, the script will run with an empty $PATH
 	if [ "$STF_PATH_REMOVE" = "yes" ] && [ -d "$STF_PATH" ]; then
