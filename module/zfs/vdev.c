@@ -706,7 +706,7 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 	vdev_alloc_bias_t alloc_bias = VDEV_BIAS_NONE;
 	boolean_t top_level = (parent && !parent->vdev_parent);
 
-	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == SCL_ALL);
+	ASSERT3U(spa_config_held(spa, SCL_ALL, RW_WRITER), ==, SCL_ALL);
 
 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) != 0)
 		return (SET_ERROR(EINVAL));
@@ -5224,6 +5224,9 @@ vdev_is_concrete(vdev_t *vd)
 boolean_t
 vdev_is_object_based(vdev_t *vd)
 {
+	if (vd == NULL)
+		return (B_FALSE);
+
 	vdev_ops_t *ops = vd->vdev_ops;
 	if (vd->vdev_ops->vdev_op_leaf && ops == &vdev_object_store_ops)
 		return (B_TRUE);

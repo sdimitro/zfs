@@ -1858,19 +1858,14 @@ vdev_object_store_metaslab_init(vdev_t *vd, metaslab_t *msp,
 uint64_t
 vdev_object_store_metaslab_offset(vdev_t *vd)
 {
-	boolean_t lock_held = spa_config_held(vd->vdev_spa,
-	    SCL_ALLOC, RW_WRITER);
-	if (!lock_held)
-		spa_config_enter(vd->vdev_spa, SCL_ALLOC, FTAG, RW_WRITER);
+	ASSERT3U(spa_config_held(vd->vdev_spa, SCL_ALLOC, RW_WRITER), ==,
+	    SCL_ALLOC);
 
 	uint64_t blockid = 0;
 	for (uint64_t m = 0; m < vd->vdev_ms_count; m++) {
 		metaslab_t *msp = vd->vdev_ms[m];
 		blockid = MAX(blockid, msp->ms_lbas[0]);
 	}
-
-	if (!lock_held)
-		spa_config_exit(vd->vdev_spa, SCL_ALLOC, FTAG);
 
 	/*
 	 * The blockid represents the next block that will be allocated
