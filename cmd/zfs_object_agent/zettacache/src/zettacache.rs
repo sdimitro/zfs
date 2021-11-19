@@ -27,7 +27,6 @@ use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map;
 use std::collections::BTreeMap;
-use std::convert::TryFrom;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 use std::sync::Arc;
@@ -685,17 +684,18 @@ impl ZettaCache {
             my_cache.checkpoint_task(merge_rx, merge_index).await;
         });
 
-        let my_cache = this.clone();
+        let state = this.state.clone();
+        let metrics = this.metrics.clone();
         tokio::spawn(async move {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 interval.tick().await;
-                debug!("metrics: {:#?}", my_cache.metrics);
-                my_cache.state.lock().await.block_access.dump_metrics();
+                debug!("metrics: {:#?}", metrics);
+                state.lock().await.block_access.dump_metrics();
             }
         });
 
-        let my_cache = this.clone();
+        let state = this.state.clone();
         tokio::spawn(async move {
             // XXX maybe we should bump the atime after a set number of
             // accesses, so each histogram bucket starts with the same count.
@@ -704,7 +704,7 @@ impl ZettaCache {
             let mut interval = tokio::time::interval(Duration::from_secs(10));
             loop {
                 interval.tick().await;
-                let mut state = my_cache.state.lock().await;
+                let mut state = state.lock().await;
                 state.atime = state.atime.next();
             }
         });

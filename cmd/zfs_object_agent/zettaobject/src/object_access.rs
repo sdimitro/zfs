@@ -22,7 +22,6 @@ use rusoto_s3::{
     ListObjectsV2Request, ObjectIdentifier, PutObjectError, PutObjectOutput, PutObjectRequest,
     S3Client, S3,
 };
-use std::convert::TryFrom;
 use std::error::Error;
 use std::fmt::Formatter;
 use std::iter;

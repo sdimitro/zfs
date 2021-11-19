@@ -10,7 +10,6 @@ use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, min};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
-use std::convert::TryFrom;
 use std::ops::Bound::*;
 use std::sync::Arc;
 use std::time::Instant;

@@ -1,5 +1,3 @@
-use std::convert::TryInto;
-
 /// Conversions that are safe assuming that we are on LP64 (usize == u64)
 pub trait From64<A> {
     fn from64(a: A) -> Self;

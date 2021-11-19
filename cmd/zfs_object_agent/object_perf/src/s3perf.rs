@@ -6,7 +6,6 @@ use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
 use metered::time_source::StdInstantMicros;
 use std::cmp::max;
-use std::convert::TryInto;
 use std::error::Error;
 use std::string::String;
 use std::sync::Arc;

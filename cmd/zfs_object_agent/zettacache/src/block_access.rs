@@ -15,8 +15,6 @@ use num::Num;
 use num::NumCast;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
-use std::convert::TryInto;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
