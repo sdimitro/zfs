@@ -22,6 +22,8 @@
 #ifndef	_SYS_ZFS_FILE_H
 #define	_SYS_ZFS_FILE_H
 
+#include <sys/zfs_context.h>
+
 #ifndef _KERNEL
 typedef struct zfs_file {
 	int f_fd;

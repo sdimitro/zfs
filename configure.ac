@@ -48,6 +48,7 @@ AC_CONFIG_HEADERS([zfs_config.h], [
 LT_INIT
 AC_PROG_INSTALL
 AC_PROG_CC
+AC_PROG_LN_S
 PKG_PROG_PKG_CONFIG
 AM_PROG_AS
 AM_PROG_CC_C_O
@@ -84,7 +85,6 @@ AC_CONFIG_FILES([
 	cmd/zinject/Makefile
 	cmd/zpool/Makefile
 	cmd/zstream/Makefile
-	cmd/zstreamdump/Makefile
 	cmd/ztest/Makefile
 	cmd/zvol_id/Makefile
 	cmd/zvol_wait/Makefile
@@ -172,9 +172,6 @@ AC_CONFIG_FILES([
 	lib/libzstd/Makefile
 	lib/libzutil/Makefile
 	man/Makefile
-	man/man1/Makefile
-	man/man5/Makefile
-	man/man8/Makefile
 	module/Kbuild
 	module/Makefile
 	module/avl/Makefile
@@ -333,6 +330,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/cli_user/zpool_status/Makefile
 	tests/zfs-tests/tests/functional/compression/Makefile
 	tests/zfs-tests/tests/functional/cp_files/Makefile
+	tests/zfs-tests/tests/functional/crtime/Makefile
 	tests/zfs-tests/tests/functional/ctime/Makefile
 	tests/zfs-tests/tests/functional/deadman/Makefile
 	tests/zfs-tests/tests/functional/delegate/Makefile

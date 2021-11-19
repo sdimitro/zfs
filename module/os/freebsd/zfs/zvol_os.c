@@ -767,6 +767,7 @@ zvol_cdev_read(struct cdev *dev, struct uio *uio_s, int ioflag)
 	    (zfs_uio_offset(&uio) < 0 || zfs_uio_offset(&uio) > volsize))
 		return (SET_ERROR(EIO));
 
+	ssize_t start_resid = zfs_uio_resid(&uio);
 	lr = zfs_rangelock_enter(&zv->zv_rangelock, zfs_uio_offset(&uio),
 	    zfs_uio_resid(&uio), RL_READER);
 	while (zfs_uio_resid(&uio) > 0 && zfs_uio_offset(&uio) < volsize) {
@@ -785,6 +786,8 @@ zvol_cdev_read(struct cdev *dev, struct uio *uio_s, int ioflag)
 		}
 	}
 	zfs_rangelock_exit(lr);
+	int64_t nread = start_resid - zfs_uio_resid(&uio);
+	dataset_kstats_update_read_kstats(&zv->zv_kstat, nread);
 
 	return (error);
 }
@@ -809,6 +812,7 @@ zvol_cdev_write(struct cdev *dev, struct uio *uio_s, int ioflag)
 	    (zfs_uio_offset(&uio) < 0 || zfs_uio_offset(&uio) > volsize))
 		return (SET_ERROR(EIO));
 
+	ssize_t start_resid = zfs_uio_resid(&uio);
 	sync = (ioflag & IO_SYNC) ||
 	    (zv->zv_objset->os_sync == ZFS_SYNC_ALWAYS);
 
@@ -840,6 +844,8 @@ zvol_cdev_write(struct cdev *dev, struct uio *uio_s, int ioflag)
 			break;
 	}
 	zfs_rangelock_exit(lr);
+	int64_t nwritten = start_resid - zfs_uio_resid(&uio);
+	dataset_kstats_update_write_kstats(&zv->zv_kstat, nwritten);
 	if (sync)
 		zil_commit(zv->zv_zilog, ZVOL_OBJ);
 	rw_exit(&zv->zv_suspend_lock);
@@ -1235,7 +1241,11 @@ zvol_rename_minor(zvol_state_t *zv, const char *newname)
 		args.mda_si_drv2 = zv;
 		if (make_dev_s(&args, &dev, "%s/%s", ZVOL_DRIVER, newname)
 		    == 0) {
+#if __FreeBSD_version > 1300130
+			dev->si_iosize_max = maxphys;
+#else
 			dev->si_iosize_max = MAXPHYS;
+#endif
 			zsd->zsd_cdev = dev;
 		}
 	}
@@ -1271,9 +1281,10 @@ zvol_free(zvol_state_t *zv)
 		struct zvol_state_dev *zsd = &zv->zv_zso->zso_dev;
 		struct cdev *dev = zsd->zsd_cdev;
 
-		ASSERT3P(dev->si_drv2, ==, NULL);
-
-		destroy_dev(dev);
+		if (dev != NULL) {
+			ASSERT3P(dev->si_drv2, ==, NULL);
+			destroy_dev(dev);
+		}
 	}
 
 	mutex_destroy(&zv->zv_state_lock);
@@ -1368,16 +1379,15 @@ zvol_create_minor_impl(const char *name)
 		args.mda_gid = GID_OPERATOR;
 		args.mda_mode = 0640;
 		args.mda_si_drv2 = zv;
-		error = make_dev_s(&args, &dev, "%s/%s", ZVOL_DRIVER, name);
-		if (error) {
-			kmem_free(zv->zv_zso, sizeof (struct zvol_state_os));
-			mutex_destroy(&zv->zv_state_lock);
-			kmem_free(zv, sizeof (*zv));
-			dmu_objset_disown(os, B_TRUE, FTAG);
-			goto out_doi;
+		if (make_dev_s(&args, &dev, "%s/%s", ZVOL_DRIVER, name)
+		    == 0) {
+#if __FreeBSD_version > 1300130
+			dev->si_iosize_max = maxphys;
+#else
+			dev->si_iosize_max = MAXPHYS;
+#endif
+			zsd->zsd_cdev = dev;
 		}
-		dev->si_iosize_max = MAXPHYS;
-		zsd->zsd_cdev = dev;
 	}
 	(void) strlcpy(zv->zv_name, name, MAXPATHLEN);
 	rw_init(&zv->zv_suspend_lock, NULL, RW_DEFAULT, NULL);
@@ -1450,7 +1460,8 @@ zvol_clear_private(zvol_state_t *zv)
 		struct zvol_state_dev *zsd = &zv->zv_zso->zso_dev;
 		struct cdev *dev = zsd->zsd_cdev;
 
-		dev->si_drv2 = NULL;
+		if (dev != NULL)
+			dev->si_drv2 = NULL;
 	}
 }
 

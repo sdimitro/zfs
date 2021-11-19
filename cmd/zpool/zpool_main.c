@@ -32,6 +32,7 @@
  * Copyright (c) 2017, Intel Corporation.
  * Copyright (c) 2019, loli10K <ezomori.nozomu@gmail.com>
  * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
+ * Copyright [2021] Hewlett Packard Enterprise Development LP
  */
 
 #include <assert.h>
@@ -210,7 +211,7 @@ enum iostat_type {
  * of all the nvlists a flag requires.  Also specifies the order in
  * which data gets printed in zpool iostat.
  */
-static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
+static const char *vsx_type_to_nvlist[IOS_COUNT][15] = {
 	[IOS_L_HISTO] = {
 	    ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
@@ -222,6 +223,7 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_ASYNC_W_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_REBUILD_LAT_HISTO,
 	    NULL},
 	[IOS_LATENCY] = {
 	    ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
@@ -229,6 +231,7 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_DISK_R_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_DISK_W_LAT_HISTO,
 	    ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_REBUILD_LAT_HISTO,
 	    NULL},
 	[IOS_QUEUES] = {
 	    ZPOOL_CONFIG_VDEV_SYNC_R_ACTIVE_QUEUE,
@@ -237,6 +240,7 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_ASYNC_W_ACTIVE_QUEUE,
 	    ZPOOL_CONFIG_VDEV_SCRUB_ACTIVE_QUEUE,
 	    ZPOOL_CONFIG_VDEV_TRIM_ACTIVE_QUEUE,
+	    ZPOOL_CONFIG_VDEV_REBUILD_ACTIVE_QUEUE,
 	    NULL},
 	[IOS_RQ_HISTO] = {
 	    ZPOOL_CONFIG_VDEV_SYNC_IND_R_HISTO,
@@ -251,6 +255,8 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][13] = {
 	    ZPOOL_CONFIG_VDEV_AGG_SCRUB_HISTO,
 	    ZPOOL_CONFIG_VDEV_IND_TRIM_HISTO,
 	    ZPOOL_CONFIG_VDEV_AGG_TRIM_HISTO,
+	    ZPOOL_CONFIG_VDEV_IND_REBUILD_HISTO,
+	    ZPOOL_CONFIG_VDEV_AGG_REBUILD_HISTO,
 	    NULL},
 };
 
@@ -428,10 +434,9 @@ get_usage(zpool_help_t idx)
 	case HELP_WAIT:
 		return (gettext("\twait [-Hp] [-T d|u] [-t <activity>[,...]] "
 		    "<pool> [interval]\n"));
+	default:
+		__builtin_unreachable();
 	}
-
-	abort();
-	/* NOTREACHED */
 }
 
 static void
@@ -532,7 +537,7 @@ usage(boolean_t requested)
 		(void) fprintf(fp, "YES   disabled | enabled | active\n");
 
 		(void) fprintf(fp, gettext("\nThe feature@ properties must be "
-		    "appended with a feature name.\nSee zpool-features(5).\n"));
+		    "appended with a feature name.\nSee zpool-features(7).\n"));
 	}
 
 	/*
@@ -1215,6 +1220,26 @@ zpool_do_remove(int argc, char **argv)
 }
 
 /*
+ * Return 1 if a vdev is active (being used in a pool)
+ * Return 0 if a vdev is inactive (offlined or faulted, or not in active pool)
+ *
+ * This is useful for checking if a disk in an active pool is offlined or
+ * faulted.
+ */
+static int
+vdev_is_active(char *vdev_path)
+{
+	int fd;
+	fd = open(vdev_path, O_EXCL);
+	if (fd < 0) {
+		return (1);   /* cant open O_EXCL - disk is active */
+	}
+
+	close(fd);
+	return (0);   /* disk is inactive in the pool */
+}
+
+/*
  * zpool labelclear [-f] <vdev>
  *
  *	-f	Force clearing the label for the vdevs which are members of
@@ -1323,9 +1348,23 @@ zpool_do_labelclear(int argc, char **argv)
 	case POOL_STATE_ACTIVE:
 	case POOL_STATE_SPARE:
 	case POOL_STATE_L2CACHE:
+		/*
+		 * We allow the user to call 'zpool offline -f'
+		 * on an offlined disk in an active pool. We can check if
+		 * the disk is online by calling vdev_is_active().
+		 */
+		if (force && !vdev_is_active(vdev))
+			break;
+
 		(void) fprintf(stderr, gettext(
-		    "%s is a member (%s) of pool \"%s\"\n"),
+		    "%s is a member (%s) of pool \"%s\""),
 		    vdev, zpool_pool_state_to_name(state), name);
+
+		if (force) {
+			(void) fprintf(stderr, gettext(
+			    ". Offline the disk first to clear its label."));
+		}
+		printf("\n");
 		ret = 1;
 		goto errout;
 
@@ -2379,6 +2418,10 @@ print_status_config(zpool_handle_t *zhp, status_cbdata_t *cb, const char *name,
 			(void) printf(gettext("all children offline"));
 			break;
 
+		case VDEV_AUX_BAD_LABEL:
+			(void) printf(gettext("invalid label"));
+			break;
+
 		default:
 			(void) printf(gettext("corrupted data"));
 			break;
@@ -2519,6 +2562,10 @@ print_import_config(status_cbdata_t *cb, const char *name, nvlist_t *nv,
 
 		case VDEV_AUX_CHILDREN_OFFLINE:
 			(void) printf(gettext("all children offline"));
+			break;
+
+		case VDEV_AUX_BAD_LABEL:
+			(void) printf(gettext("invalid label"));
 			break;
 
 		default:
@@ -3490,16 +3537,8 @@ zpool_do_import(int argc, char **argv)
 			cachefile = optarg;
 			break;
 		case 'd':
-			if (searchdirs == NULL) {
-				searchdirs = safe_malloc(sizeof (char *));
-			} else {
-				char **tmp = safe_malloc((nsearch + 1) *
-				    sizeof (char *));
-				bcopy(searchdirs, tmp, nsearch *
-				    sizeof (char *));
-				free(searchdirs);
-				searchdirs = tmp;
-			}
+			searchdirs = safe_realloc(searchdirs,
+			    (nsearch + 1) * sizeof (char *));
 			searchdirs[nsearch++] = optarg;
 			break;
 		case 'D':
@@ -3689,24 +3728,16 @@ zpool_do_import(int argc, char **argv)
 	 * Check the environment for the preferred search path.
 	 */
 	if ((searchdirs == NULL) && (env = getenv("ZPOOL_IMPORT_PATH"))) {
-		char *dir;
+		char *dir, *tmp = NULL;
 
 		envdup = strdup(env);
 
-		dir = strtok(envdup, ":");
-		while (dir != NULL) {
-			if (searchdirs == NULL) {
-				searchdirs = safe_malloc(sizeof (char *));
-			} else {
-				char **tmp = safe_malloc((nsearch + 1) *
-				    sizeof (char *));
-				bcopy(searchdirs, tmp, nsearch *
-				    sizeof (char *));
-				free(searchdirs);
-				searchdirs = tmp;
-			}
+		for (dir = strtok_r(envdup, ":", &tmp);
+		    dir != NULL;
+		    dir = strtok_r(NULL, ":", &tmp)) {
+			searchdirs = safe_realloc(searchdirs,
+			    (nsearch + 1) * sizeof (char *));
 			searchdirs[nsearch++] = dir;
-			dir = strtok(NULL, ":");
 		}
 	}
 
@@ -3745,19 +3776,18 @@ zpool_do_import(int argc, char **argv)
 	}
 
 	if (err == 1) {
-		if (searchdirs != NULL)
-			free(searchdirs);
-		if (envdup != NULL)
-			free(envdup);
+		free(searchdirs);
+		free(envdup);
 		nvlist_free(policy);
 		nvlist_free(pools);
 		nvlist_free(props);
 		return (1);
 	}
 
-	err = import_pools(pools, props, mntopts, flags, argv[0],
-	    argc == 1 ? NULL : argv[1], do_destroyed, pool_specified,
-	    do_all, &idata);
+	err = import_pools(pools, props, mntopts, flags,
+	    argc >= 1 ? argv[0] : NULL,
+	    argc >= 2 ? argv[1] : NULL,
+	    do_destroyed, pool_specified, do_all, &idata);
 
 	/*
 	 * If we're using the cachefile and we failed to import, then
@@ -3777,19 +3807,18 @@ zpool_do_import(int argc, char **argv)
 		nvlist_free(pools);
 		pools = zpool_search_import(g_zfs, &idata, &libzfs_config_ops);
 
-		err = import_pools(pools, props, mntopts, flags, argv[0],
-		    argc == 1 ? NULL : argv[1], do_destroyed, pool_specified,
-		    do_all, &idata);
+		err = import_pools(pools, props, mntopts, flags,
+		    argc >= 1 ? argv[0] : NULL,
+		    argc >= 2 ? argv[1] : NULL,
+		    do_destroyed, pool_specified, do_all, &idata);
 	}
 
 error:
 	nvlist_free(props);
 	nvlist_free(pools);
 	nvlist_free(policy);
-	if (searchdirs != NULL)
-		free(searchdirs);
-	if (envdup != NULL)
-		free(envdup);
+	free(searchdirs);
+	free(envdup);
 
 	return (err ? 1 : 0);
 }
@@ -3854,22 +3883,23 @@ typedef struct name_and_columns {
 	unsigned int columns;	/* Center name to this number of columns */
 } name_and_columns_t;
 
-#define	IOSTAT_MAX_LABELS	13	/* Max number of labels on one line */
+#define	IOSTAT_MAX_LABELS	15	/* Max number of labels on one line */
 
 static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 {
 	[IOS_DEFAULT] = {{"capacity", 2}, {"operations", 2}, {"bandwidth", 2},
 	    {NULL}},
 	[IOS_LATENCY] = {{"total_wait", 2}, {"disk_wait", 2}, {"syncq_wait", 2},
-	    {"asyncq_wait", 2}, {"scrub", 1}, {"trim", 1}, {NULL}},
+	    {"asyncq_wait", 2}, {"scrub", 1}, {"trim", 1}, {"rebuild", 1},
+	    {NULL}},
 	[IOS_QUEUES] = {{"syncq_read", 2}, {"syncq_write", 2},
 	    {"asyncq_read", 2}, {"asyncq_write", 2}, {"scrubq_read", 2},
-	    {"trimq_write", 2}, {NULL}},
+	    {"trimq_write", 2}, {"rebuildq_write", 2}, {NULL}},
 	[IOS_L_HISTO] = {{"total_wait", 2}, {"disk_wait", 2}, {"syncq_wait", 2},
 	    {"asyncq_wait", 2}, {NULL}},
 	[IOS_RQ_HISTO] = {{"sync_read", 2}, {"sync_write", 2},
 	    {"async_read", 2}, {"async_write", 2}, {"scrub", 2},
-	    {"trim", 2}, {NULL}},
+	    {"trim", 2}, {"rebuild", 2}, {NULL}},
 };
 
 /* Shorthand - if "columns" field not set, default to 1 column */
@@ -3878,14 +3908,17 @@ static const name_and_columns_t iostat_bottom_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_DEFAULT] = {{"alloc"}, {"free"}, {"read"}, {"write"}, {"read"},
 	    {"write"}, {NULL}},
 	[IOS_LATENCY] = {{"read"}, {"write"}, {"read"}, {"write"}, {"read"},
-	    {"write"}, {"read"}, {"write"}, {"wait"}, {"wait"}, {NULL}},
+	    {"write"}, {"read"}, {"write"}, {"wait"}, {"wait"}, {"wait"},
+	    {NULL}},
 	[IOS_QUEUES] = {{"pend"}, {"activ"}, {"pend"}, {"activ"}, {"pend"},
 	    {"activ"}, {"pend"}, {"activ"}, {"pend"}, {"activ"},
-	    {"pend"}, {"activ"}, {NULL}},
+	    {"pend"}, {"activ"}, {"pend"}, {"activ"}, {NULL}},
 	[IOS_L_HISTO] = {{"read"}, {"write"}, {"read"}, {"write"}, {"read"},
-	    {"write"}, {"read"}, {"write"}, {"scrub"}, {"trim"}, {NULL}},
+	    {"write"}, {"read"}, {"write"}, {"scrub"}, {"trim"}, {"rebuild"},
+	    {NULL}},
 	[IOS_RQ_HISTO] = {{"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
-	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"}, {NULL}},
+	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
+	    {"ind"}, {"agg"}, {NULL}},
 };
 
 static const char *histo_to_title[] = {
@@ -4517,6 +4550,8 @@ print_iostat_queues(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		ZPOOL_CONFIG_VDEV_SCRUB_ACTIVE_QUEUE,
 		ZPOOL_CONFIG_VDEV_TRIM_PEND_QUEUE,
 		ZPOOL_CONFIG_VDEV_TRIM_ACTIVE_QUEUE,
+		ZPOOL_CONFIG_VDEV_REBUILD_PEND_QUEUE,
+		ZPOOL_CONFIG_VDEV_REBUILD_ACTIVE_QUEUE,
 	};
 
 	struct stat_array *nva;
@@ -4556,6 +4591,7 @@ print_iostat_latency(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		ZPOOL_CONFIG_VDEV_ASYNC_W_LAT_HISTO,
 		ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO,
 		ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO,
+		ZPOOL_CONFIG_VDEV_REBUILD_LAT_HISTO,
 	};
 	struct stat_array *nva;
 
@@ -5380,7 +5416,7 @@ print_zpool_dir_scripts(char *dirpath)
 static void
 print_zpool_script_list(char *subcommand)
 {
-	char *dir, *sp;
+	char *dir, *sp, *tmp;
 
 	printf(gettext("Available 'zpool %s -c' commands:\n"), subcommand);
 
@@ -5388,11 +5424,10 @@ print_zpool_script_list(char *subcommand)
 	if (sp == NULL)
 		return;
 
-	dir = strtok(sp, ":");
-	while (dir != NULL) {
+	for (dir = strtok_r(sp, ":", &tmp);
+	    dir != NULL;
+	    dir = strtok_r(NULL, ":", &tmp))
 		print_zpool_dir_scripts(dir);
-		dir = strtok(NULL, ":");
-	}
 
 	free(sp);
 }
@@ -8260,7 +8295,7 @@ status_callback(zpool_handle_t *zhp, void *data)
 		printf_color(ANSI_YELLOW, gettext("Enable all features using "
 		    "'zpool upgrade'. Once this is done,\n\tthe pool may no "
 		    "longer be accessible by software that does not support\n\t"
-		    "the features. See zpool-features(5) for details.\n"));
+		    "the features. See zpool-features(7) for details.\n"));
 		break;
 
 	case ZPOOL_STATUS_COMPATIBILITY_ERR:
@@ -8849,7 +8884,7 @@ upgrade_cb(zpool_handle_t *zhp, void *arg)
 	upgrade_cbdata_t *cbp = arg;
 	nvlist_t *config;
 	uint64_t version;
-	boolean_t printnl = B_FALSE;
+	boolean_t modified_pool = B_FALSE;
 	int ret;
 
 	config = zpool_get_config(zhp, NULL);
@@ -8863,7 +8898,7 @@ upgrade_cb(zpool_handle_t *zhp, void *arg)
 		ret = upgrade_version(zhp, cbp->cb_version);
 		if (ret != 0)
 			return (ret);
-		printnl = B_TRUE;
+		modified_pool = B_TRUE;
 
 		/*
 		 * If they did "zpool upgrade -a", then we could
@@ -8883,12 +8918,13 @@ upgrade_cb(zpool_handle_t *zhp, void *arg)
 
 		if (count > 0) {
 			cbp->cb_first = B_FALSE;
-			printnl = B_TRUE;
+			modified_pool = B_TRUE;
 		}
 	}
 
-	if (printnl) {
-		(void) printf(gettext("\n"));
+	if (modified_pool) {
+		(void) printf("\n");
+		(void) after_zpool_upgrade(zhp);
 	}
 
 	return (0);
@@ -8962,7 +8998,7 @@ upgrade_list_disabled_cb(zpool_handle_t *zhp, void *arg)
 					    "pool may become incompatible with "
 					    "software\nthat does not support "
 					    "the feature. See "
-					    "zpool-features(5) for "
+					    "zpool-features(7) for "
 					    "details.\n\n"
 					    "Note that the pool "
 					    "'compatibility' feature can be "
@@ -9001,7 +9037,7 @@ upgrade_list_disabled_cb(zpool_handle_t *zhp, void *arg)
 static int
 upgrade_one(zpool_handle_t *zhp, void *data)
 {
-	boolean_t printnl = B_FALSE;
+	boolean_t modified_pool = B_FALSE;
 	upgrade_cbdata_t *cbp = data;
 	uint64_t cur_version;
 	int ret;
@@ -9029,7 +9065,7 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 	}
 
 	if (cur_version != cbp->cb_version) {
-		printnl = B_TRUE;
+		modified_pool = B_TRUE;
 		ret = upgrade_version(zhp, cbp->cb_version);
 		if (ret != 0)
 			return (ret);
@@ -9042,7 +9078,7 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 			return (ret);
 
 		if (count != 0) {
-			printnl = B_TRUE;
+			modified_pool = B_TRUE;
 		} else if (cur_version == SPA_VERSION) {
 			(void) printf(gettext("Pool '%s' already has all "
 			    "supported and requested features enabled.\n"),
@@ -9050,8 +9086,9 @@ upgrade_one(zpool_handle_t *zhp, void *data)
 		}
 	}
 
-	if (printnl) {
-		(void) printf(gettext("\n"));
+	if (modified_pool) {
+		(void) printf("\n");
+		(void) after_zpool_upgrade(zhp);
 	}
 
 	return (0);

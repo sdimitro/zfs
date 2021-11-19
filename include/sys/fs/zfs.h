@@ -32,7 +32,7 @@
  */
 
 #ifndef	_SYS_FS_ZFS_H
-#define	_SYS_FS_ZFS_H
+#define	_SYS_FS_ZFS_H extern __attribute__((visibility("default")))
 
 #include <sys/time.h>
 #include <sys/zio_priority.h>
@@ -205,7 +205,7 @@ typedef enum {
 	ZFS_NUM_USERQUOTA_PROPS
 } zfs_userquota_prop_t;
 
-extern const char *zfs_userquota_prop_prefixes[ZFS_NUM_USERQUOTA_PROPS];
+_SYS_FS_ZFS_H const char *zfs_userquota_prop_prefixes[ZFS_NUM_USERQUOTA_PROPS];
 
 /*
  * Pool properties are identified by these constants and must be added to the
@@ -301,38 +301,41 @@ typedef int (*zprop_func)(int, void *);
 /*
  * Dataset property functions shared between libzfs and kernel.
  */
-const char *zfs_prop_default_string(zfs_prop_t);
-uint64_t zfs_prop_default_numeric(zfs_prop_t);
-boolean_t zfs_prop_readonly(zfs_prop_t);
-boolean_t zfs_prop_visible(zfs_prop_t prop);
-boolean_t zfs_prop_inheritable(zfs_prop_t);
-boolean_t zfs_prop_setonce(zfs_prop_t);
-boolean_t zfs_prop_encryption_key_param(zfs_prop_t);
-boolean_t zfs_prop_valid_keylocation(const char *, boolean_t);
-const char *zfs_prop_to_name(zfs_prop_t);
-zfs_prop_t zfs_name_to_prop(const char *);
-boolean_t zfs_prop_user(const char *);
-boolean_t zfs_prop_userquota(const char *);
-boolean_t zfs_prop_written(const char *);
-int zfs_prop_index_to_string(zfs_prop_t, uint64_t, const char **);
-int zfs_prop_string_to_index(zfs_prop_t, const char *, uint64_t *);
-uint64_t zfs_prop_random_value(zfs_prop_t, uint64_t seed);
-boolean_t zfs_prop_valid_for_type(int, zfs_type_t, boolean_t);
+_SYS_FS_ZFS_H const char *zfs_prop_default_string(zfs_prop_t);
+_SYS_FS_ZFS_H uint64_t zfs_prop_default_numeric(zfs_prop_t);
+_SYS_FS_ZFS_H boolean_t zfs_prop_readonly(zfs_prop_t);
+_SYS_FS_ZFS_H boolean_t zfs_prop_visible(zfs_prop_t prop);
+_SYS_FS_ZFS_H boolean_t zfs_prop_inheritable(zfs_prop_t);
+_SYS_FS_ZFS_H boolean_t zfs_prop_setonce(zfs_prop_t);
+_SYS_FS_ZFS_H boolean_t zfs_prop_encryption_key_param(zfs_prop_t);
+_SYS_FS_ZFS_H boolean_t zfs_prop_valid_keylocation(const char *, boolean_t);
+_SYS_FS_ZFS_H const char *zfs_prop_to_name(zfs_prop_t);
+_SYS_FS_ZFS_H zfs_prop_t zfs_name_to_prop(const char *);
+_SYS_FS_ZFS_H boolean_t zfs_prop_user(const char *);
+_SYS_FS_ZFS_H boolean_t zfs_prop_userquota(const char *);
+_SYS_FS_ZFS_H boolean_t zfs_prop_written(const char *);
+_SYS_FS_ZFS_H int zfs_prop_index_to_string(zfs_prop_t, uint64_t, const char **);
+_SYS_FS_ZFS_H int zfs_prop_string_to_index(zfs_prop_t, const char *,
+    uint64_t *);
+_SYS_FS_ZFS_H uint64_t zfs_prop_random_value(zfs_prop_t, uint64_t seed);
+_SYS_FS_ZFS_H boolean_t zfs_prop_valid_for_type(int, zfs_type_t, boolean_t);
 
 /*
  * Pool property functions shared between libzfs and kernel.
  */
-zpool_prop_t zpool_name_to_prop(const char *);
-const char *zpool_prop_to_name(zpool_prop_t);
-const char *zpool_prop_default_string(zpool_prop_t);
-uint64_t zpool_prop_default_numeric(zpool_prop_t);
-boolean_t zpool_prop_readonly(zpool_prop_t);
-boolean_t zpool_prop_setonce(zpool_prop_t);
-boolean_t zpool_prop_feature(const char *);
-boolean_t zpool_prop_unsupported(const char *);
-int zpool_prop_index_to_string(zpool_prop_t, uint64_t, const char **);
-int zpool_prop_string_to_index(zpool_prop_t, const char *, uint64_t *);
-uint64_t zpool_prop_random_value(zpool_prop_t, uint64_t seed);
+_SYS_FS_ZFS_H zpool_prop_t zpool_name_to_prop(const char *);
+_SYS_FS_ZFS_H const char *zpool_prop_to_name(zpool_prop_t);
+_SYS_FS_ZFS_H const char *zpool_prop_default_string(zpool_prop_t);
+_SYS_FS_ZFS_H uint64_t zpool_prop_default_numeric(zpool_prop_t);
+_SYS_FS_ZFS_H boolean_t zpool_prop_readonly(zpool_prop_t);
+_SYS_FS_ZFS_H boolean_t zpool_prop_setonce(zpool_prop_t);
+_SYS_FS_ZFS_H boolean_t zpool_prop_feature(const char *);
+_SYS_FS_ZFS_H boolean_t zpool_prop_unsupported(const char *);
+_SYS_FS_ZFS_H int zpool_prop_index_to_string(zpool_prop_t, uint64_t,
+    const char **);
+_SYS_FS_ZFS_H int zpool_prop_string_to_index(zpool_prop_t, const char *,
+    uint64_t *);
+_SYS_FS_ZFS_H uint64_t zpool_prop_random_value(zpool_prop_t, uint64_t seed);
 
 /*
  * Definitions for the Delegation.
@@ -640,6 +643,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_W_ACTIVE_QUEUE	"vdev_async_w_active_queue"
 #define	ZPOOL_CONFIG_VDEV_SCRUB_ACTIVE_QUEUE	"vdev_async_scrub_active_queue"
 #define	ZPOOL_CONFIG_VDEV_TRIM_ACTIVE_QUEUE	"vdev_async_trim_active_queue"
+#define	ZPOOL_CONFIG_VDEV_REBUILD_ACTIVE_QUEUE	"vdev_rebuild_active_queue"
 
 /* Queue sizes */
 #define	ZPOOL_CONFIG_VDEV_SYNC_R_PEND_QUEUE	"vdev_sync_r_pend_queue"
@@ -648,6 +652,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_W_PEND_QUEUE	"vdev_async_w_pend_queue"
 #define	ZPOOL_CONFIG_VDEV_SCRUB_PEND_QUEUE	"vdev_async_scrub_pend_queue"
 #define	ZPOOL_CONFIG_VDEV_TRIM_PEND_QUEUE	"vdev_async_trim_pend_queue"
+#define	ZPOOL_CONFIG_VDEV_REBUILD_PEND_QUEUE	"vdev_rebuild_pend_queue"
 
 /* Latency read/write histogram stats */
 #define	ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO	"vdev_tot_r_lat_histo"
@@ -660,6 +665,7 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_W_LAT_HISTO	"vdev_async_w_lat_histo"
 #define	ZPOOL_CONFIG_VDEV_SCRUB_LAT_HISTO	"vdev_scrub_histo"
 #define	ZPOOL_CONFIG_VDEV_TRIM_LAT_HISTO	"vdev_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_REBUILD_LAT_HISTO	"vdev_rebuild_histo"
 
 /* Request size histograms */
 #define	ZPOOL_CONFIG_VDEV_SYNC_IND_R_HISTO	"vdev_sync_ind_r_histo"
@@ -668,12 +674,14 @@ typedef struct zpool_load_policy {
 #define	ZPOOL_CONFIG_VDEV_ASYNC_IND_W_HISTO	"vdev_async_ind_w_histo"
 #define	ZPOOL_CONFIG_VDEV_IND_SCRUB_HISTO	"vdev_ind_scrub_histo"
 #define	ZPOOL_CONFIG_VDEV_IND_TRIM_HISTO	"vdev_ind_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_IND_REBUILD_HISTO	"vdev_ind_rebuild_histo"
 #define	ZPOOL_CONFIG_VDEV_SYNC_AGG_R_HISTO	"vdev_sync_agg_r_histo"
 #define	ZPOOL_CONFIG_VDEV_SYNC_AGG_W_HISTO	"vdev_sync_agg_w_histo"
 #define	ZPOOL_CONFIG_VDEV_ASYNC_AGG_R_HISTO	"vdev_async_agg_r_histo"
 #define	ZPOOL_CONFIG_VDEV_ASYNC_AGG_W_HISTO	"vdev_async_agg_w_histo"
 #define	ZPOOL_CONFIG_VDEV_AGG_SCRUB_HISTO	"vdev_agg_scrub_histo"
 #define	ZPOOL_CONFIG_VDEV_AGG_TRIM_HISTO	"vdev_agg_trim_histo"
+#define	ZPOOL_CONFIG_VDEV_AGG_REBUILD_HISTO	"vdev_agg_rebuild_histo"
 
 /* Number of slow IOs */
 #define	ZPOOL_CONFIG_VDEV_SLOW_IOS		"vdev_slow_ios"
@@ -1222,7 +1230,7 @@ typedef struct ddt_histogram {
 #define	ZVOL_DEV_NAME		"zd"
 
 #define	ZVOL_PROP_NAME		"name"
-#define	ZVOL_DEFAULT_BLOCKSIZE	8192
+#define	ZVOL_DEFAULT_BLOCKSIZE	16384
 
 typedef enum {
 	VDEV_INITIALIZE_NONE,
@@ -1629,6 +1637,47 @@ typedef enum {
 #define	ZFS_EV_HIST_DSNAME	"history_dsname"
 #define	ZFS_EV_HIST_DSID	"history_dsid"
 #define	ZFS_EV_RESILVER_TYPE	"resilver_type"
+
+
+/*
+ * We currently support block sizes from 512 bytes to 16MB.
+ * The benefits of larger blocks, and thus larger IO, need to be weighed
+ * against the cost of COWing a giant block to modify one byte, and the
+ * large latency of reading or writing a large block.
+ *
+ * Note that although blocks up to 16MB are supported, the recordsize
+ * property can not be set larger than zfs_max_recordsize (default 1MB).
+ * See the comment near zfs_max_recordsize in dsl_dataset.c for details.
+ *
+ * Note that although the LSIZE field of the blkptr_t can store sizes up
+ * to 32MB, the dnode's dn_datablkszsec can only store sizes up to
+ * 32MB - 512 bytes.  Therefore, we limit SPA_MAXBLOCKSIZE to 16MB.
+ */
+#define	SPA_MINBLOCKSHIFT	9
+#define	SPA_OLD_MAXBLOCKSHIFT	17
+#define	SPA_MAXBLOCKSHIFT	24
+#define	SPA_MINBLOCKSIZE	(1ULL << SPA_MINBLOCKSHIFT)
+#define	SPA_OLD_MAXBLOCKSIZE	(1ULL << SPA_OLD_MAXBLOCKSHIFT)
+#define	SPA_MAXBLOCKSIZE	(1ULL << SPA_MAXBLOCKSHIFT)
+
+
+/* supported encryption algorithms */
+enum zio_encrypt {
+	ZIO_CRYPT_INHERIT = 0,
+	ZIO_CRYPT_ON,
+	ZIO_CRYPT_OFF,
+	ZIO_CRYPT_AES_128_CCM,
+	ZIO_CRYPT_AES_192_CCM,
+	ZIO_CRYPT_AES_256_CCM,
+	ZIO_CRYPT_AES_128_GCM,
+	ZIO_CRYPT_AES_192_GCM,
+	ZIO_CRYPT_AES_256_GCM,
+	ZIO_CRYPT_FUNCTIONS
+};
+
+#define	ZIO_CRYPT_ON_VALUE	ZIO_CRYPT_AES_256_GCM
+#define	ZIO_CRYPT_DEFAULT	ZIO_CRYPT_OFF
+
 
 #ifdef	__cplusplus
 }

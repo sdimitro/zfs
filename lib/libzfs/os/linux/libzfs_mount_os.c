@@ -47,7 +47,7 @@
 #include <sys/dsl_crypt.h>
 #include <libzfs.h>
 
-#include "libzfs_impl.h"
+#include "../../libzfs_impl.h"
 #include <thread_pool.h>
 
 #define	ZS_COMMENT	0x00000000	/* comment */
@@ -374,7 +374,7 @@ do_mount(zfs_handle_t *zhp, const char *mntpt, char *opts, int flags)
 }
 
 int
-do_unmount(const char *mntpt, int flags)
+do_unmount(zfs_handle_t *zhp, const char *mntpt, int flags)
 {
 	if (!libzfs_envvar_is_set("ZFS_MOUNT_HELPER")) {
 		int rv = umount2(mntpt, flags);
