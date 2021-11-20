@@ -78,6 +78,14 @@ impl ZettaCacheIndexPhys {
     ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<IndexEntry>>> {
         self.log.iter_summary_chunks(block_access)
     }
+
+    pub fn log_bytes(&self) -> u64 {
+        self.log.num_bytes()
+    }
+
+    pub fn log_reserved_bytes(&self) -> u64 {
+        self.log.num_reserved_bytes()
+    }
 }
 
 pub struct ZettaCacheIndex {

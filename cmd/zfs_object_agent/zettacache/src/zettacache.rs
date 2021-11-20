@@ -37,6 +37,7 @@ use tokio::sync::Semaphore;
 use tokio::time::{sleep_until, timeout_at};
 use util::get_tunable;
 use util::maybe_die_with;
+use util::nice_p2size;
 use util::AlignedBytes;
 use util::From64;
 use util::LockSet;
@@ -1160,6 +1161,111 @@ impl ZCacheDBHandle {
             checkpoint,
             extent_allocator,
         })
+    }
+
+    pub async fn dump_free_space(&self) {
+        println!(
+            "[{:>6}-{:>6}) Superblock",
+            nice_p2size(0),
+            nice_p2size(*SUPERBLOCK_SIZE)
+        );
+        let superblock_len = self
+            .block_access
+            .chunk_to_raw(EncodeType::Json, &self.superblock)
+            .len() as u64;
+        println!(
+            "  {:>6} used out of {:>6}",
+            nice_p2size(superblock_len),
+            nice_p2size(*SUPERBLOCK_SIZE)
+        );
+        println!();
+        println!(
+            "[{:>6}-{:>6}) Checkpoint Region",
+            nice_p2size(*SUPERBLOCK_SIZE),
+            nice_p2size(*SUPERBLOCK_SIZE + u64::from(self.superblock.checkpoint_ring_buffer_size))
+        );
+        println!(
+            "  checkpoint size: {:>6}",
+            nice_p2size(self.superblock.last_checkpoint_extent.size)
+        );
+        println!();
+        println!(
+            "[{:>6}-{:>6}) Metadata Region",
+            nice_p2size(self.checkpoint.extent_allocator.first_valid_offset),
+            nice_p2size(self.checkpoint.extent_allocator.last_valid_offset)
+        );
+        let mut total_used_bytes = 0;
+        println!(
+            "  {:>13} - {:>6} used out of {:>6} allocated",
+            "operation log",
+            nice_p2size(self.checkpoint.operation_log.len_bytes()),
+            nice_p2size(self.checkpoint.operation_log.capacity_bytes())
+        );
+        total_used_bytes += self.checkpoint.operation_log.len_bytes();
+
+        println!(
+            "  {:>13} - {:>6} used out of {:>6} allocated",
+            "spacemap",
+            nice_p2size(self.checkpoint.block_allocator.spacemap_bytes()),
+            nice_p2size(self.checkpoint.block_allocator.spacemap_capacity_bytes())
+        );
+        total_used_bytes += self.checkpoint.block_allocator.spacemap_bytes();
+
+        println!(
+            "  {:>13} - {:>6} used out of {:>6} allocated",
+            "spacemap_next",
+            nice_p2size(self.checkpoint.block_allocator.spacemap_next_bytes()),
+            nice_p2size(
+                self.checkpoint
+                    .block_allocator
+                    .spacemap_next_capacity_bytes()
+            )
+        );
+        total_used_bytes += self.checkpoint.block_allocator.spacemap_next_bytes();
+
+        println!(
+            "  {:>13} - {:>6} used out of {:>6} allocated",
+            "index log",
+            nice_p2size(self.checkpoint.index.log_bytes()),
+            nice_p2size(self.checkpoint.index.log_reserved_bytes())
+        );
+        total_used_bytes += self.checkpoint.index.log_bytes();
+
+        if let Some((log, idx)) = self.checkpoint.merge_progress.clone() {
+            println!(
+                "  {:>13} - {:>6} used out of {:>6} allocated",
+                "progress log",
+                nice_p2size(log.len_bytes()),
+                nice_p2size(log.capacity_bytes())
+            );
+            total_used_bytes += log.len_bytes();
+            println!(
+                "  {:>13} - {:>6} used out of {:>6} allocated",
+                "progress index",
+                nice_p2size(idx.log_bytes()),
+                nice_p2size(idx.log_reserved_bytes())
+            );
+            total_used_bytes += idx.log_bytes();
+        }
+        println!("  ----------------------");
+        let metadata_region_size = self.checkpoint.extent_allocator.last_valid_offset
+            - self.checkpoint.extent_allocator.first_valid_offset;
+        println!(
+            "  {:>13} - {:>6} used out of {:>6} allocated ({:>6} total)",
+            "total",
+            nice_p2size(total_used_bytes),
+            nice_p2size(metadata_region_size - self.extent_allocator.allocatable_bytes()),
+            nice_p2size(metadata_region_size)
+        );
+        println!();
+
+        let balloc_coverage = self.checkpoint.block_allocator.coverage();
+        let balloc_end = balloc_coverage.location.offset + balloc_coverage.size;
+        println!(
+            "[{:>6}-{:>6}) User Data Region",
+            nice_p2size(balloc_coverage.location.offset),
+            nice_p2size(balloc_end)
+        );
     }
 
     pub async fn dump_structures(&self, opts: DumpStructuresOptions) {

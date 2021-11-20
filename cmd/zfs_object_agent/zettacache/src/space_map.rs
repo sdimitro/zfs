@@ -65,6 +65,23 @@ impl SpaceMapPhys {
     pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
         self.log.claim(builder);
     }
+
+    pub fn coverage(&self) -> Extent {
+        Extent {
+            location: DiskLocation {
+                offset: self.coverage.offset,
+            },
+            size: self.coverage.size,
+        }
+    }
+
+    pub fn len_bytes(&self) -> u64 {
+        self.log.len_bytes()
+    }
+
+    pub fn capacity_bytes(&self) -> u64 {
+        self.log.capacity_bytes()
+    }
 }
 
 impl SpaceMap {

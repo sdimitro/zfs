@@ -1455,6 +1455,26 @@ impl BlockAllocatorPhys {
         self.spacemap.claim(builder);
         self.spacemap_next.claim(builder);
     }
+
+    pub fn coverage(&self) -> Extent {
+        self.spacemap.coverage()
+    }
+
+    pub fn spacemap_bytes(&self) -> u64 {
+        self.spacemap.len_bytes()
+    }
+
+    pub fn spacemap_next_bytes(&self) -> u64 {
+        self.spacemap_next.len_bytes()
+    }
+
+    pub fn spacemap_capacity_bytes(&self) -> u64 {
+        self.spacemap.capacity_bytes()
+    }
+
+    pub fn spacemap_next_capacity_bytes(&self) -> u64 {
+        self.spacemap_next.capacity_bytes()
+    }
 }
 
 pub async fn zcachedb_dump_spacemaps(

@@ -135,6 +135,14 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
             assert_eq!(phys_entries, num_entries);
         }
     }
+
+    pub fn len_bytes(&self) -> u64 {
+        self.next_chunk_offset.0
+    }
+
+    pub fn capacity_bytes(&self) -> u64 {
+        self.extents.values().map(|x| x.size).sum()
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -175,6 +183,14 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummaryPhys<T> {
         block_access: Arc<BlockAccess>,
     ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<T>>> {
         self.chunk_summary.iter_chunks(block_access)
+    }
+
+    pub fn num_bytes(&self) -> u64 {
+        self.chunk_summary.len_bytes() + self.this.len_bytes()
+    }
+
+    pub fn num_reserved_bytes(&self) -> u64 {
+        self.chunk_summary.capacity_bytes() + self.this.capacity_bytes()
     }
 }
 
