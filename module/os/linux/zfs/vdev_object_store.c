@@ -627,12 +627,12 @@ agent_free_blocks(vdev_object_store_t *vos)
 static void
 agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 {
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 	/*
 	 * We need to ensure that we only issue a request when the
 	 * socket is ready. Otherwise, we block here since the agent
 	 * might be in recovery.
 	 */
-	mutex_enter(&vos->vos_sock_lock);
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
@@ -652,9 +652,7 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 	    vd->vdev_path);
 	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CREATE_POOL);
 
-	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
-	agent_wait_serial(vos, VOS_SERIAL_CREATE_POOL);
 }
 
 static uint64_t
@@ -859,15 +857,19 @@ agent_resume(void *arg)
 	 */
 	mutex_enter(&vos->vos_sock_lock);
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
-	mutex_exit(&vos->vos_sock_lock);
 
-	/*
-	 * Re-establish the connection with the agent and send
-	 * open/create message.
-	 */
 	if (spa->spa_load_state == SPA_LOAD_CREATE) {
+		/*
+		 * Since we're resuming a pool creation, just
+		 * replay the message but don't wait for the completion.
+		 * The original caller of the pool creation will be
+		 * woken up when the response is received.
+		 */
 		agent_create_pool(vd, vos);
+		mutex_exit(&vos->vos_sock_lock);
+		return;
 	}
+	mutex_exit(&vos->vos_sock_lock);
 
 	if (agent_open_pool(vd, vos,
 	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_TRUE) != 0) {
@@ -977,6 +979,18 @@ agent_resume(void *arg)
 	mutex_exit(&vos->vos_sock_lock);
 
 	zfs_dbgmsg("agent_resume completed");
+}
+
+static void
+object_store_create_pool(vdev_t *vd)
+{
+	ASSERT(vdev_is_object_based(vd));
+	vdev_object_store_t *vos = vd->vdev_tsd;
+	mutex_enter(&vos->vos_sock_lock);
+	agent_create_pool(vd, vos);
+	mutex_exit(&vos->vos_sock_lock);
+
+	agent_wait_serial(vos, VOS_SERIAL_CREATE_POOL);
 }
 
 void
@@ -1697,7 +1711,7 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	    vd, 0, &p0, TS_RUN, defclsyspri);
 
 	if (vd->vdev_spa->spa_load_state == SPA_LOAD_CREATE) {
-		agent_create_pool(vd, vos);
+		object_store_create_pool(vd);
 	}
 	error = agent_open_pool(vd, vos,
 	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_FALSE);
