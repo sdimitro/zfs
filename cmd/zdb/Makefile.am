@@ -8,6 +8,7 @@ sbin_PROGRAMS = zdb
 zdb_SOURCES = \
 	zdb.c \
 	zdb_il.c \
+	../libzoa_util/libzoa_util.c \
 	zdb.h
 
 zdb_LDADD = \

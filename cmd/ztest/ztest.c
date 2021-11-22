@@ -136,12 +136,9 @@
 #include <sys/crypto/icp.h>
 #include <sys/un.h>
 #include <sys/socket.h>
-#include <object_agent.h>
+#include <libzoa_util.h>
 #if (__GLIBC__ && !__UCLIBC__)
 #include <execinfo.h> /* for backtrace() */
-#endif
-#ifdef HAVE_LIBZOA
-#include <libzoa.h>
 #endif
 
 static int ztest_fd_data = -1;
@@ -176,6 +173,7 @@ typedef struct ztest_shared_opts {
 	char zo_obj_store_region[MAXNAMELEN];
 	char zo_obj_store_bucket[MAXNAMELEN];
 	char zo_obj_store_creds_profile[MAXNAMELEN];
+	char zo_zoa_log_file[MAXPATHLEN];
 	int zo_use_zettacache;
 	char zo_alt_ztest[MAXNAMELEN];
 	char zo_alt_libpath[MAXNAMELEN];
@@ -211,6 +209,7 @@ typedef struct ztest_shared_opts {
 #define	DEFAULT_ENDPOINT "https://s3-us-west-2.amazonaws.com"
 #define	DEFAULT_REGION "us-west-2"
 #define	DEFAULT_CREDS_PROFILE "default"
+#define	DEFAULT_ZOA_LOG "/tmp/zoa.log"
 #define	DEFAULT_VDEV_COUNT 5
 #define	DEFAULT_VDEV_SIZE (SPA_MINDEVSIZE * 4)	/* 256m default size */
 #define	DEFAULT_VDEV_SIZE_STR "256M"
@@ -244,6 +243,7 @@ static const ztest_shared_opts_t ztest_opts_defaults = {
 	.zo_obj_store_region = DEFAULT_REGION,
 	.zo_obj_store_bucket = { '\0' },
 	.zo_obj_store_creds_profile = DEFAULT_CREDS_PROFILE,
+	.zo_zoa_log_file = DEFAULT_ZOA_LOG,
 	.zo_alt_ztest = { '\0' },
 	.zo_alt_libpath = { '\0' },
 	.zo_vdevs = DEFAULT_VDEV_COUNT,
@@ -792,6 +792,8 @@ static ztest_option_t option_table[] = {
 	    NO_DEFAULT, DEFAULT_CREDS_PROFILE},
 	{ 'Z',	"use-zettacache", NULL, "use zettacache",
 	    NO_DEFAULT, NULL},
+	{ 'l',	"zoa-log-file", "PATH", "ZFS object agent log file",
+	    NO_DEFAULT, DEFAULT_ZOA_LOG},
 #endif
 	{ 'M',	"multi-host", NULL,
 	    "Multi-host; simulate pool imported on remote host",
@@ -1072,6 +1074,11 @@ process_options(int argc, char **argv)
 			break;
 		case 'Z':
 			zo->zo_use_zettacache = 1;
+			zo->zo_obj_store = 1;
+			break;
+		case 'l':
+			(void) strlcpy(zo->zo_zoa_log_file, optarg,
+			    sizeof (zo->zo_zoa_log_file));
 			zo->zo_obj_store = 1;
 			break;
 #endif
@@ -8146,21 +8153,6 @@ zoa_get_zettacache(ztest_shared_opts_t *ztest_opts)
 	return (path);
 }
 
-static void
-zoa_thread(void *arg)
-{
-#ifdef HAVE_LIBZOA
-	char ztest_sock_dir[] = "/tmp/ztest.sock.XXXXXX";
-	char *dir = mkdtemp(ztest_sock_dir);
-	ASSERT3S(dir, !=, NULL);
-	set_object_agent_sock_dir(ztest_sock_dir);
-	char *zcache = zoa_get_zettacache(&ztest_opts);
-	libzoa_init(ztest_sock_dir, "/tmp/zoa.log", zcache);
-#else
-	fatal(0, "libzoa support missing.");
-#endif
-}
-
 int
 main(int argc, char **argv)
 {
@@ -8260,8 +8252,10 @@ main(int argc, char **argv)
 	zs = ztest_shared;
 
 	if (ztest_opts.zo_obj_store) {
-		thread_create(NULL, 0, zoa_thread, NULL, 0, NULL,
-		    TS_RUN | TS_JOINABLE, defclsyspri);
+		if (start_zfs_object_agent(ztest_opts.zo_zoa_log_file) != 0) {
+			(void) fprintf(stderr, "Error initializing libzoa.\n");
+			exit(1);
+		}
 	}
 
 	if (fd_data_str) {

@@ -12,7 +12,8 @@ AM_CPPFLAGS += -DDEBUG -UNDEBUG -DZFS_DEBUG
 sbin_PROGRAMS = ztest
 
 ztest_SOURCES = \
-	ztest.c
+	ztest.c \
+	../libzoa_util/libzoa_util.c
 
 ztest_DEPENDENCIES = $(abs_top_builddir)/cmd/zfs_object_agent
 

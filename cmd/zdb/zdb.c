@@ -39,6 +39,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <sys/un.h>
+#include <sys/socket.h>
 #include <sys/zfs_context.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
@@ -80,10 +82,7 @@
 #include <sys/zstd/zstd.h>
 #include <libnvpair.h>
 #include <libzutil.h>
-#include <object_agent.h>
-#ifdef HAVE_LIBZOA
-#include <libzoa.h>
-#endif
+#include <libzoa_util.h>
 #include "zdb.h"
 
 #define	ZDB_COMPRESS_NAME(idx) ((idx) < ZIO_COMPRESS_FUNCTIONS ?	\
@@ -102,6 +101,8 @@
 #else
 #define	ZDB_MAP_OBJECT_ID(obj) (obj)
 #endif
+
+#define	DEFAULT_ZOA_LOG "/tmp/zoa.log";
 
 static char *
 zdb_ot_name(dmu_object_type_t type)
@@ -789,8 +790,8 @@ usage(void)
 	    "\t%1$s [-AdiPv] [-e [-V] [-p <path> ...]] [-U <cache>]\n"
 	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]\n"
 #ifdef HAVE_LIBZOA
-	    "\t%1$s [-AdiPv] [-e [-V] -a <endpoint> -g <region> -B <bucket> "
-	    "-f <creds profile>]\n"
+	    "\t%1$s [-AdiPv] [-e [-V] -a <endpoint> -g <region> -B <bucket>\n"
+	    "\t\t[-f <creds profile>] [-z <zoa logfile>]]\n"
 #endif
 	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]\n"
 	    "\t%1$s [-v] <bookmark>\n"
@@ -8379,20 +8380,6 @@ make_objectstore_prop(char *endpoint, char *region, char *bucket,
 	return (nv);
 }
 
-static void
-zoa_thread(void *arg)
-{
-#ifdef HAVE_LIBZOA
-	char ztest_sock_dir[] = "/tmp/ztest.sock.XXXXXX";
-	char *dir = mkdtemp(ztest_sock_dir);
-	ASSERT3S(dir, !=, NULL);
-	set_object_agent_sock_dir(ztest_sock_dir);
-	libzoa_init(ztest_sock_dir, "/tmp/zoa.log", NULL);
-#else
-	fatal(0, "libzoa support missing.");
-#endif
-}
-
 int
 main(int argc, char **argv)
 {
@@ -8408,6 +8395,7 @@ main(int argc, char **argv)
 	char *region = NULL;
 	char *bucket = NULL;
 	char *creds_profile = "default";
+	char *zoa_log_file = DEFAULT_ZOA_LOG;
 	int nsearch = 0;
 	char *target, *target_pool, dsname[ZFS_MAX_DATASET_NAME_LEN];
 	nvlist_t *policy = NULL;
@@ -8442,7 +8430,7 @@ main(int argc, char **argv)
 	zfs_btree_verify_intensity = 3;
 
 	while ((c = getopt(argc, argv,
-	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZ")) != -1) {
+	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZz")) != -1) {
 		switch (c) {
 		case 'b':
 		case 'c':
@@ -8545,6 +8533,10 @@ main(int argc, char **argv)
 			region = optarg;
 			objstore = 1;
 			break;
+		case 'z':
+			zoa_log_file = optarg;
+			objstore = 1;
+			break;
 #endif
 		case 'v':
 			verbose++;
@@ -8592,8 +8584,10 @@ main(int argc, char **argv)
 	}
 
 	if (objstore) {
-		thread_create(NULL, 0, zoa_thread, NULL, 0, NULL,
-		    TS_RUN | TS_JOINABLE, defclsyspri);
+		if (start_zfs_object_agent(zoa_log_file) != 0) {
+			(void) fprintf(stderr, "Error initializing libzoa.\n");
+			exit(1);
+		}
 	}
 
 #if defined(_LP64)
