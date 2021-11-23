@@ -93,6 +93,13 @@ impl Sub<Atime> for Atime {
     }
 }
 
+impl Add<usize> for Atime {
+    type Output = Atime;
+    fn add(self, rhs: usize) -> Atime {
+        Atime(self.0 + rhs as u64)
+    }
+}
+
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct ReclaimLogId(pub u16);
 impl Display for ReclaimLogId {

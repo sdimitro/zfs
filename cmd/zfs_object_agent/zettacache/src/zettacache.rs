@@ -1,3 +1,4 @@
+use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_allocator::zcachedb_dump_slabs;
@@ -10,6 +11,7 @@ use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::extent_allocator::ExtentAllocatorPhys;
 use crate::index::*;
+use crate::size_histogram::SizeHistogramPhys;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 use anyhow::Result;
@@ -55,6 +57,7 @@ lazy_static! {
     static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
     static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
+    static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
 
     static ref CACHE_INSERT_BLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_blocking_buffer_bytes", 256_000_000);
     static ref CACHE_INSERT_NONBLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_nonblocking_buffer_bytes", 256_000_000);
@@ -102,6 +105,7 @@ struct ZettaCheckpointPhys {
     last_atime: Atime,
     index: ZettaCacheIndexPhys,
     operation_log: BlockBasedLogPhys<OperationLogEntry>,
+    size_histogram: SizeHistogramPhys,
     merge_progress: Option<(BlockBasedLogPhys<OperationLogEntry>, ZettaCacheIndexPhys)>,
 }
 
@@ -160,79 +164,6 @@ enum OperationLogEntry {
 }
 impl OnDisk for OperationLogEntry {}
 impl BlockBasedLogEntry for OperationLogEntry {}
-
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
-pub struct AtimeHistogramPhys {
-    histogram: Vec<u64>,
-    first: Atime,
-}
-
-impl AtimeHistogramPhys {
-    pub fn new(first: Atime) -> AtimeHistogramPhys {
-        AtimeHistogramPhys {
-            histogram: Default::default(),
-            first,
-        }
-    }
-
-    pub fn first(&self) -> Atime {
-        self.first
-    }
-
-    /// Reset the start to a later atime, discarding older entries.
-    /// Requests to reset to an earlier atime are ignored.
-    pub fn reset_first(&mut self, new_first: Atime) {
-        if new_first <= self.first {
-            return;
-        }
-        let delta = new_first - self.first;
-        // XXX - if this becomes a bottleneck we should change the histogram to a VecDeque
-        // so that we don't have to copy when deleting the head of the histogram
-        self.histogram.drain(0..delta);
-        self.first = new_first;
-    }
-
-    pub fn atime_for_target_size(&self, target_size: u64) -> Atime {
-        info!(
-            "histogram starts at {:?} and has {} entries",
-            self.first,
-            self.histogram.len()
-        );
-        let mut remaining = target_size;
-        for (index, &bytes) in self.histogram.iter().enumerate().rev() {
-            if remaining <= bytes {
-                trace!("final include of {} for target at bucket {}", bytes, index);
-                return Atime(self.first.0 + index as u64);
-            }
-            trace!("including {} in target at bucket {}", bytes, index);
-            remaining -= bytes;
-        }
-        self.first
-    }
-
-    pub fn insert(&mut self, value: IndexValue) {
-        assert_ge!(value.atime, self.first);
-        let index = value.atime - self.first;
-        if index >= self.histogram.len() {
-            self.histogram.resize(index + 1, 0);
-        }
-        self.histogram[index] += u64::from(value.size);
-    }
-
-    pub fn remove(&mut self, value: IndexValue) {
-        assert_ge!(value.atime, self.first);
-        let index = value.atime - self.first;
-        self.histogram[index] -= u64::from(value.size);
-    }
-
-    pub fn clear(&mut self) {
-        self.histogram.clear();
-    }
-
-    fn sum(&self) -> u64 {
-        self.histogram.iter().sum()
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 struct MergeProgress {
@@ -505,6 +436,7 @@ struct ZettaCacheState {
     // and then this is useful.  Same goes for block_access.
     extent_allocator: Arc<ExtentAllocator>,
     atime_histogram: AtimeHistogramPhys, // includes pending_changes, including AtimeUpdate which is not logged
+    size_histogram: SizeHistogramPhys,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
     // When i/o completes, the value will be sent, and the entry can be removed
@@ -553,6 +485,10 @@ impl ZettaCache {
             operation_log: Default::default(),
             last_atime: Atime(0),
             block_allocator: BlockAllocatorPhys::new(data_start, block_access.size() - data_start),
+            size_histogram: SizeHistogramPhys::new(
+                block_access.size() - data_start,
+                *QUANTILES_IN_SIZE_HISTOGRAM,
+            ),
             merge_progress: None,
         };
         let raw = block_access.chunk_to_raw(EncodeType::Json, &checkpoint);
@@ -634,6 +570,7 @@ impl ZettaCache {
             pending_changes,
             merging_state: None,
             atime_histogram,
+            size_histogram: checkpoint.size_histogram,
             operation_log,
             super_phys: phys,
             outstanding_reads: Default::default(),
@@ -882,11 +819,13 @@ impl ZettaCache {
     #[measure(HitCount)]
     fn cache_miss_without_index_read(&self, key: &IndexKey) {
         trace!("cache miss without reading index for {:?}", key);
+        // XXX - possibly add entry to hit-by-size ghost histogram
     }
 
     #[measure(HitCount)]
     fn cache_miss_after_index_read(&self, key: &IndexKey) {
         trace!("cache miss after reading index for {:?}", key);
+        // XXX - possibly add entry to hit-by-size ghost histogram
     }
 
     #[measure(HitCount)]
@@ -908,7 +847,7 @@ impl ZettaCache {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn lookup(&self, guid: PoolGuid, block: BlockId) -> LookupResponse {
+    pub async fn lookup(&self, guid: PoolGuid, block: BlockId, from_write: bool) -> LookupResponse {
         // Hold the index lock over the whole operation
         // so that the index can't change after we get the value from it.
         // Lock ordering requres that we lock the index before locking the state.
@@ -919,13 +858,23 @@ impl ZettaCache {
             // We don't want to hold the state lock while reading from disk so we
             // use lock_non_send() to ensure that we can't hold it across .await.
             let mut state = self.state.lock_non_send().await;
+            if !from_write {
+                state.size_histogram.lookup();
+            }
 
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
                         PendingChange::Insert(value)
                         | PendingChange::RemoveThenInsert(value)
-                        | PendingChange::UpdateAtime(value) => Some(state.lookup(key, value)),
+                        | PendingChange::UpdateAtime(value) => {
+                            if !from_write {
+                                // Add an entry to the hit-by-size histogram
+                                let size = state.atime_histogram.size_at(value.atime);
+                                state.size_histogram.hit(size);
+                            }
+                            Some(state.lookup(key, value))
+                        }
                         PendingChange::Remove() => {
                             // Pending change says this has been removed
                             Some(data_reader_none())
@@ -945,6 +894,11 @@ impl ZettaCache {
                                 | PendingChange::UpdateAtime(value) => {
                                     // if this block's atime is before the eviction cutoff, return none
                                     if value.atime >= eviction_cutoff {
+                                        if !from_write {
+                                            // Add an entry to the hit-by-size histogram
+                                            let size = state.atime_histogram.size_at(value.atime);
+                                            state.size_histogram.hit(size);
+                                        }
                                         state.lookup(key, value)
                                     } else {
                                         data_reader_none()
@@ -1003,10 +957,17 @@ impl ZettaCache {
                 // read data from location indicated by index
                 match read_data_fut.await {
                     Some((vec, value)) => {
+                        if !from_write {
+                            let mut state = self.state.lock_non_send().await;
+                            // Add an entry to the hit-by-size histogram
+                            // Use the atime from the index entry so that we properly update hits-by-size
+                            let size = state.atime_histogram.size_at(entry.value.atime);
+                            state.size_histogram.hit(size);
+                        }
                         self.cache_hit_after_index_read(&key);
                         // We return the IndexValue from the DataReader, which
-                        // may be different from entry.value if we found it in a
-                        // PendingChange.
+                        // has been updated to the current atime as a result of
+                        // this cache hit.
                         LookupResponse::Present((vec, locked_key, value))
                     }
                     None => {
@@ -1067,6 +1028,7 @@ impl ZettaCache {
             // because we have to wait for any in-progress insertions (up to
             // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
             let write_permit = block_access.acquire_write().await;
+
             // Now that we are ready to issue the write to disk, insert to the
             // cache in the current checkpoint (allocate a block, add to
             // pending_changes and outstanding_writes).
@@ -1100,7 +1062,7 @@ impl ZettaCache {
 
     pub async fn heal(&self, guid: PoolGuid, block: BlockId, bytes: AlignedBytes) {
         if let LookupResponse::Present((cached_bytes, locked_key, value)) =
-            self.lookup(guid, block).await
+            self.lookup(guid, block, true).await
         {
             if *cached_bytes != *bytes {
                 if bytes.len() == value.size as usize {
@@ -1123,6 +1085,16 @@ impl ZettaCache {
 
     pub fn sector_size(&self) -> usize {
         self.block_access.round_up_to_sector(1)
+    }
+
+    pub async fn hits_by_size_data(&self) -> SizeHistogramPhys {
+        self.state.lock().await.size_histogram.clone()
+    }
+
+    pub async fn clear_hit_data(&self) {
+        let mut state = self.state.lock().await;
+        state.size_histogram =
+            SizeHistogramPhys::new(state.block_access.size(), *QUANTILES_IN_SIZE_HISTOGRAM)
     }
 }
 
@@ -1657,6 +1629,7 @@ impl ZettaCacheState {
             operation_log: operation_log_phys,
             last_atime: self.atime,
             block_allocator: self.block_allocator.flush().await,
+            size_histogram: self.size_histogram.clone(),
             merge_progress,
         };
 

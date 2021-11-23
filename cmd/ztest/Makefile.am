@@ -27,7 +27,7 @@ ztest_LDFLAGS = -pthread
 
 if BUILD_RUST
 ztest_LDADD += -lzoa
-ztest_LDFLAGS += -L$(abs_top_builddir)/cmd/zfs_object_agent
+ztest_LDFLAGS += -L$(abs_top_builddir)/cmd/zfs_object_agent/$(RUSTDIR)
 ztest_CFLAGS = -DHAVE_LIBZOA
 endif
 

@@ -77,6 +77,7 @@ impl RootConnectionState {
         server.register_handler("exit agent", Box::new(Self::exit_agent));
         server.register_handler("enable feature", Box::new(Self::enable_feature));
         server.register_handler("resume destroy pool", Box::new(Self::resume_destroy_pool));
+        server.register_handler("clear_hit_data", Box::new(Self::clear_hit_data));
     }
 
     fn get_object_access(nvl: &NvListRef) -> Result<Arc<ObjectAccess>> {
@@ -490,6 +491,30 @@ impl RootConnectionState {
             debug!("sending response: {:?}", response);
             Ok(Some(response))
         }))
+    }
+
+    fn clear_hit_data(&mut self, nvl: NvList) -> HandlerReturn {
+        if let Some(cache) = self.cache.as_ref() {
+            let cache = cache.clone();
+            Ok(Box::pin(async move {
+                debug!("got request: {:?}", nvl);
+
+                cache.clear_hit_data().await;
+                let mut response = NvList::new_unique_names();
+                response.insert("Type", "clear_hit_data").unwrap();
+                response.insert("result", "ok").unwrap();
+
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        } else {
+            debug!("got request with no cache: {:?}", nvl);
+            let mut response = NvList::new_unique_names();
+            response.insert("Type", "clear_hit_data").unwrap();
+            response.insert("result", "err").unwrap();
+            debug!("sending response: {:?}", response);
+            handler_return_ok(Some(response))
+        }
     }
 }
 

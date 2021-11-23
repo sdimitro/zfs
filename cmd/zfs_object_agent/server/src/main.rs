@@ -145,7 +145,7 @@ fn main() {
             let socket_dir = matches.value_of("socket-dir").unwrap();
             let cache_path = matches.value_of("cache-file");
 
-            zettaobject::init::setup_logging(
+            util::setup_logging(
                 matches.occurrences_of("verbosity"),
                 matches.value_of("output-file"),
                 matches.value_of("log-config"),

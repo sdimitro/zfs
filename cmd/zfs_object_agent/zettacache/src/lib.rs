@@ -3,12 +3,14 @@
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
 
+mod atime_histogram;
 pub mod base_types;
 mod block_access;
 mod block_allocator;
 mod block_based_log;
 mod extent_allocator;
 mod index;
+mod size_histogram;
 mod space_map;
 mod zcachedb;
 mod zettacache;

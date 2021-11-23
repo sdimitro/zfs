@@ -1616,7 +1616,7 @@ impl Pool {
             false => None,
         };
         if let Some(cache) = cache {
-            match cache.lookup(guid, block).await {
+            match cache.lookup(guid, block, true).await {
                 LookupResponse::Present(_) => {
                     // Surprisingly, the BlockId may be in the cache even
                     // when writing a "new" block, if the system crashed or
@@ -1683,7 +1683,10 @@ impl Pool {
                         .await;
                     bytes
                 }
-                false => match cache.lookup(self.state.shared_state.guid, block).await {
+                false => match cache
+                    .lookup(self.state.shared_state.guid, block, false)
+                    .await
+                {
                     LookupResponse::Present((cached_bytes, _key, _value)) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
                         let mut data_object = self.read_object_for_block(block, heal).await;
@@ -1701,7 +1704,7 @@ impl Pool {
                                 .into_iter()
                                 .map(|(b, bytes)| async move {
                                     if let LookupResponse::Absent(key) =
-                                        cache.lookup(self.state.shared_state.guid, b).await
+                                        cache.lookup(self.state.shared_state.guid, b, true).await
                                     {
                                         cache
                                             .insert(

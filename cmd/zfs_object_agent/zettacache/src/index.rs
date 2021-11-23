@@ -1,9 +1,9 @@
+use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
-use crate::zettacache::AtimeHistogramPhys;
 use futures_core::Stream;
 use log::*;
 use more_asserts::*;

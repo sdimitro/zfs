@@ -13,7 +13,7 @@ AC_DEFUN([ZFS_AC_DEBUG_ENABLE], [
 	DEBUG_ZFS="_with_debug"
 	WITH_DEBUG="true"
 	RUSTTARGET=""
-	RUSTDIR="debug"
+	RUSTDIR="target/debug"
 	AC_DEFINE(ZFS_DEBUG, 1, [zfs debugging enabled])
 
 	KERNEL_DEBUG_CFLAGS="-Werror"
@@ -27,7 +27,7 @@ AC_DEFUN([ZFS_AC_DEBUG_DISABLE], [
 	DEBUG_ZFS="_without_debug"
 	WITH_DEBUG=""
 	RUSTTARGET="--release"
-	RUSTDIR="release"
+	RUSTDIR="target/release"
 
 	KERNEL_DEBUG_CFLAGS=""
 	KERNEL_DEBUG_CPPFLAGS="-UDEBUG -DNDEBUG"

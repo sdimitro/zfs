@@ -107,7 +107,7 @@ async fn main() {
         .subcommand(SubCommand::with_name("read").about("read test"))
         .get_matches();
 
-    zettaobject::init::setup_logging(
+    util::setup_logging(
         matches.occurrences_of("verbosity"),
         matches.value_of("output-file"),
         matches.value_of("log-config"),

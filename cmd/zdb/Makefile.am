@@ -18,7 +18,7 @@ zdb_LDADD = \
 
 if BUILD_RUST
 zdb_LDADD += -lzoa
-zdb_LDFLAGS = -L$(abs_top_builddir)/cmd/zfs_object_agent
+zdb_LDFLAGS = -L$(abs_top_builddir)/cmd/zfs_object_agent/$(RUSTDIR)
 zdb_CFLAGS = -DHAVE_LIBZOA
 endif
 

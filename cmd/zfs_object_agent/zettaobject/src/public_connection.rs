@@ -1,6 +1,7 @@
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::pool_destroy;
+use crate::server::handler_return_ok;
 use crate::server::{HandlerReturn, Server};
 use anyhow::Result;
 use futures::stream::StreamExt;
@@ -9,30 +10,38 @@ use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
 use std::sync::{Arc, Mutex};
+use std::time::UNIX_EPOCH;
 use util::get_tunable;
 use util::maybe_die_with;
 use zettacache::base_types::*;
+use zettacache::ZettaCache;
 
 lazy_static! {
     pub static ref GET_POOLS_QUEUE_DEPTH: usize = get_tunable("get_pools_queue_depth", 100);
 }
 
-pub struct PublicServerState {}
+pub struct PublicServerState {
+    cache: Option<ZettaCache>,
+}
 
-struct PublicConnectionState {}
+struct PublicConnectionState {
+    cache: Option<ZettaCache>,
+}
 
 impl PublicServerState {
     fn connection_handler(&self) -> PublicConnectionState {
-        PublicConnectionState {}
+        PublicConnectionState {
+            cache: self.cache.as_ref().cloned(),
+        }
     }
 
-    pub fn start(socket_dir: &str) {
+    pub fn start(socket_dir: &str, cache: Option<ZettaCache>) {
         let socket_path = format!("{}/zfs_public_socket", socket_dir);
 
         let mut server = Server::new(
             &socket_path,
             0o666, // world writable
-            PublicServerState {},
+            PublicServerState { cache },
             Box::new(Self::connection_handler),
         );
 
@@ -50,6 +59,7 @@ impl PublicConnectionState {
             "clear destroyed pools",
             Box::new(Self::clear_destroyed_pools),
         );
+        server.register_handler("report_hits", Box::new(Self::report_hits));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -178,5 +188,39 @@ impl PublicConnectionState {
             debug!("sending response: {:?}", response);
             Ok(Some(response))
         }))
+    }
+
+    fn report_hits(&mut self, nvl: NvList) -> HandlerReturn {
+        debug!("got request: {:?}", nvl);
+        let mut response = NvList::new_unique_names();
+        let cache = self.cache.as_ref().cloned();
+        match cache {
+            Some(zettacache) => Ok(Box::pin(async move {
+                response.insert("Type", "report_hits").unwrap();
+                let size_data = zettacache.hits_by_size_data().await;
+                response
+                    .insert("histogram", &size_data.histogram[..])
+                    .unwrap();
+                response
+                    .insert("bucket_size", &size_data.bucket_size)
+                    .unwrap();
+                response.insert("lookups", &size_data.lookups).unwrap();
+                let started = size_data
+                    .started()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap()
+                    .as_secs();
+                response.insert("started", &started).unwrap();
+                response.insert("result", "ok").unwrap();
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            })),
+            None => {
+                response.insert("Type", "report_hits").unwrap();
+                response.insert("result", "err").unwrap();
+                debug!("sending response: {:?}", response);
+                handler_return_ok(Some(response))
+            }
+        }
     }
 }
