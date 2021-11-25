@@ -551,10 +551,12 @@ zfs_log_write(zilog_t *zilog, dmu_tx_t *tx, int txtype,
 		return;
 	}
 
-	if (zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT)
+	boolean_t object_based = spa_is_object_based(zilog->zl_spa);
+
+	if (zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT && !object_based)
 		write_state = WR_INDIRECT;
 	else if (!spa_has_slogs(zilog->zl_spa) &&
-	    resid >= zfs_immediate_write_sz)
+	    resid >= zfs_immediate_write_sz && !object_based)
 		write_state = WR_INDIRECT;
 	else if (ioflag & (O_SYNC | O_DSYNC))
 		write_state = WR_COPIED;

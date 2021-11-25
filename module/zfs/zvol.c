@@ -580,10 +580,13 @@ zvol_log_write(zvol_state_t *zv, dmu_tx_t *tx, uint64_t offset,
 	if (zil_replaying(zilog, tx))
 		return;
 
-	if (zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT)
+	boolean_t object_based = spa_is_object_based(zilog->zl_spa);
+
+	if (zilog->zl_logbias == ZFS_LOGBIAS_THROUGHPUT && !object_based)
 		write_state = WR_INDIRECT;
 	else if (!spa_has_slogs(zilog->zl_spa) &&
-	    size >= blocksize && blocksize > zvol_immediate_write_sz)
+	    size >= blocksize && blocksize > zvol_immediate_write_sz &&
+	    !object_based)
 		write_state = WR_INDIRECT;
 	else if (sync)
 		write_state = WR_COPIED;

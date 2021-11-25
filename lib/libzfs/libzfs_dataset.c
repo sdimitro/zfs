@@ -1492,6 +1492,21 @@ badlabel:
 			chosen_normal = (int)intval;
 			break;
 
+		case ZFS_PROP_LOGBIAS:
+			if (zpool_hdl != NULL &&
+			    zpool_is_object_based(zpool_hdl) &&
+			    intval == ZFS_LOGBIAS_THROUGHPUT) {
+				const char *valname;
+				verify(zfs_prop_index_to_string(prop,
+				    intval, &valname) == 0);
+				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				    "object based pools cannot set '%s' to "
+				    "'%s'"), propname, valname);
+				(void) zfs_error(hdl, EZFS_BADPROP, errbuf);
+				goto error;
+			}
+			break;
+
 		default:
 			break;
 		}

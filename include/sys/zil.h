@@ -454,6 +454,19 @@ typedef struct zil_stats {
 	 */
 	kstat_named_t zil_itx_metaslab_slog_count;
 	kstat_named_t zil_itx_metaslab_slog_bytes;
+
+	/*
+	 * Number of allocation failures to slog device when
+	 * using object-based pools.
+	 */
+	kstat_named_t zil_slog_alloc_failures;
+
+	/*
+	 * Object-based pools don't support sync write semantics unless
+	 * a slog exits. If a slog does not exist, then we skip the
+	 * zil_commit call. Keep a count of how often that occurs.
+	 */
+	kstat_named_t zil_skip_zil_commit;
 } zil_stats_t;
 
 extern zil_stats_t zil_stats;

@@ -3741,15 +3741,23 @@ zio_alloc_zil(spa_t *spa, objset_t *os, uint64_t txg, blkptr_t *new_bp,
 	int flags = METASLAB_FASTWRITE | METASLAB_ZIL;
 	int allocator = (uint_t)cityhash4(0, 0, 0,
 	    os->os_dsl_dataset->ds_object) % spa->spa_alloc_count;
+
+	/*
+	 * Object-based pools can only allocate zil block on the slog,
+	 * so if we failed to allocate from the slog we need to return
+	 * an error and not fallback to the normal class.
+	 */
+	boolean_t object_based = spa_is_object_based(spa);
 	error = metaslab_alloc(spa, spa_log_class(spa), size, new_bp, 1,
 	    txg, NULL, flags, &io_alloc_list, NULL, allocator);
-	*slog = (error == 0);
-	if (error != 0) {
+	*slog = (error == 0 || object_based);
+
+	if (error != 0 && !object_based) {
 		error = metaslab_alloc(spa, spa_embedded_log_class(spa), size,
 		    new_bp, 1, txg, NULL, flags,
 		    &io_alloc_list, NULL, allocator);
 	}
-	if (error != 0) {
+	if (error != 0 && !object_based) {
 		error = metaslab_alloc(spa, spa_normal_class(spa), size,
 		    new_bp, 1, txg, NULL, flags,
 		    &io_alloc_list, NULL, allocator);

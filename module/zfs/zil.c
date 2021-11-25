@@ -108,6 +108,8 @@ zil_stats_t zil_stats = {
 	{ "zil_itx_metaslab_normal_bytes",	KSTAT_DATA_UINT64 },
 	{ "zil_itx_metaslab_slog_count",	KSTAT_DATA_UINT64 },
 	{ "zil_itx_metaslab_slog_bytes",	KSTAT_DATA_UINT64 },
+	{ "zil_slog_alloc_failures",		KSTAT_DATA_UINT64 },
+	{ "zil_skip_zil_commit",		KSTAT_DATA_UINT64 },
 };
 
 static kstat_t *zil_ksp;
@@ -709,6 +711,8 @@ zil_create(zilog_t *zilog)
 
 		if (error == 0)
 			zil_init_log_chain(zilog, &blk);
+		else if (slog)
+			ZIL_STAT_BUMP(zil_slog_alloc_failures);
 	}
 
 	/*
@@ -1557,6 +1561,8 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	if (slog) {
 		ZIL_STAT_BUMP(zil_itx_metaslab_slog_count);
 		ZIL_STAT_INCR(zil_itx_metaslab_slog_bytes, lwb->lwb_nused);
+		if (error)
+			ZIL_STAT_BUMP(zil_slog_alloc_failures);
 	} else {
 		ZIL_STAT_BUMP(zil_itx_metaslab_normal_count);
 		ZIL_STAT_INCR(zil_itx_metaslab_normal_bytes, lwb->lwb_nused);
@@ -1753,6 +1759,7 @@ cont:
 				ZIL_STAT_INCR(zil_itx_needcopy_bytes, dnow);
 			} else {
 				ASSERT3S(itx->itx_wr_state, ==, WR_INDIRECT);
+				ASSERT(!spa_is_object_based(zilog->zl_spa));
 				dbuf = NULL;
 				ZIL_STAT_BUMP(zil_itx_indirect_count);
 				ZIL_STAT_INCR(zil_itx_indirect_bytes,
@@ -2956,10 +2963,14 @@ zil_commit(zilog_t *zilog, uint64_t foid)
 	 */
 	ASSERT3B(dmu_objset_is_snapshot(zilog->zl_os), ==, B_FALSE);
 
-	if (zilog->zl_sync == ZFS_SYNC_DISABLED ||
-	    (spa_is_object_based(zilog->zl_spa) &&
-	    !spa_has_slogs(zilog->zl_spa)))
+	if (zilog->zl_sync == ZFS_SYNC_DISABLED)
 		return;
+
+	if (spa_is_object_based(zilog->zl_spa) &&
+	    !spa_has_slogs(zilog->zl_spa)) {
+		ZIL_STAT_BUMP(zil_skip_zil_commit);
+		return;
+	}
 
 	if (!spa_writeable(zilog->zl_spa)) {
 		/*
