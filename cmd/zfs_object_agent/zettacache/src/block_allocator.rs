@@ -1305,6 +1305,10 @@ impl BlockAllocator {
         self.freeing_space
     }
 
+    pub fn size(&self) -> u64 {
+        self.coverage.size
+    }
+
     //
     // |----------------| Device Offset 0
     // |... metadata ...|

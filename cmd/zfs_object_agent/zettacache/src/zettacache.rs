@@ -1751,7 +1751,7 @@ impl ZettaCacheState {
     ) -> Option<tokio::sync::mpsc::Receiver<MergeMessage>> {
         if self.pending_changes.len() < *MAX_PENDING_CHANGES
             && self.atime_histogram.sum()
-                < (self.block_access.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
+                < (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
         {
             trace!(
                 "not starting new merge, only {} pending changes",
@@ -1760,13 +1760,13 @@ impl ZettaCacheState {
             return None;
         }
 
-        let target_size = (self.block_access.size() / 100) * *TARGET_CACHE_SIZE_PCT;
+        let target_size = (self.block_allocator.size() / 100) * *TARGET_CACHE_SIZE_PCT;
         info!(
             "target cache size for storage size {}GB is {}GB; {}MB used; {}MB high-water; {}MB freeing; histogram covers {}MB",
-            self.block_access.size() / 1024 / 1024 / 1024,
+            self.block_allocator.size() / 1024 / 1024 / 1024,
             target_size / 1024 / 1024 / 1024,
-            (self.block_access.size() - self.block_allocator.get_available()) / 1024 / 1024,
-            (self.block_access.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT / 1024 / 1024,
+            (self.block_allocator.size() - self.block_allocator.get_available()) / 1024 / 1024,
+            (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT / 1024 / 1024,
             self.block_allocator.get_freeing() / 1024 / 1024,
             self.atime_histogram.sum() / 1024 / 1024,
         );
