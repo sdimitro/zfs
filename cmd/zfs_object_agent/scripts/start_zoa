@@ -9,8 +9,27 @@
 #  - ZETTACACHE_DEVICE: File/device to use for ZettaCache
 #
 
+DEV_WAIT=300
+
 error() {
 	echo "$@" 1>&2
+	exit 1
+}
+
+wait_for_device() {
+	local DEVICE=$1
+
+	# Wait for udev to settle and for the device to show up.
+	udevadm settle
+	for i in $(seq 1 $DEV_WAIT); do
+		if [ -b "$DEVICE" ]; then
+			return
+		fi
+		echo "Waiting for $DEVICE to show up..."
+		sleep 1
+	done
+
+	error "$DEVICE does not exists."
 }
 
 ZOA_LOG_CONFIG="${ZOA_LOG_CONFIG:-/etc/zfs/zoa_log4rs.yml}"
@@ -25,6 +44,8 @@ fi
 if [ ! -z $ZETTACACHE_DEVICE ]; then
 	echo "ZettaCache: ${ZETTACACHE_DEVICE}"
 	PARAMS="$PARAMS -c ${ZETTACACHE_DEVICE}"
+
+	wait_for_device ${ZETTACACHE_DEVICE}
 fi
 
 /sbin/zfs_object_agent ${PARAMS}
