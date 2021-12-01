@@ -403,6 +403,11 @@ impl MergeState {
         );
         debug!("skipped {} index entries", index_skips);
 
+        // Send final checkpoint progress message with final free_list content
+        tx.send(MergeMessage::new_progress(&mut next_index, free_list).await)
+            .await
+            .unwrap_or_else(|e| panic!("couldn't send: {}", e));
+
         drop(old_index);
         next_index.flush().await;
 
