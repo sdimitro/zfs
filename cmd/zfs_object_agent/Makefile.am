@@ -23,11 +23,11 @@ RUSTFLAGS = \
 GITREV = $(shell cat $(abs_top_builddir)/include/zfs_gitrev.h | awk '{print $$3}')
 
 .PHONY: \
-	zcache$(EXEEXT) \
-	zcachedb$(EXEEXT) \
-	zfs_object_agent$(EXEEXT) \
-	zfs_object_perf$(EXEEXT) \
-	zoa_test$(EXEEXT) \
+	$(RUSTDIR)/zcache$(EXEEXT) \
+	$(RUSTDIR)/zcachedb$(EXEEXT) \
+	$(RUSTDIR)/zfs_object_agent$(EXEEXT) \
+	$(RUSTDIR)/zfs_object_perf$(EXEEXT) \
+	$(RUSTDIR)/zoa_test$(EXEEXT) \
 	libzoa.la
 
 $(RUSTDIR)/libzoa.la :
@@ -52,11 +52,11 @@ all: build
 
 build: \
 	libzoa.la \
-	zcache$(EXEEXT) \
-	zcachedb$(EXEEXT) \
-	zfs_object_agent$(EXEEXT) \
-	zfs_object_perf$(EXEEXT) \
-	zoa_test$(EXEEXT)
+	$(RUSTDIR)/zcache$(EXEEXT) \
+	$(RUSTDIR)/zcachedb$(EXEEXT) \
+	$(RUSTDIR)/zfs_object_agent$(EXEEXT) \
+	$(RUSTDIR)/zfs_object_perf$(EXEEXT) \
+	$(RUSTDIR)/zoa_test$(EXEEXT)
 
 install-exec-hook :
 	cp $(RUSTDIR)/libzoa.so $(DESTDIR)$(libdir)/libzoa.so
