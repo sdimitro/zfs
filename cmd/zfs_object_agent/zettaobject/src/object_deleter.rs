@@ -29,7 +29,7 @@ impl ObjectDeleter {
         Self::open(object_access, guid, Default::default())
     }
 
-    async fn deleter(
+    async fn delete_task(
         object_access: Arc<ObjectAccess>,
         guid: PoolGuid,
         mut rx: mpsc::UnboundedReceiver<Vec<ObjectId>>,
@@ -46,7 +46,10 @@ impl ObjectDeleter {
                         vec.into_iter().map(|o| DataObject::key(guid, o)),
                     ))
                     .await;
-                tx.send(chunk.len()).unwrap();
+                if tx.send(chunk.len()).is_err() {
+                    // ObjectDeleter has been dropped
+                    return;
+                }
             }
             info!(
                 "reclaim: deleted {} objects in {}ms",
@@ -72,7 +75,7 @@ impl ObjectDeleter {
         };
 
         if !object_access.readonly() {
-            tokio::spawn(Self::deleter(
+            tokio::spawn(Self::delete_task(
                 object_access,
                 guid,
                 initiation_rx,
