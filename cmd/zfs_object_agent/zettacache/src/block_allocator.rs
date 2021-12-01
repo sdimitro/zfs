@@ -13,7 +13,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::Bound::*;
 use std::sync::Arc;
 use std::time::Instant;
-use std::{fmt, iter, mem};
+use std::{fmt, mem};
 use util::BitmapRangeIterator;
 use util::RangeTree;
 use util::{get_tunable, TerseVec};
@@ -770,19 +770,22 @@ impl SortedSlabs {
 struct SlabAllocationBuckets(BTreeMap<u32, SortedSlabs>);
 
 impl SlabAllocationBuckets {
-    fn new(phys: SlabAllocationBucketsPhys) -> Self {
+    fn new(
+        phys: SlabAllocationBucketsPhys,
+        mut slabs: BTreeMap<u32, Vec<SortedSlabEntry>>,
+    ) -> Self {
         let mut buckets = BTreeMap::new();
         for (max_size, is_extent_based) in phys.buckets {
-            buckets.insert(max_size, SortedSlabs::new(is_extent_based, iter::empty()));
+            buckets.insert(
+                max_size,
+                SortedSlabs::new(is_extent_based, slabs.remove(&max_size).unwrap_or_default()),
+            );
         }
-        SlabAllocationBuckets(buckets)
-    }
 
-    fn add_slab_to_bucket(&mut self, bucket: u32, slab: &Slab) {
-        self.0
-            .get_mut(&bucket)
-            .unwrap()
-            .insert(slab.to_sorted_slab_entry());
+        // We expect for all slabs passed in to be consumed and added to a bucket.
+        assert!(slabs.is_empty());
+
+        SlabAllocationBuckets(buckets)
     }
 
     fn get_bucket_for_allocation_size(&mut self, request_size: u32) -> (&u32, &mut SortedSlabs) {
@@ -986,11 +989,15 @@ impl BlockAllocator {
 
         let mut available_space = 0u64;
         let mut free_slabs = Vec::new();
-        let mut slab_buckets = SlabAllocationBuckets::new(phys.slab_buckets);
+        let mut slabs_by_bucket: BTreeMap<u32, Vec<SortedSlabEntry>> = BTreeMap::new();
+
         for slab in slabs.0.iter() {
             match &slab.info {
                 SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => {
-                    slab_buckets.add_slab_to_bucket(slab.get_max_size(), slab);
+                    slabs_by_bucket
+                        .entry(slab.get_max_size())
+                        .or_default()
+                        .push(slab.to_sorted_slab_entry());
                     available_space += slab.get_free_space();
                 }
                 SlabType::Free(_) => {
@@ -999,6 +1006,8 @@ impl BlockAllocator {
                 }
             }
         }
+
+        let slab_buckets = SlabAllocationBuckets::new(phys.slab_buckets, slabs_by_bucket);
 
         info!(
             "loaded BlockAllocator metadata in {}ms",
