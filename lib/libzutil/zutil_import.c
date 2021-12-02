@@ -2104,6 +2104,15 @@ for_each_vdev_cb(void *zhp, nvlist_t *nv, pool_vdev_iter_f func,
 	    ZPOOL_CONFIG_CHILDREN
 	};
 
+	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) != 0)
+		return (ret);
+
+	/* Don't run our function on root or indirect vdevs */
+	if ((strcmp(type, VDEV_TYPE_ROOT) != 0) &&
+	    (strcmp(type, VDEV_TYPE_INDIRECT) != 0)) {
+		ret |= func(zhp, nv, data);
+	}
+
 	for (i = 0; i < ARRAY_SIZE(list); i++) {
 		if (nvlist_lookup_nvlist_array(nv, list[i], &child,
 		    &children) == 0) {
@@ -2120,14 +2129,6 @@ for_each_vdev_cb(void *zhp, nvlist_t *nv, pool_vdev_iter_f func,
 				    func, data);
 			}
 		}
-	}
-
-	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) != 0)
-		return (ret);
-
-	/* Don't run our function on root vdevs */
-	if (strcmp(type, VDEV_TYPE_ROOT) != 0) {
-		ret |= func(zhp, nv, data);
 	}
 
 	return (ret);

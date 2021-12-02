@@ -278,7 +278,7 @@ function unmounted
 
 function splitline
 {
-	echo $1 | sed "s/,/ /g"
+	echo $1 | tr ',' ' '
 }
 
 function default_setup
@@ -1116,9 +1116,7 @@ function get_endslice #<disk> <slice>
 	case "$(uname)" in
 	Linux)
 		endcyl=$(parted -s $DEV_DSKDIR/$disk -- unit cyl print | \
-			grep "part${slice}" | \
-			awk '{print $3}' | \
-			sed 's,cyl,,')
+			awk "/part${slice}/"' {sub(/cyl/, "", $3); print $3}')
 		((endcyl = (endcyl + 1)))
 		;;
 	FreeBSD)
@@ -1485,7 +1483,7 @@ function is_shared_smb
 	if datasetnonexists "$fs" ; then
 		return 1
 	else
-		fs=$(echo $fs | sed 's@/@_@g')
+		fs=$(echo $fs | tr / _)
 	fi
 
 	if is_linux; then
