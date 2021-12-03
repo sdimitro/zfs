@@ -120,11 +120,14 @@ typedef struct vdev_object_store {
 	kcondvar_t vos_sock_cv;
 	ksocket_t vos_sock;
 	socket_state_t vos_sock_state;
+	boolean_t vos_closing;
 
 	kmutex_t vos_outstanding_lock;
 	kcondvar_t vos_outstanding_cv;
 	boolean_t vos_serial_done[VOS_SERIAL_TYPES];
 	vos_serial_flag_t vos_send_txg_selector;
+	boolean_t vos_open_completed;
+	const char *vos_feature_enable;
 	uint64_t vos_result;
 
 	uint64_t vos_next_block;
@@ -458,6 +461,7 @@ agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid,
 static void
 agent_wait_serial(vdev_object_store_t *vos, vos_serial_types_t wait_type)
 {
+	ASSERT(!MUTEX_HELD(&vos->vos_sock_lock));
 	mutex_enter(&vos->vos_outstanding_lock);
 	while (!vos->vos_serial_done[wait_type])
 		cv_wait(&vos->vos_outstanding_cv, &vos->vos_outstanding_lock);
@@ -502,62 +506,6 @@ static inline void
 agent_io_block_free(nvlist_t *nv)
 {
 	fnvlist_free(nv);
-}
-
-void
-object_store_restart_agent(vdev_t *vd)
-{
-	vdev_object_store_t *vos = vd->vdev_tsd;
-	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
-	/*
-	 * We need to ensure that we only issue a request when the
-	 * socket is ready. Otherwise, we block here since the agent
-	 * might be in recovery.
-	 */
-	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
-
-	nvlist_t *nv = fnvlist_alloc();
-	/*
-	 * XXX This doesn't actually exit the agent, it just tells the agent to
-	 * close the connection.  We could just as easily close the connection
-	 * ourself.  Or change the agent code to actually exit.
-	 */
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_EXIT);
-	agent_request(vos, nv, FTAG);
-	fnvlist_free(nv);
-}
-
-/*
- * XXX This doesn't actually stop the agent, it just tells the agent to close
- * the pool (practically, to mark the pool as no longer owned by this agent).
- */
-static void
-object_store_stop_agent(vdev_t *vd)
-{
-	vdev_object_store_t *vos = vd->vdev_tsd;
-	if (vos->vos_sock == INVALID_SOCKET)
-		return;
-
-	spa_t *spa = vd->vdev_spa;
-	boolean_t destroy = spa_state(spa) == POOL_STATE_DESTROYED;
-
-	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
-	/*
-	 * We need to ensure that we only issue a request when the
-	 * socket is ready. Otherwise, we block here since the agent
-	 * might be in recovery.
-	 */
-	zfs_dbgmsg("stop_agent() destroy=%d", destroy);
-	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
-
-	// Tell agent to destroy if needed.
-
-	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CLOSE_POOL);
-	fnvlist_add_boolean_value(nv, AGENT_DESTROY, destroy);
-	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CLOSE_POOL);
-	fnvlist_free(nv);
-	agent_wait_serial(vos, VOS_SERIAL_CLOSE_POOL);
 }
 
 static int
@@ -622,6 +570,18 @@ agent_free_blocks(vdev_object_store_t *vos)
 	vmem_free(blkid_array, buf_len * sizeof (*blkid_array));
 	vmem_free(size_array, buf_len * sizeof (*size_array));
 	return (err);
+}
+
+static void
+agent_close_pool(vdev_object_store_t *vos, boolean_t destroy)
+{
+	nvlist_t *nv = fnvlist_alloc();
+	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CLOSE_POOL);
+	fnvlist_add_boolean_value(nv, AGENT_DESTROY, destroy);
+	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CLOSE_POOL);
+	vos->vos_closing = B_TRUE;
+	mutex_exit(&vos->vos_sock_lock);
+	fnvlist_free(nv);
 }
 
 static void
@@ -696,6 +656,14 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 		    spa_syncing_txg(vd->vdev_spa));
 	}
 
+	/*
+	 * If we are in the resume path, and the initial open hasn't been
+	 * completed, waiting will result in either this thread or the original
+	 * thread hanging indefintely, and there's no way to know which will
+	 * occur. Instead, we simply skip the wait_serial call if we're in that
+	 * case.
+	 */
+	boolean_t wait = !resume || vos->vos_open_completed;
 	zfs_dbgmsg("agent_open_pool(guid=%llu bucket=%s)",
 	    (u_longlong_t)spa_guid(vd->vdev_spa),
 	    vd->vdev_path);
@@ -703,7 +671,8 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
-	agent_wait_serial(vos, VOS_SERIAL_OPEN_POOL);
+	if (wait)
+		agent_wait_serial(vos, VOS_SERIAL_OPEN_POOL);
 	return (vos->vos_result);
 }
 
@@ -781,15 +750,15 @@ agent_flush_writes(vdev_object_store_t *vos, uint64_t blockid)
 }
 
 static void
-agent_set_feature(vdev_object_store_t *vos, zfeature_info_t *feature)
+agent_set_feature(vdev_object_store_t *vos, const char *guid)
 {
-	mutex_enter(&vos->vos_sock_lock);
-	zfs_object_store_wait(vos, VOS_SOCK_READY);
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_ENABLE_FEATURE);
-	fnvlist_add_string(nv, AGENT_FEATURE, feature->fi_guid);
-	zfs_dbgmsg("agent_set_feature: feature %s", feature->fi_guid);
+	fnvlist_add_string(nv, AGENT_FEATURE, guid);
+	zfs_dbgmsg("agent_set_feature: feature %s", guid);
 
 	/*
 	 * We do a serial operation here because we need to make sure that a
@@ -798,9 +767,63 @@ agent_set_feature(vdev_object_store_t *vos, zfeature_info_t *feature)
 	 * token-based approach planned for iostat.
 	 */
 	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_ENABLE_FEATURE);
+	vos->vos_feature_enable = guid;
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
-	agent_wait_serial(vos, VOS_SERIAL_ENABLE_FEATURE);
+}
+
+void
+object_store_restart_agent(vdev_t *vd)
+{
+	vdev_object_store_t *vos = vd->vdev_tsd;
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+	/*
+	 * We need to ensure that we only issue a request when the
+	 * socket is ready. Otherwise, we block here since the agent
+	 * might be in recovery.
+	 */
+	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
+
+	nvlist_t *nv = fnvlist_alloc();
+	/*
+	 * XXX This doesn't actually exit the agent, it just tells the agent to
+	 * close the connection.  We could just as easily close the connection
+	 * ourself.  Or change the agent code to actually exit.
+	 */
+	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_EXIT);
+	agent_request(vos, nv, FTAG);
+	fnvlist_free(nv);
+}
+
+/*
+ * XXX This doesn't actually stop the agent, it just tells the agent to close
+ * the pool (practically, to mark the pool as no longer owned by this agent).
+ */
+static void
+object_store_stop_agent(vdev_t *vd)
+{
+	vdev_object_store_t *vos = vd->vdev_tsd;
+	mutex_enter(&vos->vos_sock_lock);
+	if (vos->vos_sock == INVALID_SOCKET) {
+		mutex_exit(&vos->vos_sock_lock);
+		return;
+	}
+
+	spa_t *spa = vd->vdev_spa;
+	boolean_t destroy = spa_state(spa) == POOL_STATE_DESTROYED;
+
+	/*
+	 * We need to ensure that we only issue a request when the
+	 * socket is ready. Otherwise, we block here since the agent
+	 * might be in recovery.
+	 */
+	zfs_dbgmsg("stop_agent() destroy=%d", destroy);
+	zfs_object_store_wait(vos, VOS_SOCK_READY);
+
+	// Tell agent to destroy if needed.
+	agent_close_pool(vos, destroy);
+
+	agent_wait_serial(vos, VOS_SERIAL_CLOSE_POOL);
 }
 
 static int
@@ -849,6 +872,7 @@ agent_resume(void *arg)
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	spa_t *spa = vd->vdev_spa;
 	int ret;
+	boolean_t destroying = spa_state(spa) == POOL_STATE_DESTROYED;
 
 	zfs_dbgmsg("agent_resume running");
 
@@ -871,14 +895,38 @@ agent_resume(void *arg)
 	}
 	mutex_exit(&vos->vos_sock_lock);
 
-	if (agent_open_pool(vd, vos,
-	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_TRUE) != 0) {
-		zfs_dbgmsg("agent resume failed, pool open failed");
-		vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
-		    VDEV_AUX_OPEN_FAILED);
-		vos->vos_agent_thread_exit = B_TRUE;
+	/*
+	 * If there was an open in progress when we resumed, all we need
+	 * to do is restart the open. There can't be any other outstanding
+	 * requests before the initial open complets.
+	 */
+	boolean_t in_open = !vos->vos_open_completed;
+
+	/*
+	 * If we are destroying the pool or closing it, the open call is
+	 * unnecessary. Bypassing it is a small performance optimization.
+	 */
+	if (destroying || !vos->vos_closing) {
+		if (agent_open_pool(vd, vos,
+		    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)),
+		    B_TRUE) != 0) {
+			zfs_dbgmsg("agent resume failed, pool open failed");
+			vdev_set_state(vd, B_FALSE, VDEV_STATE_CANT_OPEN,
+			    VDEV_AUX_OPEN_FAILED);
+			vos->vos_agent_thread_exit = B_TRUE;
+			return;
+		}
+		if (in_open) {
+			zfs_dbgmsg("agent resume during initial open");
+			return;
+		}
+	}
+	if (vos->vos_closing) {
+		mutex_enter(&vos->vos_sock_lock);
+		agent_close_pool(vos, destroying);
 		return;
 	}
+
 
 	if ((ret = agent_resume_state_check(vd)) != 0) {
 		zfs_dbgmsg("agent resume failed, uberblock changed");
@@ -890,8 +938,11 @@ agent_resume(void *arg)
 
 	mutex_enter(&vos->vos_sock_lock);
 
-	vdev_queue_t *vq = &vd->vdev_queue;
+	if (vos->vos_feature_enable != NULL) {
+		agent_set_feature(vos, vos->vos_feature_enable);
+	}
 
+	vdev_queue_t *vq = &vd->vdev_queue;
 	mutex_enter(&vq->vq_lock);
 	for (zio_t *zio = avl_first(&vq->vq_active_tree); zio != NULL;
 	    zio = AVL_NEXT(&vq->vq_active_tree, zio)) {
@@ -1339,6 +1390,7 @@ agent_reader(void *arg)
 		mutex_enter(&vos->vos_outstanding_lock);
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_OPEN_POOL]);
 		vos->vos_serial_done[VOS_SERIAL_OPEN_POOL] = B_TRUE;
+		vos->vos_open_completed = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
 		mutex_exit(&vos->vos_outstanding_lock);
 	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_FAILED) == 0) {
@@ -1437,6 +1489,7 @@ agent_reader(void *arg)
 		ASSERT(!vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE]);
 		vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE] = B_TRUE;
 		cv_broadcast(&vos->vos_outstanding_cv);
+		vos->vos_feature_enable = NULL;
 		mutex_exit(&vos->vos_outstanding_lock);
 	} else if (strcmp(type, AGENT_TYPE_GET_STATS_DONE) == 0) {
 		object_store_stats_call_t *caller, search;
@@ -1688,6 +1741,8 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 
 	vos = vd->vdev_tsd;
 	vos->vos_vdev = vd;
+	vos->vos_open_completed = B_FALSE;
+	vos->vos_closing = B_FALSE;
 
 	/*
 	 * Reopen the device if it's not currently open.  Otherwise,
@@ -1750,9 +1805,7 @@ vdev_object_store_close(vdev_t *vd)
 	if (vd->vdev_reopening || vos == NULL)
 		return;
 
-	mutex_enter(&vos->vos_sock_lock);
 	object_store_stop_agent(vd);
-	mutex_exit(&vos->vos_sock_lock);
 
 	mutex_enter(&vos->vos_lock);
 	vos->vos_agent_thread_exit = B_TRUE;
@@ -1908,7 +1961,12 @@ vdev_object_store_get_config(vdev_t *vd)
 static void
 vdev_object_store_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
 {
-	agent_set_feature(vd->vdev_tsd, zfeature);
+	vdev_object_store_t *vos = vd->vdev_tsd;
+	mutex_enter(&vos->vos_sock_lock);
+	zfs_object_store_wait(vos, VOS_SOCK_READY);
+
+	agent_set_feature(vd->vdev_tsd, zfeature->fi_guid);
+	agent_wait_serial(vos, VOS_SERIAL_ENABLE_FEATURE);
 }
 
 /*
