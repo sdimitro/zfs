@@ -8430,7 +8430,7 @@ main(int argc, char **argv)
 	zfs_btree_verify_intensity = 3;
 
 	while ((c = getopt(argc, argv,
-	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZz")) != -1) {
+	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZz:")) != -1) {
 		switch (c) {
 		case 'b':
 		case 'c':
