@@ -12,7 +12,7 @@
 #
 
 #
-# Copyright (c) 2015, 2020 by Delphix. All rights reserved.
+# Copyright (c) 2015, 2021 by Delphix. All rights reserved.
 #
 
 #
@@ -51,18 +51,13 @@ else
 fi
 
 # Variables for use by fio.
-export PERF_RUNTIME=${PERF_RUNTIME:-$PERF_RUNTIME_NIGHTLY}
-export PERF_RANDSEED=${PERF_RANDSEED:-'1234'}
-export PERF_COMPPERCENT=${PERF_COMPPERCENT:-'66'}
-export PERF_COMPCHUNK=${PERF_COMPCHUNK:-'4096'}
-export PERF_RUNTYPE=${PERF_RUNTYPE:-'nightly'}
 export PERF_NTHREADS=1
 export PERF_NTHREADS_PER_FS=${PERF_NTHREADS_PER_FS:-'0'}
 export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'0'}
 export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
 export PERF_NUMIOS=655360 # 5GB worth of IOs
 
-# Random writing to the file 
+# Random writing to the file
 export NUMJOBS=$(get_max $PERF_NTHREADS)
 export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
 export DIRECTORY=$(get_directory)
@@ -80,14 +75,12 @@ log_note "Collecting backend IO stats with lun list $lun_list"
 # Run log collection for only 10 seconds which should be sufficient.
 export PERF_RUNTIME=10
 if is_linux; then
-	typeset perf_record_cmd="perf record --call-graph dwarf,8192 -F 49 -agq \
-	    -o /dev/stdout -- sleep ${PERF_RUNTIME}"
 	export collect_scripts=(
 	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
 	    "iostat -tdxyz 1" "iostat"
 	    "arcstat 1" "arcstat"
 	    "dstat -at --nocolor 1" "dstat"
-	    "$perf_record_cmd" "perf"
+	    "$PERF_RECORD_CMD" "perf"
 	)
 else
 	export collect_scripts=(
