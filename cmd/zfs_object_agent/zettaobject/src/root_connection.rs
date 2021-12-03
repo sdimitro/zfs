@@ -17,6 +17,7 @@ use std::sync::Arc;
 use util::get_tunable;
 use util::maybe_die_with;
 use util::AlignedBytes;
+use util::From64;
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -353,6 +354,7 @@ impl RootConnectionState {
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
         let heal = bool_value(&nvl, "heal")?;
+        let size = nvl.lookup_uint64("size")?;
 
         let pool = self
             .pool
@@ -360,7 +362,20 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
         Ok(Box::pin(async move {
-            let data = pool.read_block(block, heal).await;
+            let mut data = pool.read_block(block, heal).await;
+
+            //
+            // If the cache has the wrong content/size for this BlockId, then proactively do a healing read
+            // from the object store.
+            //
+            if !heal && data.len() != usize::from64(size) {
+                debug!(
+                    "read size mismatch: expected={} actual={}",
+                    size,
+                    data.len()
+                );
+                data = pool.read_block(block, true).await;
+            }
             let mut nvl = NvList::new_unique_names();
             nvl.insert("Type", "read done").unwrap();
             nvl.insert("block", &block.0).unwrap();

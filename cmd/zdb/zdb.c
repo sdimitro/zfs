@@ -8477,7 +8477,7 @@ main(int argc, char **argv)
 	zfs_btree_verify_intensity = 3;
 
 	while ((c = getopt(argc, argv,
-	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZz")) != -1) {
+	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZz:")) != -1) {
 		switch (c) {
 		case 'b':
 		case 'c':
@@ -8631,6 +8631,16 @@ main(int argc, char **argv)
 	}
 
 	if (objstore) {
+		if (dump_opt['R']) {
+			(void) fprintf(stderr, "Reading blocks (-R) is "
+			    "unsupported for an object-store based zpool.\n");
+			exit(1);
+		}
+		if (dump_opt['Z']) {
+			(void) fprintf(stderr, "Reading ZSTD headers (-Z) is "
+			    "unsupported for an object-store based zpool.\n");
+			exit(1);
+		}
 		if (start_zfs_object_agent(zoa_log_file) != 0) {
 			(void) fprintf(stderr, "Error initializing libzoa.\n");
 			exit(1);

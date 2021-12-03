@@ -70,9 +70,6 @@ fill_zetta_cache 1800
 lun_list=$(pool_to_lun_list $PERFPOOL)
 log_note "Collecting backend IO stats with lun list $lun_list"
 if is_linux; then
-	typeset perf_record_cmd="perf record --call-graph dwarf,8192 -F 49 -agq \
-	    -o /dev/stdout -- sleep ${PERF_RUNTIME}"
-
 	export collect_scripts=(
 	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
 	    "vmstat -t 1" "vmstat"
@@ -80,7 +77,7 @@ if is_linux; then
 	    "iostat -tdxyz 1" "iostat"
 	    "arcstat 1" "arcstat"
 	    "dstat -at --nocolor 1" "dstat"
-	    "$perf_record_cmd" "perf"
+	    "$PERF_RECORD_CMD" "perf"
 	)
 else
 	export collect_scripts=(
