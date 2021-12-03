@@ -411,9 +411,10 @@ get_usage(zpool_help_t idx)
 		    "[newpool]\n"));
 	case HELP_IOSTAT:
 		return (gettext("\tiostat [[[-c [script1,script2,...]"
-		    "[-lq]]|[-rw]] [-T d | u] [-ghHLpPvy] [-o [-l|-q|-r|-w]]\n"
-		    "\t    [[pool ...]|[pool vdev ...]|[vdev ...]]"
-		    " [[-n] interval [count]]\n"));
+		    "[-lq]]|[-rw]] [-T d | u] [-ghHLpPvy]\n"
+		    "\t    [-o [-l|-q|-r|-w]] [[pool ...]|[pool vdev ...]"
+		    "|[vdev ...]]\n"
+		    "\t    [[-n] interval [count]]\n"));
 	case HELP_LABELCLEAR:
 		return (gettext("\tlabelclear [-f] <vdev>\n"));
 	case HELP_LIST:
