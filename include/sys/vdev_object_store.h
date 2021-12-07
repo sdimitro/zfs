@@ -26,7 +26,6 @@
 #define	AGENT_TYPE_CREATE_POOL_DONE	"pool create done"
 #define	AGENT_TYPE_OPEN_POOL		"open pool"
 #define	AGENT_TYPE_OPEN_POOL_DONE	"pool open done"
-#define	AGENT_TYPE_OPEN_POOL_FAILED	"pool open failed"
 #define	AGENT_TYPE_READ_BLOCK		"read block"
 #define	AGENT_TYPE_READ_DONE		"read done"
 #define	AGENT_TYPE_WRITE_BLOCK		"write block"

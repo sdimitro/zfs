@@ -469,6 +469,16 @@ agent_wait_serial(vdev_object_store_t *vos, vos_serial_types_t wait_type)
 	mutex_exit(&vos->vos_outstanding_lock);
 }
 
+static void
+agent_serial_done(vdev_object_store_t *vos, vos_serial_types_t wait_type)
+{
+	mutex_enter(&vos->vos_outstanding_lock);
+	ASSERT(!vos->vos_serial_done[wait_type]);
+	vos->vos_serial_done[wait_type] = B_TRUE;
+	cv_broadcast(&vos->vos_outstanding_cv);
+	mutex_exit(&vos->vos_outstanding_lock);
+}
+
 static nvlist_t *
 agent_io_block_alloc(zio_t *zio)
 {
@@ -1032,7 +1042,7 @@ agent_resume(void *arg)
 	zfs_dbgmsg("agent_resume completed");
 }
 
-static void
+static uint64_t
 object_store_create_pool(vdev_t *vd)
 {
 	ASSERT(vdev_is_object_based(vd));
@@ -1042,6 +1052,7 @@ object_store_create_pool(vdev_t *vd)
 	mutex_exit(&vos->vos_sock_lock);
 
 	agent_wait_serial(vos, VOS_SERIAL_CREATE_POOL);
+	return (vos->vos_result);
 }
 
 void
@@ -1285,6 +1296,7 @@ agent_reader(void *arg)
 {
 	vdev_object_store_t *vos = arg;
 	uint64_t nvlist_len = 0;
+	char *cause = NULL;
 	int err = agent_read_all(vos, &nvlist_len, sizeof (nvlist_len));
 	if (err != 0) {
 		zfs_dbgmsg("agent_reader(%px) got err %d", curthread, err);
@@ -1314,11 +1326,11 @@ agent_reader(void *arg)
 	}
 	// XXX debug message the nvlist
 	if (strcmp(type, AGENT_TYPE_CREATE_POOL_DONE) == 0) {
-		mutex_enter(&vos->vos_outstanding_lock);
-		ASSERT(!vos->vos_serial_done[VOS_SERIAL_CREATE_POOL]);
-		vos->vos_serial_done[VOS_SERIAL_CREATE_POOL] = B_TRUE;
-		cv_broadcast(&vos->vos_outstanding_cv);
-		mutex_exit(&vos->vos_outstanding_lock);
+		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
+			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
+			vos->vos_result = SET_ERROR(EACCES);
+		}
+		agent_serial_done(vos, VOS_SERIAL_CREATE_POOL);
 	} else if (strcmp(type, AGENT_TYPE_END_TXG_DONE) == 0) {
 		mutex_enter(&vos->vos_stats_lock);
 		vos->vos_stats.voss_blocks_count =
@@ -1347,100 +1359,84 @@ agent_reader(void *arg)
 		update_features(vos->vos_vdev->vdev_spa,
 		    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
 
-		mutex_enter(&vos->vos_outstanding_lock);
-		ASSERT(!vos->vos_serial_done[VOS_SERIAL_END_TXG]);
-		vos->vos_serial_done[VOS_SERIAL_END_TXG] = B_TRUE;
-		cv_broadcast(&vos->vos_outstanding_cv);
-		mutex_exit(&vos->vos_outstanding_lock);
+		agent_serial_done(vos, VOS_SERIAL_END_TXG);
 	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_DONE) == 0) {
-		uint_t len;
-		uint8_t *arr;
-		int err = nvlist_lookup_uint8_array(nv, AGENT_UBERBLOCK,
-		    &arr, &len);
-		if (err == 0) {
-			ASSERT3U(len, <=, sizeof (uberblock_t));
-			bcopy(arr, &vos->vos_uberblock, len);
-
-			/*
-			 * We may be opening an uberblock from a pool
-			 * with an older on-disk format. To handle this,
-			 * we just zero out any uberblock members that
-			 * did not exist when the uberblock was written.
-			 */
-			if (len < sizeof (uberblock_t)) {
-				bzero(&vos->vos_uberblock + len,
-				    sizeof (uberblock_t) - len);
-			}
-			VERIFY0(nvlist_lookup_uint8_array(nv,
-			    AGENT_CONFIG, &arr, &len));
-			vos->vos_config = fnvlist_unpack((char *)arr, len);
-
-			update_features(vos->vos_vdev->vdev_spa,
-			    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
-		}
-
-		uint64_t next_block = fnvlist_lookup_uint64(nv,
-		    AGENT_NEXT_BLOCK);
-		vos->vos_next_block = next_block;
-
-		zfs_dbgmsg("got pool open done len=%u block=%llu",
-		    len, (u_longlong_t)next_block);
-
-		fnvlist_free(nv);
-		mutex_enter(&vos->vos_outstanding_lock);
-		ASSERT(!vos->vos_serial_done[VOS_SERIAL_OPEN_POOL]);
-		vos->vos_serial_done[VOS_SERIAL_OPEN_POOL] = B_TRUE;
-		vos->vos_open_completed = B_TRUE;
-		cv_broadcast(&vos->vos_outstanding_cv);
-		mutex_exit(&vos->vos_outstanding_lock);
-	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_FAILED) == 0) {
-		char *cause = fnvlist_lookup_string(nv, AGENT_CAUSE);
-		spa_t *spa = vos->vos_vdev->vdev_spa;
-		zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
-		if (strcmp(cause, "MMP") == 0) {
-			fnvlist_add_string(spa->spa_load_info,
-			    ZPOOL_CONFIG_MMP_HOSTNAME, fnvlist_lookup_string(nv,
-			    AGENT_HOSTNAME));
-			fnvlist_add_uint64(spa->spa_load_info,
-			    ZPOOL_CONFIG_MMP_STATE, MMP_STATE_ACTIVE);
-			fnvlist_add_uint64(spa->spa_load_info,
-			    ZPOOL_CONFIG_MMP_TXG, 0);
-			mutex_enter(&vos->vos_outstanding_lock);
-			vos->vos_result = SET_ERROR(EREMOTEIO);
-		} else if (strcmp(cause, "IO") == 0) {
-			char *message = fnvlist_lookup_string(nv,
-			    AGENT_MESSAGE);
-			zfs_dbgmsg("message=\"%s\"", message);
-			mutex_enter(&vos->vos_outstanding_lock);
-			if (strstr(message, "does not exist") != NULL) {
-				vos->vos_result = SET_ERROR(ENOENT);
+		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
+			spa_t *spa = vos->vos_vdev->vdev_spa;
+			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
+			if (strcmp(cause, "MMP") == 0) {
+				fnvlist_add_string(spa->spa_load_info,
+				    ZPOOL_CONFIG_MMP_HOSTNAME,
+				    fnvlist_lookup_string(nv, AGENT_HOSTNAME));
+				fnvlist_add_uint64(spa->spa_load_info,
+				    ZPOOL_CONFIG_MMP_STATE, MMP_STATE_ACTIVE);
+				fnvlist_add_uint64(spa->spa_load_info,
+				    ZPOOL_CONFIG_MMP_TXG, 0);
+				vos->vos_result = SET_ERROR(EREMOTEIO);
+			} else if (strcmp(cause, "IO") == 0) {
+				char *message = fnvlist_lookup_string(nv,
+				    AGENT_MESSAGE);
+				zfs_dbgmsg("message=\"%s\"", message);
+				if (strstr(message, "does not exist") != NULL) {
+					vos->vos_result = SET_ERROR(ENOENT);
+				} else {
+					vos->vos_result = SET_ERROR(EIO);
+				}
+			} else if (strcmp(cause, "checkpoint") == 0) {
+				zfs_dbgmsg("Failed to find checkpoint when "
+				    "attempting to rewind pool");
+				vos->vos_result =
+				    SET_ERROR(ZFS_ERR_NO_CHECKPOINT);
 			} else {
-				vos->vos_result = SET_ERROR(EIO);
+				ASSERT0(strcmp(cause, "feature"));
+				fnvlist_add_nvlist(spa->spa_load_info,
+				    ZPOOL_CONFIG_UNSUP_FEAT,
+				    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
+				if (fnvlist_lookup_boolean_value(nv,
+				    AGENT_CAN_READONLY)) {
+					fnvlist_add_boolean(spa->spa_load_info,
+					    ZPOOL_CONFIG_CAN_RDONLY);
+				}
+				vos->vos_result = SET_ERROR(ENOTSUP);
 			}
-		} else if (strcmp(cause, "checkpoint") == 0) {
-			zfs_dbgmsg("Failed to find checkpoint when attempting "
-			    "to rewind pool");
-			vos->vos_result = SET_ERROR(ZFS_ERR_NO_CHECKPOINT);
 		} else {
-			ASSERT0(strcmp(cause, "feature"));
-			fnvlist_add_nvlist(spa->spa_load_info,
-			    ZPOOL_CONFIG_UNSUP_FEAT, fnvlist_lookup_nvlist(nv,
-			    AGENT_FEATURES));
-			if (fnvlist_lookup_boolean_value(nv,
-			    AGENT_CAN_READONLY)) {
-				fnvlist_add_boolean(spa->spa_load_info,
-				    ZPOOL_CONFIG_CAN_RDONLY);
+			uint_t len;
+			uint8_t *arr;
+			int err = nvlist_lookup_uint8_array(nv,
+			    AGENT_UBERBLOCK, &arr, &len);
+			if (err == 0) {
+				ASSERT3U(len, <=, sizeof (uberblock_t));
+				bcopy(arr, &vos->vos_uberblock, len);
+
+				/*
+				 * We may be opening an uberblock from a pool
+				 * with an older on-disk format. To handle
+				 * this, we just zero out any uberblock members
+				 * that did not exist when the uberblock was
+				 * written.
+				 */
+				if (len < sizeof (uberblock_t)) {
+					bzero(&vos->vos_uberblock + len,
+					    sizeof (uberblock_t) - len);
+				}
+				VERIFY0(nvlist_lookup_uint8_array(nv,
+				    AGENT_CONFIG, &arr, &len));
+				vos->vos_config = fnvlist_unpack((char *)arr,
+				    len);
+
+				update_features(vos->vos_vdev->vdev_spa,
+				    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
 			}
 
-			mutex_enter(&vos->vos_outstanding_lock);
-			vos->vos_result = SET_ERROR(ENOTSUP);
-		}
+			uint64_t next_block = fnvlist_lookup_uint64(nv,
+			    AGENT_NEXT_BLOCK);
+			vos->vos_next_block = next_block;
 
-		ASSERT(!vos->vos_serial_done[VOS_SERIAL_OPEN_POOL]);
-		vos->vos_serial_done[VOS_SERIAL_OPEN_POOL] = B_TRUE;
-		cv_broadcast(&vos->vos_outstanding_cv);
-		mutex_exit(&vos->vos_outstanding_lock);
-		fnvlist_free(nv);
+			zfs_dbgmsg("got pool open done len=%u block=%llu",
+			    len, (u_longlong_t)next_block);
+		}
+		vos->vos_open_completed = B_TRUE;
+		agent_serial_done(vos, VOS_SERIAL_OPEN_POOL);
 	} else if (strcmp(type, AGENT_TYPE_READ_DONE) == 0) {
 		uint64_t req = fnvlist_lookup_uint64(nv,
 		    AGENT_REQUEST_ID);
@@ -1459,7 +1455,6 @@ agent_reader(void *arg)
 		VERIFY3U(len, ==, zio->io_size);
 		VERIFY3U(len, ==, abd_get_size(zio->io_abd));
 		abd_copy_from_buf(zio->io_abd, data, len);
-		fnvlist_free(nv);
 		zio_delay_interrupt(zio);
 	} else if (strcmp(type, AGENT_TYPE_WRITE_DONE) == 0) {
 		uint64_t req = fnvlist_lookup_uint64(nv,
@@ -1472,25 +1467,16 @@ agent_reader(void *arg)
 		zio_t *zio = agent_complete_zio(vos, req, token);
 		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
 		    zio->io_offset >> SPA_MINBLOCKSHIFT);
-		fnvlist_free(nv);
 		zio_delay_interrupt(zio);
 	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL_DONE) == 0) {
 		zfs_dbgmsg("got %s", type);
-		mutex_enter(&vos->vos_outstanding_lock);
-		ASSERT(!vos->vos_serial_done[VOS_SERIAL_CLOSE_POOL]);
-		vos->vos_serial_done[VOS_SERIAL_CLOSE_POOL] = B_TRUE;
-		cv_broadcast(&vos->vos_outstanding_cv);
-		mutex_exit(&vos->vos_outstanding_lock);
+		agent_serial_done(vos, VOS_SERIAL_CLOSE_POOL);
 		mutex_enter(&vos->vos_lock);
 		vos->vos_agent_thread_exit = B_TRUE;
 		mutex_exit(&vos->vos_lock);
 	} else if (strcmp(type, AGENT_TYPE_ENABLE_FEATURE_DONE) == 0) {
-		mutex_enter(&vos->vos_outstanding_lock);
-		ASSERT(!vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE]);
-		vos->vos_serial_done[VOS_SERIAL_ENABLE_FEATURE] = B_TRUE;
-		cv_broadcast(&vos->vos_outstanding_cv);
 		vos->vos_feature_enable = NULL;
-		mutex_exit(&vos->vos_outstanding_lock);
+		agent_serial_done(vos, VOS_SERIAL_ENABLE_FEATURE);
 	} else if (strcmp(type, AGENT_TYPE_GET_STATS_DONE) == 0) {
 		object_store_stats_call_t *caller, search;
 
@@ -1517,10 +1503,11 @@ agent_reader(void *arg)
 			zfs_dbgmsg("unexpected get stats done response: "
 			    "owner 0x%llx", (longlong_t)search.oss_owner);
 		}
-		fnvlist_free(nv);
 	} else {
 		zfs_dbgmsg("unrecognized response type!");
 	}
+
+	fnvlist_free(nv);
 	return (0);
 }
 
@@ -1766,14 +1753,20 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	    vd, 0, &p0, TS_RUN, defclsyspri);
 
 	if (vd->vdev_spa->spa_load_state == SPA_LOAD_CREATE) {
-		object_store_create_pool(vd);
+		error = object_store_create_pool(vd);
+		if (error != 0) {
+			zfs_dbgmsg("agent_create_pool failed with %d", error);
+			goto sock_ready;
+		}
 	}
 	error = agent_open_pool(vd, vos,
 	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_FALSE);
 	if (error != 0) {
 		ASSERT3U(vd->vdev_spa->spa_load_state, !=, SPA_LOAD_CREATE);
-		return (error);
+		goto sock_ready;
 	}
+
+sock_ready:
 
 	/*
 	 * Socket is now ready for communication, wake up
@@ -1790,11 +1783,13 @@ skip_open:
 	 * XXX - We can only support ~1EB since the metaslab weights
 	 * use some of the high order bits.
 	 */
-	*max_psize = *psize = (1ULL << 60) - 1;
-	*logical_ashift = vdev_object_store_logical_ashift;
-	*physical_ashift = vdev_object_store_physical_ashift;
+	if (!error) {
+		*max_psize = *psize = (1ULL << 60) - 1;
+		*logical_ashift = vdev_object_store_logical_ashift;
+		*physical_ashift = vdev_object_store_physical_ashift;
+	}
 
-	return (0);
+	return (error);
 }
 
 static void

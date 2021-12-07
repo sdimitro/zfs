@@ -106,10 +106,16 @@ impl RootConnectionState {
             let name = nvl.lookup_string("name")?;
             let object_access = Self::get_object_access(&nvl)?;
 
-            Pool::create(&object_access, name.to_str()?, guid).await;
             let mut response = NvList::new_unique_names();
             response.insert("Type", "pool create done").unwrap();
             response.insert("GUID", &guid.0).unwrap();
+
+            if let Err(err) = Pool::create(&object_access, name.to_str()?, guid).await {
+                error!("pool create failed: {:?}", &err);
+                response
+                    .insert("cause", err.to_string().replace('\n', "").as_str())
+                    .unwrap();
+            }
 
             maybe_die_with(|| format!("before sending response: {:?}", response));
             debug!("sending response: {:?}", response);
@@ -128,6 +134,8 @@ impl RootConnectionState {
             let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
             let syncing_txg = nvl.lookup_uint64("syncing_txg").ok().map(Txg);
             let mut response = NvList::new_unique_names();
+            response.insert("Type", "pool open done").unwrap();
+            response.insert("GUID", &guid.0).unwrap();
 
             let (pool, phys_opt, next_block) = match Pool::open(
                 object_access,
@@ -141,14 +149,12 @@ impl RootConnectionState {
             .await
             {
                 Err(PoolOpenError::Mmp(hostname)) => {
-                    response.insert("Type", "pool open failed").unwrap();
                     response.insert("cause", "MMP").unwrap();
                     response.insert("hostname", hostname.as_str()).unwrap();
                     debug!("sending response: {:?}", response);
                     return Ok(Some(response));
                 }
                 Err(PoolOpenError::Feature(FeatureError { features, readonly })) => {
-                    response.insert("Type", "pool open failed").unwrap();
                     response.insert("cause", "feature").unwrap();
                     let mut feature_nvl = NvList::new_unique_names();
                     for feature in features {
@@ -174,7 +180,6 @@ impl RootConnectionState {
                      * then, we just pass the root cause error message back to the kernel, and
                      * hope that it can present a usable error to the user.
                      */
-                    response.insert("Type", "pool open failed").unwrap();
                     response.insert("cause", "IO").unwrap();
                     response
                         .insert("message", e.root_cause().to_string().as_str())
@@ -183,7 +188,6 @@ impl RootConnectionState {
                     return Ok(Some(response));
                 }
                 Err(PoolOpenError::NoCheckpoint) => {
-                    response.insert("Type", "pool open failed").unwrap();
                     response.insert("cause", "checkpoint").unwrap();
                     debug!("sending response: {:?}", response);
                     return Ok(Some(response));
@@ -191,8 +195,6 @@ impl RootConnectionState {
                 Ok(x) => x,
             };
 
-            response.insert("Type", "pool open done").unwrap();
-            response.insert("GUID", &guid.0).unwrap();
             if let Some(phys) = phys_opt {
                 response
                     .insert("uberblock", &phys.get_zfs_uberblock()[..])

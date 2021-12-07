@@ -94,6 +94,8 @@ lazy_static! {
 
     pub static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
 
+    pub static ref CREATE_WAIT_DURATION: Duration = Duration::from_secs(get_tunable("create_wait_duration_secs", 30));
+
     // By default, retain metadata for as long as we would return Uberblocks in a block-based pool
     static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
 
@@ -310,6 +312,24 @@ impl PoolPhys {
                 ObjectAccessStatType::MetadataPut,
             )
             .await;
+    }
+
+    pub async fn put_timed(
+        &self,
+        object_access: &ObjectAccess,
+        timeout: Option<Duration>,
+    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+        maybe_die_with(|| format!("before putting {:#?}", self));
+        debug!("putting {:#?}", self);
+        let buf = serde_json::to_vec(&self).unwrap();
+        object_access
+            .put_object_timed(
+                Self::key(self.guid),
+                buf.into(),
+                ObjectAccessStatType::MetadataPut,
+                timeout,
+            )
+            .await
     }
 }
 
@@ -806,7 +826,11 @@ impl Pool {
         Ok(nvl)
     }
 
-    pub async fn create(object_access: &ObjectAccess, name: &str, guid: PoolGuid) {
+    pub async fn create(
+        object_access: &ObjectAccess,
+        name: &str,
+        guid: PoolGuid,
+    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
         let phys = PoolPhys {
             guid,
             name: name.to_string(),
@@ -815,7 +839,8 @@ impl Pool {
             checkpoint_txg: None,
         };
         // XXX make sure it doesn't already exist
-        phys.put(object_access).await;
+        phys.put_timed(object_access, Some(*CREATE_WAIT_DURATION))
+            .await
     }
 
     async fn open_from_txg(
