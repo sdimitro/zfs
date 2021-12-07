@@ -62,7 +62,7 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
     Ok(Uuid::parse_str(std::str::from_utf8(&bytes)?)?)
 }
 
-pub fn start(socket_dir: &str, cache_path: Option<&str>) {
+pub fn start(socket_dir: &str, cache_paths: Vec<&str>) {
     /*
      * Take an exclusive lock on a lock file. This prevents multiple agent
      * processes from operating out of the same socket_dir.
@@ -78,9 +78,9 @@ pub fn start(socket_dir: &str, cache_path: Option<&str>) {
             // Kick off zpool destroy tasks.
             pool_destroy::init_pool_destroyer(socket_dir).await;
 
-            let cache = match cache_path {
-                Some(path) => Some(ZettaCache::open(path).await),
-                None => None,
+            let cache = match cache_paths.is_empty() {
+                false => Some(ZettaCache::open(cache_paths).await),
+                true => None,
             };
 
             PublicServerState::start(socket_dir, cache.as_ref().cloned());

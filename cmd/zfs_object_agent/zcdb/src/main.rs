@@ -30,9 +30,14 @@ async fn main() {
         .about("ZFS ZettaCache Debugger")
         .version(GIT_VERSION)
         .arg(
-            Arg::with_name("device")
-                .help("ZettaCache Device")
-                .required(true),
+            Arg::with_name("cache-device")
+                .short("c")
+                .long("cache-device")
+                .value_name("PATH")
+                .help("File/device to use for ZettaCache")
+                .takes_value(true)
+                .multiple(true)
+                .number_of_values(1),
         )
         .subcommand(
             SubCommand::with_name("dump-structures")
@@ -71,7 +76,7 @@ async fn main() {
         .subcommand(SubCommand::with_name("space-usage").about("dump space usage statistics"))
         .get_matches();
 
-    let device = matches.value_of("device").unwrap();
+    let cache_paths = matches.values_of("cache-device").unwrap().collect();
     match matches.subcommand() {
         ("dump-structures", Some(subcommand_matches)) => {
             ZettaCacheDBCommand::issue_command(
@@ -82,7 +87,7 @@ async fn main() {
                         .operation_log_raw(subcommand_matches.is_present("operation-log-raw"))
                         .index_log_raw(subcommand_matches.is_present("index-log-raw")),
                 ),
-                device,
+                cache_paths,
             )
             .await;
         }
@@ -91,12 +96,13 @@ async fn main() {
                 ZettaCacheDBCommand::DumpSlabs(
                     DumpSlabsOptions::default().verbosity(subcommand_matches.occurrences_of("v")),
                 ),
-                device,
+                cache_paths,
             )
             .await;
         }
         ("space-usage", Some(_)) => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, device).await;
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, cache_paths)
+                .await;
         }
         _ => {
             matches.usage();

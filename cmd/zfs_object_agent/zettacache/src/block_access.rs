@@ -1,30 +1,29 @@
+use crate::base_types::DiskId;
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
-use anyhow::{anyhow, Result};
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use bincode::Options;
 use lazy_static::lazy_static;
 use libc::c_void;
 use log::*;
-use metered::common::*;
-use metered::hdr_histogram::AtomicHdrHistogram;
-use metered::metered;
-use metered::time_source::StdInstantMicros;
 use nix::errno::Errno;
 use nix::sys::stat::SFlag;
 use num::Num;
 use num::NumCast;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
+use std::fmt::Debug;
+use std::fmt::Display;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
-use std::sync::Arc;
+use std::os::unix::prelude::OpenOptionsExt;
 use std::time::Instant;
 use tokio::fs::File;
-use tokio::fs::OpenOptions;
-use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
-use tokio::task::JoinHandle;
 use util::get_tunable;
 use util::AlignedBytes;
 use util::AlignedVec;
@@ -32,9 +31,8 @@ use util::From64;
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
-    static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = get_tunable("disk_write_max_queue_depth", 32);
-    static ref DISK_WRITE_METADATA_MAX_QUEUE_DEPTH: usize =
-        get_tunable("disk_write_metadata_max_queue_depth", 32);
+    pub static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize =
+        get_tunable("disk_write_max_queue_depth", 32);
     static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
 }
 
@@ -48,14 +46,19 @@ struct BlockHeader {
 
 #[derive(Debug)]
 pub struct BlockAccess {
-    disk: File,
+    sector_size: usize,
+    disks: Vec<Disk>,
+    readonly: bool,
+}
+
+#[derive(Debug)]
+pub struct Disk {
+    file: File,
     readonly: bool,
     size: u64,
     sector_size: usize,
-    metrics: BlockAccessMetrics,
     outstanding_reads: Semaphore,
-    outstanding_data_writes: Arc<Semaphore>,
-    outstanding_metadata_writes: Arc<Semaphore>,
+    outstanding_writes: Semaphore,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -70,8 +73,6 @@ pub enum EncodeType {
     Bincode,
 }
 
-pub struct WritePermit(OwnedSemaphorePermit);
-
 // Generate ioctl function
 nix::ioctl_read!(ioctl_blkgetsize64, 0x12u8, 114u8, u64);
 nix::ioctl_read_bad!(ioctl_blksszget, 0x1268, usize);
@@ -81,20 +82,21 @@ const CUSTOM_OFLAGS: i32 = libc::O_DIRECT;
 #[cfg(not(target_os = "linux"))]
 const CUSTOM_OFLAGS: i32 = 0;
 
-// XXX this is very thread intensive.  On Linux, we can use "glommio" to use
-// io_uring for much lower overheads.  Or SPDK (which can use io_uring or nvme
-// hardware directly).
-#[metered(registry=BlockAccessMetrics)]
-impl BlockAccess {
-    pub async fn new(disk_path: &str, readonly: bool) -> BlockAccess {
-        let disk = OpenOptions::new()
-            .read(true)
-            .write(!readonly)
-            .custom_flags(CUSTOM_OFLAGS)
-            .open(disk_path)
-            .await
-            .unwrap();
-        let stat = nix::sys::stat::fstat(disk.as_raw_fd()).unwrap();
+impl Disk {
+    pub fn new(disk_path: &str, readonly: bool) -> Disk {
+        // Note: using std file open so that this func can be non-async.
+        // Although this is blocking from a tokio thread, it's used
+        // infrequently, and we're already blocking from the ioctls below.
+        let file = tokio::fs::File::from_std(
+            std::fs::OpenOptions::new()
+                .read(true)
+                .write(!readonly)
+                .custom_flags(CUSTOM_OFLAGS)
+                .open(disk_path)
+                .with_context(|| format!("opening disk '{}'", disk_path))
+                .unwrap(),
+        );
+        let stat = nix::sys::stat::fstat(file.as_raw_fd()).unwrap();
         trace!("stat: {:?}", stat);
         let mode = SFlag::from_bits_truncate(stat.st_mode);
         let sector_size;
@@ -103,13 +105,13 @@ impl BlockAccess {
             size = unsafe {
                 let mut cap: u64 = 0;
                 let cap_ptr = &mut cap as *mut u64;
-                ioctl_blkgetsize64(disk.as_raw_fd(), cap_ptr).unwrap();
+                ioctl_blkgetsize64(file.as_raw_fd(), cap_ptr).unwrap();
                 cap
             };
             sector_size = unsafe {
                 let mut ssz: usize = 0;
                 let ssz_ptr = &mut ssz as *mut usize;
-                ioctl_blksszget(disk.as_raw_fd(), ssz_ptr).unwrap();
+                ioctl_blksszget(file.as_raw_fd(), ssz_ptr).unwrap();
                 ssz
             };
         } else if mode.contains(SFlag::S_IFREG) {
@@ -118,43 +120,68 @@ impl BlockAccess {
         } else {
             panic!("{}: invalid file type {:?}", disk_path, mode);
         }
-
-        let this = BlockAccess {
-            disk,
+        let this = Disk {
+            file,
             readonly,
             size,
             sector_size,
-            metrics: Default::default(),
             outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
-            outstanding_data_writes: Arc::new(Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH)),
-            outstanding_metadata_writes: Arc::new(Semaphore::new(
-                *DISK_WRITE_METADATA_MAX_QUEUE_DEPTH,
-            )),
+            outstanding_writes: Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH),
         };
         info!("opening cache file {}: {:?}", disk_path, this);
 
         this
     }
+}
 
-    pub fn size(&self) -> u64 {
-        self.size
+// XXX this is very thread intensive.  On Linux, we can use "glommio" to use
+// io_uring for much lower overheads.  Or SPDK (which can use io_uring or nvme
+// hardware directly).
+impl BlockAccess {
+    pub fn new(disks: Vec<Disk>, readonly: bool) -> Self {
+        let sector_size = disks
+            .iter()
+            .reduce(|a, b| {
+                assert_eq!(a.sector_size, b.sector_size);
+                a
+            })
+            .unwrap()
+            .sector_size;
+        BlockAccess {
+            sector_size,
+            disks,
+            readonly,
+        }
     }
 
-    pub fn dump_metrics(&self) {
-        debug!("metrics: {:#?}", self.metrics);
+    /// Note: In the future we'll support device removal in which case the
+    /// DiskId's will probably not be sequential.  By using this accessor we
+    /// need not assume anything about the values inside the DiskId's.
+    pub fn disks(&self) -> impl Iterator<Item = DiskId> {
+        (0..u16::try_from(self.disks.len()).unwrap()).map(DiskId)
+    }
+
+    fn disk(&self, disk: DiskId) -> &Disk {
+        &self.disks[disk.0 as usize]
+    }
+
+    pub fn disk_size(&self, disk: DiskId) -> u64 {
+        self.disk(disk).size
+    }
+
+    pub fn total_capacity(&self) -> u64 {
+        self.disks().map(|disk| self.disk_size(disk)).sum()
     }
 
     // offset and length must be sector-aligned
-    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
-    #[measure(InFlight)]
-    #[measure(Throughput)]
-    #[measure(HitCount)]
     pub async fn read_raw(&self, extent: Extent) -> AlignedBytes {
-        assert_eq!(extent.size, self.round_up_to_sector(extent.size));
-        let fd = self.disk.as_raw_fd();
+        self.verify_aligned(extent.location.offset);
+        self.verify_aligned(extent.size);
+        let disk = self.disk(extent.location.disk);
+        let fd = disk.file.as_raw_fd();
         let sector_size = self.sector_size;
         let begin = Instant::now();
-        let _permit = self.outstanding_reads.acquire().await.unwrap();
+        let _permit = disk.outstanding_reads.acquire().await.unwrap();
         let bytes = tokio::task::spawn_blocking(move || {
             let mut v = AlignedVec::with_capacity(usize::from64(extent.size), sector_size);
             // By using the unsafe libc::pread() instead of
@@ -183,83 +210,31 @@ impl BlockAccess {
         bytes
     }
 
-    // Acquire a permit to write later.  This should be used only for data
-    // writes.  See the comment in write_raw() for details.
-    pub async fn acquire_write(&self) -> WritePermit {
+    // location.offset and bytes.len() must be sector-aligned.  However,
+    // bytes.alignment() need not be the sector size (it will be copied if not).
+    pub async fn write_raw(&self, location: DiskLocation, mut bytes: AlignedBytes) {
         assert!(
             !self.readonly,
             "attempting zettacache write in readonly mode"
         );
-        WritePermit(
-            self.outstanding_data_writes
-                .clone()
-                .acquire_owned()
-                .await
-                .unwrap(),
-        )
-    }
-
-    // offset and data.len() must be sector-aligned
-    // maybe this should take Bytes?
-    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
-    #[measure(InFlight)]
-    #[measure(Throughput)]
-    #[measure(HitCount)]
-    pub async fn write_raw(&self, location: DiskLocation, bytes: AlignedBytes) {
-        assert!(
-            !self.readonly,
-            "attempting zettacache write in readonly mode"
-        );
-        // We need a different semaphore for metadata writes, so that
-        // outstanding data write permits can't starve/deadlock metadata writes.
-        // We may block on locks (e.g. waiting on the ZettaCacheState lock)
-        // while holding a data write permit, but we can't while holding a
-        // metadata write permit.
-        let permit = WritePermit(
-            self.outstanding_metadata_writes
-                .clone()
-                .acquire_owned()
-                .await
-                .unwrap(),
-        );
-        self.write_raw_permit(permit, location, bytes)
-            .await
-            .unwrap();
-    }
-
-    // offset and data.len() must be sector-aligned
-    // maybe this should take Bytes?
-    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
-    #[measure(InFlight)]
-    #[measure(Throughput)]
-    #[measure(HitCount)]
-    pub fn write_raw_permit(
-        &self,
-        permit: WritePermit,
-        location: DiskLocation,
-        mut bytes: AlignedBytes,
-    ) -> JoinHandle<()> {
-        assert!(
-            !self.readonly,
-            "attempting zettacache write in readonly mode"
-        );
-        // directio requires the pointer to be sector-aligned
-        let fd = self.disk.as_raw_fd();
+        let disk = self.disk(location.disk);
+        let fd = disk.file.as_raw_fd();
         let length = bytes.len();
         let offset = location.offset;
         let alignment = bytes.alignment();
-        assert_eq!(offset, self.round_up_to_sector(offset));
-        assert_eq!(length, self.round_up_to_sector(length));
+        self.verify_aligned(offset);
+        self.verify_aligned(length);
 
+        // directio requires the pointer to be sector-aligned
         if alignment != self.round_up_to_sector(alignment) {
             // XXX copying, this happens for AlignedBytes created from a plain Bytes
             bytes = AlignedBytes::copy_from_slice(&bytes, self.sector_size)
         }
         assert_eq!(bytes.as_ptr() as usize % self.sector_size, 0);
         let begin = Instant::now();
+        let _permit = disk.outstanding_writes.acquire().await.unwrap();
         tokio::task::spawn_blocking(move || {
             nix::sys::uio::pwrite(fd, &bytes, i64::try_from(offset).unwrap()).unwrap();
-            drop(permit);
             trace!(
                 "write({:?} len={}) returned in {}us",
                 location,
@@ -267,11 +242,24 @@ impl BlockAccess {
                 begin.elapsed().as_micros()
             );
         })
+        .await
+        .unwrap();
     }
 
     pub fn round_up_to_sector<N: Num + NumCast + Copy>(&self, n: N) -> N {
         let sector_size: N = NumCast::from(self.sector_size).unwrap();
         (n + sector_size - N::one()) / sector_size * sector_size
+    }
+
+    pub fn verify_aligned<N: Num + NumCast + Copy + Debug + Display>(&self, n: N) {
+        let sector_size: N = NumCast::from(self.sector_size).unwrap();
+        assert_eq!(
+            n % sector_size,
+            N::zero(),
+            "{} is not sector-aligned ({})",
+            n,
+            sector_size
+        );
     }
 
     // XXX ideally this would return a sector-aligned address, so it can be used directly for a directio write

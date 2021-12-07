@@ -80,11 +80,11 @@ impl ZettaCacheIndexPhys {
     }
 
     pub fn log_bytes(&self) -> u64 {
-        self.log.num_bytes()
+        self.log.bytes()
     }
 
-    pub fn log_reserved_bytes(&self) -> u64 {
-        self.log.num_reserved_bytes()
+    pub fn log_capacity_bytes(&self) -> u64 {
+        self.log.capacity_bytes()
     }
 }
 

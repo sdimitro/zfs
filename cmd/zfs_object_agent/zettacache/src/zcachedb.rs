@@ -106,13 +106,12 @@ impl DumpSlabsOptions {
 }
 
 impl ZettaCacheDBCommand {
-    pub async fn issue_command(command: ZettaCacheDBCommand, path: &str) {
-        if let Some(handle) = ZCacheDBHandle::open(path).await {
-            match command {
-                ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
-                ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
-                ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_free_space().await,
-            }
+    pub async fn issue_command(command: ZettaCacheDBCommand, paths: Vec<&str>) {
+        let handle = ZCacheDBHandle::open(paths).await.unwrap();
+        match command {
+            ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
+            ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
+            ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_free_space().await,
         }
     }
 }

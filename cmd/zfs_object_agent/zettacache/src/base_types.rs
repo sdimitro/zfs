@@ -1,6 +1,7 @@
 use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
+use std::borrow::Borrow;
 use std::fmt::*;
 use std::ops::Add;
 use std::ops::Sub;
@@ -35,14 +36,18 @@ impl BlockId {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+pub struct DiskId(pub u16);
+
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct DiskLocation {
-    // note: will need to add disk ID to support multiple disks
+    pub disk: DiskId,
     pub offset: u64,
 }
 impl Add<u64> for DiskLocation {
     type Output = DiskLocation;
     fn add(self, rhs: u64) -> Self::Output {
         DiskLocation {
+            disk: self.disk,
             offset: self.offset + rhs,
         }
     }
@@ -53,6 +58,14 @@ impl Add<usize> for DiskLocation {
         self + rhs as u64
     }
 }
+impl Sub<DiskLocation> for DiskLocation {
+    type Output = u64;
+
+    fn sub(self, rhs: DiskLocation) -> Self::Output {
+        assert_eq!(self.disk, rhs.disk);
+        self.offset - rhs.offset
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct Extent {
@@ -61,12 +74,35 @@ pub struct Extent {
 }
 
 impl Extent {
+    pub fn new(disk: DiskId, offset: u64, size: u64) -> Extent {
+        assert_eq!(offset % 512, 0, "offset {} is not 512-aligned", offset);
+        assert_eq!(size % 512, 0, "size {} is not 512-aligned", size);
+        Extent {
+            location: DiskLocation { disk, offset },
+            size,
+        }
+    }
+
     pub fn range(&self, relative_offset: u64, size: u64) -> Extent {
         assert_ge!(self.size, relative_offset + size);
         Extent {
             location: self.location + relative_offset,
             size,
         }
+    }
+
+    /// returns true if `sub` is entirely contained within this extent
+    pub fn contains(&self, sub: &Extent) -> bool {
+        sub.location.disk == self.location.disk
+            && sub.location.offset >= self.location.offset
+            && sub.location.offset + sub.size <= self.location.offset + self.size
+    }
+}
+
+/// This allows Extents to be compared by their `location`s, ignoring the `size`s.
+impl Borrow<DiskLocation> for Extent {
+    fn borrow(&self) -> &DiskLocation {
+        &self.location
     }
 }
 

@@ -4,6 +4,7 @@
 #![warn(clippy::cast_sign_loss)]
 
 mod bitmap_range_iterator;
+mod btreemap_ext;
 mod die;
 mod from64;
 mod lock_set;
@@ -15,6 +16,7 @@ mod tunable;
 mod vec_ext;
 
 pub use bitmap_range_iterator::BitmapRangeIterator;
+pub use btreemap_ext::iter_wrapping;
 pub use die::maybe_die_with;
 pub use from64::From64;
 pub use lock_set::LockSet;

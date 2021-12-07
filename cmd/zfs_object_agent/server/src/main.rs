@@ -38,12 +38,14 @@ fn main() {
                 .takes_value(true),
         )
         .arg(
-            Arg::with_name("cache-file")
+            Arg::with_name("cache-device")
                 .short("c")
-                .long("cache-file")
-                .value_name("FILE")
+                .long("cache-device")
+                .value_name("PATH")
                 .help("File/device to use for ZettaCache")
-                .takes_value(true),
+                .takes_value(true)
+                .multiple(true)
+                .number_of_values(1),
         )
         .arg(
             Arg::with_name("config-file")
@@ -143,7 +145,9 @@ fn main() {
         }
         _ => {
             let socket_dir = matches.value_of("socket-dir").unwrap();
-            let cache_path = matches.value_of("cache-file");
+            let cache_paths = matches
+                .values_of("cache-device")
+                .map_or(Vec::new(), |values| values.collect());
 
             util::setup_logging(
                 matches.occurrences_of("verbosity"),
@@ -184,7 +188,7 @@ fn main() {
             // trace!() can be used indiscriminately.
             trace!("logging level TRACE enabled");
 
-            zettaobject::init::start(socket_dir, cache_path);
+            zettaobject::init::start(socket_dir, cache_paths);
         }
     }
 }

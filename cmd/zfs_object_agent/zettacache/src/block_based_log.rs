@@ -98,9 +98,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                 let extent_bytes = block_access.read_raw(truncated_extent).await;
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
-                    let chunk_location = DiskLocation {
-                        offset: extent.location.offset + total_consumed as u64,
-                    };
+                    let chunk_location = extent.location.offset + total_consumed as u64;
                     trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
                     // XXX handle checksum error here
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
@@ -136,7 +134,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         }
     }
 
-    pub fn len_bytes(&self) -> u64 {
+    pub fn bytes(&self) -> u64 {
         self.next_chunk_offset.0
     }
 
@@ -185,11 +183,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummaryPhys<T> {
         self.chunk_summary.iter_chunks(block_access)
     }
 
-    pub fn num_bytes(&self) -> u64 {
-        self.chunk_summary.len_bytes() + self.this.len_bytes()
+    pub fn bytes(&self) -> u64 {
+        self.chunk_summary.bytes() + self.this.bytes()
     }
 
-    pub fn num_reserved_bytes(&self) -> u64 {
+    pub fn capacity_bytes(&self) -> u64 {
         self.chunk_summary.capacity_bytes() + self.this.capacity_bytes()
     }
 }
@@ -384,15 +382,13 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 let offset_within_extent = self.phys.next_chunk_offset.0 - offset.0;
                 // The last extent should go at least to the end of the chunks.
                 assert_le!(offset_within_extent, extent.size);
-                Extent {
-                    location: DiskLocation {
-                        offset: extent.location.offset + offset_within_extent,
-                    },
-                    size: extent.size - offset_within_extent,
-                }
+                extent.range(offset_within_extent, extent.size - offset_within_extent)
             }
             None => Extent {
-                location: DiskLocation { offset: 0 },
+                location: DiskLocation {
+                    disk: DiskId(0),
+                    offset: 0,
+                },
                 size: 0,
             },
         }

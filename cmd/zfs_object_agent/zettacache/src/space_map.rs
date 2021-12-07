@@ -1,25 +1,18 @@
-use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
-use crate::block_access::*;
+use crate::base_types::OnDisk;
+use crate::block_access::BlockAccess;
 use crate::block_allocator::SlabGeneration;
 use crate::block_allocator::SlabId;
-use crate::block_based_log::*;
+use crate::block_based_log::BlockBasedLog;
+use crate::block_based_log::BlockBasedLogEntry;
+use crate::block_based_log::BlockBasedLogPhys;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
-use crate::{
-    base_types::OnDisk,
-    block_based_log::{BlockBasedLog, BlockBasedLogEntry},
-};
 use futures::future;
-use futures::stream::*;
-use serde::{Deserialize, Serialize};
+use futures::stream::StreamExt;
+use serde::Deserialize;
+use serde::Serialize;
 use std::sync::Arc;
-
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-pub struct SpaceMapExtent {
-    pub offset: u64,
-    pub size: u64,
-}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct MarkGenerationEntry {
@@ -29,8 +22,8 @@ pub struct MarkGenerationEntry {
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub enum SpaceMapEntry {
-    Alloc(SpaceMapExtent),
-    Free(SpaceMapExtent),
+    Alloc(Extent),
+    Free(Extent),
     MarkGeneration(MarkGenerationEntry),
 }
 impl OnDisk for SpaceMapEntry {}
@@ -38,8 +31,6 @@ impl BlockBasedLogEntry for SpaceMapEntry {}
 
 pub struct SpaceMap {
     log: BlockBasedLog<SpaceMapEntry>,
-    coverage: SpaceMapExtent,
-
     // This is only used currently for printing out the ideal size that the
     // spacemap would have if it was condensed to our logs.
     alloc_entries: u64,
@@ -48,16 +39,14 @@ pub struct SpaceMap {
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct SpaceMapPhys {
     log: BlockBasedLogPhys<SpaceMapEntry>,
-    coverage: SpaceMapExtent,
     alloc_entries: u64,
 }
 impl OnDisk for SpaceMapPhys {}
 
 impl SpaceMapPhys {
-    pub fn new(offset: u64, size: u64) -> SpaceMapPhys {
+    pub fn new() -> SpaceMapPhys {
         SpaceMapPhys {
             log: Default::default(),
-            coverage: SpaceMapExtent { offset, size },
             alloc_entries: 0,
         }
     }
@@ -66,17 +55,8 @@ impl SpaceMapPhys {
         self.log.claim(builder);
     }
 
-    pub fn coverage(&self) -> Extent {
-        Extent {
-            location: DiskLocation {
-                offset: self.coverage.offset,
-            },
-            size: self.coverage.size,
-        }
-    }
-
-    pub fn len_bytes(&self) -> u64 {
-        self.log.len_bytes()
+    pub fn bytes(&self) -> u64 {
+        self.log.bytes()
     }
 
     pub fn capacity_bytes(&self) -> u64 {
@@ -92,7 +72,6 @@ impl SpaceMap {
     ) -> SpaceMap {
         SpaceMap {
             log: BlockBasedLog::open(block_access, extent_allocator, phys.log),
-            coverage: phys.coverage,
             alloc_entries: phys.alloc_entries,
         }
     }
@@ -110,18 +89,16 @@ impl SpaceMap {
             .await;
     }
 
-    pub fn alloc(&mut self, offset: u64, size: u64) {
-        if size != 0 {
-            self.log
-                .append(SpaceMapEntry::Alloc(SpaceMapExtent { offset, size }));
+    pub fn alloc(&mut self, extent: Extent) {
+        if extent.size != 0 {
+            self.log.append(SpaceMapEntry::Alloc(extent));
             self.alloc_entries += 1;
         }
     }
 
-    pub fn free(&mut self, offset: u64, size: u64) {
-        if size != 0 {
-            self.log
-                .append(SpaceMapEntry::Free(SpaceMapExtent { offset, size }));
+    pub fn free(&mut self, extent: Extent) {
+        if extent.size != 0 {
+            self.log.append(SpaceMapEntry::Free(extent));
         }
     }
 
@@ -136,25 +113,15 @@ impl SpaceMap {
     pub async fn flush(&mut self) -> SpaceMapPhys {
         SpaceMapPhys {
             log: self.log.flush().await,
-            coverage: self.coverage,
             alloc_entries: self.alloc_entries,
         }
     }
 
-    pub fn get_coverage(&self) -> Extent {
-        Extent {
-            location: DiskLocation {
-                offset: self.coverage.offset,
-            },
-            size: self.coverage.size,
-        }
-    }
-
-    pub fn get_total_entries(&self) -> u64 {
+    pub fn total_entries(&self) -> u64 {
         self.log.len()
     }
 
-    pub fn get_alloc_entries(&self) -> u64 {
+    pub fn alloc_entries(&self) -> u64 {
         self.alloc_entries
     }
 
