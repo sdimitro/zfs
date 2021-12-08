@@ -309,6 +309,16 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
             ['SKIP', object_store_skip],
         'cli_root/zpool_import/zpool_import_missing_002_pos':
             ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_004_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_005_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_print_repairing':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_offline_device':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_multiple_copies':
+            ['SKIP', object_store_skip],
     })
 
 #

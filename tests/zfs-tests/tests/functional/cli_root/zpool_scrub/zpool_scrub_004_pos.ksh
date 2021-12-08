@@ -44,6 +44,10 @@
 #	5. Verify scrub failed until the resilver completed
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 function cleanup
 {
 	log_must set_tunable32 SCAN_SUSPEND_PROGRESS 0

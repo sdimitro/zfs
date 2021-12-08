@@ -45,6 +45,10 @@
 # Ported from script used to reproduce issue #5806
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 function cleanup

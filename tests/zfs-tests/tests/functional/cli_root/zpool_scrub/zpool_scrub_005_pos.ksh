@@ -42,6 +42,10 @@
 #	3. Try it twice, verify both of them work fine.
 #
 
+if use_object_store; then
+    log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 log_assert "When scrubbing, detach device should not break system."

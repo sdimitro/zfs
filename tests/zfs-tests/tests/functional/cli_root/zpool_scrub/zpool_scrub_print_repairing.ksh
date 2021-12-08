@@ -36,6 +36,10 @@
 #	4. Verify we see "(repairing)" on the bad vdev
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 log_assert "Verify we see '(repairing)' while scrubbing a bad vdev."
