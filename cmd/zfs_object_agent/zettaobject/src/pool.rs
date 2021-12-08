@@ -59,6 +59,7 @@ use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::InsertSource;
 use zettacache::LookupResponse;
+use zettacache::LookupSource;
 use zettacache::ZettaCache;
 
 lazy_static! {
@@ -1641,7 +1642,7 @@ impl Pool {
             false => None,
         };
         if let Some(cache) = cache {
-            match cache.lookup(guid, block, true).await {
+            match cache.lookup(guid, block, LookupSource::Write).await {
                 LookupResponse::Present(_) => {
                     // Surprisingly, the BlockId may be in the cache even
                     // when writing a "new" block, if the system crashed or
@@ -1709,7 +1710,7 @@ impl Pool {
                     bytes
                 }
                 false => match cache
-                    .lookup(self.state.shared_state.guid, block, false)
+                    .lookup(self.state.shared_state.guid, block, LookupSource::Read)
                     .await
                 {
                     LookupResponse::Present((cached_bytes, _key, _value)) => cached_bytes.into(),
@@ -1728,8 +1729,13 @@ impl Pool {
                                 .blocks
                                 .into_iter()
                                 .map(|(b, bytes)| async move {
-                                    if let LookupResponse::Absent(key) =
-                                        cache.lookup(self.state.shared_state.guid, b, true).await
+                                    if let LookupResponse::Absent(key) = cache
+                                        .lookup(
+                                            self.state.shared_state.guid,
+                                            b,
+                                            LookupSource::Write,
+                                        )
+                                        .await
                                     {
                                         cache
                                             .insert(

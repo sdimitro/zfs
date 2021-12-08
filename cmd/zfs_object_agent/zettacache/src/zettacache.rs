@@ -21,6 +21,7 @@ use futures::stream::*;
 use futures::Future;
 use lazy_static::lazy_static;
 use log::*;
+use lru::LruCache;
 use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
@@ -30,17 +31,22 @@ use serde::{Deserialize, Serialize};
 use std::cmp::Ordering;
 use std::collections::btree_map;
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
+use std::mem;
 use std::ops::Bound::{Excluded, Unbounded};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
+use sysinfo::System;
+use sysinfo::SystemExt;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep_until, timeout_at};
 use util::get_tunable;
 use util::maybe_die_with;
 use util::nice_p2size;
 use util::AlignedBytes;
+use util::From64;
 use util::LockSet;
 use util::LockedItem;
 use util::MutexExt;
@@ -59,6 +65,8 @@ lazy_static! {
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
     static ref CACHE_INSERT_BLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_blocking_buffer_bytes", 256_000_000);
     static ref CACHE_INSERT_NONBLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_nonblocking_buffer_bytes", 256_000_000);
+
+    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -162,6 +170,7 @@ enum PendingChange {
 #[derive(Clone)]
 pub struct ZettaCache {
     block_access: Arc<BlockAccess>,
+
     // lock ordering: index first then state
     index: Arc<tokio::sync::RwLock<ZettaCacheIndex>>,
     // XXX may need to break up this big lock.  At least we aren't holding it while doing i/o
@@ -459,6 +468,7 @@ struct ZettaCacheState {
     pending_changes: BTreeMap<IndexKey, PendingChange>,
     // Keep state associated with any on-going merge here
     merging_state: Option<Arc<MergeState>>,
+    index_cache: LruCache<IndexKey, IndexValue>,
     // XXX Given that we have to lock the entire State to do anything, we might
     // get away with this being a Rc?  And the ExtentAllocator doesn't really
     // need the lock inside it.  But hopefully we split up the big State lock
@@ -491,6 +501,12 @@ pub enum InsertSource {
     Read,
     SpeculativeRead,
     Write,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub enum LookupSource {
+    Write,
+    Read,
 }
 
 #[metered(registry=ZettaCacheMetrics)]
@@ -653,6 +669,22 @@ impl ZettaCache {
         )
         .await;
 
+        let mut sysinfo = System::new();
+        sysinfo.refresh_system();
+        let system_memory = usize::from64(sysinfo.total_memory() * 1024);
+        let index_cache_entries_bytes = (*INDEX_CACHE_ENTRIES_MEM_PCT * system_memory) / 100;
+        let index_cache_entry_size = mem::size_of::<IndexKey>() + mem::size_of::<IndexValue>();
+        let index_cache_cap =
+            (((*INDEX_CACHE_ENTRIES_MEM_PCT) * system_memory) / 100) / index_cache_entry_size;
+        info!(
+            "index-cache capacity set to {} entries [{}% of {} - {} with entry size {}]",
+            index_cache_cap,
+            *INDEX_CACHE_ENTRIES_MEM_PCT,
+            nice_p2size(system_memory as u64),
+            nice_p2size(index_cache_entries_bytes as u64),
+            nice_p2size(index_cache_entry_size as u64)
+        );
+
         // XXX would be nice to periodically load the operation_log and verify
         // that our state's pending_changes & atime_histogram match it
         let mut atime_histogram = index.atime_histogram.clone();
@@ -663,6 +695,7 @@ impl ZettaCache {
             block_access: block_access.clone(),
             pending_changes,
             merging_state: None,
+            index_cache: LruCache::new(index_cache_cap),
             atime_histogram,
             size_histogram: checkpoint.size_histogram,
             operation_log,
@@ -942,7 +975,12 @@ impl ZettaCache {
     #[measure(InFlight)]
     #[measure(Throughput)]
     #[measure(HitCount)]
-    pub async fn lookup(&self, guid: PoolGuid, block: BlockId, from_write: bool) -> LookupResponse {
+    pub async fn lookup(
+        &self,
+        guid: PoolGuid,
+        block: BlockId,
+        source: LookupSource,
+    ) -> LookupResponse {
         // Hold the index lock over the whole operation
         // so that the index can't change after we get the value from it.
         // Lock ordering requres that we lock the index before locking the state.
@@ -953,7 +991,7 @@ impl ZettaCache {
             // We don't want to hold the state lock while reading from disk so we
             // use lock_non_send() to ensure that we can't hold it across .await.
             let mut state = self.state.lock_non_send().await;
-            if !from_write {
+            if matches!(source, LookupSource::Read) {
                 state.size_histogram.lookup();
             }
 
@@ -963,12 +1001,7 @@ impl ZettaCache {
                         PendingChange::Insert(value)
                         | PendingChange::RemoveThenInsert(value)
                         | PendingChange::UpdateAtime(value) => {
-                            if !from_write {
-                                // Add an entry to the hit-by-size histogram
-                                let size = state.atime_histogram.size_at(value.atime);
-                                state.size_histogram.hit(size);
-                            }
-                            Some(state.lookup(key, value))
+                            Some(state.lookup(key, value, source))
                         }
                         PendingChange::Remove() => {
                             // Pending change says this has been removed
@@ -977,35 +1010,32 @@ impl ZettaCache {
                     }
                 }
                 None => {
-                    // No pending change in current state; need to look in merging state
                     if let Some(ms) = &state.merging_state {
-                        let eviction_cutoff = ms.eviction_cutoff;
-                        ms.old_pending_changes
-                            .get(&key)
-                            .copied()
-                            .map(|pc| match pc {
+                        if let Some(pc) = ms.old_pending_changes.get(&key).copied() {
+                            match pc {
                                 PendingChange::Insert(value)
                                 | PendingChange::RemoveThenInsert(value)
                                 | PendingChange::UpdateAtime(value) => {
-                                    // if this block's atime is before the eviction cutoff, return none
-                                    if value.atime >= eviction_cutoff {
-                                        if !from_write {
-                                            // Add an entry to the hit-by-size histogram
-                                            let size = state.atime_histogram.size_at(value.atime);
-                                            state.size_histogram.hit(size);
-                                        }
-                                        state.lookup(key, value)
-                                    } else {
-                                        data_reader_none()
-                                    }
+                                    Some(state.lookup(key, value, source))
                                 }
                                 PendingChange::Remove() => {
                                     // Pending change says this has been removed
-                                    data_reader_none()
+                                    Some(data_reader_none())
                                 }
-                            })
+                            }
+                        } else {
+                            state
+                                .index_cache
+                                .get(&key)
+                                .copied()
+                                .map(|value| state.lookup(key, value, source))
+                        }
                     } else {
-                        None
+                        state
+                            .index_cache
+                            .get(&key)
+                            .copied()
+                            .map(|value| state.lookup(key, value, source))
                     }
                 }
             }
@@ -1025,7 +1055,11 @@ impl ZettaCache {
             }
         }
 
-        trace!("lookup has no pending_change; checking index for {:?}", key);
+        trace!(
+            "lookup has no pending_change and is absent from the index-cache; checking index for {:?}",
+            key
+        );
+
         match index.log.lookup_by_key(&key, |entry| entry.key).await {
             None => {
                 // key not in index
@@ -1046,19 +1080,12 @@ impl ZettaCache {
                         }
                     }
 
-                    state.lookup_with_value_from_index(key, Some(entry.value))
+                    state.lookup_with_value_from_index(key, Some(entry.value), source)
                 };
 
                 // read data from location indicated by index
                 match read_data_fut.await {
                     Some((vec, value)) => {
-                        if !from_write {
-                            let mut state = self.state.lock_non_send().await;
-                            // Add an entry to the hit-by-size histogram
-                            // Use the atime from the index entry so that we properly update hits-by-size
-                            let size = state.atime_histogram.size_at(entry.value.atime);
-                            state.size_histogram.hit(size);
-                        }
                         self.cache_hit_after_index_read(&key);
                         // We return the IndexValue from the DataReader, which
                         // has been updated to the current atime as a result of
@@ -1159,7 +1186,7 @@ impl ZettaCache {
 
     pub async fn heal(&self, guid: PoolGuid, block: BlockId, bytes: AlignedBytes) {
         if let LookupResponse::Present((cached_bytes, locked_key, value)) =
-            self.lookup(guid, block, true).await
+            self.lookup(guid, block, LookupSource::Write).await
         {
             if *cached_bytes != *bytes {
                 if bytes.len() == value.size as usize {
@@ -1443,10 +1470,18 @@ fn data_reader_none() -> DataReader {
 }
 
 impl ZettaCacheState {
+    fn eviction_cutoff(&self) -> Atime {
+        match &self.merging_state {
+            Some(ms) => ms.eviction_cutoff,
+            None => self.atime_histogram.first(),
+        }
+    }
+
     fn lookup_with_value_from_index(
         &mut self,
         key: IndexKey,
         value_from_index_opt: Option<IndexValue>,
+        source: LookupSource,
     ) -> DataReader {
         // Note: we're here because there was no PendingChange for this key, but
         // since we dropped the lock, a PendingChange may have been inserted
@@ -1468,21 +1503,20 @@ impl ZettaCacheState {
             }
         };
 
-        self.lookup(key, value)
+        self.lookup(key, value, source)
     }
 
-    fn lookup(&mut self, key: IndexKey, mut value: IndexValue) -> DataReader {
+    fn lookup(&mut self, key: IndexKey, mut value: IndexValue, source: LookupSource) -> DataReader {
         // If value.atime is before eviction cutoff, return a cache miss
-        if let Some(ms) = &self.merging_state {
-            if value.atime < ms.eviction_cutoff {
-                trace!(
-                    "cache miss: {:?} at {:?} was prior to eviction cutoff {:?}",
-                    key,
-                    value,
-                    ms.eviction_cutoff
-                );
-                return data_reader_none();
-            }
+        let cutoff = self.eviction_cutoff();
+        if value.atime < cutoff {
+            trace!(
+                "cache miss: {:?} at {:?} was prior to eviction cutoff {:?}",
+                key,
+                value,
+                cutoff
+            );
+            return data_reader_none();
         }
         trace!("cache hit: reading {:?} from {:?}", key, value);
         if value.atime != self.atime {
@@ -1512,7 +1546,11 @@ impl ZettaCacheState {
                     .insert(key, PendingChange::UpdateAtime(value));
             }
         }
-
+        if matches!(source, LookupSource::Read) {
+            // Add an entry to the hit-by-size histogram
+            let size = self.atime_histogram.size_at(value.atime);
+            self.size_histogram.hit(size);
+        }
         // If there's a write to this location in progress, we will need to wait for it to complete before reading.
         // Since we won't be able to remove the entry from outstanding_writes after we wait, we just get the semaphore.
         let write_sem_opt = self
@@ -1947,6 +1985,23 @@ impl ZettaCacheState {
         // Free up the space used by the old index and rotate in the new index
         index.clear();
         *index = next_index;
+
+        // Populate index_cache with old_pending_changes
+        for (&key, &pc) in &merging_state.old_pending_changes {
+            match pc {
+                PendingChange::Insert(value)
+                | PendingChange::UpdateAtime(value)
+                | PendingChange::RemoveThenInsert(value) => {
+                    self.index_cache.put(key, value);
+                }
+                PendingChange::Remove() => {
+                    // LruCache.pop() doesn't blow up if the key is not part of
+                    // the cache - it just returns None. Thus it is safe to use
+                    // here unconditionally.
+                    self.index_cache.pop(&key);
+                }
+            }
+        }
 
         self.merging_state = None;
     }
