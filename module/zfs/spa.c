@@ -9202,7 +9202,7 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 	uint64_t txg = tx->tx_txg;
 	bplist_t *free_bpl = &spa->spa_free_bplist[txg & TXG_MASK];
 
-	if (spa_is_object_based(spa)) {
+	if (spa_is_object_based(spa) && txg <= spa_final_dirty_txg(spa)) {
 		spa_sync_restore_mos_stats(spa);
 	}
 
@@ -9276,7 +9276,7 @@ spa_sync_iterate_to_convergence(spa_t *spa, dmu_tx_t *tx)
 		spa_sync_deferred_frees(spa, tx);
 	} while (dmu_objset_is_dirty(mos, txg));
 
-	if (spa_is_object_based(spa)) {
+	if (spa_is_object_based(spa) && txg <= spa_final_dirty_txg(spa)) {
 		spa_sync_save_mos_stats(spa);
 	}
 
