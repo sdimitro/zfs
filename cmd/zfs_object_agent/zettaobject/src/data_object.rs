@@ -11,14 +11,13 @@ use std::fmt::Display;
 use std::time::Instant;
 use zettacache::base_types::*;
 
-const NUM_DATA_PREFIXES: u64 = 64;
+pub const NUM_DATA_PREFIXES: u64 = 64;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub struct DataObjectHeader {
     pub guid: PoolGuid,      // redundant with key, for verification
     pub object: ObjectId,    // redundant with key, for verification
     pub blocks_size: u32,    // sum of blocks.values().len()
-    pub min_block: BlockId,  // inclusive (all blocks are >= min_block)
     pub next_block: BlockId, // exclusive (all blocks are < next_block)
 
     // Note: if this object was rewritten to consolidate adjacent objects, the
@@ -43,12 +42,7 @@ pub struct DataObject {
 
 impl DataObject {
     pub fn key(guid: PoolGuid, object: ObjectId) -> String {
-        format!(
-            "zfs/{}/data/{:03}/{}",
-            guid,
-            object.0 % NUM_DATA_PREFIXES,
-            object
-        )
+        format!("zfs/{}/data/{:03}/{}", guid, object.prefix(), object)
     }
 
     // Could change this to return an Iterator
@@ -61,11 +55,11 @@ impl DataObject {
     }
 
     pub fn new(guid: PoolGuid, object: ObjectId, next_block: BlockId, txg: Txg) -> Self {
+        assert_eq!(object.as_min_block(), next_block);
         DataObject {
             header: DataObjectHeader {
                 guid,
                 object,
-                min_block: next_block,
                 next_block,
                 min_txg: txg,
                 max_txg: txg,
@@ -184,9 +178,12 @@ impl DataObject {
     fn verify(&self) {
         assert_eq!(self.header.blocks_size, self.calculate_blocks_size());
         assert_le!(self.header.min_txg, self.header.max_txg);
-        assert_le!(self.header.min_block, self.header.next_block);
+        assert_le!(self.header.object.as_min_block(), self.header.next_block);
         if !self.blocks.is_empty() {
-            assert_le!(self.header.min_block, self.blocks.keys().min().unwrap());
+            assert_le!(
+                self.header.object.as_min_block(),
+                self.blocks.keys().min().unwrap()
+            );
             assert_gt!(self.header.next_block, self.blocks.keys().max().unwrap());
         }
     }
@@ -208,11 +205,10 @@ impl Display for DataObject {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{:?}: blocks={} bytes={} BlockId[{},{}) TXG[{},{}]",
+            "{:?}: blocks={} bytes={} next={:?} TXG[{},{}]",
             self.header.object,
             self.blocks.len(),
             self.header.blocks_size,
-            self.header.min_block,
             self.header.next_block,
             self.header.min_txg.0,
             self.header.max_txg.0,

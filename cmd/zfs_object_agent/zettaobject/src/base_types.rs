@@ -1,6 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fmt::*;
-use zettacache::base_types::OnDisk;
+use zettacache::base_types::{BlockId, OnDisk};
+
+use crate::data_object::NUM_DATA_PREFIXES;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct Txg(pub u64);
@@ -22,7 +24,7 @@ impl Txg {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-pub struct ObjectId(pub u64);
+pub struct ObjectId(u64);
 impl OnDisk for ObjectId {}
 impl Display for ObjectId {
     fn fmt(&self, f: &mut Formatter) -> Result {
@@ -30,7 +32,15 @@ impl Display for ObjectId {
     }
 }
 impl ObjectId {
-    pub fn next(&self) -> ObjectId {
-        ObjectId(self.0 + 1)
+    pub fn new(min_block: BlockId) -> ObjectId {
+        ObjectId(min_block.0)
+    }
+
+    pub fn as_min_block(self) -> BlockId {
+        BlockId(self.0)
+    }
+
+    pub fn prefix(self) -> u64 {
+        self.0 % NUM_DATA_PREFIXES
     }
 }

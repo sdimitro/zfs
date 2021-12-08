@@ -12,8 +12,8 @@ use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
 use crate::object_based_log::*;
 use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
-use crate::object_deleter::ObjectDeletePhys;
 use crate::object_deleter::ObjectDeleter;
+use crate::object_deleter::ObjectDeleterPhys;
 use crate::pool_destroy;
 use crate::pool_destroy::PoolDestroyingPhys;
 use anyhow::Error;
@@ -107,7 +107,7 @@ lazy_static! {
 
 const ONE_MIB: u64 = 1_048_576;
 
-const OBJECTS_PER_LOG: u64 = 1024;
+const BLOCKIDS_PER_LOG_GROUP: u64 = 1024 * 1024;
 const RECLAIM_TABLE_MAX_BITS: u8 = 16;
 
 enum OwnResult {
@@ -218,7 +218,7 @@ pub struct UberblockPhys {
     storage_object_log: ObjectBasedLogPhys<StorageObjectLogEntry>,
     reclaim_info: ReclaimInfoPhys, // Extendible hash structures for reclaiming free blocks.
     next_block: BlockId,           // Next BlockID that can be allocated.
-    obsolete_objects: ObjectDeletePhys,
+    obsolete_objects: ObjectDeleterPhys,
     stats: PoolStatsPhys,
     features: Vec<(FeatureFlag, u64)>, // Each pair is a feature and its refcount
     zfs_uberblock: TerseVec<u8>,
@@ -626,7 +626,7 @@ impl PoolSyncingState {
         // Note: All the freed blocks from the same object land in the same log
 
         // Group adjacent objects together
-        let object_group = object.0 / OBJECTS_PER_LOG;
+        let object_group = object.as_min_block().0 / BLOCKIDS_PER_LOG_GROUP;
 
         let hash_value = u16::try_from(object_group % (1 << RECLAIM_TABLE_MAX_BITS))
             .unwrap()
@@ -640,8 +640,10 @@ impl PoolSyncingState {
     /// as the specified object.  Returns [min, max) (i.e. min is inclusive, max
     /// is exclusive)
     fn get_log_range(object: ObjectId) -> (ObjectId, ObjectId) {
-        let min = ObjectId(object.0 / OBJECTS_PER_LOG * OBJECTS_PER_LOG);
-        let max = ObjectId(min.0 + OBJECTS_PER_LOG);
+        let min = ObjectId::new(BlockId(
+            object.as_min_block().0 / BLOCKIDS_PER_LOG_GROUP * BLOCKIDS_PER_LOG_GROUP,
+        ));
+        let max = ObjectId::new(BlockId(min.as_min_block().0 + BLOCKIDS_PER_LOG_GROUP));
 
         assert_le!(min, object);
         assert_ge!(max, object);
@@ -1144,8 +1146,8 @@ impl Pool {
             .fold(BTreeMap::new(), |mut map, data_res| async move {
                 let data = data_res.unwrap();
                 debug!(
-                    "resume: found {:?}, min={:?} next={:?}",
-                    data.header.object, data.header.min_block, data.header.next_block
+                    "resume: found {:?}, next {:?}",
+                    data.header.object, data.header.next_block
                 );
                 assert_eq!(data.header.guid, shared_state.guid);
                 assert_eq!(data.header.min_txg, txg);
@@ -1185,15 +1187,16 @@ impl Pool {
 
             while let Some((_, next_recovered_object)) = recovered_objects_iter.peek() {
                 match ordered_writes_iter.peek() {
-                    Some(next_ordered_write)
-                        if next_ordered_write < &next_recovered_object.header.min_block =>
+                    Some(&next_ordered_write)
+                        if next_ordered_write
+                            < next_recovered_object.header.object.as_min_block() =>
                     {
                         // writes are next, and there are objects after this
 
                         assert!(!syncing_state.pending_object.is_pending());
                         syncing_state.pending_object = PendingObjectState::new_pending(
                             self.state.shared_state.guid,
-                            state.object_block_map.last_object().next(),
+                            state.object_block_map.next_object(),
                             syncing_state.pending_object.next_block(),
                             txg,
                         );
@@ -1204,7 +1207,7 @@ impl Pool {
                             state,
                             syncing_state,
                             None,
-                            Some(next_recovered_object.header.min_block),
+                            Some(next_recovered_object.header.object.as_min_block()),
                         );
 
                         let (phys, _) = syncing_state.pending_object.as_mut_pending();
@@ -1255,7 +1258,7 @@ impl Pool {
             assert!(!syncing_state.pending_object.is_pending());
             syncing_state.pending_object = PendingObjectState::new_pending(
                 self.state.shared_state.guid,
-                state.object_block_map.last_object().next(),
+                state.object_block_map.next_object(),
                 syncing_state.pending_object.next_block(),
                 txg,
             );
@@ -1287,7 +1290,7 @@ impl Pool {
             assert!(!syncing_state.pending_object.is_pending());
             syncing_state.pending_object = PendingObjectState::new_pending(
                 self.state.shared_state.guid,
-                self.state.object_block_map.last_object().next(),
+                self.state.object_block_map.next_object(),
                 syncing_state.pending_object.next_block(),
                 txg,
             );
@@ -1514,20 +1517,15 @@ impl Pool {
         assert_eq!(phys.header.guid, state.shared_state.guid);
         assert_eq!(phys.header.min_txg, txg);
         assert_eq!(phys.header.max_txg, txg);
-        assert_gt!(object, state.object_block_map.last_object());
         syncing_state.stats.objects_count += 1;
         syncing_state.stats.blocks_bytes += u64::from(phys.header.blocks_size);
         syncing_state.stats.blocks_count += u64::from(phys.blocks_len());
         state
             .object_block_map
-            .insert(object, phys.header.min_block, phys.header.next_block);
-        syncing_state.storage_object_log.append(
-            txg,
-            StorageObjectLogEntry::Alloc {
-                min_block: phys.header.min_block,
-                object,
-            },
-        );
+            .insert(object, phys.header.next_block);
+        syncing_state
+            .storage_object_log
+            .append(txg, StorageObjectLogEntry::Alloc { object });
         syncing_state
             .get_pending_frees_log_for_obj(object)
             .object_size_log
@@ -1552,7 +1550,7 @@ impl Pool {
             &mut syncing_state.pending_object,
             PendingObjectState::new_pending(
                 state.shared_state.guid,
-                object.next(),
+                ObjectId::new(next_block),
                 next_block,
                 txg,
             ),
@@ -2115,7 +2113,6 @@ async fn reclaim_frees_object(
 
     struct FirstInfo {
         object: ObjectId,
-        min_block: BlockId,
         next_block: BlockId,
     }
 
@@ -2124,17 +2121,13 @@ async fn reclaim_frees_object(
     let mut first = None;
     for (object_size, frees) in objects {
         let object = object_size.object;
-        let min_block = state.object_block_map.object_to_min_block(object);
+        let min_block = object.as_min_block();
         let next_block = state.object_block_map.object_to_next_block(object);
 
         match &mut first {
             None => {
                 // This is the first object.
-                first = Some(FirstInfo {
-                    object,
-                    min_block,
-                    next_block,
-                })
+                first = Some(FirstInfo { object, next_block })
             }
             Some(first) => {
                 // This is not the first object.  It needs to be deleted, and
@@ -2145,7 +2138,6 @@ async fn reclaim_frees_object(
                 // visited by the .reduce(), because we `continue` here.
                 assert_gt!(object, first.object);
                 to_delete.push(object);
-                first.min_block = min(first.min_block, min_block);
                 first.next_block = max(first.next_block, next_block);
                 if object_size.num_blocks == 0 {
                     trace!(
@@ -2198,18 +2190,16 @@ async fn reclaim_frees_object(
             // doesn't have any required blocks.  That happens above, where we
             // `continue`.
 
-            if phys.header.min_block != min_block || phys.header.next_block != next_block {
-                debug!("reclaim: {:?} expected range BlockID[{},{}), found BlockID[{},{}), trimming uncommitted consolidation",
-                    object, min_block, next_block, phys.header.min_block, phys.header.next_block);
+            if phys.header.next_block != next_block {
+                debug!("reclaim: {:?} expected next {:?}, found next {:?}, trimming uncommitted consolidation",
+                    object, next_block, phys.header.next_block);
                 phys
                     .blocks
-                    .retain(|block, _| block >= &min_block && block < &next_block);
+                    .retain(|block, _| block < &next_block);
 
                 assert_ge!(phys.header.blocks_size, object_size.num_bytes);
                 phys.header.blocks_size = object_size.num_bytes;
 
-                assert_le!(phys.header.min_block, min_block);
-                phys.header.min_block = min_block;
                 assert_ge!(phys.header.next_block, next_block);
                 phys.header.next_block = next_block;
             }
@@ -2225,23 +2215,20 @@ async fn reclaim_frees_object(
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.header.guid, b.header.guid);
             trace!(
-                "reclaim: moving {} blocks from {:?} (TXG[{},{}] BlockID[{},{})) to {:?} (TXG[{},{}] BlockID[{},{}))",
+                "reclaim: moving {} blocks from {:?} (TXG[{},{}] next {:?}) to {:?} (TXG[{},{}] next {:?})",
                 b.blocks_len(),
                 b.header.object,
                 b.header.min_txg.0,
                 b.header.max_txg.0,
-                b.header.min_block,
                 b.header.next_block,
                 a.header.object,
                 a.header.min_txg.0,
                 a.header.max_txg.0,
-                a.header.min_block,
                 a.header.next_block,
             );
             a.header.object = min(a.header.object, b.header.object);
             a.header.min_txg = min(a.header.min_txg, b.header.min_txg);
             a.header.max_txg = max(a.header.max_txg, b.header.max_txg);
-            a.header.min_block = min(a.header.min_block, b.header.min_block);
             a.header.next_block = max(a.header.next_block, b.header.next_block);
             let mut already_moved = 0;
             for (k, v) in b.blocks.drain() {
@@ -2270,11 +2257,9 @@ async fn reclaim_frees_object(
         .unwrap();
 
     if let Some(first) = first {
-        // Fold in the min/next_block info which includes the skipped objects.
+        // Fold in the next_block info which includes the skipped objects.
         assert_eq!(new_phys.header.object, first.object);
-        assert_ge!(new_phys.header.min_block, first.min_block);
         assert_le!(new_phys.header.next_block, first.next_block);
-        new_phys.header.min_block = first.min_block;
         new_phys.header.next_block = first.next_block;
     }
     assert_eq!(new_phys.header.object, first_object);
@@ -2728,17 +2713,11 @@ async fn try_condense_object_log(state: Arc<PoolState>, syncing_state: &mut Pool
 
     let begin = Instant::now();
     syncing_state.storage_object_log.clear(txg).await;
-    {
-        state.object_block_map.for_each(|ent| {
-            syncing_state.storage_object_log.append(
-                txg,
-                StorageObjectLogEntry::Alloc {
-                    object: ent.object,
-                    min_block: ent.block,
-                },
-            )
-        });
-    }
+    state.object_block_map.for_each(|object| {
+        syncing_state
+            .storage_object_log
+            .append(txg, StorageObjectLogEntry::Alloc { object })
+    });
     // Note: the caller (end_txg_cb()) is about to call flush(), but doing it
     // here ensures that the time to PUT these objects is accounted for in the
     // info!() below.

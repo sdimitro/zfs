@@ -22,7 +22,7 @@ pub struct ObjectDeleter {
 }
 
 #[derive(Default, Debug, Serialize, Deserialize, Clone)]
-pub struct ObjectDeletePhys(Vec<ObjectId>);
+pub struct ObjectDeleterPhys(Vec<ObjectId>);
 
 impl ObjectDeleter {
     pub fn new(object_access: Arc<ObjectAccess>, guid: PoolGuid) -> ObjectDeleter {
@@ -62,7 +62,7 @@ impl ObjectDeleter {
     pub fn open(
         object_access: Arc<ObjectAccess>,
         guid: PoolGuid,
-        phys: ObjectDeletePhys,
+        phys: ObjectDeleterPhys,
     ) -> ObjectDeleter {
         let (completion_tx, completion_rx) = mpsc::unbounded_channel();
         let (initiation_tx, initiation_rx) = mpsc::unbounded_channel();
@@ -99,11 +99,11 @@ impl ObjectDeleter {
         self.objects_to_delete = Some(objects);
     }
 
-    pub fn phys(&mut self) -> ObjectDeletePhys {
+    pub fn phys(&mut self) -> ObjectDeleterPhys {
         while let Ok(completed) = self.rx.try_recv() {
             self.obsolete_objects.drain(..completed);
         }
-        ObjectDeletePhys(
+        ObjectDeleterPhys(
             self.obsolete_objects
                 .iter()
                 .chain(self.objects_to_delete.as_ref().unwrap_or(&Vec::new()))
