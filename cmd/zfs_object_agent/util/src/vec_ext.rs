@@ -63,10 +63,24 @@ impl From<AlignedBytes> for Bytes {
 }
 
 impl From<AlignedVec> for AlignedBytes {
-    fn from(aligned_vec: AlignedVec) -> Self {
+    fn from(mut aligned_vec: AlignedVec) -> Self {
+        aligned_vec.verify();
+        let ptr = aligned_vec.vec.as_ptr();
+        // resize so that there is no spare capacity, so that converting to Bytes will not reallocate
+        let raw_len = aligned_vec.vec.len();
+        aligned_vec.vec.resize(aligned_vec.vec.capacity(), 0);
+        assert_eq!(aligned_vec.vec.as_ptr(), ptr);
         let unaligned_bytes: Bytes = aligned_vec.vec.into();
-        let bytes = unaligned_bytes.slice(aligned_vec.pad..);
-        assert_eq!(bytes.as_ptr().align_offset(aligned_vec.alignment), 0);
+        assert_eq!(unaligned_bytes.as_ptr(), ptr);
+        let bytes = unaligned_bytes.slice(aligned_vec.pad..raw_len);
+        assert_eq!(
+            bytes.as_ptr().align_offset(aligned_vec.alignment),
+            0,
+            "pointer {:?}+{} is not {}-aligned",
+            unaligned_bytes.as_ptr(),
+            aligned_vec.pad,
+            aligned_vec.alignment
+        );
         AlignedBytes {
             alignment: aligned_vec.alignment,
             bytes,
