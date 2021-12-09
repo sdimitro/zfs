@@ -5097,6 +5097,19 @@ print_vdev_stats(zpool_handle_t *zhp, const char *name, nvlist_t *oldnv,
 	if (strcmp(name, VDEV_TYPE_INDIRECT) == 0)
 		return (ret);
 
+	/*
+	 * When asked to display object store stats (-o), make sure the
+	 * expected stats still exist. If they are missing we can skip
+	 * printing this line and pick up on the next iteration.
+	 */
+	if (cb->cb_flags & IOS_OBJECT_ANY_M) {
+		if (!nvlist_exists(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS) ||
+		    (oldnv != NULL &&
+		    !nvlist_exists(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS))) {
+			return (ret);
+		}
+	}
+
 	calcvs = safe_malloc(sizeof (*calcvs));
 
 	if (oldnv != NULL) {
