@@ -41,6 +41,13 @@
 #	3. Verify the log is fine
 #
 
+if use_object_store; then
+	# We can't create an object store backed pool with multiple vdevs.
+	# This test relies on corrupting one of the vdev
+	# which is unsupported & should be marked as skipped.
+	log_unsupported "Not supported with object store run."
+fi
+
 verify_runnable "global"
 
 log_assert "log device can survive when one of the pool device get corrupted."

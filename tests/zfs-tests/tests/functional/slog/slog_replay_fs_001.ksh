@@ -65,7 +65,7 @@ log_must setup
 #
 # 1. Create an empty file system (TESTFS)
 #
-log_must zpool create $TESTPOOL $VDEV log mirror $LDEV
+log_must create_pool -p $TESTPOOL -d "$VDEV" -l "log mirror $LDEV"
 log_must zfs set compression=on $TESTPOOL
 log_must zfs create $TESTPOOL/$TESTFS
 
@@ -190,7 +190,7 @@ log_must cp -a /$TESTPOOL/$TESTFS/* $TESTDIR/copy/
 log_must zfs unmount /$TESTPOOL/$TESTFS
 
 log_note "Verify transactions to replay:"
-log_must zdb -iv $TESTPOOL/$TESTFS
+log_must run_zdb -e "-iv" -p "$TESTPOOL/$TESTFS"
 
 log_must zpool export $TESTPOOL
 
@@ -200,13 +200,13 @@ log_must zpool export $TESTPOOL
 # Import the pool to unfreeze it and claim log blocks.  It has to be
 # `zpool import -f` because we can't write a frozen pool's labels!
 #
-log_must zpool import -f -d $VDIR $TESTPOOL
+log_must import_pool -e "-f" -s "-d $VDIR" -p "$TESTPOOL"
 
 #
 # 7. Compare TESTFS against the TESTDIR/copy
 #
 log_note "Verify current block usage:"
-log_must zdb -bcv $TESTPOOL
+log_must run_zdb -e "-bcv" -p $TESTPOOL
 
 log_note "Verify copy of xattrs:"
 log_must ls_xattr /$TESTPOOL/$TESTFS/xattr.dir

@@ -1788,19 +1788,22 @@ get_slog_part() {
 # -p <pool name> - REQUIRED
 # -d "<space separated devices list>" - OPTIONAL, if use_object_store is true
 # -e "<extra options that need to be passed while creating pool>" - OPTIONAL
+# -l "<slog options to create log device while creating the pool>" - OPTIONAL
 
 function create_pool
 {
 	typeset pool=""
 	typeset devices_list=""
 	typeset extra_options=""
+	typeset log_options=""
 
 	typeset opt=""
-	while getopts "p:d:e:" opt; do
+	while getopts "p:d:e:l:" opt; do
 		case $opt in
 			p) pool=$OPTARG ;;
 			d) devices_list=$OPTARG ;;
 			e) extra_options=$OPTARG ;;
+			l) log_options=$OPTARG ;;
 		esac
 	done
 
@@ -1830,11 +1833,11 @@ function create_pool
 			-o object-region=$ZTS_REGION \
 			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
 			$extra_options \
-			$pool s3 $ZTS_BUCKET_NAME"
+			$pool s3 $ZTS_BUCKET_NAME $log_options"
 	else
 		zpool_create_cmd="zpool create \
 			$extra_options \
-			-f $pool $devices_list"
+			-f $pool $devices_list $log_options"
 	fi
 
 	log_note $zpool_create_cmd

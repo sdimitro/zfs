@@ -47,12 +47,10 @@ log_assert "Pool can survive when one of mirror log device get corrupted."
 log_onexit cleanup
 log_must setup
 
-for type in "" "mirror" "raidz" "raidz2"
-do
-	for spare in "" "spare"
-	do
-		log_must zpool create $TESTPOOL $type $VDEV $spare $SDEV \
-			log mirror $LDEV
+for type in "" $(get_type); do
+	for spare in "" $(get_spare); do
+		log_must create_pool -p $TESTPOOL -d "$type $VDEV $spare $SDEV" \
+			-l "log mirror $LDEV"
 
 		mntpnt=$(get_prop mountpoint $TESTPOOL)
 		#
@@ -61,7 +59,11 @@ do
 		log_must dd if=/dev/urandom of=$mntpnt/testfile.$$ count=100
 
 		ldev=$(random_get $LDEV)
-		log_must mkfile $MINVDEVSIZE $ldev
+		#
+		# Fill half of the ldev(128M) with some random data & corrupt it
+		#
+		log_must dd if=/dev/urandom of=$ldev \
+			count=$(($MINVDEVSIZE/(2*1024*1024))) bs=1M
 		log_must zpool scrub $TESTPOOL
 
 		log_must display_status $TESTPOOL

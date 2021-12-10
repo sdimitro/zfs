@@ -48,16 +48,12 @@ log_assert "Adding an extra log device works."
 log_onexit cleanup
 log_must setup
 
-for type in "" "mirror" "raidz" "raidz2"
-do
-	for spare in "" "spare"
-	do
-		for logtype in "" "mirror"
-		do
-			for newtype in "" "mirror"
-			do
-				log_must zpool create $TESTPOOL $type $VDEV \
-					$spare $SDEV log $logtype $LDEV
+for type in "" $(get_type); do
+	for spare in "" $(get_spare); do
+		for logtype in "" "mirror"; do
+			for newtype in "" "mirror"; do
+				log_must create_pool -p $TESTPOOL -d "$type $VDEV $spare $SDEV" \
+					-l "log $logtype $LDEV"
 				log_must zpool add $TESTPOOL \
 					log $newtype $LDEV2
 

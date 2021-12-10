@@ -155,3 +155,18 @@ function verify_slog_device
 
 	return 1
 }
+
+#
+# Helper functions to get supported vdev types.
+# These vdevs are only supported for block based
+# runs
+#
+function get_type
+{
+	! use_object_store && echo "mirror raidz raidz2"
+}
+
+function get_spare
+{
+	! use_object_store && echo "spare"
+}
