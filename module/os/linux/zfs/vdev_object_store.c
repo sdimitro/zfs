@@ -1060,7 +1060,8 @@ object_store_begin_txg(vdev_t *vd, uint64_t txg)
 {
 	ASSERT(vdev_is_object_based(vd));
 	vdev_object_store_t *vos = vd->vdev_tsd;
-	ASSERT(vos->vos_send_txg_selector == VOS_TXG_NONE);
+	ASSERT(vos->vos_send_txg_selector == VOS_TXG_NONE ||
+	    txg > spa_freeze_txg(vd->vdev_spa));
 	mutex_enter(&vos->vos_sock_lock);
 	agent_begin_txg(vos, txg);
 	vos->vos_send_txg_selector = VOS_TXG_BEGIN;
