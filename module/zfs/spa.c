@@ -3418,6 +3418,7 @@ spa_ld_parse_config(spa_t *spa, spa_import_type_t type)
 	parse = (type == SPA_IMPORT_EXISTING ?
 	    VDEV_ALLOC_LOAD : VDEV_ALLOC_SPLIT);
 	error = spa_config_parse(spa, &rvd, nvtree, NULL, 0, parse);
+	spa_set_pool_type(spa);
 	spa_config_exit(spa, SCL_ALL, FTAG);
 
 	if (error != 0) {
@@ -3847,6 +3848,7 @@ spa_ld_trusted_config(spa_t *spa, spa_import_type_t type,
 		    error);
 		return (spa_vdev_err(rvd, VDEV_AUX_CORRUPT_DATA, error));
 	}
+	spa_set_pool_type(spa);
 
 	/*
 	 * Vdev paths in the MOS may be obsolete. If the untrusted config was
@@ -5926,6 +5928,7 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 
 	error = spa_config_parse(spa, &rvd, nvroot, NULL, 0, VDEV_ALLOC_ADD);
+	spa_set_pool_type(spa);
 
 	ASSERT(error != 0 || rvd != NULL);
 	ASSERT(error != 0 || spa->spa_root_vdev == rvd);

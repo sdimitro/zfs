@@ -5240,12 +5240,9 @@ vdev_is_concrete(vdev_t *vd)
 	}
 }
 
-boolean_t
-vdev_is_object_based(vdev_t *vd)
+static boolean_t
+vdev_is_object_based_impl(vdev_t *vd)
 {
-	if (vd == NULL)
-		return (B_FALSE);
-
 	vdev_ops_t *ops = vd->vdev_ops;
 	if (vd->vdev_ops->vdev_op_leaf && ops == &vdev_object_store_ops)
 		return (B_TRUE);
@@ -5259,6 +5256,27 @@ vdev_is_object_based(vdev_t *vd)
 			return (B_TRUE);
 	}
 	return (B_FALSE);
+}
+
+boolean_t
+vdev_is_object_based(vdev_t *vd)
+{
+	if (vd == NULL)
+		return (B_FALSE);
+
+	/* Are we holding any spa_config_locks? */
+	boolean_t lock_held =
+	    spa_config_held(vd->vdev_spa, SCL_ALL, RW_READER) ||
+	    spa_config_held(vd->vdev_spa, SCL_ALL, RW_WRITER);
+
+	if (!lock_held)
+		spa_config_enter(vd->vdev_spa, SCL_VDEV, FTAG, RW_READER);
+
+	boolean_t object_based = vdev_is_object_based_impl(vd);
+
+	if (!lock_held)
+		spa_config_exit(vd->vdev_spa, SCL_VDEV, FTAG);
+	return (object_based);
 }
 
 /*

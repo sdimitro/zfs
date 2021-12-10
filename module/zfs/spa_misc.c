@@ -430,6 +430,29 @@ int zfs_user_indirect_is_special = B_TRUE;
  */
 int zfs_special_class_metadata_reserve_pct = 25;
 
+void
+spa_set_pool_type(spa_t *spa)
+{
+	ASSERT3P(spa->spa_root_vdev, !=, NULL);
+
+	/*
+	 * Must hold one of the spa_config locks.
+	 */
+	ASSERT(spa_config_held(spa, SCL_ALL, RW_READER) ||
+	    spa_config_held(spa, SCL_ALL, RW_WRITER));
+
+	if (vdev_is_object_based(spa->spa_root_vdev))
+		spa->spa_pool_type = SPA_TYPE_OBJECT_STORE;
+	else
+		spa->spa_pool_type = SPA_TYPE_NORMAL;
+}
+
+boolean_t
+spa_is_object_based(spa_t *spa)
+{
+	return (spa->spa_pool_type == SPA_TYPE_OBJECT_STORE);
+}
+
 /*
  * ==========================================================================
  * SPA config locking
@@ -2859,21 +2882,6 @@ spa_suspend_async_destroy(spa_t *spa)
 
 	return (B_FALSE);
 }
-
-boolean_t
-spa_is_object_based(spa_t *spa)
-{
-	vdev_t *rvd = spa->spa_root_vdev;
-	if (rvd == NULL)
-		return (B_FALSE);
-
-	for (uint64_t c = 0; c < rvd->vdev_children; c++) {
-		if (vdev_is_object_based(rvd->vdev_child[c]))
-			return (B_TRUE);
-	}
-	return (B_FALSE);
-}
-
 
 #if defined(_KERNEL)
 

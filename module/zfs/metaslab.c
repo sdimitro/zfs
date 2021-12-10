@@ -417,7 +417,6 @@ metaslab_class_create(spa_t *spa, metaslab_ops_t *ops)
 	mc->mc_spa = spa;
 	mc->mc_ops = ops;
 	mutex_init(&mc->mc_lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&mc->mc_object_store_lock, NULL, MUTEX_DEFAULT, NULL);
 	multilist_create(&mc->mc_metaslab_txg_list, sizeof (metaslab_t),
 	    offsetof(metaslab_t, ms_class_txg_node), metaslab_idx_func);
 	for (int i = 0; i < spa->spa_alloc_count; i++) {
@@ -445,7 +444,6 @@ metaslab_class_destroy(metaslab_class_t *mc)
 		zfs_refcount_destroy(&mca->mca_alloc_slots);
 	}
 	mutex_destroy(&mc->mc_lock);
-	mutex_destroy(&mc->mc_object_store_lock);
 	multilist_destroy(&mc->mc_metaslab_txg_list);
 	kmem_free(mc, offsetof(metaslab_class_t,
 	    mc_allocator[spa->spa_alloc_count]));

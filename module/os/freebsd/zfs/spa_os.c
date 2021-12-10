@@ -247,6 +247,7 @@ spa_import_rootpool(const char *name, bool checkpointrewind)
 	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 	error = spa_config_parse(spa, &rvd, nvtop, NULL, 0,
 	    VDEV_ALLOC_ROOTPOOL);
+	spa_set_pool_type(spa);
 	spa_config_exit(spa, SCL_ALL, FTAG);
 	if (error) {
 		mutex_exit(&spa_namespace_lock);

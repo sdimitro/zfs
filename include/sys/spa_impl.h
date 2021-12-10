@@ -203,6 +203,11 @@ typedef enum spa_config_source {
 	SPA_CONFIG_SRC_MOS		/* MOS, but not always from right txg */
 } spa_config_source_t;
 
+typedef enum spa_pool_type {
+	SPA_TYPE_NORMAL = 0,
+	SPA_TYPE_OBJECT_STORE,
+} spa_pool_type_t;
+
 struct spa {
 	/*
 	 * Fields protected by spa_namespace_lock.
@@ -279,6 +284,7 @@ struct spa {
 	boolean_t	spa_extreme_rewind;	/* rewind past deferred frees */
 	kmutex_t	spa_scrub_lock;		/* resilver/scrub lock */
 	uint64_t	spa_scrub_inflight;	/* in-flight scrub bytes */
+	spa_pool_type_t	spa_pool_type;	/* normal or object-based */
 
 	/* in-flight verification bytes */
 	uint64_t	spa_load_verify_bytes;
@@ -459,6 +465,7 @@ extern int param_set_deadman_failmode_common(const char *val);
 extern void spa_set_deadman_synctime(hrtime_t ns);
 extern void spa_set_deadman_ziotime(hrtime_t ns);
 extern const char *spa_history_zone(void);
+extern void spa_set_pool_type(spa_t *);
 
 #ifdef	__cplusplus
 }
