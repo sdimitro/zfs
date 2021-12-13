@@ -1,7 +1,6 @@
 use crate::block_access::BlockAccess;
 use crate::extent_allocator::{ExtentAllocator, ExtentAllocatorBuilder};
 use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
-use crate::zettacache::DEFAULT_SLAB_SIZE;
 use crate::{base_types::*, DumpSlabsOptions};
 use bimap::BiBTreeMap;
 use lazy_static::lazy_static;
@@ -23,6 +22,7 @@ use util::{get_tunable, TerseVec};
 use util::{nice_p2size, From64};
 
 lazy_static! {
+    static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =
         get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
     static ref SLAB_CONDENSE_PER_CHECKPOINT: u64 = get_tunable("slab_condense_per_checkpoint", 10);

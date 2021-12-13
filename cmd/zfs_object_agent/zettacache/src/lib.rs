@@ -12,6 +12,7 @@ mod extent_allocator;
 mod index;
 mod size_histogram;
 mod space_map;
+mod superblock;
 mod zcachedb;
 mod zettacache;
 

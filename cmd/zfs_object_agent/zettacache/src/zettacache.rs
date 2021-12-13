@@ -12,6 +12,8 @@ use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::extent_allocator::ExtentAllocatorPhys;
 use crate::index::*;
 use crate::size_histogram::SizeHistogramPhys;
+use crate::superblock::PrimaryPhys;
+use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 use anyhow::Result;
@@ -28,7 +30,6 @@ use metered::metered;
 use metered::time_source::StdInstantMicros;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
-use std::cmp::Ordering;
 use std::collections::btree_map;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
@@ -52,9 +53,7 @@ use util::LockedItem;
 use util::MutexExt;
 
 lazy_static! {
-    static ref SUPERBLOCK_SIZE: u64 = get_tunable("superblock_size", 4 * 1024);
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
-    pub static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 15.0); // Can lower this to test forced eviction.
     static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
     static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
@@ -67,65 +66,6 @@ lazy_static! {
     static ref CACHE_INSERT_NONBLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_nonblocking_buffer_bytes", 256_000_000);
 
     static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct ZettaSuperBlockPhys {
-    checkpoint_id: CheckpointId,
-    checkpoint_capacity: Extent, // space available for checkpoints
-    checkpoint: Extent,          // space used by latest checkpoint
-    slab_size: u32,
-    disk: DiskId,
-    num_disks: usize,
-    guid: u64,
-    // XXX put sector size in here too and verify it matches what the disk says now?
-    // XXX put disk size in here so we can detect expansion?
-}
-
-impl ZettaSuperBlockPhys {
-    async fn read(block_access: &BlockAccess, disk: DiskId) -> Result<ZettaSuperBlockPhys> {
-        let raw = block_access
-            .read_raw(Extent::new(disk, 0, *SUPERBLOCK_SIZE))
-            .await;
-        let (this, _): (Self, usize) = block_access.chunk_from_raw(&raw)?;
-        debug!("got {:#?}", this);
-        assert_eq!(this.disk, disk);
-        Ok(this)
-    }
-
-    async fn read_all(block_access: &BlockAccess) -> Result<Vec<ZettaSuperBlockPhys>> {
-        block_access
-            .disks()
-            .map(|disk| ZettaSuperBlockPhys::read(block_access, disk))
-            .collect::<FuturesOrdered<_>>()
-            .try_collect()
-            .await
-    }
-
-    async fn write(&self, block_access: &BlockAccess, disk: DiskId) {
-        maybe_die_with(|| format!("before writing {:#?}", self));
-        debug!("writing {:#?}", self);
-        let raw = block_access.chunk_to_raw(EncodeType::Json, self);
-        // XXX pad it out to SUPERBLOCK_SIZE?
-        block_access
-            .write_raw(DiskLocation { offset: 0, disk }, raw)
-            .await;
-    }
-
-    /// Write superblock to all disks.  Note that ZettaSuperBlockPhys::disk will
-    /// be changed to the DiskId of each disk that's written.
-    async fn write_all(&self, block_access: &BlockAccess) {
-        block_access
-            .disks()
-            .map(|disk| async move {
-                // Change the DiskId of this superblock to match the disk we're writing to.
-                let phys = Self { disk, ..*self };
-                phys.write(block_access, disk).await
-            })
-            .collect::<FuturesUnordered<_>>()
-            .for_each(|_| async move {})
-            .await;
-    }
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -472,7 +412,9 @@ impl MergeState {
 
 struct ZettaCacheState {
     block_access: Arc<BlockAccess>,
-    super_phys: ZettaSuperBlockPhys,
+    primary: PrimaryPhys,
+    guid: u64,
+    primary_disk: DiskId,
     block_allocator: BlockAllocator,
     pending_changes: BTreeMap<IndexKey, PendingChange>,
     // Keep state associated with any on-going merge here
@@ -537,7 +479,7 @@ impl ZettaCache {
                     }
                 })
                 .unwrap(),
-            *SUPERBLOCK_SIZE,
+            SUPERBLOCK_SIZE,
             block_access.round_up_to_sector(
                 (*DEFAULT_CHECKPOINT_SIZE_PCT / 100.0 * total_capacity as f64)
                     .approx_as::<u64>()
@@ -552,7 +494,7 @@ impl ZettaCache {
                 let start = if disk == checkpoint_capacity.location.disk {
                     checkpoint_capacity.location.offset + checkpoint_capacity.size
                 } else {
-                    *SUPERBLOCK_SIZE
+                    SUPERBLOCK_SIZE
                 };
                 Extent::new(
                     disk,
@@ -598,16 +540,13 @@ impl ZettaCache {
             .write_raw(checkpoint_extent.location, raw)
             .await;
         let num_disks = block_access.disks().count();
-        ZettaSuperBlockPhys {
+        PrimaryPhys {
             checkpoint_id: CheckpointId(0),
             checkpoint_capacity,
             checkpoint: checkpoint_extent,
-            slab_size: *DEFAULT_SLAB_SIZE,
-            disk: DiskId(0), // will be changed by .write_all()
             num_disks,
-            guid,
         }
-        .write_all(block_access)
+        .write_all(DiskId(0), guid, block_access)
         .await;
     }
 
@@ -617,49 +556,18 @@ impl ZettaCache {
             false,
         ));
 
-        let super_blocks = match ZettaSuperBlockPhys::read_all(&block_access).await {
-            Ok(super_blocks) => super_blocks,
+        let (primary, primary_disk, guid) = match PrimaryPhys::read(&block_access).await {
+            Ok(tuple) => tuple,
             Err(_) => {
                 // XXX need proper create CLI
                 Self::create(&block_access).await;
-                ZettaSuperBlockPhys::read_all(&block_access).await.unwrap()
+                PrimaryPhys::read(&block_access).await.unwrap()
             }
         };
 
-        let latest_super_block = super_blocks
-            .into_iter()
-            .enumerate()
-            .map(|(id, phys)| {
-                // XXX proper error handling
-                // XXX we should be able to reorder them?
-                assert_eq!(DiskId(id.try_into().unwrap()), phys.disk);
-                phys
-            })
-            .reduce(|x, y| {
-                // XXX proper error handling
-                assert_eq!(x.guid, y.guid);
-                assert_eq!(x.num_disks, y.num_disks);
-                match x.checkpoint_id.cmp(&y.checkpoint_id) {
-                    Ordering::Greater => x,
-                    Ordering::Less => y,
-                    Ordering::Equal => {
-                        assert_eq!(x.checkpoint, y.checkpoint);
-                        x
-                    }
-                }
-            })
-            .unwrap();
+        let checkpoint = ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await;
 
-        // XXX proper error handling
-        assert_eq!(paths.len(), latest_super_block.num_disks);
-        assert!(latest_super_block
-            .checkpoint_capacity
-            .contains(&latest_super_block.checkpoint));
-
-        let checkpoint =
-            ZettaCheckpointPhys::read(&block_access, latest_super_block.checkpoint).await;
-
-        assert_eq!(checkpoint.generation, latest_super_block.checkpoint_id);
+        assert_eq!(checkpoint.generation, primary.checkpoint_id);
 
         let mut builder = ExtentAllocatorBuilder::new(&checkpoint.extent_allocator);
         checkpoint.claim(&mut builder);
@@ -708,7 +616,9 @@ impl ZettaCache {
             atime_histogram,
             size_histogram: checkpoint.size_histogram,
             operation_log,
-            super_phys: latest_super_block,
+            primary,
+            primary_disk,
+            guid,
             outstanding_reads: Default::default(),
             outstanding_writes: Default::default(),
             atime: checkpoint.last_atime,
@@ -1235,7 +1145,9 @@ impl ZettaCache {
 
 pub struct ZCacheDBHandle {
     block_access: Arc<BlockAccess>,
-    superblock: ZettaSuperBlockPhys,
+    primary: PrimaryPhys,
+    primary_disk: DiskId,
+    guid: u64,
     checkpoint: Arc<ZettaCheckpointPhys>,
     extent_allocator: Arc<ExtentAllocator>,
 }
@@ -1247,40 +1159,10 @@ impl ZCacheDBHandle {
             true,
         ));
 
-        let super_blocks = ZettaSuperBlockPhys::read_all(&block_access).await?;
-
-        let superblock = super_blocks
-            .into_iter()
-            .enumerate()
-            .map(|(id, phys)| {
-                // XXX proper error handling
-                // XXX we should be able to reorder them?
-                assert_eq!(DiskId(id.try_into().unwrap()), phys.disk);
-                phys
-            })
-            .reduce(|x, y| {
-                // XXX proper error handling
-                assert_eq!(x.guid, y.guid);
-                assert_eq!(x.num_disks, y.num_disks);
-                match x.checkpoint_id.cmp(&y.checkpoint_id) {
-                    Ordering::Greater => x,
-                    Ordering::Less => y,
-                    Ordering::Equal => {
-                        assert_eq!(x.checkpoint, y.checkpoint);
-                        x
-                    }
-                }
-            })
-            .unwrap();
-
-        // XXX proper error handling
-        assert_eq!(paths.len(), superblock.num_disks);
-        assert!(superblock
-            .checkpoint_capacity
-            .contains(&superblock.checkpoint));
+        let (primary, primary_disk, guid) = PrimaryPhys::read(&block_access).await?;
 
         let checkpoint =
-            Arc::new(ZettaCheckpointPhys::read(&block_access, superblock.checkpoint).await);
+            Arc::new(ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await);
 
         let mut builder = ExtentAllocatorBuilder::new(&checkpoint.extent_allocator);
         // We should be able to get away without claiming the metadata space,
@@ -1291,37 +1173,26 @@ impl ZCacheDBHandle {
 
         Ok(ZCacheDBHandle {
             block_access,
-            superblock,
+            primary,
+            primary_disk,
+            guid,
             checkpoint,
             extent_allocator,
         })
     }
 
     pub async fn dump_free_space(&self) {
-        println!(
-            "[{:>6}-{:>6}) Superblock",
-            nice_p2size(0),
-            nice_p2size(*SUPERBLOCK_SIZE)
-        );
-        let superblock_len = self
-            .block_access
-            .chunk_to_raw(EncodeType::Json, &self.superblock)
-            .len() as u64;
-        println!(
-            "  {} used out of {} ({:.1}%)",
-            nice_p2size(superblock_len),
-            nice_p2size(*SUPERBLOCK_SIZE),
-            superblock_len as f64 * 100.0 / *SUPERBLOCK_SIZE as f64
-        );
+        println!("Superblock");
+        println!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
         println!();
         println!("Checkpoint Region");
-        println!("  {:?}", self.superblock.checkpoint_capacity);
+        println!("  {:?}", self.primary.checkpoint_capacity);
         println!(
             "  checkpoint: {} used out of {} ({:.1}%, must be <50%)",
-            nice_p2size(self.superblock.checkpoint.size),
-            nice_p2size(self.superblock.checkpoint_capacity.size),
-            self.superblock.checkpoint.size as f64 * 100.0
-                / self.superblock.checkpoint_capacity.size as f64
+            nice_p2size(self.primary.checkpoint.size),
+            nice_p2size(self.primary.checkpoint_capacity.size),
+            self.primary.checkpoint.size as f64 * 100.0
+                / self.primary.checkpoint_capacity.size as f64
         );
         println!();
         println!("Metadata Region");
@@ -1419,7 +1290,7 @@ impl ZCacheDBHandle {
 
     pub async fn dump_structures(&self, opts: DumpStructuresOptions) {
         if opts.dump_defaults {
-            println!("{:#?}", self.superblock);
+            println!("{:#?}", self.primary);
             println!("{:#?}", self.checkpoint);
         }
 
@@ -1721,7 +1592,7 @@ impl ZettaCacheState {
     ) {
         debug!(
             "flushing checkpoint {:?}",
-            self.super_phys.checkpoint_id.next()
+            self.primary.checkpoint_id.next()
         );
         let begin_checkpoint = Instant::now();
 
@@ -1790,7 +1661,7 @@ impl ZettaCacheState {
         });
 
         let checkpoint = ZettaCheckpointPhys {
-            generation: self.super_phys.checkpoint_id.next(),
+            generation: self.primary.checkpoint_id.next(),
             extent_allocator: self.extent_allocator.get_phys(),
             index: index.get_phys(),
             operation_log: operation_log_phys,
@@ -1823,25 +1694,25 @@ impl ZettaCacheState {
             .chunk_to_raw(EncodeType::Json, &checkpoint);
 
         let mut checkpoint_extent = Extent::new(
-            self.super_phys.checkpoint.location.disk,
-            self.super_phys.checkpoint.location.offset + self.super_phys.checkpoint.size,
+            self.primary.checkpoint.location.disk,
+            self.primary.checkpoint.location.offset + self.primary.checkpoint.size,
             raw.len() as u64,
         );
 
         if !self
-            .super_phys
+            .primary
             .checkpoint_capacity
             .contains(&checkpoint_extent)
         {
             // Out of space; go back to the beginning of the checkpoint space.
-            checkpoint_extent.location.offset = self.super_phys.checkpoint_capacity.location.offset;
+            checkpoint_extent.location.offset = self.primary.checkpoint_capacity.location.offset;
             assert!(self
-                .super_phys
+                .primary
                 .checkpoint_capacity
                 .contains(&checkpoint_extent));
             assert_le!(
                 checkpoint_extent.location.offset + checkpoint_extent.size,
-                self.super_phys.checkpoint.location.offset
+                self.primary.checkpoint.location.offset
             );
             // XXX The above assertion could fail if there isn't enough
             // checkpoint space for 3 checkpoints (the existing one that
@@ -1858,15 +1729,17 @@ impl ZettaCacheState {
             .write_raw(checkpoint_extent.location, raw)
             .await;
 
-        self.super_phys.checkpoint = checkpoint_extent;
-        self.super_phys.checkpoint_id = self.super_phys.checkpoint_id.next();
-        self.super_phys.write_all(&self.block_access).await;
+        self.primary.checkpoint = checkpoint_extent;
+        self.primary.checkpoint_id = self.primary.checkpoint_id.next();
+        self.primary
+            .write_all(self.primary_disk, self.guid, &self.block_access)
+            .await;
 
         self.extent_allocator.checkpoint_done();
 
         info!(
             "completed {:?} in {}ms; flushed {} operations ({}KB) to log",
-            self.super_phys.checkpoint_id,
+            self.primary.checkpoint_id,
             begin_checkpoint.elapsed().as_millis(),
             operation_log_len,
             operation_log_bytes / 1024,
