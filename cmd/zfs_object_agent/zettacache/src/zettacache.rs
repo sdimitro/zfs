@@ -159,10 +159,19 @@ impl ZettaCheckpointPhys {
     }
 }
 
+/// A PendingChange is the in-core data structure for tracking changes to the index between merges.
+/// Four types of events are tracked: insertions, removals, lookup hits (atime update), and removals
+/// followed by insertions. The last change type is necessary because, otherwise, the change would
+/// look like an insertion on top of an existing index entry. Note that removal does not need to store
+/// a value (disk location) and atime updates store an extra item: the original atime of the entry in
+/// the index. This atime is necessary when recording a removal operation in the persistent operation
+/// log. The operation log does not track atime updates so, when a log entry for a remove is logged,
+/// the "original" atime for a remove from cache entry needs to be recorded to maintain consistency
+/// on log replay when the cache is reopened.
 #[derive(Debug, Clone, Copy)]
 enum PendingChange {
     Insert(IndexValue),
-    UpdateAtime(IndexValue),
+    UpdateAtime(IndexValue, Atime),
     Remove(),
     RemoveThenInsert(IndexValue),
 }
@@ -372,7 +381,7 @@ impl MergeState {
                         self.add_to_index_or_evict(entry, &mut next_index, &mut free_list);
                     }
                 }
-                Some((&pc_key, &PendingChange::UpdateAtime(pc_value))) => {
+                Some((&pc_key, &PendingChange::UpdateAtime(pc_value, _))) => {
                     if pc_key == entry.key {
                         // Add the pending entry to the next generation instead of the current index's entry
                         assert_eq!(pc_value.location, entry.value.location);
@@ -1000,7 +1009,7 @@ impl ZettaCache {
                     match pc {
                         PendingChange::Insert(value)
                         | PendingChange::RemoveThenInsert(value)
-                        | PendingChange::UpdateAtime(value) => {
+                        | PendingChange::UpdateAtime(value, _) => {
                             Some(state.lookup(key, value, source))
                         }
                         PendingChange::Remove() => {
@@ -1015,7 +1024,7 @@ impl ZettaCache {
                             match pc {
                                 PendingChange::Insert(value)
                                 | PendingChange::RemoveThenInsert(value)
-                                | PendingChange::UpdateAtime(value) => {
+                                | PendingChange::UpdateAtime(value, _) => {
                                     Some(state.lookup(key, value, source))
                                 }
                                 PendingChange::Remove() => {
@@ -1492,7 +1501,7 @@ impl ZettaCacheState {
         let value = match self.pending_changes.get(&key) {
             Some(PendingChange::Insert(value_ref))
             | Some(PendingChange::RemoveThenInsert(value_ref))
-            | Some(PendingChange::UpdateAtime(value_ref)) => *value_ref,
+            | Some(PendingChange::UpdateAtime(value_ref, _)) => *value_ref,
             Some(PendingChange::Remove()) => return data_reader_none(),
             None => {
                 // use value from on-disk index
@@ -1519,6 +1528,7 @@ impl ZettaCacheState {
             return data_reader_none();
         }
         trace!("cache hit: reading {:?} from {:?}", key, value);
+        let original_atime = value.atime;
         if value.atime != self.atime {
             self.atime_histogram.remove(value);
             value.atime = self.atime;
@@ -1529,21 +1539,22 @@ impl ZettaCacheState {
         match pc {
             Some(PendingChange::Insert(value_ref))
             | Some(PendingChange::RemoveThenInsert(value_ref))
-            | Some(PendingChange::UpdateAtime(value_ref)) => {
+            | Some(PendingChange::UpdateAtime(value_ref, _)) => {
                 *value_ref = value;
             }
             Some(PendingChange::Remove()) => panic!("invalid state"),
             None => {
                 // only in Index, not pending_changes
                 trace!(
-                    "adding UpdateAtime to pending_changes {:?} {:?}",
+                    "adding UpdateAtime to pending_changes {:?} {:?}, original atime {:?}",
                     key,
-                    value
+                    value,
+                    original_atime
                 );
                 // XXX would be nice to have saved the btreemap::Entry so we
                 // don't have to traverse the tree again.
                 self.pending_changes
-                    .insert(key, PendingChange::UpdateAtime(value));
+                    .insert(key, PendingChange::UpdateAtime(value, original_atime));
             }
         }
         if matches!(source, LookupSource::Read) {
@@ -1575,6 +1586,7 @@ impl ZettaCacheState {
     }
 
     fn remove_from_index(&mut self, key: IndexKey, value: IndexValue) {
+        let mut oplog_value = value;
         match self.pending_changes.get_mut(&key) {
             Some(PendingChange::Insert(value_ref)) => {
                 // The operation_log has an Insert for this key, and the key
@@ -1598,7 +1610,7 @@ impl ZettaCacheState {
                 );
                 self.pending_changes.insert(key, PendingChange::Remove());
             }
-            Some(PendingChange::UpdateAtime(value_ref)) => {
+            Some(PendingChange::UpdateAtime(value_ref, index_atime)) => {
                 // It's just an atime update, so the operation_log doesn't
                 // have an Insert for this key, but the key is in the
                 // Index.
@@ -1608,7 +1620,10 @@ impl ZettaCacheState {
                     key,
                     value,
                 );
-                self.pending_changes.insert(key, PendingChange::Remove());
+                // The atime for this block has been updated (in pending changes), but that
+                // update is not preserved in the operation log (we don't log atime updates).
+                // So we need to associate the "original" atime from the index with this remove.
+                oplog_value.atime = *index_atime;
             }
             Some(PendingChange::Remove()) => {
                 panic!("invalid state");
@@ -1622,7 +1637,7 @@ impl ZettaCacheState {
         trace!("adding Remove to operation_log {:?}", key);
         self.atime_histogram.remove(value);
         self.operation_log
-            .append(OperationLogEntry::Remove(key, value));
+            .append(OperationLogEntry::Remove(key, oplog_value));
     }
 
     /// Insert this block to the cache, if space and performance parameters
@@ -1990,7 +2005,7 @@ impl ZettaCacheState {
         for (&key, &pc) in &merging_state.old_pending_changes {
             match pc {
                 PendingChange::Insert(value)
-                | PendingChange::UpdateAtime(value)
+                | PendingChange::UpdateAtime(value, _)
                 | PendingChange::RemoveThenInsert(value) => {
                     self.index_cache.put(key, value);
                 }
