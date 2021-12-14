@@ -5,6 +5,7 @@ use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use anyhow::Context;
 use async_stream::stream;
+use futures::stream;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures_core::Stream;
@@ -118,20 +119,8 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
     }
 
     pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
-        let stream = self.iter_chunks(block_access);
-        let phys_entries = self.num_entries;
-
-        stream! {
-            let mut num_entries = 0;
-            for await chunk in stream {
-                for entry in chunk.entries {
-                    yield entry;
-                    num_entries += 1;
-                }
-            };
-
-            assert_eq!(phys_entries, num_entries);
-        }
+        self.iter_chunks(block_access)
+            .flat_map(|chunk| stream::iter(chunk.entries.into_iter()))
     }
 
     pub fn bytes(&self) -> u64 {

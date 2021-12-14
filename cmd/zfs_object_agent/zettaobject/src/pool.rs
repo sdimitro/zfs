@@ -2099,67 +2099,53 @@ async fn get_frees_per_obj(
 }
 
 async fn reclaim_frees_object(
-    state: Arc<PoolState>,
+    state: &PoolState,
     objects: Vec<(ObjectSize, Vec<PendingFreesLogEntry>)>,
 ) -> ObjectSize {
-    let first_object = objects[0].0.object;
-    let shared_state = state.shared_state.clone();
+    // objects should be sorted
+    assert!(objects.windows(2).all(|w| w[0].0.object < w[1].0.object));
+
+    let first_object = objects.first().unwrap().0.object;
+    let last_object = objects.last().unwrap().0.object;
+
+    // Note that the .reduce() below can't completely determine the next_block
+    // because if we skip the GET (because this object doesn't have any
+    // non-freed blocks), it won't be visited by the .reduce() when the
+    // filter_map() below returns None.
+    let next_block = state.object_block_map.object_to_next_block(last_object);
     trace!(
-        "reclaim: consolidating {} objects into {:?} to free {} blocks",
+        "reclaim: consolidating {} objects into {:?} to free {} blocks (last {:?} next {:?})",
         objects.len(),
         first_object,
-        objects.iter().map(|x| x.1.len()).sum::<usize>()
+        objects.iter().map(|(_, frees)| frees.len()).sum::<usize>(),
+        last_object,
+        next_block,
     );
 
-    struct FirstInfo {
-        object: ObjectId,
-        next_block: BlockId,
-    }
-
-    let stream = FuturesUnordered::new();
-    let mut to_delete = Vec::new();
-    let mut first = None;
-    for (object_size, frees) in objects {
+    let futures = objects.into_iter().filter_map(move |(object_size, frees)| {
         let object = object_size.object;
         let min_block = object.as_min_block();
         let next_block = state.object_block_map.object_to_next_block(object);
 
-        match &mut first {
-            None => {
-                // This is the first object.
-                first = Some(FirstInfo { object, next_block })
-            }
-            Some(first) => {
-                // This is not the first object.  It needs to be deleted, and
-                // its min/next_block needs to be folded into the FirstInfo.
-                // Note that the .reduce() below can't completely determine the
-                // min/next_block because if we skip the GET (because this
-                // object doesn't have any non-freed blocks), it won't be
-                // visited by the .reduce(), because we `continue` here.
-                assert_gt!(object, first.object);
-                to_delete.push(object);
-                first.next_block = max(first.next_block, next_block);
-                if object_size.num_blocks == 0 {
-                    trace!(
-                        "reclaim: moving 0 blocks from {:?} (BlockID[{},{})) because all {} blocks were freed",
-                        object,
-                        min_block,
-                        next_block,
-                        frees.len(),
-                    );
-                    assert_eq!(object_size.num_bytes, 0);
-                    continue;
-                }
-            }
+        if object != first_object && object_size.num_blocks == 0 {
+            trace!(
+                "reclaim: moving 0 blocks from {:?} (BlockID[{},{})) because all {} blocks were freed",
+                object,
+                min_block,
+                next_block,
+                frees.len(),
+            );
+            assert_eq!(object_size.num_bytes, 0);
+            return None;
         }
 
-        let my_shared_state = shared_state.clone();
-        stream.push(future::ready(async move {
+        let shared_state = state.shared_state.clone();
+        Some(async move {
             // Bypass object cache so that it isn't added, so that when we
             // overwrite it with put(), we don't need to copy the data into the
             // cache to invalidate.
             let mut phys =
-                DataObject::get(&my_shared_state.object_access, my_shared_state.guid, object, ObjectAccessStatType::ReclaimGet, true)
+                DataObject::get(&shared_state.object_access, shared_state.guid, object, ObjectAccessStatType::ReclaimGet, true)
                     .await
                     .unwrap();
 
@@ -2188,8 +2174,7 @@ async fn reclaim_frees_object(
             // uncommitted consolidation.  Therefore, if the expected size is
             // zero, we can remove this object without reading it because it
             // doesn't have any required blocks.  That happens above, where we
-            // `continue`.
-
+            // `return None`.
             if phys.header.next_block != next_block {
                 debug!("reclaim: {:?} expected next {:?}, found next {:?}, trimming uncommitted consolidation",
                     object, next_block, phys.header.next_block);
@@ -2208,9 +2193,9 @@ async fn reclaim_frees_object(
             assert_eq!(phys.blocks_len(), object_size.num_blocks);
 
             phys
-        }));
-    }
-    let mut new_phys = stream
+        })
+    });
+    let mut new_phys = stream::iter(futures)
         .buffered(*RECLAIM_ONE_BUFFERED)
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.header.guid, b.header.guid);
@@ -2256,19 +2241,17 @@ async fn reclaim_frees_object(
         .await
         .unwrap();
 
-    if let Some(first) = first {
-        // Fold in the next_block info which includes the skipped objects.
-        assert_eq!(new_phys.header.object, first.object);
-        assert_le!(new_phys.header.next_block, first.next_block);
-        new_phys.header.next_block = first.next_block;
-    }
+    // Fold in the next_block info which includes the skipped objects.
     assert_eq!(new_phys.header.object, first_object);
+    assert_le!(new_phys.header.next_block, next_block);
+    new_phys.header.next_block = next_block;
+
     // XXX would be nice to skip this if we didn't actually make any change
     // (because we already did it all before crashing)
     trace!("reclaim: rewriting {}", new_phys);
     new_phys
         .put(
-            &shared_state.object_access,
+            &state.shared_state.object_access,
             ObjectAccessStatType::ReclaimPut,
         )
         .await;
@@ -2622,10 +2605,10 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                 .try_into()
                 .unwrap();
             let permit = outstanding.clone().acquire_many_owned(num_permits).await;
-            let state2 = state.clone();
+            let state = state.clone();
             join_handles.push(tokio::spawn(async move {
                 let _permit = permit; // force permit to be moved & dropped in the task
-                reclaim_frees_object(state2, objects_to_consolidate).await
+                reclaim_frees_object(&state, objects_to_consolidate).await
             }));
             if freed_blocks_bytes > required_free_bytes {
                 break;

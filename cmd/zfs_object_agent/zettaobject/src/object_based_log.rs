@@ -2,10 +2,10 @@ use crate::base_types::*;
 use crate::object_access::{ObjectAccess, ObjectAccessStatType};
 use crate::pool::PoolSharedState;
 use anyhow::{Context, Result};
-use async_stream::stream;
+use futures::future;
+use futures::future::join;
 use futures::future::join_all;
-use futures::future::{self, join};
-use futures::stream::{FuturesOrdered, StreamExt};
+use futures::stream::{self, StreamExt};
 use futures_core::Stream;
 use lazy_static::lazy_static;
 use log::*;
@@ -327,34 +327,29 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         &self,
         first_chunk_opt: Option<ObjectBasedLogRemainder>,
     ) -> (impl Stream<Item = T>, ObjectBasedLogRemainder) {
-        let mut stream = FuturesOrdered::new();
-        let generation = self.generation;
         let first_chunk = match first_chunk_opt {
-            Some(rem) => rem.chunk,
+            Some(remainder) => remainder.chunk,
             None => 0,
         };
-        for chunk in first_chunk..self.num_flushed_chunks {
-            let shared_state = self.shared_state.clone();
-            let n = self.name.clone();
-            stream.push(future::ready(async move {
-                ObjectBasedLogChunk::get(&shared_state.object_access, &n, generation, chunk)
+        let shared_state = self.shared_state.clone();
+        let name = self.name.clone();
+        let generation = self.generation;
+        let futures = (first_chunk..self.num_flushed_chunks).map(move |chunk| {
+            let shared_state = shared_state.clone();
+            let name = name.clone();
+            async move {
+                ObjectBasedLogChunk::get(&shared_state.object_access, &name, generation, chunk)
                     .await
                     .unwrap()
-            }));
-        }
-        // Note: buffered() is needed because rust-s3 creates one connection for
-        // each request, rather than using a connection pool. If we created 1000
-        // connections we'd run into the open file descriptor limit.
-        let mut buffered_stream = stream.buffered(*OBJECT_LOG_ITERATE_QUEUE_DEPTH);
+            }
+        });
         (
-            stream! {
-                while let Some(chunk) = buffered_stream.next().await {
-                    trace!("yielding entries of chunk {}", chunk.chunk);
-                    for ent in chunk.entries {
-                        yield ent;
-                    }
-                }
-            },
+            // Note: buffered() is needed because rust-s3 creates one connection for
+            // each request, rather than using a connection pool. If we created 1000
+            // connections we'd run into the open file descriptor limit.
+            stream::iter(futures)
+                .buffered(*OBJECT_LOG_ITERATE_QUEUE_DEPTH)
+                .flat_map(|chunk| stream::iter(chunk.entries.into_iter())),
             ObjectBasedLogRemainder {
                 chunk: self.num_flushed_chunks,
             },

@@ -680,7 +680,7 @@ impl ObjectAccess {
 
         let result = retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
             let my_bytes = bytes.clone();
-            let stream = ByteStream::new_with_size(stream! { yield Ok(my_bytes)}, len);
+            let stream = ByteStream::new_with_size(stream::iter(iter::once(Ok(my_bytes))), len);
 
             let req = PutObjectRequest {
                 bucket: self.bucket_str.clone(),
