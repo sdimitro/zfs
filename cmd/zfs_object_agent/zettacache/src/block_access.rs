@@ -54,7 +54,6 @@ pub struct BlockAccess {
 #[derive(Debug)]
 pub struct Disk {
     file: File,
-    readonly: bool,
     size: u64,
     sector_size: usize,
     outstanding_reads: Semaphore,
@@ -122,7 +121,6 @@ impl Disk {
         }
         let this = Disk {
             file,
-            readonly,
             size,
             sector_size,
             outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
