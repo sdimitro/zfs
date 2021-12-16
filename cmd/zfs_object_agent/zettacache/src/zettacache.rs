@@ -10,6 +10,8 @@ use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::extent_allocator::ExtentAllocatorPhys;
+use crate::features::check_features;
+use crate::features::SUPPORTED_FEATURES;
 use crate::index::*;
 use crate::size_histogram::SizeHistogramPhys;
 use crate::superblock::PrimaryPhys;
@@ -545,6 +547,7 @@ impl ZettaCache {
             checkpoint_capacity,
             checkpoint: checkpoint_extent,
             num_disks,
+            feature_flags: SUPPORTED_FEATURES.keys().cloned().collect(),
         }
         .write_all(DiskId(0), guid, block_access)
         .await;
@@ -563,6 +566,9 @@ impl ZettaCache {
                 Self::create(&block_access).await;
                 PrimaryPhys::read(&block_access).await.unwrap()
             }
+        };
+        if let Err(feature_error) = check_features(primary.feature_flags.iter()) {
+            panic!("{}", feature_error)
         };
 
         let checkpoint = ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await;
@@ -1731,6 +1737,7 @@ impl ZettaCacheState {
 
         self.primary.checkpoint = checkpoint_extent;
         self.primary.checkpoint_id = self.primary.checkpoint_id.next();
+        self.primary.feature_flags = SUPPORTED_FEATURES.keys().cloned().collect();
         self.primary
             .write_all(self.primary_disk, self.guid, &self.block_access)
             .await;

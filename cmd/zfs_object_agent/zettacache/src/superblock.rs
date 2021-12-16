@@ -1,5 +1,6 @@
 use crate::base_types::*;
 use crate::block_access::*;
+use crate::features::FeatureName;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::stream::*;
@@ -26,6 +27,7 @@ pub struct PrimaryPhys {
     pub checkpoint_capacity: Extent, // space available for checkpoints
     pub checkpoint: Extent,          // space used by latest checkpoint
     pub num_disks: usize,
+    pub feature_flags: Vec<FeatureName>,
 }
 
 impl PrimaryPhys {
