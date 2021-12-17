@@ -15,7 +15,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Add, Bound::*, Sub};
 use std::sync::Arc;
 use std::time::Instant;
-use std::{fmt, mem};
+use std::{fmt, iter, mem};
 use util::BitmapRangeIterator;
 use util::RangeTree;
 use util::{get_tunable, TerseVec};
@@ -1374,36 +1374,40 @@ pub struct BlockAllocatorPhys {
 impl OnDisk for BlockAllocatorPhys {}
 
 impl BlockAllocatorPhys {
-    pub fn new(capacity: Vec<Extent>) -> BlockAllocatorPhys {
-        let slab_size = *DEFAULT_SLAB_SIZE;
-        let slab_size64 = u64::from(slab_size);
-
-        // Truncate each extent to a multiple of slab_size
-        let capacity: Vec<Extent> = capacity
-            .iter()
-            .map(|extent| extent.range(0, extent.size / slab_size64 * slab_size64))
-            .collect();
-        let slabs = vec![
-            SlabPhys {
-                generation: SlabGeneration(0),
-                slab_type: SlabPhysType::Free
-            };
-            usize::from64(
-                capacity
-                    .iter()
-                    .map(|extent| extent.size / slab_size64)
-                    .sum()
-            )
-        ];
-
-        BlockAllocatorPhys {
-            slab_size,
+    pub fn new<T>(capacity: T) -> BlockAllocatorPhys
+    where
+        T: IntoIterator<Item = Extent>,
+    {
+        let mut this = BlockAllocatorPhys {
+            slab_size: *DEFAULT_SLAB_SIZE,
             spacemap: SpaceMapPhys::new(),
             spacemap_next: SpaceMapPhys::new(),
             next_slab_to_condense: SlabId(0),
-            capacity,
-            slabs: slabs.into(),
+            capacity: Default::default(),
+            slabs: TerseVec(Vec::new()),
             slab_buckets: DEFAULT_SLAB_BUCKETS.clone(),
+        };
+        this.extend(capacity);
+        this
+    }
+
+    /// Add new capacity
+    pub fn extend<T>(&mut self, capacity: T)
+    where
+        T: IntoIterator<Item = Extent>,
+    {
+        let slabsize = u64::from(self.slab_size);
+        for extent in capacity {
+            let nslabs = extent.size / slabsize;
+            self.slabs.0.extend(
+                iter::repeat(SlabPhys {
+                    generation: SlabGeneration(0),
+                    slab_type: SlabPhysType::Free,
+                })
+                .take(usize::from64(nslabs)),
+            );
+            // capacity is aligned to be a multiple of slabsize
+            self.capacity.push(extent.range(0, nslabs * slabsize));
         }
     }
 

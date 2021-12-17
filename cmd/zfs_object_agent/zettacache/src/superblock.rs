@@ -57,31 +57,52 @@ impl PrimaryPhys {
             .await;
     }
 
-    pub async fn read(block_access: &BlockAccess) -> Result<(Self, DiskId, u64)> {
-        let superblocks = SuperblockPhys::read_all(block_access).await?;
+    /// Return value is (Self, primary_disk, guid, extra_disks)
+    pub async fn read(block_access: &BlockAccess) -> Result<(Self, DiskId, u64, Vec<DiskId>)> {
+        let results = SuperblockPhys::read_all(block_access).await;
 
-        let (primary, primary_disk, guid) = superblocks
+        let (primary, primary_disk, guid) = results
             .iter()
-            .find_map(|phys| {
-                phys.primary
-                    .as_ref()
-                    .map(|primary| (primary.clone(), phys.disk, phys.guid))
+            .find_map(|result| {
+                if let Ok(phys) = result {
+                    phys.primary
+                        .as_ref()
+                        .map(|primary| (primary.clone(), phys.disk, phys.guid))
+                } else {
+                    None
+                }
             })
             .ok_or_else(|| anyhow!("Primary Superblock not found"))?;
 
-        for (id, phys) in superblocks.iter().enumerate() {
+        let extra_disks = results
+            .iter()
+            .enumerate()
+            .filter_map(|(id, result)| match result {
+                Ok(_) => None,
+                Err(_) => Some(DiskId(id.try_into().unwrap())),
+            })
+            .collect::<Vec<_>>();
+
+        for (id, result) in results.iter().enumerate() {
             // XXX proper error handling
             // XXX we should be able to reorder them?
-            assert_eq!(DiskId(id.try_into().unwrap()), phys.disk);
-            assert_eq!(phys.guid, guid);
-            assert!(phys.primary.is_none() || phys.disk == primary_disk);
+            if let Ok(phys) = result {
+                assert_eq!(DiskId(id.try_into().unwrap()), phys.disk);
+                assert_eq!(phys.guid, guid);
+                assert!(phys.primary.is_none() || phys.disk == primary_disk);
+            }
         }
 
-        // XXX proper error handling
-        assert_eq!(block_access.disks().count(), primary.num_disks);
-        assert!(primary.checkpoint_capacity.contains(&primary.checkpoint));
+        assert_eq!(
+            results.len() - extra_disks.len(),
+            primary.num_disks,
+            "Expected {} disks with superblocks, {} disks provided, of which {} have superblocks",
+            primary.num_disks,
+            results.len(),
+            results.len() - extra_disks.len()
+        );
 
-        Ok((primary, primary_disk, guid))
+        Ok((primary, primary_disk, guid, extra_disks))
     }
 }
 
@@ -96,12 +117,12 @@ impl SuperblockPhys {
         Ok(this)
     }
 
-    async fn read_all(block_access: &BlockAccess) -> Result<Vec<SuperblockPhys>> {
+    async fn read_all(block_access: &BlockAccess) -> Vec<Result<SuperblockPhys>> {
         block_access
             .disks()
             .map(|disk| SuperblockPhys::read(block_access, disk))
             .collect::<FuturesOrdered<_>>()
-            .try_collect()
+            .collect()
             .await
     }
 

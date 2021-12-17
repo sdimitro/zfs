@@ -18,6 +18,13 @@ impl ExtentAllocatorPhys {
     pub fn new(capacity: Vec<Extent>) -> Self {
         Self { capacity }
     }
+
+    pub fn extend<T>(&mut self, capacity: T)
+    where
+        T: IntoIterator<Item = Extent>,
+    {
+        self.capacity.extend(capacity);
+    }
 }
 
 pub struct ExtentAllocator {

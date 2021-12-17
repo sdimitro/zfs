@@ -66,7 +66,6 @@ lazy_static! {
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
     static ref CACHE_INSERT_BLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_blocking_buffer_bytes", 256_000_000);
     static ref CACHE_INSERT_NONBLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_nonblocking_buffer_bytes", 256_000_000);
-
     static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
 }
 
@@ -464,34 +463,38 @@ pub enum LookupSource {
 
 #[metered(registry=ZettaCacheMetrics)]
 impl ZettaCache {
-    pub async fn create(block_access: &BlockAccess) {
-        let guid: u64 = rand::random();
-
-        let total_capacity = block_access.total_capacity();
-
-        // checkpoint is stored on the largest disk, its size a percent of the whole cache
-        let checkpoint_capacity = Extent::new(
-            block_access
-                .disks()
-                .reduce(|a, b| {
-                    if block_access.disk_size(a) > block_access.disk_size(b) {
-                        a
-                    } else {
-                        b
-                    }
-                })
+    // The checkpoint is stored on the largest provided disk (when adding disks,
+    // only the new disks are candidates). Its size is a percent of the whole
+    // cache.
+    fn checkpoint_capacity<D>(disks: D, block_access: &BlockAccess) -> Extent
+    where
+        D: IntoIterator<Item = DiskId>,
+    {
+        Extent::new(
+            disks
+                .into_iter()
+                .max_by_key(|&disk| block_access.disk_size(disk))
                 .unwrap(),
             SUPERBLOCK_SIZE,
             block_access.round_up_to_sector(
-                (*DEFAULT_CHECKPOINT_SIZE_PCT / 100.0 * total_capacity as f64)
+                (*DEFAULT_CHECKPOINT_SIZE_PCT / 100.0 * block_access.total_capacity() as f64)
                     .approx_as::<u64>()
                     .unwrap(),
             ),
-        );
+        )
+    }
 
-        // metadata is stored on each disk, its size a percent of that disk
-        let metadata_capacity: Vec<Extent> = block_access
-            .disks()
+    // metadata is stored on each disk, its size a percent of that disk
+    fn metadata_capacity<D>(
+        disks: D,
+        block_access: &BlockAccess,
+        checkpoint_capacity: Extent,
+    ) -> Vec<Extent>
+    where
+        D: IntoIterator<Item = DiskId>,
+    {
+        disks
+            .into_iter()
             .map(|disk| {
                 let start = if disk == checkpoint_capacity.location.disk {
                     checkpoint_capacity.location.offset + checkpoint_capacity.size
@@ -510,10 +513,16 @@ impl ZettaCache {
                     ),
                 )
             })
-            .collect();
+            .collect()
+    }
 
-        let data_capacity = metadata_capacity
-            .iter()
+    // data is stored after metadata
+    fn data_capacity<M>(metadata_capacity: M, block_access: &BlockAccess) -> Vec<Extent>
+    where
+        M: IntoIterator<Item = Extent>,
+    {
+        metadata_capacity
+            .into_iter()
             .map(|extent| {
                 Extent::new(
                     extent.location.disk,
@@ -522,15 +531,27 @@ impl ZettaCache {
                         - (extent.location.offset + extent.size),
                 )
             })
-            .collect();
+            .collect()
+    }
+
+    pub async fn create(block_access: &BlockAccess) {
+        let guid: u64 = rand::random();
+
+        let total_capacity = block_access.total_capacity();
+        info!("creating cache from {} disks", block_access.disks().count());
+
+        let checkpoint_capacity = Self::checkpoint_capacity(block_access.disks(), block_access);
+        let metadata_capacity =
+            Self::metadata_capacity(block_access.disks(), block_access, checkpoint_capacity);
+        let data_capacity = Self::data_capacity(metadata_capacity.iter().copied(), block_access);
 
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
+            block_allocator: BlockAllocatorPhys::new(data_capacity),
             extent_allocator: ExtentAllocatorPhys::new(metadata_capacity),
             index: Default::default(),
             operation_log: Default::default(),
             last_atime: Atime(0),
-            block_allocator: BlockAllocatorPhys::new(data_capacity),
             size_histogram: SizeHistogramPhys::new(total_capacity, *QUANTILES_IN_SIZE_HISTOGRAM),
 
             merge_progress: None,
@@ -559,21 +580,59 @@ impl ZettaCache {
             false,
         ));
 
-        let (primary, primary_disk, guid) = match PrimaryPhys::read(&block_access).await {
-            Ok(tuple) => tuple,
-            Err(_) => {
-                // XXX need proper create CLI
-                Self::create(&block_access).await;
-                PrimaryPhys::read(&block_access).await.unwrap()
-            }
-        };
+        let (mut primary, primary_disk, guid, extra_disks) =
+            match PrimaryPhys::read(&block_access).await {
+                Ok(tuple) => tuple,
+                Err(_) => {
+                    // XXX need proper create CLI
+                    Self::create(&block_access).await;
+                    PrimaryPhys::read(&block_access).await.unwrap()
+                }
+            };
         if let Err(feature_error) = check_features(primary.feature_flags.iter()) {
             panic!("{}", feature_error)
         };
 
-        let checkpoint = ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await;
-
+        // XXX proper error handling
+        assert!(primary.checkpoint_capacity.contains(&primary.checkpoint));
+        let mut checkpoint = ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await;
         assert_eq!(checkpoint.generation, primary.checkpoint_id);
+
+        // XXX proper CLI for adding disks
+        if !extra_disks.is_empty() {
+            info!(
+                "adding {} disks to existing {}-disk cache",
+                extra_disks.len(),
+                primary.num_disks
+            );
+            primary.num_disks += extra_disks.len();
+
+            // Checkpoint size is a % of the total pool, so reallocate a bigger checkpoint space on a new disk.
+            let checkpoint_capacity =
+                Self::checkpoint_capacity(extra_disks.iter().copied(), &block_access);
+            primary.checkpoint_capacity = checkpoint_capacity;
+
+            // Add new disks to extent (metadata) allocator.
+            let metadata_capacity = Self::metadata_capacity(
+                extra_disks.into_iter(),
+                &block_access,
+                checkpoint_capacity,
+            );
+            checkpoint
+                .extent_allocator
+                .extend(metadata_capacity.iter().copied());
+
+            // Add new disks to block (data) allocator.
+            checkpoint.block_allocator.extend(Self::data_capacity(
+                metadata_capacity.into_iter(),
+                &block_access,
+            ));
+        }
+
+        info!(
+            "opening ZettaCache {} with {} disks",
+            guid, primary.num_disks
+        );
 
         let mut builder = ExtentAllocatorBuilder::new(&checkpoint.extent_allocator);
         checkpoint.claim(&mut builder);
@@ -1165,7 +1224,7 @@ impl ZCacheDBHandle {
             true,
         ));
 
-        let (primary, primary_disk, guid) = PrimaryPhys::read(&block_access).await?;
+        let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
 
         let checkpoint =
             Arc::new(ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await);
@@ -1699,11 +1758,21 @@ impl ZettaCacheState {
             .block_access
             .chunk_to_raw(EncodeType::Json, &checkpoint);
 
-        let mut checkpoint_extent = Extent::new(
-            self.primary.checkpoint.location.disk,
-            self.primary.checkpoint.location.offset + self.primary.checkpoint.size,
-            raw.len() as u64,
-        );
+        let mut checkpoint_extent = if self
+            .primary
+            .checkpoint_capacity
+            .contains(&self.primary.checkpoint)
+        {
+            // Try placing checkpoint after current checkpoint.
+            Extent::new(
+                self.primary.checkpoint.location.disk,
+                self.primary.checkpoint.location.offset + self.primary.checkpoint.size,
+                raw.len() as u64,
+            )
+        } else {
+            // The checkpoint region has moved. Write new checkpoint in new region.
+            self.primary.checkpoint_capacity.range(0, raw.len() as u64)
+        };
 
         if !self
             .primary
