@@ -89,14 +89,23 @@ appenders:
     - kind: threshold
       level: error
 
-# Set the default logging level to "debug"
+  memory:
+    kind: buffer
+    filters:
+    - kind: threshold
+      level: trace
+
+# Set the default logging level to "trace" to permit trace logs to "memory".
+# But tracelog is not enabled by default.
 root:
-  level: debug
+  level: trace
   appenders:
     - stdout
+#   - tracelog
     - debuglog
     - infolog
     - errorlog
+    - memory
 
 loggers:
   # "rusoto_core::request" is very chatty when set to debug.

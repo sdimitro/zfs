@@ -148,6 +148,9 @@ fn main() {
             let cache_paths = matches
                 .values_of("cache-device")
                 .map_or(Vec::new(), |values| values.collect());
+            if let Some(file_name) = matches.value_of("config-file") {
+                util::read_tunable_config(file_name);
+            }
 
             util::setup_logging(
                 matches.occurrences_of("verbosity"),
@@ -155,38 +158,11 @@ fn main() {
                 matches.value_of("log-config"),
             );
 
-            if let Some(file_name) = matches.value_of("config-file") {
-                util::read_tunable_config(file_name);
-            }
-
             error!(
                 "Starting ZFS Object Agent ({}).  Local timezone is {}",
                 GIT_VERSION,
                 chrono::Local::now().format("%Z (%:z)")
             );
-
-            // error!() should be used when an invalid state is encountered; the related
-            // operation will fail and the program may exit.  E.g. an invalid request
-            // was received from the client (kernel).
-            error!("logging level ERROR enabled");
-
-            // warn!() should be used when something unexpected has happened, but it can
-            // be recovered from.
-            warn!("logging level WARN enabled");
-
-            // info!() should be used for very high level operations which are expected
-            // to happen infrequently (no more than once per minute in typical
-            // operation).  e.g. opening/closing a pool, long-lived background tasks,
-            // things that might be in `zpool history -i`.
-            info!("logging level INFO enabled");
-
-            // debug!() can be used for all but the most frequent operations.
-            // e.g. not every single read/write/free operation, but perhaps for every
-            // call to S3.
-            debug!("logging level DEBUG enabled");
-
-            // trace!() can be used indiscriminately.
-            trace!("logging level TRACE enabled");
 
             zettaobject::init::start(socket_dir, cache_paths);
         }
