@@ -3855,8 +3855,8 @@ zpool_vdev_split(zpool_handle_t *zhp, char *newname, nvlist_t **newroot,
 	}
 
 	/* Add all the children we found */
-	if (nvlist_add_nvlist_array(*newroot, ZPOOL_CONFIG_CHILDREN, varray,
-	    lastlog == 0 ? vcount : lastlog) != 0)
+	if (nvlist_add_nvlist_array(*newroot, ZPOOL_CONFIG_CHILDREN,
+	    (const nvlist_t **)varray, lastlog == 0 ? vcount : lastlog) != 0)
 		goto out;
 
 	/*
@@ -4599,7 +4599,7 @@ zpool_get_history(zpool_handle_t *zhp, nvlist_t **nvhisp, uint64_t *off,
 	if (!err) {
 		verify(nvlist_alloc(nvhisp, NV_UNIQUE_NAME, 0) == 0);
 		verify(nvlist_add_nvlist_array(*nvhisp, ZPOOL_HIST_RECORD,
-		    records, numrecords) == 0);
+		    (const nvlist_t **)records, numrecords) == 0);
 	}
 	for (i = 0; i < numrecords; i++)
 		nvlist_free(records[i]);
@@ -5406,7 +5406,6 @@ zpool_set_vdev_prop(zpool_handle_t *zhp, const char *vdevname,
     const char *propname, const char *propval)
 {
 	int ret;
-	vdev_prop_t vprop;
 	nvlist_t *nvl = NULL;
 	nvlist_t *outnvl = NULL;
 	nvlist_t *props;
@@ -5417,8 +5416,6 @@ zpool_set_vdev_prop(zpool_handle_t *zhp, const char *vdevname,
 
 	if ((ret = zpool_vdev_guid(zhp, vdevname, &vdev_guid)) != 0)
 		return (ret);
-
-	vprop = vdev_name_to_prop(propname);
 
 	if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0)
 		return (no_memory(zhp->zpool_hdl));

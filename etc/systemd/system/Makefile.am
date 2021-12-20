@@ -14,7 +14,10 @@ systemdunit_DATA = \
 	zfs-volumes.target \
 	zfs-object-agent.service \
 	zoa-chaos-monkey.service \
-	zfs.target
+	zfs.target \
+	zfs-scrub-monthly@.timer \
+	zfs-scrub-weekly@.timer \
+	zfs-scrub@.service
 
 SUBSTFILES += $(systemdpreset_DATA) $(systemdunit_DATA)
 
