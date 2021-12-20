@@ -1699,7 +1699,6 @@ static int
 vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
     uint64_t *logical_ashift, uint64_t *physical_ashift)
 {
-	vdev_object_store_t *vos;
 	int error = 0;
 
 	/*
@@ -1727,11 +1726,6 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 		return (SET_ERROR(EINVAL));
 	}
 
-	vos = vd->vdev_tsd;
-	vos->vos_vdev = vd;
-	vos->vos_open_completed = B_FALSE;
-	vos->vos_closing = B_FALSE;
-
 	/*
 	 * Reopen the device if it's not currently open.  Otherwise,
 	 * just update the physical size of the device.
@@ -1739,6 +1733,16 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	if (vd->vdev_reopening) {
 		goto skip_open;
 	}
+
+	/*
+	 * At this point, we can initialize aspects of the vdev
+	 * which must not change as part of a vdev_reopen.
+	 */
+	vdev_object_store_t *vos = vd->vdev_tsd;
+	vos->vos_vdev = vd;
+	vos->vos_open_completed = B_FALSE;
+	vos->vos_closing = B_FALSE;
+
 	ASSERT(vd->vdev_path != NULL);
 	ASSERT3P(vos->vos_agent_thread, ==, NULL);
 
