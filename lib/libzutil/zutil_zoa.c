@@ -117,7 +117,16 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock)
 			break;
 		}
 
-		if (errno == ECONNREFUSED && retries < ZOA_MAX_RETRIES) {
+		/*
+		 * If the object agent is running or has run in the past, the
+		 * zoa socket file should be present. If this file is missing,
+		 * it indicates that either the agent has never run or the
+		 * superuser removed the file. Fail silently in this case.
+		 */
+		if (errno == ENOENT) {
+			close(sock);
+			return (-1);
+		} else if (errno == ECONNREFUSED && retries < ZOA_MAX_RETRIES) {
 			zutil_error(hdl, EZFS_CONNECT_RETRY,
 			    dgettext(TEXT_DOMAIN,
 			    "failed to connect to object agent process:"));
