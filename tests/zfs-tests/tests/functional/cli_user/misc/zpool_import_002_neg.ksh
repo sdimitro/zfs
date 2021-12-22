@@ -57,7 +57,7 @@ log_assert "Executing 'zpool import' by regular user fails"
 
 typeset -i i=0
 while [[ $i -lt ${#args[*]} ]]; do
-	log_mustnot zpool import ${args[i]}
+	log_mustnot import_pool -p "${args[i]}"
 	((i = i + 1))
 done
 

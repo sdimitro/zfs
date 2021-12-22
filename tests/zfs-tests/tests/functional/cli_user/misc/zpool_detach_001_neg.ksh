@@ -43,6 +43,10 @@
 # 2. Verify the command fails
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 log_assert "zpool detach returns an error when run as a user"

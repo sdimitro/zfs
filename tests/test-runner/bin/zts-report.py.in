@@ -324,6 +324,12 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'slog/slog_010_neg': ['SKIP', object_store_skip],
         'slog/slog_014_pos': ['SKIP', object_store_skip],
         'nopwrite/nopwrite_copies': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_attach_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_detach_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_offline_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_online_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_remove_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_replace_001_neg': ['SKIP', object_store_skip],
     })
 
 #

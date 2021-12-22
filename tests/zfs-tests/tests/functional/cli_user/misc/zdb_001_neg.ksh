@@ -45,10 +45,12 @@
 function check_zdb
 {
 	$@ > $TEST_BASE_DIR/zdb.$$
-	grep "Dataset mos" $TEST_BASE_DIR/zdb.$$
-	if [ $? -eq 0 ]
-	then
-		log_fail "$@ exited 0 when run as a non root user!"
+	grep "Dataset" $TEST_BASE_DIR/zdb.$$
+	if [ $? -eq 0 ]; then
+		# For object store it is allowed to open the dataset
+		# using normal user
+		use_object_store || \
+			log_fail "$@ exited 0 when run as a non root user!"
 	fi
 	rm $TEST_BASE_DIR/zdb.$$
 }
@@ -70,9 +72,9 @@ log_must grep pool_guid $TEST_BASE_DIR/zdb_001_neg.$$.txt
 log_must rm $TEST_BASE_DIR/zdb_001_neg.$$.txt
 
 # we shouldn't able to run it on any dataset
-check_zdb zdb $TESTPOOL
-check_zdb zdb $TESTPOOL/$TESTFS
-check_zdb zdb $TESTPOOL/$TESTFS@snap
-check_zdb zdb $TESTPOOL/$TESTFS.clone
+check_zdb run_zdb -p "$TESTPOOL"
+check_zdb run_zdb -p "$TESTPOOL/$TESTFS"
+check_zdb run_zdb -p "$TESTPOOL/$TESTFS@snap"
+check_zdb run_zdb -p "$TESTPOOL/$TESTFS/clone"
 
 log_pass "zdb can't run as a user on datasets, but can run without arguments"
