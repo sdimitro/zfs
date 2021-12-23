@@ -29,10 +29,10 @@ function cleanup
 	# threads for each test, and there's no good way to get a list
 	# of all the filesystems that should be destroyed on cleanup
 	# (i.e. the list of filesystems used for the last test ran).
-	# Thus, we simply recreate the pool as a way to destroy all
-	# filesystems and leave a fresh pool behind.
+	# Thus, we simply destroy the pool as a way to destroy all
+	# filesystems.
 	#
-	recreate_perf_pool
+	destroy_perf_pool
 }
 
 trap "log_fail \"Measure IO stats during random write load\"" SIGTERM

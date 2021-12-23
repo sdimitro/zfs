@@ -324,6 +324,25 @@ function recreate_perf_pool
 	create_pool -p $PERFPOOL -d "$DISKS"
 }
 
+#
+# Destroy the pool used for performance tests.
+#
+function destroy_perf_pool
+{
+	[[ -n $PERFPOOL ]] || log_fail "The \$PERFPOOL variable isn't set."
+
+	#
+	# In case there's been some "leaked" zinject delays, or if the
+	# performance test injected some delays itself, we clear all
+	# delays before attempting to destroy the pool. Each delay
+	# places a hold on the pool, so the destroy will fail if there
+	# are any outstanding delays.
+	#
+	clear_zinject_delays
+
+	destroy_pool $PERFPOOL
+}
+
 function verify_threads_per_fs
 {
 	typeset threads=$1

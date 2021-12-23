@@ -43,7 +43,7 @@ function cleanup
 	# kill fio and iostat
 	pkill fio
 	pkill iostat
-	recreate_perf_pool
+	destroy_perf_pool
 }
 
 trap "log_fail \"Measure IO stats during random read load\"" SIGTERM

@@ -488,6 +488,22 @@ get_cache_part() {
 	echo "/dev/disk/by-id/$cache_part"
 }
 
+configure_zettacache() {
+	cache_parts=""
+	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		# Dedicate 8G at the start of the zettacache disk for a slog.
+		printf "size=16777216, bootable\n," | \
+		    sudo sfdisk --wipe always \
+		    "/dev/$(basename "$cache_dev")"
+		if [ -z "$cache_parts" ]; then
+			cache_parts="$(get_cache_part "$cache_dev")"
+		else
+			cache_parts="${cache_parts},$(get_cache_part "$cache_dev")"
+		fi
+	done
+	sudo -E sed -i 's/ZETTACACHE_DEVICES=.*//g' $ZOA_CONF
+	sudo sh -c "echo ZETTACACHE_DEVICES=$cache_parts >>$ZOA_CONF"
+}
 
 # Add a tunable with name and value in the
 # /etc/zfs/zoa_config.toml
@@ -876,16 +892,17 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	#
 	export RUST_BACKTRACE=1
 
+	# Use ZETTACACHE_DEVICE to be backward compatible
+	ZETTACACHE_DEVICE=${ZETTACACHE_DEVICE:-""}
 	if [ -n "$ZETTACACHE_DEVICE" ]; then
-		# Dedicate 8G at the start of the zettacache disk for a slog.
-		printf "size=16777216, bootable\n," | \
-		    sudo sfdisk --wipe always \
-		    "/dev/$(basename "$ZETTACACHE_DEVICE")"
-		cache_part="$(get_cache_part "$ZETTACACHE_DEVICE")"
-		sudo -E sed -i 's/ZETTACACHE_DEVICE=.*//g' $ZOA_CONF
-		sudo sh -c "echo ZETTACACHE_DEVICE=$cache_part >>$ZOA_CONF"
+		export ZETTACACHE_DEVICES=$ZETTACACHE_DEVICE
+		unset ZETTACACHE_DEVICE
+	fi
+
+	if [ -n "$ZETTACACHE_DEVICES" ]; then
+		configure_zettacache
 	else
-		sudo -E sed -i 's/ZETTACACHE_DEVICE=.*/ZETTACACHE_DEVICE=/g' \
+		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
 		    $ZOA_CONF
 	fi
 
@@ -1021,7 +1038,7 @@ msg "STACK_TRACER:    $STACK_TRACER"
 msg "Keep pool(s):    $KEEP"
 msg "Missing util(s): $STF_MISSING_BIN"
 msg "ZTS_OBJECT_STORE:      $ZTS_OBJECT_STORE"
-msg "ZETTACACHE_DEVICE:     $ZETTACACHE_DEVICE"
+msg "ZETTACACHE_DEVICES:     $ZETTACACHE_DEVICES"
 msg "RUST_BACKTRACE:        $RUST_BACKTRACE"
 msg "ZTS_KILL_ZOA:          $ZTS_KILL_ZOA"
 msg ""
