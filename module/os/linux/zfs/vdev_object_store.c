@@ -62,6 +62,9 @@ int vdev_object_store_max_frees = 100000;
 static int partial_write_counter = 0;
 static int write_retry_counter = 0;
 
+/* Taskq used for agent_resume. */
+taskq_t *resume_taskq;
+
 typedef enum {
 	VOS_SOCK_UNINITIALIZED = 0,
 	VOS_SOCK_CLOSED = (1 << 0),
@@ -1596,7 +1599,7 @@ vdev_agent_thread(void *arg)
 		    vos->vos_sock);
 
 		/* XXX - make sure we only run this once and it completes */
-		VERIFY3U(taskq_dispatch(system_taskq,
+		VERIFY3U(taskq_dispatch(resume_taskq,
 		    agent_resume, vd, TQ_SLEEP), !=, TASKQID_INVALID);
 	}
 
@@ -1620,6 +1623,15 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 {
 	vdev_object_store_t *vos;
 	char *val = NULL;
+
+	if (resume_taskq == NULL) {
+		taskq_t *tq = taskq_create("agent_resume", 1, defclsyspri, 1,
+		    INT_MAX, 0);
+		// Only allow one taskq allocation to succeed.
+		if (atomic_cas_ptr(&resume_taskq, NULL, tq) != NULL) {
+			taskq_destroy(tq);
+		}
+	}
 
 	vos = *tsd = kmem_zalloc(sizeof (vdev_object_store_t), KM_SLEEP);
 	vos->vos_sock = INVALID_SOCKET;
