@@ -60,7 +60,7 @@ log_mustnot zpool import
 log_mustnot zpool import -a
 check_for_import
 
-log_mustnot zpool import -d /$TESTDIR $TESTPOOL.exported
+log_mustnot import_pool -p "$TESTPOOL.exported" -s "-d /$TESTDIR"
 check_for_import
 
 log_pass "zpool import returns an error when run as a user"

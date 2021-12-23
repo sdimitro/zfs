@@ -42,9 +42,12 @@
 # 2. Verify the command fails
 #
 
+POOLNAME="$TESTPOOL.virt"
+use_object_store && POOLNAME=$TESTPOOL
+
 function check_for_export
 {
-	RESULT=$(zpool list | grep $TESTPOOL.virt )
+	RESULT=$(zpool list | grep $POOLNAME )
 	if [ -z "$RESULT" ]
 	then
 		log_fail "A pool was exported!"
@@ -56,10 +59,10 @@ verify_runnable "global"
 
 log_assert "zpool export returns an error when run as a user"
 
-log_mustnot zpool export $TESTPOOL.virt
+log_mustnot zpool export $POOLNAME
 check_for_export
 
-log_mustnot zpool export -f $TESTPOOL.virt
+log_mustnot zpool export -f $POOLNAME
 check_for_export
 
 log_pass "zpool export returns an error when run as a user"

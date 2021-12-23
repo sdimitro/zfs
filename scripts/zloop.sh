@@ -120,10 +120,12 @@ function store_core
 		foundcrashes=$((foundcrashes + 1))
 
 		# zdb debugging
-		zdbcmd="$ZDB -U "$workdir/zpool.cache" -dddMmDDG ztest"
-		zdbdebug=$($zdbcmd 2>&1)
-		echo -e "$zdbcmd\n" >>ztest.zdb
-		echo "$zdbdebug" >>ztest.zdb
+		if [[ -e "$workdir/zpool.cache" ]]; then
+			zdbcmd="$ZDB -U "$workdir/zpool.cache" -dddMmDDG ztest"
+			zdbdebug=$($zdbcmd 2>&1)
+			echo -e "$zdbcmd\n" >>ztest.zdb
+			echo "$zdbdebug" >>ztest.zdb
+		fi
 
 		dest=$coredir/$coreid
 		or_die mkdir -p "$dest"
@@ -136,9 +138,14 @@ function store_core
 		echo "*** ztest crash found - moving logs to $dest"
 
 		or_die mv ztest.history "$dest/"
-		or_die mv ztest.zdb "$dest/"
+		[[ -e ztest.zdb ]] && \
+			or_die mv ztest.zdb "$dest/"
 		or_die mv ztest.out "$dest/"
-		or_die mv "$workdir/ztest*" "$dest/vdev/"
+
+		ztest_dirs=$(find "$workdir" -name "ztest*")
+		if [ -n "$ztest_dirs" ]; then
+			or_die mv "$workdir/ztest*" "$dest/vdev/"
+		fi
 
 		if [[ -e "$workdir/zpool.cache" ]]; then
 			or_die mv "$workdir/zpool.cache" "$dest/vdev/"
@@ -288,7 +295,14 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 		break
 	fi
 
+	# start each run with an empty directory
+	workdir="$basedir/$rundir"
+	or_die rm -rf "$workdir"
+	or_die mkdir "$workdir"
+
 	zopt="-G -VVVVV"
+	# Set common working directory
+	zopt="$zopt -f $workdir"
 
 	if use_object_store; then
 		# If S3 credentials are provided configure and
@@ -308,10 +322,6 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 		[ -z "$ZTS_CREDS_PROFILE" ] && ZTS_CREDS_PROFILE="default"
 		zopt="$zopt -z $ZTS_CREDS_PROFILE"
 	else
-		# start each run with an empty directory
-		workdir="$basedir/$rundir"
-		or_die rm -rf "$workdir"
-		or_die mkdir "$workdir"
 
 		# switch between three types of configs
 		# 1/3 basic, 1/3 raidz mix, and 1/3 draid mix
@@ -364,7 +374,6 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 		zopt="$zopt -a $align"
 		zopt="$zopt -C $class"
 		zopt="$zopt -s $size"
-		zopt="$zopt -f $workdir"
 	fi
 	cmd="$ZTEST $zopt $*"
 	desc="$(date '+%m/%d %T') $cmd"

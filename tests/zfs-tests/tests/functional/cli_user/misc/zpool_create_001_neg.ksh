@@ -47,8 +47,10 @@ verify_runnable "global"
 ADD_DISK="${DISKS%% }"
 ADD_DISK="${ADD_DISK##* }"
 
-[[ -z $ADD_DISK ]] && \
-        log_fail "No spare disks available."
+if ! use_object_store; then
+	[[ -z $ADD_DISK ]] && \
+		log_fail "No spare disks available."
+fi
 
 # Under Linux dry-run commands have no legitimate reason to fail.
 if is_linux; then
@@ -56,6 +58,15 @@ if is_linux; then
 	    "create $TESTPOOL" "create -f $TESTPOOL" "create -n $TESTPOOL" \
 	    "create -fn $TESTPOOL" "create -nf $TESTPOOL" \
 	    "create $TESTPOOL $ADD_DISK" "create -f $TESTPOOL $ADD_DISK"
+
+	# Add additional object store params to verify it doesn't
+	# allow pool to be created when running as standard user
+	if use_object_store; then
+		args+=("create -o object-endpoint=$ZTS_OBJECT_ENDPOINT \
+		-o object-region=$ZTS_REGION \
+		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
+		$TESTPOOL s3 $ZTS_BUCKET_NAME")
+	fi
 else
 	set -A args "create" "create -f" "create -n" \
 	    "create $TESTPOOL" "create -f $TESTPOOL" "create -n $TESTPOOL" \

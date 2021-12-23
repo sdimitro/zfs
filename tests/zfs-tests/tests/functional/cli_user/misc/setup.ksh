@@ -137,7 +137,7 @@ then
 
 
 	# create an exported pool to test import
-	log_must zpool create $TESTPOOL.exported $TEST_BASE_DIR/disk-export.dat
+	log_must create_pool -p "$TESTPOOL.exported" -d "$TEST_BASE_DIR/disk-export.dat"
 	log_must zpool export $TESTPOOL.exported
 
 	set -A props $POOL_PROPS
