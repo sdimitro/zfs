@@ -5,7 +5,7 @@ use clap::SubCommand;
 use client::Client;
 use futures::stream::StreamExt;
 use git_version::git_version;
-use nvpair::*;
+use nvpair::{NvEncoding, NvList};
 use rand::prelude::*;
 use rusoto_core::ByteStream;
 use rusoto_credential::ChainProvider;
