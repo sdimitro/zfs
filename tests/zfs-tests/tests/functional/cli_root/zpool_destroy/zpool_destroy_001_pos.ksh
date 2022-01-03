@@ -48,8 +48,7 @@ verify_runnable "global"
 function cleanup
 {
 	poolexists $TESTPOOL2 && destroy_pool $TESTPOOL2
-	datasetexists $TESTPOOL1/$TESTVOL && \
-		log_must zfs destroy -f $TESTPOOL1/$TESTVOL
+	datasetexists $TESTPOOL1/$TESTVOL && destroy_dataset $TESTPOOL1/$TESTVOL -f
 
 	typeset pool
 	for pool in $TESTPOOL1 $TESTPOOL; do
@@ -65,15 +64,15 @@ log_assert "'zpool destroy <pool>' can destroy a specified pool."
 
 log_onexit cleanup
 
-create_pool $TESTPOOL $DISK0
-create_pool $TESTPOOL1 $DISK1
+create_pool -p $TESTPOOL -d "$DISK0"
+create_pool -p $TESTPOOL1 -d "$DISK1"
 log_must zfs create -s -V $VOLSIZE $TESTPOOL1/$TESTVOL
 block_device_wait
 if is_freebsd; then
 	typeset recursive=$(get_tunable VOL_RECURSIVE)
 	log_must set_tunable64 VOL_RECURSIVE 1
 fi
-create_pool $TESTPOOL2 $ZVOL_DEVDIR/$TESTPOOL1/$TESTVOL
+create_pool -p $TESTPOOL2 -d "$ZVOL_DEVDIR/$TESTPOOL1/$TESTVOL"
 
 typeset -i i=0
 while (( i < ${#datasets[*]} )); do

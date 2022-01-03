@@ -28,13 +28,18 @@
 # 3. Repeat with the number of copies decreased.
 #
 
+if use_object_store; then
+    log_unsupported "Test with multiple copies not supported " \
+        "for object store run."
+fi
+
 verify_runnable "global"
 origin="$TESTPOOL/$TESTFS"
 log_onexit cleanup
 
 function cleanup
 {
-	datasetexists $origin && log_must zfs destroy -R $origin
+	datasetexists $origin && destroy_dataset $origin -R
 	log_must zfs create -o mountpoint=$TESTDIR $origin
 }
 

@@ -45,15 +45,18 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Multiple zfs copies inapplicable for object storage \
+		run."
+fi
+
 function cleanup
 {
 	if poolexists $TESTPOOL1; then
 		destroy_pool $TESTPOOL1
 	fi
 
-	if datasetexists $vol; then
-		log_must zfs destroy $vol
-	fi
+	datasetexists $vol && destroy_dataset $vol
 }
 
 log_assert "Verify that ZFS volume space used by multiple copies is charged correctly."

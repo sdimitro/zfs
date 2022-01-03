@@ -39,6 +39,8 @@
 #include <unistd.h>
 #include <stdlib.h>
 #include <ctype.h>
+#include <sys/un.h>
+#include <sys/socket.h>
 #include <sys/zfs_context.h>
 #include <sys/spa.h>
 #include <sys/spa_impl.h>
@@ -78,10 +80,9 @@
 #include <sys/btree.h>
 #include <zfs_comutil.h>
 #include <sys/zstd/zstd.h>
-
 #include <libnvpair.h>
 #include <libzutil.h>
-
+#include <libzoa_util.h>
 #include "zdb.h"
 
 #define	ZDB_COMPRESS_NAME(idx) ((idx) < ZIO_COMPRESS_FUNCTIONS ?	\
@@ -93,6 +94,15 @@
 	DMU_OT_ZAP_OTHER : \
 	(idx) == DMU_OTN_UINT64_DATA || (idx) == DMU_OTN_UINT64_METADATA ? \
 	DMU_OT_UINT64_OTHER : DMU_OT_NUMTYPES)
+
+/* Some platforms require part of inode IDs to be remapped */
+#ifdef __APPLE__
+#define	ZDB_MAP_OBJECT_ID(obj) INO_XNUTOZFS(obj, 2)
+#else
+#define	ZDB_MAP_OBJECT_ID(obj) (obj)
+#endif
+
+#define	DEFAULT_ZOA_LOG "/tmp/zoa.log";
 
 static char *
 zdb_ot_name(dmu_object_type_t type)
@@ -111,6 +121,7 @@ extern int zfs_recover;
 extern unsigned long zfs_arc_meta_min, zfs_arc_meta_limit;
 extern int zfs_vdev_async_read_max_active;
 extern boolean_t spa_load_verify_dryrun;
+extern boolean_t spa_mode_readable_spacemaps;
 extern int zfs_reconstruct_indirect_combinations_max;
 extern int zfs_btree_verify_intensity;
 
@@ -154,6 +165,7 @@ static int flagbits[256];
 uint64_t max_inflight_bytes = 256 * 1024 * 1024; /* 256MB */
 static int leaked_objects = 0;
 static range_tree_t *mos_refd_objs;
+static int objstore = 0;
 
 static void snprintf_blkptr_compact(char *, size_t, const blkptr_t *,
     boolean_t);
@@ -772,26 +784,30 @@ static void
 usage(void)
 {
 	(void) fprintf(stderr,
-	    "Usage:\t%s [-AbcdDFGhikLMPsvXy] [-e [-V] [-p <path> ...]] "
+	    "Usage:\t%1$s [-AbcdDFGhikLMPsvXy] [-e [-V] [-p <path> ...]] "
 	    "[-I <inflight I/Os>]\n"
 	    "\t\t[-o <var>=<value>]... [-t <txg>] [-U <cache>] [-x <dumpdir>]\n"
 	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]]\n"
-	    "\t%s [-AdiPv] [-e [-V] [-p <path> ...]] [-U <cache>]\n"
+	    "\t%1$s [-AdiPv] [-e [-V] [-p <path> ...]] [-U <cache>]\n"
 	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]\n"
-	    "\t%s [-v] <bookmark>\n"
-	    "\t%s -C [-A] [-U <cache>]\n"
-	    "\t%s -l [-Aqu] <device>\n"
-	    "\t%s -m [-AFLPX] [-e [-V] [-p <path> ...]] [-t <txg>] "
+#ifdef HAVE_LIBZOA
+	    "\t%1$s [-AdiPv] [-e [-V] -a <endpoint> -g <region> -B <bucket>\n"
+	    "\t\t[-f <creds profile>] [-z <zoa logfile>]]\n"
+#endif
+	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]\n"
+	    "\t%1$s [-v] <bookmark>\n"
+	    "\t%1$s -C [-A] [-U <cache>]\n"
+	    "\t%1$s -l [-Aqu] <device>\n"
+	    "\t%1$s -m [-AFLPX] [-e [-V] [-p <path> ...]] [-t <txg>] "
 	    "[-U <cache>]\n\t\t<poolname> [<vdev> [<metaslab> ...]]\n"
-	    "\t%s -O <dataset> <path>\n"
-	    "\t%s -r <dataset> <path> <destination>\n"
-	    "\t%s -R [-A] [-e [-V] [-p <path> ...]] [-U <cache>]\n"
+	    "\t%1$s -O <dataset> <path>\n"
+	    "\t%1$s -r <dataset> <path> <destination>\n"
+	    "\t%1$s -R [-A] [-e [-V] [-p <path> ...]] [-U <cache>]\n"
 	    "\t\t<poolname> <vdev>:<offset>:<size>[:<flags>]\n"
-	    "\t%s -E [-A] word0:word1:...:word15\n"
-	    "\t%s -S [-AP] [-e [-V] [-p <path> ...]] [-U <cache>] "
+	    "\t%1$s -E [-A] word0:word1:...:word15\n"
+	    "\t%1$s -S [-AP] [-e [-V] [-p <path> ...]] [-U <cache>] "
 	    "<poolname>\n\n",
-	    cmdname, cmdname, cmdname, cmdname, cmdname, cmdname, cmdname,
-	    cmdname, cmdname, cmdname, cmdname);
+	    cmdname);
 
 	(void) fprintf(stderr, "    Dataset name must include at least one "
 	    "separator character '/' or '@'\n");
@@ -856,6 +872,14 @@ usage(void)
 	    "variable to an unsigned 32-bit integer\n");
 	(void) fprintf(stderr, "        -p <path> -- use one or more with "
 	    "-e to specify path to vdev dir\n");
+#ifdef HAVE_LIBZOA
+	(void) fprintf(stderr, "        -a <endpoint> -- use with "
+	    "-e to specify object-store endpoint\n");
+	(void) fprintf(stderr, "        -g <region> object-store region\n");
+	(void) fprintf(stderr, "        -B <bucket> object-store bucket\n");
+	(void) fprintf(stderr, "        -f <profile> object-store credentials "
+	    "profile\n");
+#endif
 	(void) fprintf(stderr, "        -P print numbers in parseable form\n");
 	(void) fprintf(stderr, "        -q don't print label contents\n");
 	(void) fprintf(stderr, "        -t <txg> -- highest txg to use when "
@@ -1726,10 +1750,11 @@ print_vdev_metaslab_header(vdev_t *vd)
 }
 
 static void
-dump_metaslab_groups(spa_t *spa)
+dump_metaslab_groups(spa_t *spa, boolean_t show_special)
 {
 	vdev_t *rvd = spa->spa_root_vdev;
 	metaslab_class_t *mc = spa_normal_class(spa);
+	metaslab_class_t *smc = spa_special_class(spa);
 	uint64_t fragmentation;
 
 	metaslab_class_histogram_verify(mc);
@@ -1738,7 +1763,8 @@ dump_metaslab_groups(spa_t *spa)
 		vdev_t *tvd = rvd->vdev_child[c];
 		metaslab_group_t *mg = tvd->vdev_mg;
 
-		if (mg == NULL || mg->mg_class != mc)
+		if (mg == NULL || (mg->mg_class != mc &&
+		    (!show_special || mg->mg_class != smc)))
 			continue;
 
 		metaslab_group_histogram_verify(mg);
@@ -3631,6 +3657,7 @@ parse_object_range(char *range, zopt_object_range_t *zor, char **msg)
 			*msg = "Invalid characters in object ID";
 			rc = 1;
 		}
+		zor->zor_obj_start = ZDB_MAP_OBJECT_ID(zor->zor_obj_start);
 		zor->zor_obj_end = zor->zor_obj_start;
 		return (rc);
 	}
@@ -3708,6 +3735,9 @@ parse_object_range(char *range, zopt_object_range_t *zor, char **msg)
 			flags |= bit;
 	}
 	zor->zor_flags = flags;
+
+	zor->zor_obj_start = ZDB_MAP_OBJECT_ID(zor->zor_obj_start);
+	zor->zor_obj_end = ZDB_MAP_OBJECT_ID(zor->zor_obj_end);
 
 out:
 	free(dup);
@@ -4137,7 +4167,7 @@ cksum_record_compare(const void *x1, const void *x2)
 	const cksum_record_t *l = (cksum_record_t *)x1;
 	const cksum_record_t *r = (cksum_record_t *)x2;
 	int arraysize = ARRAY_SIZE(l->cksum.zc_word);
-	int difference;
+	int difference = 0;
 
 	for (int i = 0; i < arraysize; i++) {
 		difference = TREE_CMP(l->cksum.zc_word[i], r->cksum.zc_word[i]);
@@ -4209,11 +4239,13 @@ print_label_numbers(char *prefix, cksum_record_t *rec)
 
 typedef struct zdb_label {
 	vdev_label_t label;
+	uint64_t label_offset;
 	nvlist_t *config_nv;
 	cksum_record_t *config;
 	cksum_record_t *uberblocks[MAX_UBERBLOCK_COUNT];
 	boolean_t header_printed;
 	boolean_t read_failed;
+	boolean_t cksum_valid;
 } zdb_label_t;
 
 static void
@@ -4227,7 +4259,8 @@ print_label_header(zdb_label_t *label, int l)
 		return;
 
 	(void) printf("------------------------------------\n");
-	(void) printf("LABEL %d\n", l);
+	(void) printf("LABEL %d %s\n", l,
+	    label->cksum_valid ? "" : "(Bad label cksum)");
 	(void) printf("------------------------------------\n");
 
 	label->header_printed = B_TRUE;
@@ -4614,7 +4647,7 @@ dump_path_impl(objset_t *os, uint64_t obj, char *name, uint64_t *retobj)
 	case DMU_OT_DIRECTORY_CONTENTS:
 		if (s != NULL && *(s + 1) != '\0')
 			return (dump_path_impl(os, child_obj, s + 1, retobj));
-		/* FALLTHROUGH */
+		fallthrough;
 	case DMU_OT_PLAIN_FILE_CONTENTS:
 		if (retobj != NULL) {
 			*retobj = child_obj;
@@ -4739,6 +4772,42 @@ zdb_copy_object(objset_t *os, uint64_t srcobj, char *destfile)
 	return (err);
 }
 
+static boolean_t
+label_cksum_valid(vdev_label_t *label, uint64_t offset)
+{
+	zio_checksum_info_t *ci = &zio_checksum_table[ZIO_CHECKSUM_LABEL];
+	zio_cksum_t expected_cksum;
+	zio_cksum_t actual_cksum;
+	zio_cksum_t verifier;
+	zio_eck_t *eck;
+	int byteswap;
+
+	void *data = (char *)label + offsetof(vdev_label_t, vl_vdev_phys);
+	eck = (zio_eck_t *)((char *)(data) + VDEV_PHYS_SIZE) - 1;
+
+	offset += offsetof(vdev_label_t, vl_vdev_phys);
+	ZIO_SET_CHECKSUM(&verifier, offset, 0, 0, 0);
+
+	byteswap = (eck->zec_magic == BSWAP_64(ZEC_MAGIC));
+	if (byteswap)
+		byteswap_uint64_array(&verifier, sizeof (zio_cksum_t));
+
+	expected_cksum = eck->zec_cksum;
+	eck->zec_cksum = verifier;
+
+	abd_t *abd = abd_get_from_buf(data, VDEV_PHYS_SIZE);
+	ci->ci_func[byteswap](abd, VDEV_PHYS_SIZE, NULL, &actual_cksum);
+	abd_free(abd);
+
+	if (byteswap)
+		byteswap_uint64_array(&expected_cksum, sizeof (zio_cksum_t));
+
+	if (ZIO_CHECKSUM_EQUAL(actual_cksum, expected_cksum))
+		return (B_TRUE);
+
+	return (B_FALSE);
+}
+
 static int
 dump_label(const char *dev)
 {
@@ -4805,8 +4874,9 @@ dump_label(const char *dev)
 
 	/*
 	 * 1. Read the label from disk
-	 * 2. Unpack the configuration and insert in config tree.
-	 * 3. Traverse all uberblocks and insert in uberblock tree.
+	 * 2. Verify label cksum
+	 * 3. Unpack the configuration and insert in config tree.
+	 * 4. Traverse all uberblocks and insert in uberblock tree.
 	 */
 	for (int l = 0; l < VDEV_LABELS; l++) {
 		zdb_label_t *label = &labels[l];
@@ -4817,8 +4887,10 @@ dump_label(const char *dev)
 		zio_cksum_t cksum;
 		vdev_t vd;
 
+		label->label_offset = vdev_label_offset(psize, l, 0);
+
 		if (pread64(fd, &label->label, sizeof (label->label),
-		    vdev_label_offset(psize, l, 0)) != sizeof (label->label)) {
+		    label->label_offset) != sizeof (label->label)) {
 			if (!dump_opt['q'])
 				(void) printf("failed to read label %d\n", l);
 			label->read_failed = B_TRUE;
@@ -4827,6 +4899,8 @@ dump_label(const char *dev)
 		}
 
 		label->read_failed = B_FALSE;
+		label->cksum_valid = label_cksum_valid(&label->label,
+		    label->label_offset);
 
 		if (nvlist_unpack(buf, buflen, &config, 0) == 0) {
 			nvlist_t *vdev_tree = NULL;
@@ -5458,9 +5532,9 @@ zdb_blkptr_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 		uint64_t now = gethrtime();
 		char buf[10];
 		uint64_t bytes = zcb->zcb_type[ZB_TOTAL][ZDB_OT_TOTAL].zb_asize;
-		int kb_per_sec =
+		uint64_t kb_per_sec =
 		    1 + bytes / (1 + ((now - zcb->zcb_start) / 1000 / 1000));
-		int sec_remaining =
+		uint64_t sec_remaining =
 		    (zcb->zcb_totalasize - bytes) / 1024 / kb_per_sec;
 
 		/* make sure nicenum has enough space */
@@ -5468,8 +5542,9 @@ zdb_blkptr_cb(spa_t *spa, zilog_t *zilog, const blkptr_t *bp,
 
 		zfs_nicebytes(bytes, buf, sizeof (buf));
 		(void) fprintf(stderr,
-		    "\r%5s completed (%4dMB/s) "
-		    "estimated time remaining: %uhr %02umin %02usec        ",
+		    "\r%5s completed (%4"PRIu64"MB/s) "
+		    "estimated time remaining: "
+		    "%"PRIu64"hr %02"PRIu64"min %02"PRIu64"sec        ",
 		    buf, kb_per_sec / 1024,
 		    sec_remaining / 60 / 60,
 		    sec_remaining / 60 % 60,
@@ -6338,6 +6413,16 @@ dump_block_stats(spa_t *spa)
 	boolean_t leaks = B_FALSE;
 	int e, c, err;
 	bp_embedded_type_t i;
+
+	/*
+	 * For an objectstore based zpool, there are no space maps and zdb leak
+	 * detection will not work.
+	 */
+	if (spa_is_object_based(spa) && !dump_opt['L']) {
+		(void) printf("\nSkipping leak detection for object-store "
+		    "based zpool.\n\n");
+		dump_opt['L'] = 1;
+	}
 
 	bzero(&zcb, sizeof (zcb));
 	(void) printf("\nTraversing all blocks %s%s%s%s%s...\n\n",
@@ -7616,7 +7701,7 @@ dump_zpool(spa_t *spa)
 	if (dump_opt['d'] > 2 || dump_opt['m'])
 		dump_metaslabs(spa);
 	if (dump_opt['M'])
-		dump_metaslab_groups(spa);
+		dump_metaslab_groups(spa, dump_opt['M'] > 1);
 	if (dump_opt['d'] > 2 || dump_opt['m']) {
 		dump_log_spacemaps(spa);
 		dump_log_spacemap_obsolete_stats(spa);
@@ -8309,6 +8394,39 @@ zdb_embedded_block(char *thing)
 	free(buf);
 }
 
+
+static nvlist_t *
+make_objectstore_prop(char *endpoint, char *region, char *bucket,
+    char *creds_profile)
+{
+	if (endpoint == NULL) {
+		(void) fprintf(stderr,
+		    "object-store endpoint not specified.\n");
+		usage();
+	}
+	if (region == NULL) {
+		(void) fprintf(stderr,
+		    "object-store region not specified.\n");
+		usage();
+	}
+	if (bucket == NULL) {
+		(void) fprintf(stderr,
+		    "object-store bucket not specified.\n");
+		usage();
+	}
+
+	nvlist_t *nv = fnvlist_alloc();
+	fnvlist_add_string(nv, ZPOOL_CONFIG_PATH, bucket);
+	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
+	    endpoint);
+	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION),
+	    region);
+	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE),
+	    creds_profile);
+
+	return (nv);
+}
+
 int
 main(int argc, char **argv)
 {
@@ -8320,6 +8438,11 @@ main(int argc, char **argv)
 	int verbose = 0;
 	int error = 0;
 	char **searchdirs = NULL;
+	char *endpoint = NULL;
+	char *region = NULL;
+	char *bucket = NULL;
+	char *creds_profile = "default";
+	char *zoa_log_file = DEFAULT_ZOA_LOG;
 	int nsearch = 0;
 	char *target, *target_pool, dsname[ZFS_MAX_DATASET_NAME_LEN];
 	nvlist_t *policy = NULL;
@@ -8354,7 +8477,7 @@ main(int argc, char **argv)
 	zfs_btree_verify_intensity = 3;
 
 	while ((c = getopt(argc, argv,
-	    "AbcCdDeEFGhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZ")) != -1) {
+	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMo:Op:PqrRsSt:uU:vVx:XYyZz:")) != -1) {
 		switch (c) {
 		case 'b':
 		case 'c':
@@ -8440,6 +8563,28 @@ main(int argc, char **argv)
 				usage();
 			}
 			break;
+#ifdef HAVE_LIBZOA
+		case 'a':
+			endpoint = optarg;
+			objstore = 1;
+			break;
+		case 'B':
+			bucket = optarg;
+			objstore = 1;
+			break;
+		case 'f':
+			creds_profile = optarg;
+			objstore = 1;
+			break;
+		case 'g':
+			region = optarg;
+			objstore = 1;
+			break;
+		case 'z':
+			zoa_log_file = optarg;
+			objstore = 1;
+			break;
+#endif
 		case 'v':
 			verbose++;
 			break;
@@ -8485,6 +8630,23 @@ main(int argc, char **argv)
 		}
 	}
 
+	if (objstore) {
+		if (dump_opt['R']) {
+			(void) fprintf(stderr, "Reading blocks (-R) is "
+			    "unsupported for an object-store based zpool.\n");
+			exit(1);
+		}
+		if (dump_opt['Z']) {
+			(void) fprintf(stderr, "Reading ZSTD headers (-Z) is "
+			    "unsupported for an object-store based zpool.\n");
+			exit(1);
+		}
+		if (start_zfs_object_agent(zoa_log_file) != 0) {
+			(void) fprintf(stderr, "Error initializing libzoa.\n");
+			exit(1);
+		}
+	}
+
 #if defined(_LP64)
 	/*
 	 * ZDB does not typically re-read blocks; therefore limit the ARC
@@ -8511,6 +8673,11 @@ main(int argc, char **argv)
 	 * to load non-idle pools.
 	 */
 	spa_load_verify_dryrun = B_TRUE;
+
+	/*
+	 * ZDB should have ability to read spacemaps.
+	 */
+	spa_mode_readable_spacemaps = B_TRUE;
 
 	kernel_init(SPA_MODE_READ);
 
@@ -8595,7 +8762,10 @@ main(int argc, char **argv)
 		args.paths = nsearch;
 		args.path = searchdirs;
 		args.can_be_active = B_TRUE;
-
+		if (objstore) {
+			args.props = make_objectstore_prop(endpoint, region,
+			    bucket, creds_profile);
+		}
 		error = zpool_find_config(NULL, target_pool, &cfg, &args,
 		    &libzpool_config_ops);
 

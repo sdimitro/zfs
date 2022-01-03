@@ -407,6 +407,10 @@ typedef struct blkptr {
 	BF64_GET_SB((dva)->dva_word[1], 0, 63, SPA_MINBLOCKSHIFT, 0)
 #define	DVA_SET_OFFSET(dva, x)	\
 	BF64_SET_SB((dva)->dva_word[1], 0, 63, SPA_MINBLOCKSHIFT, 0, x)
+#define	DVA_GET_OBJECTID(dva)	\
+	BF64_GET((dva)->dva_word[1], 0, 63)
+#define	DVA_SET_OBJECTID(dva, x)	\
+	BF64_SET((dva)->dva_word[1], 0, 63, x)
 
 #define	DVA_GET_GANG(dva)	BF64_GET((dva)->dva_word[1], 63, 1)
 #define	DVA_SET_GANG(dva, x)	BF64_SET((dva)->dva_word[1], 63, 1, x)
@@ -848,7 +852,6 @@ extern void spa_config_update(spa_t *spa, int what);
 extern int spa_config_parse(spa_t *spa, vdev_t **vdp, nvlist_t *nv,
     vdev_t *parent, uint_t id, int atype);
 
-
 /*
  * Miscellaneous SPA routines in spa_misc.c
  */
@@ -974,6 +977,7 @@ extern int spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw);
 extern void spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw);
 extern void spa_config_exit(spa_t *spa, int locks, const void *tag);
 extern int spa_config_held(spa_t *spa, int locks, krw_t rw);
+extern void spa_config_enter_read_priority(spa_t *, int, const void *);
 
 /* Pool vdev add/remove lock */
 extern uint64_t spa_vdev_enter(spa_t *spa);
@@ -1076,6 +1080,7 @@ extern void spa_upgrade(spa_t *spa, uint64_t version);
 extern void spa_evict_all(void);
 extern vdev_t *spa_lookup_by_guid(spa_t *spa, uint64_t guid,
     boolean_t l2cache);
+extern boolean_t spa_has_l2cache(spa_t *, uint64_t guid);
 extern boolean_t spa_has_spare(spa_t *, uint64_t guid);
 extern uint64_t dva_get_dsize_sync(spa_t *spa, const dva_t *dva);
 extern uint64_t bp_get_dsize_sync(spa_t *spa, const blkptr_t *bp);
@@ -1106,6 +1111,7 @@ extern boolean_t spa_multihost(spa_t *spa);
 extern uint32_t spa_get_hostid(spa_t *spa);
 extern void spa_activate_allocation_classes(spa_t *, dmu_tx_t *);
 extern boolean_t spa_livelist_delete_check(spa_t *spa);
+extern boolean_t spa_is_object_based(spa_t *spa);
 
 extern spa_mode_t spa_mode(spa_t *spa);
 extern uint64_t zfs_strtonum(const char *str, char **nptr);
@@ -1171,6 +1177,8 @@ extern void spa_configfile_set(spa_t *, nvlist_t *, boolean_t);
 /* asynchronous event notification */
 extern void spa_event_notify(spa_t *spa, vdev_t *vdev, nvlist_t *hist_nvl,
     const char *name);
+extern void zfs_ereport_zvol_post(const char *subclass, const char *name,
+    const char *device_name, const char *raw_name);
 
 /* waiting for pool activities to complete */
 extern int spa_wait(const char *pool, zpool_wait_activity_t activity,

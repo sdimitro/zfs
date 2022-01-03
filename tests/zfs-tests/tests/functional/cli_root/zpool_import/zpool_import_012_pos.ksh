@@ -65,10 +65,10 @@ function cleanup
 		if poolexists ${pools[i]}; then
 			log_must zpool export ${pools[i]}
 			log_note "Try to import ${devs[i]} ${pools[i]}"
-			zpool import ${devs[i]} ${pools[i]}
+			import_pool -s "${devs[i]}" -p "${pools[i]}"
 		else
 			log_note "Try to import $option ${devs[i]} ${pools[i]}"
-			zpool import $option ${devs[i]} ${pools[i]}
+			import_pool -e "$option" -s "${devs[i]}" -p "${pools[i]}"
 		fi
 
 		if poolexists ${pools[i]}; then
@@ -84,9 +84,9 @@ function cleanup
 
 	destroy_pool $TESTPOOL1
 
-	if datasetexists $TESTPOOL/$TESTFS; then
-		log_must zfs destroy -Rf $TESTPOOL/$TESTFS
-	fi
+	datasetexists $TESTPOOL/$TESTFS && \
+		destroy_dataset $TESTPOOL/$TESTFS -Rf
+
 	log_must zfs create $TESTPOOL/$TESTFS
 	log_must zfs set mountpoint=$TESTDIR $TESTPOOL/$TESTFS
 
@@ -123,7 +123,13 @@ typeset -i nfs_share_bit=0
 typeset -i guid_bit=0
 typeset basedir
 
-for option in "" "-Df"; do
+if use_object_store; then
+	typeset -A opts ""
+else
+	typeset -A opts "" "-Df"
+fi
+
+for option in "${opts[*]}"; do
 	i=0
 	while ((i < ${#pools[*]})); do
 		pool=${pools[i]}
@@ -172,9 +178,9 @@ for option in "" "-Df"; do
 						log_note "Possible pool name" \
 						    "duplicates. Try GUID import"
 						target=$guid
-						log_must zpool import $option \
-						    ${devs[i]} ${options[j]} \
-						    $target
+						log_must import_pool -s "-d ${devs[i]}" \
+							-e "$option ${options[j]}" \
+							-p $target
 					fi
 					log_must poolexists $pool
 

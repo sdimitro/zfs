@@ -26,7 +26,7 @@
 #
 
 #
-# Copyright (c) 2013, 2016 by Delphix. All rights reserved.
+# Copyright (c) 2013, 2021 by Delphix. All rights reserved.
 #
 
 . $STF_SUITE/include/libtest.shlib
@@ -40,58 +40,28 @@
 # STRATEGY:
 #
 # 1. Using zpool get, retrieve all default values
-# 2. Verify that the header is printed
-# 3. Verify that we can see all the properties we expect to see
-# 4. Verify that the total output contains just those properties + header.
+# 2. Get each property individually
 #
 # Test for those properties are expected to check whether their
 # default values are sane, or whether they can be changed with zpool set.
 #
 
-function cleanup
-{
-	rm -f $values
-}
-log_onexit cleanup
 log_assert "Zpool get all works as expected"
-
-typeset -i i=0;
-typeset values=$TEST_BASE_DIR/values.$$
+log_onexit cleanup
 
 if ! is_global_zone ; then
 	TESTPOOL=${TESTPOOL%%/*}
 fi
 
-log_must zpool get all $TESTPOOL
-zpool get all $TESTPOOL > $values
+typeset tmpfile=$(mktemp)
 
-log_note "Checking zpool get all output for a header."
-grep ^"NAME " $values > /dev/null 2>&1
-if [ $? -ne 0 ]
-then
-	log_fail "The header was not printed from zpool get all"
-fi
+log_must eval "zpool get all $TESTPOOL >$tmpfile"
+log_must grep -q "^NAME" $tmpfile
 
-
-while [ $i -lt "${#properties[@]}" ]
-do
-	log_note "Checking for ${properties[$i]} property"
-	grep "$TESTPOOL *${properties[$i]}" $values > /dev/null 2>&1
-	if [ $? -ne 0 ]
-	then
-		log_fail "zpool property ${properties[$i]} was not found\
- in pool output."
-	fi
-	i=$(( $i + 1 ))
+for prop in $(get_pool_props); do
+	log_must eval "zpool get "$prop" $TESTPOOL"
+	log_must grep -q "^NAME" $tmpfile
+	log_must grep -q "$prop" $tmpfile
 done
-
-# increment the counter to include the header line
-i=$(( $i + 1 ))
-
-COUNT=$(wc $values | awk '{print $1}')
-if [ $i -ne $COUNT ]
-then
-	log_fail "Found zpool features not in the zpool_get test config $i/$COUNT."
-fi
 
 log_pass "Zpool get all works as expected"

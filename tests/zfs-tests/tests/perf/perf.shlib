@@ -21,7 +21,8 @@ export PERF_RUNTIME=${PERF_RUNTIME:-'180'}
 export PERF_RANDSEED=${PERF_RANDSEED:-'1234'}
 export PERF_COMPPERCENT=${PERF_COMPPERCENT:-'66'}
 export PERF_COMPCHUNK=${PERF_COMPCHUNK:-'4096'}
-export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
+export PERF_RECORD_CMD=${PERF_RECORD_CMD:-"perf record --call-graph \
+    dwarf,8192 -F 49 -agq -o /dev/stdout -- sleep ${PERF_RUNTIME}"}
 
 # Default to JSON for fio output
 export PERF_FIO_FORMAT=${PERF_FIO_FORMAT:-'json'}
@@ -52,6 +53,24 @@ function get_suffix
 	typeset suffix="$sync_str.$iosize-ios"
 	suffix="$suffix.$threads-threads.$filesystems-filesystems"
 	echo $suffix
+}
+
+function fill_zetta_cache
+{
+	[ -z "$ZETTACACHE_DEVICE" ] && return
+
+	log_note "Filling ZettaCache: $ZETTACACHE_DEVICE"
+
+	export RUNTIME=$1
+	export BLOCKSIZE=1m
+	export SYNC_TYPE=1
+	export DIRECT=0
+
+	#
+	# Flush ARC so that reads reach object store and can populate zettacache
+	#
+	log_must zinject -a
+	log_must fio  --output /tmp/fio_fill.out $FIO_SCRIPTS/sequential_reads_fill.fio
 }
 
 function do_fio_run_impl
@@ -302,7 +321,26 @@ function recreate_perf_pool
 	# This function handles the case where the pool already exists,
 	# and will destroy the previous pool and recreate a new pool.
 	#
-	create_pool $PERFPOOL $DISKS
+	create_pool -p $PERFPOOL -d "$DISKS"
+}
+
+#
+# Destroy the pool used for performance tests.
+#
+function destroy_perf_pool
+{
+	[[ -n $PERFPOOL ]] || log_fail "The \$PERFPOOL variable isn't set."
+
+	#
+	# In case there's been some "leaked" zinject delays, or if the
+	# performance test injected some delays itself, we clear all
+	# delays before attempting to destroy the pool. Each delay
+	# places a hold on the pool, so the destroy will fail if there
+	# are any outstanding delays.
+	#
+	clear_zinject_delays
+
+	destroy_pool $PERFPOOL
 }
 
 function verify_threads_per_fs

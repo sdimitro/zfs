@@ -33,9 +33,13 @@
 . $STF_SUITE/tests/functional/cli_root/zpool_scrub/zpool_scrub.cfg
 
 verify_runnable "global"
-verify_disk_count "$DISKS" 2
 
-default_mirror_setup_noexit $DISK1 $DISK2
+if use_object_store; then
+    default_setup_noexit
+else
+    verify_disk_count "$DISKS" 2
+    default_mirror_setup_noexit $DISK1 $DISK2
+fi
 
 mntpnt=$(get_prop mountpoint $TESTPOOL/$TESTFS)
 

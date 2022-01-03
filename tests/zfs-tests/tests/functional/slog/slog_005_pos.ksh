@@ -48,12 +48,10 @@ log_assert "Detaching a log device passes."
 log_onexit cleanup
 log_must setup
 
-for type in "" "mirror" "raidz" "raidz2"
-do
-	for spare in "" "spare"
-	do
-		log_must zpool create $TESTPOOL $type $VDEV $spare $SDEV \
-			log mirror $LDEV mirror $LDEV2
+for type in "" $(get_type); do
+	for spare in "" $(get_spare); do
+		log_must create_pool -p $TESTPOOL -d "$type $VDEV $spare $SDEV" \
+			-l "log mirror $LDEV mirror $LDEV2"
 		ldev=$(random_get $LDEV $LDEV2)
 		log_must zpool detach $TESTPOOL $ldev
 		log_must display_status $TESTPOOL

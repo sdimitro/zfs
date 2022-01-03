@@ -47,8 +47,11 @@ verify_runnable "global"
 
 log_assert "zpool upgrade returns an error when run as a user"
 
+POOLNAME="$TESTPOOL.virt"
+use_object_store && POOLNAME="$TESTPOOL"
+
 # zpool upgrade returns 0 when it can't do anything
-log_must zpool upgrade $TESTPOOL.virt
+log_must zpool upgrade $POOLNAME
 
 # Now try to upgrade our version 1 pool
 log_mustnot zpool upgrade v1-pool

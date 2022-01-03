@@ -194,18 +194,37 @@ enum iostat_type {
 	IOS_QUEUES = 2,
 	IOS_L_HISTO = 3,
 	IOS_RQ_HISTO = 4,
+	IOS_OBJECT_STORE = 5,
+	IOS_OBJECT_LATENCY = 6,
+	IOS_OBJECT_ACTIVE = 7,
+	IOS_OBJECT_LAT_HISTO = 8,
+	IOS_OBJECT_REQ_HISTO = 9,
 	IOS_COUNT,	/* always last element */
 };
 
 /* iostat_type entries as bitmasks */
-#define	IOS_DEFAULT_M	(1ULL << IOS_DEFAULT)
-#define	IOS_LATENCY_M	(1ULL << IOS_LATENCY)
-#define	IOS_QUEUES_M	(1ULL << IOS_QUEUES)
-#define	IOS_L_HISTO_M	(1ULL << IOS_L_HISTO)
-#define	IOS_RQ_HISTO_M	(1ULL << IOS_RQ_HISTO)
+#define	IOS_DEFAULT_M		(1ULL << IOS_DEFAULT)
+#define	IOS_LATENCY_M		(1ULL << IOS_LATENCY)
+#define	IOS_QUEUES_M		(1ULL << IOS_QUEUES)
+#define	IOS_L_HISTO_M		(1ULL << IOS_L_HISTO)
+#define	IOS_RQ_HISTO_M		(1ULL << IOS_RQ_HISTO)
+#define	IOS_OBJECT_STORE_M	(1ULL << IOS_OBJECT_STORE)
+#define	IOS_OBJECT_LATENCY_M	(1ULL << IOS_OBJECT_LATENCY)
+#define	IOS_OBJECT_ACTIVE_M	(1ULL << IOS_OBJECT_ACTIVE)
+#define	IOS_OBJECT_LAT_HISTO_M	(1ULL << IOS_OBJECT_LAT_HISTO)
+#define	IOS_OBJECT_REQ_HISTO_M	(1ULL << IOS_OBJECT_REQ_HISTO)
+
+#define	IOS_OBJECT_ANY_M ( \
+    IOS_OBJECT_STORE_M | \
+    IOS_OBJECT_LATENCY_M | \
+    IOS_OBJECT_ACTIVE_M | \
+    IOS_OBJECT_LAT_HISTO_M | \
+    IOS_OBJECT_REQ_HISTO_M)
 
 /* Mask of all the histo bits */
-#define	IOS_ANYHISTO_M (IOS_L_HISTO_M | IOS_RQ_HISTO_M)
+#define	IOS_ANYHISTO_M ( \
+    IOS_L_HISTO_M | IOS_RQ_HISTO_M | \
+    IOS_OBJECT_LAT_HISTO_M | IOS_OBJECT_REQ_HISTO_M)
 
 /*
  * Lookup table for iostat flags to nvlist names.  Basically a list
@@ -258,6 +277,21 @@ static const char *vsx_type_to_nvlist[IOS_COUNT][15] = {
 	    ZPOOL_CONFIG_VDEV_AGG_TRIM_HISTO,
 	    ZPOOL_CONFIG_VDEV_IND_REBUILD_HISTO,
 	    ZPOOL_CONFIG_VDEV_AGG_REBUILD_HISTO,
+	    NULL},
+	[IOS_OBJECT_LAT_HISTO] = {
+	    ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
+	    ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
+	    ZPOOL_CONFIG_VOS_GETS_LAT_HISTO,
+	    ZPOOL_CONFIG_VOS_PUTS_LAT_HISTO,
+	    ZPOOL_CONFIG_VOS_DELS_LAT_HISTO,
+	    NULL},
+	[IOS_OBJECT_REQ_HISTO] = {
+	    ZPOOL_CONFIG_VDEV_SYNC_IND_R_HISTO,
+	    ZPOOL_CONFIG_VDEV_SYNC_IND_W_HISTO,
+	    ZPOOL_CONFIG_VDEV_ASYNC_IND_R_HISTO,
+	    ZPOOL_CONFIG_VDEV_ASYNC_IND_W_HISTO,
+	    ZPOOL_CONFIG_VOS_GETS_REQ_HISTO,
+	    ZPOOL_CONFIG_VOS_PUTS_REQ_HISTO,
 	    NULL},
 };
 
@@ -375,12 +409,14 @@ get_usage(zpool_help_t idx)
 		    "\timport [-o mntopts] [-o property=value] ... \n"
 		    "\t    [-d dir | -c cachefile] [-D] [-l] [-f] [-m] [-N] "
 		    "[-R root] [-F [-n]]\n"
-		    "\t    [--rewind-to-checkpoint] <pool | id> [newpool]\n"));
+		    "\t    [--rewind-to-checkpoint] [-r] <pool | id> "
+		    "[newpool]\n"));
 	case HELP_IOSTAT:
 		return (gettext("\tiostat [[[-c [script1,script2,...]"
 		    "[-lq]]|[-rw]] [-T d | u] [-ghHLpPvy]\n"
-		    "\t    [[pool ...]|[pool vdev ...]|[vdev ...]]"
-		    " [[-n] interval [count]]\n"));
+		    "\t    [-o [-l|-q|-r|-w]] [[pool ...]|[pool vdev ...]"
+		    "|[vdev ...]]\n"
+		    "\t    [[-n] interval [count]]\n"));
 	case HELP_LABELCLEAR:
 		return (gettext("\tlabelclear [-f] <vdev>\n"));
 	case HELP_LIST:
@@ -410,7 +446,7 @@ get_usage(zpool_help_t idx)
 		    "[<device> ...]\n"));
 	case HELP_STATUS:
 		return (gettext("\tstatus [-c [script1,script2,...]] "
-		    "[-igLpPstvxD]  [-T d|u] [pool] ... \n"
+		    "[-dDigLpPstvxw] [-T d|u] [-d|-w] [pool] ... \n"
 		    "\t    [interval [count]]\n"));
 	case HELP_UPGRADE:
 		return (gettext("\tupgrade\n"
@@ -1621,11 +1657,24 @@ zpool_do_create(int argc, char **argv)
 		goto errout;
 	}
 
+	char *profile;
+	if ((nvlist_lookup_string(props,
+	    zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE), &profile)) == 0) {
+		fnvlist_add_string(props, ZPOOL_CONFIG_CRED_PROFILE,
+		    profile);
+	}
+
 	/* pass off to make_root_vdev for bulk processing */
 	nvroot = make_root_vdev(NULL, props, force, !force, B_FALSE, dryrun,
 	    argc - 1, argv + 1);
 	if (nvroot == NULL)
 		goto errout;
+
+	/*
+	 * We don't store the creds profile as a normal property, so remove
+	 * it now that is has been consumed.
+	 */
+	(void) nvlist_remove_all(props, ZPOOL_CONFIG_CRED_PROFILE);
 
 	/* make_root_vdev() allows 0 toplevel children if there are spares */
 	if (!zfs_allocatable_devs(nvroot)) {
@@ -2084,6 +2133,8 @@ typedef struct status_cbdata {
 	boolean_t	cb_print_slow_ios;
 	boolean_t	cb_print_vdev_init;
 	boolean_t	cb_print_vdev_trim;
+	boolean_t	cb_print_destroyed;
+	boolean_t	cb_clear_destroyed;
 	vdev_cmd_data_list_t	*vcdl;
 } status_cbdata_t;
 
@@ -3257,7 +3308,6 @@ import_pools(nvlist_t *pools, nvlist_t *props, char *mntopts, int flags,
 	nvpair_t *elem = NULL;
 	boolean_t first = B_TRUE;
 	while ((elem = nvlist_next_nvpair(pools, elem)) != NULL) {
-
 		verify(nvpair_value_nvlist(elem, &config) == 0);
 
 		verify(nvlist_lookup_uint64(config, ZPOOL_CONFIG_POOL_STATE,
@@ -3554,6 +3604,7 @@ zpool_do_import(int argc, char **argv)
 	boolean_t do_rewind = B_FALSE;
 	boolean_t xtreme_rewind = B_FALSE;
 	boolean_t do_scan = B_FALSE;
+	boolean_t resume_destroy = B_FALSE;
 	boolean_t pool_exists = B_FALSE;
 	boolean_t pool_specified = B_FALSE;
 	uint64_t txg = -1ULL;
@@ -3563,11 +3614,12 @@ zpool_do_import(int argc, char **argv)
 
 	struct option long_options[] = {
 		{"rewind-to-checkpoint", no_argument, NULL, CHECKPOINT_OPT},
+		{"resume-destroy", no_argument, NULL, 'r'},
 		{0, 0, 0, 0}
 	};
 
 	/* check options */
-	while ((c = getopt_long(argc, argv, ":aCc:d:DEfFlmnNo:R:stT:VX",
+	while ((c = getopt_long(argc, argv, ":aCc:d:DEfFlmnNo:R:rstT:VX",
 	    long_options, NULL)) != -1) {
 		switch (c) {
 		case 'a':
@@ -3620,6 +3672,9 @@ zpool_do_import(int argc, char **argv)
 			if (add_prop_list_default(zpool_prop_to_name(
 			    ZPOOL_PROP_CACHEFILE), "none", &props, B_TRUE))
 				goto error;
+			break;
+		case 'r':
+			resume_destroy = B_TRUE;
 			break;
 		case 's':
 			do_scan = B_TRUE;
@@ -3788,6 +3843,39 @@ zpool_do_import(int argc, char **argv)
 	idata.cachefile = cachefile;
 	idata.scan = do_scan;
 	idata.policy = policy;
+	idata.props = props;
+	idata.resume_destroy = resume_destroy;
+
+	if (resume_destroy) {
+		if (searchguid == 0) {
+			(void) fprintf(stderr,
+			    gettext("-r requires the guid to be specified\n"));
+			usage(B_FALSE);
+		} else if (do_destroyed) {
+			(void) fprintf(stderr,
+			    gettext("-r is not compatible with -D\n"));
+			usage(B_FALSE);
+		} else if (do_rewind) {
+			(void) fprintf(stderr,
+			    gettext("-r is not compatible with -F\n"));
+			usage(B_FALSE);
+		} else if (dryrun) {
+			(void) fprintf(stderr,
+			    gettext("-r is not compatible with -n\n"));
+			usage(B_FALSE);
+		} else if (do_all) {
+			(void) fprintf(stderr,
+			    gettext("-r is not compatible with -a\n"));
+			usage(B_FALSE);
+		}
+
+		if (zoa_resume_destroy(g_zfs, &idata) != 0) {
+			(void) fprintf(stderr,
+			    gettext("Error resuming destroy\n"));
+			return (1);
+		}
+		return (0);
+	}
 
 	pools = zpool_search_import(g_zfs, &idata, &libzfs_config_ops);
 
@@ -3921,7 +4009,7 @@ typedef struct name_and_columns {
 	unsigned int columns;	/* Center name to this number of columns */
 } name_and_columns_t;
 
-#define	IOSTAT_MAX_LABELS	15	/* Max number of labels on one line */
+#define	IOSTAT_MAX_LABELS	23	/* Max number of labels on one line */
 
 static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 {
@@ -3938,6 +4026,21 @@ static const name_and_columns_t iostat_top_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_RQ_HISTO] = {{"sync_read", 2}, {"sync_write", 2},
 	    {"async_read", 2}, {"async_write", 2}, {"scrub", 2},
 	    {"trim", 2}, {"rebuild", 2}, {NULL}},
+	[IOS_OBJECT_STORE] = {{"operations", 2}, {"throughput", 2},
+	    {"operations", 2}, {"throughput", 2}, {"operations", 2},
+	    {"throughput", 2}, {"operations", 2}, {"throughput", 2},
+	    {"object", 1}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"operations", 2}, {"throughput", 2},
+	    {"latency", 2}, {"operations", 2}, {"throughput", 2},
+	    {"latency", 2}, {NULL}},
+	[IOS_OBJECT_ACTIVE] = { {"operations", 2}, {"throughput", 2},
+	    {"operations", 2}, {"throughput", 2}, {"active", 2},
+	    {"operations", 2}, {"throughput", 2}, {"active", 2},
+	    {"operations", 2}, {"throughput", 2}, {"active", 2}, {NULL}},
+	[IOS_OBJECT_LAT_HISTO] = {{"object_agent", 2}, {" object_store", 3},
+	    {NULL}},
+	[IOS_OBJECT_REQ_HISTO] = {{"synchronous", 2}, {"asynchronous", 2},
+	    {"object_store", 2}, {NULL}},
 };
 
 /* Shorthand - if "columns" field not set, default to 1 column */
@@ -3957,11 +4060,48 @@ static const name_and_columns_t iostat_bottom_labels[][IOSTAT_MAX_LABELS] =
 	[IOS_RQ_HISTO] = {{"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
 	    {"ind"}, {"agg"}, {"ind"}, {"agg"}, {"ind"}, {"agg"},
 	    {"ind"}, {"agg"}, {NULL}},
+	[IOS_OBJECT_STORE] = {{"read"}, {"write"}, {"read"}, {"write"}, {"get"},
+	    {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"},
+	    {"get"}, {"put"}, {"get"}, {"put"}, {"del"}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"read"}, {"write"}, {"read"}, {"write"},
+	    {"read"}, {"write"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"},
+	    {"put"}, {NULL}},
+	[IOS_OBJECT_ACTIVE] = {{"read"}, {"write"}, {"read"}, {"write"},
+	    {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"},
+	    {"put"}, {"get"}, {"put"}, {"get"}, {"put"}, {"get"}, {"put"},
+	    {"get"}, {"put"}, {"get"}, {"put"}, {NULL}},
+	[IOS_OBJECT_LAT_HISTO] = {{"read"}, {"write"}, {"get"}, {"put"},
+	    {"del"}, {NULL}},
+	[IOS_OBJECT_REQ_HISTO] = {{"read"}, {"write"}, {"read"}, {"write"},
+	    {"get"}, {"put"}, {NULL}},
+};
+
+static const name_and_columns_t iostat_object_top_labels[][IOSTAT_MAX_LABELS] =
+{
+	[IOS_DEFAULT] = {{NULL}},
+	[IOS_LATENCY] = {{NULL}},
+	[IOS_QUEUES] = {{NULL}},
+	[IOS_L_HISTO] = {{NULL}},
+	[IOS_RQ_HISTO] = {{NULL}},
+	[IOS_OBJECT_STORE] = {{"object_agent_io", 4},
+	    {"object_store_data", 4}, {"object_store_metadata", 4},
+	    {"object_store_reclaim", 4}, {NULL}},
+	[IOS_OBJECT_LATENCY] = {{"--------- object_agent_total ---------", 6},
+	    {"--------- object_store_total ---------", 6}, {NULL}},
+	[IOS_OBJECT_ACTIVE] = {
+	    {"--- object_agent_io ---", 4},
+	    {"---------- object_store_data ---------", 6},
+	    {"-------- object_store_metadata -------", 6},
+	    {"-------- object_store_reclaim --------", 6}, {NULL}},
+	[IOS_OBJECT_LAT_HISTO] = {{NULL}},
+	[IOS_OBJECT_REQ_HISTO] = {{NULL}},
 };
 
 static const char *histo_to_title[] = {
 	[IOS_L_HISTO] = "latency",
 	[IOS_RQ_HISTO] = "req_size",
+	[IOS_OBJECT_LAT_HISTO] = "latency",
+	[IOS_OBJECT_REQ_HISTO] = "req_size",
 };
 
 /*
@@ -4017,6 +4157,11 @@ default_column_width(iostat_cbdata_t *cb, enum iostat_type type)
 		[IOS_QUEUES] = 6,   /* 1M queue entries */
 		[IOS_L_HISTO] = 10, /* 1B ns = 10sec */
 		[IOS_RQ_HISTO] = 6, /* 1M queue entries */
+		[IOS_OBJECT_STORE] = 17, /* 512PB capacity */
+		[IOS_OBJECT_LATENCY] = 10, /* 1B ns = 10sec */
+		[IOS_OBJECT_ACTIVE] = 6,   /* 1M active entries */
+		[IOS_OBJECT_LAT_HISTO] = 10, /* 1B ns = 10sec */
+		[IOS_OBJECT_REQ_HISTO] = 6, /* 1M queue entries */
 	};
 
 	if (cb->cb_literal)
@@ -4052,6 +4197,7 @@ print_iostat_labels(iostat_cbdata_t *cb, unsigned int force_column_width,
 		/* Print our top labels centered over "read  write" label. */
 		for (i = 0; i < label_array_len(labels[idx]); i++) {
 			const char *name = labels[idx][i].name;
+
 			/*
 			 * We treat labels[][].columns == 0 as shorthand
 			 * for one column.  It makes writing out the label
@@ -4063,8 +4209,10 @@ print_iostat_labels(iostat_cbdata_t *cb, unsigned int force_column_width,
 			rw_column_width = (column_width * columns) +
 			    (2 * (columns - 1));
 
-			text_start = (int)((rw_column_width) / columns -
+			columns = MIN(2, columns);
+			text_start = (int)(rw_column_width / columns -
 			    slen / columns);
+
 			if (text_start < 0)
 				text_start = 0;
 
@@ -4235,11 +4383,17 @@ print_iostat_header_impl(iostat_cbdata_t *cb, unsigned int force_column_width,
 	namewidth = MAX(MAX(strlen(title), cb->cb_namewidth),
 	    histo_vdev_name ? strlen(histo_vdev_name) : 0);
 
+	/* Object Store iostats have an additional top row of labels */
+	if (cb->cb_flags & IOS_OBJECT_ANY_M) {
+		printf("%*s", namewidth, "");
+		print_iostat_labels(cb, force_column_width,
+		    iostat_object_top_labels);
+		printf("\n");
+	}
 	if (histo_vdev_name)
 		printf("%-*s", namewidth, histo_vdev_name);
 	else
 		printf("%*s", namewidth, "");
-
 
 	print_iostat_labels(cb, force_column_width, iostat_top_labels);
 	printf("\n");
@@ -4282,6 +4436,25 @@ print_one_stat(uint64_t value, enum zfs_nicenum_format format,
 		printf("\t%s", buf);
 	else
 		printf("  %*s", column_size, buf);
+}
+
+static void
+print_one_stat_fractional(double value, enum zfs_nicenum_format format,
+    unsigned int column_size, boolean_t scripted)
+{
+	/*
+	 * The operations values can be single digit and thay have been
+	 * scaled. Display values less than 9 as a float for more accuracy.
+	 */
+	if (format == ZFS_NICENUM_1024 && value > 0.005 && value < 9.0) {
+		if (scripted)
+			printf("\t%.2f", value);
+		else
+			printf("  %*.2f", column_size, value);
+	} else {
+		print_one_stat((uint64_t)(value + 0.5), format, column_size,
+		    scripted);
+	}
 }
 
 /*
@@ -4336,13 +4509,17 @@ stat_histo_max(struct stat_array *nva, unsigned int len)
  * it look like a one element array to make it easier to process.
  */
 static int
-nvpair64_to_stat_array(nvlist_t *nvl, const char *name,
+nvpair64_to_stat_array(nvlist_t *nvl, nvlist_t *altnvl, const char *name,
     struct stat_array *nva)
 {
 	nvpair_t *tmp;
 	int ret;
 
-	verify(nvlist_lookup_nvpair(nvl, name, &tmp) == 0);
+	if (altnvl != NULL && nvlist_exists(altnvl, name))
+		tmp = fnvlist_lookup_nvpair(altnvl, name);
+	else
+		tmp = fnvlist_lookup_nvpair(nvl, name);
+
 	switch (nvpair_type(tmp)) {
 	case DATA_TYPE_UINT64_ARRAY:
 		ret = nvpair_value_uint64_array(tmp, &nva->data, &nva->count);
@@ -4362,6 +4539,22 @@ nvpair64_to_stat_array(nvlist_t *nvl, const char *name,
 }
 
 /*
+ * When not displaying nanosec latency histogram buckets we fold them
+ * into the 1 usec bucket.
+ */
+static void
+stat_array_fold_ns(struct stat_array *nva)
+{
+	assert(nva->count == VDEV_L_HISTO_BUCKETS);
+
+	uint64_t nsec = 0;
+
+	for (int i = 0; i < 9; i++)
+		nsec += nva->data[i] * (2 << i);
+	nva->data[9] += MAX(nsec > 0 ? 1 : 0, nsec / 1000);
+}
+
+/*
  * Given a list of nvlist names, look up the extended stats in newnv and oldnv,
  * subtract them, and return the results in a newly allocated stat_array.
  * You must free the returned array after you are done with it with
@@ -4372,19 +4565,27 @@ nvpair64_to_stat_array(nvlist_t *nvl, const char *name,
  */
 static struct stat_array *
 calc_and_alloc_stats_ex(const char **names, unsigned int len, nvlist_t *oldnv,
-    nvlist_t *newnv)
+    nvlist_t *newnv, enum iostat_type type)
 {
 	nvlist_t *oldnvx = NULL, *newnvx;
+	nvlist_t *oldnvo = NULL, *newnvo = NULL;
 	struct stat_array *oldnva, *newnva, *calcnva;
 	int i, j;
 	unsigned int alloc_size = (sizeof (struct stat_array)) * len;
 
 	/* Extract our extended stats nvlist from the main list */
-	verify(nvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_VDEV_STATS_EX,
-	    &newnvx) == 0);
-	if (oldnv) {
-		verify(nvlist_lookup_nvlist(oldnv, ZPOOL_CONFIG_VDEV_STATS_EX,
-		    &oldnvx) == 0);
+	newnvx = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_VDEV_STATS_EX);
+	if (oldnv != NULL) {
+		oldnvx = fnvlist_lookup_nvlist(oldnv,
+		    ZPOOL_CONFIG_VDEV_STATS_EX);
+	}
+	if (type == IOS_OBJECT_LAT_HISTO || type == IOS_OBJECT_REQ_HISTO) {
+		newnvo = fnvlist_lookup_nvlist(newnv,
+		    ZPOOL_CONFIG_OBJECT_STORE_STATS);
+		if (oldnv != NULL) {
+			oldnvo = fnvlist_lookup_nvlist(oldnv,
+			    ZPOOL_CONFIG_OBJECT_STORE_STATS);
+		}
 	}
 
 	newnva = safe_malloc(alloc_size);
@@ -4392,7 +4593,7 @@ calc_and_alloc_stats_ex(const char **names, unsigned int len, nvlist_t *oldnv,
 	calcnva = safe_malloc(alloc_size);
 
 	for (j = 0; j < len; j++) {
-		verify(nvpair64_to_stat_array(newnvx, names[j],
+		verify(nvpair64_to_stat_array(newnvx, newnvo, names[j],
 		    &newnva[j]) == 0);
 		calcnva[j].count = newnva[j].count;
 		alloc_size = calcnva[j].count * sizeof (calcnva[j].data[0]);
@@ -4400,11 +4601,13 @@ calc_and_alloc_stats_ex(const char **names, unsigned int len, nvlist_t *oldnv,
 		memcpy(calcnva[j].data, newnva[j].data, alloc_size);
 
 		if (oldnvx) {
-			verify(nvpair64_to_stat_array(oldnvx, names[j],
+			verify(nvpair64_to_stat_array(oldnvx, oldnvo, names[j],
 			    &oldnva[j]) == 0);
 			for (i = 0; i < oldnva[j].count; i++)
 				calcnva[j].data[i] -= oldnva[j].data[i];
 		}
+		if (type == IOS_OBJECT_LAT_HISTO)
+			stat_array_fold_ns(&calcnva[j]);
 	}
 	free(newnva);
 	free(oldnva);
@@ -4444,13 +4647,19 @@ print_iostat_histo(struct stat_array *nva, unsigned int len,
 	if (cb->cb_flags & IOS_RQ_HISTO_M) {
 		/* Start at 512 - req size should never be lower than this */
 		start_bucket = 9;
+	} else if (cb->cb_flags & IOS_OBJECT_REQ_HISTO_M) {
+		/* Start at 64 bytes */
+		start_bucket = 6;
+	} else if (cb->cb_flags & IOS_OBJECT_LAT_HISTO_M) {
+		/* Omit nanosec buckects for object store latencies */
+		start_bucket = 9;
 	} else {
 		start_bucket = 0;
 	}
 
 	for (j = start_bucket; j < buckets; j++) {
 		/* Print histogram bucket label */
-		if (cb->cb_flags & IOS_L_HISTO_M) {
+		if (cb->cb_flags & (IOS_L_HISTO_M | IOS_OBJECT_LAT_HISTO_M)) {
 			/* Ending range of this bucket */
 			val = (1UL << (j + 1)) - 1;
 			zfs_nicetime(val, buf, sizeof (buf));
@@ -4501,7 +4710,7 @@ print_iostat_histos(iostat_cbdata_t *cb, nvlist_t *oldnv,
 	names = vsx_type_to_nvlist[type];
 	names_len = str_array_len(names); /* num of names */
 
-	nva = calc_and_alloc_stats_ex(names, names_len, oldnv, newnv);
+	nva = calc_and_alloc_stats_ex(names, names_len, oldnv, newnv, type);
 
 	if (cb->cb_literal) {
 		column_width = MAX(5,
@@ -4596,8 +4805,10 @@ print_iostat_queues(iostat_cbdata_t *cb, nvlist_t *oldnv,
 
 	unsigned int column_width = default_column_width(cb, IOS_QUEUES);
 	enum zfs_nicenum_format format;
+	enum iostat_type type = IOS_HISTO_IDX(cb->cb_flags);
+	unsigned int length = ARRAY_SIZE(names);
 
-	nva = calc_and_alloc_stats_ex(names, ARRAY_SIZE(names), NULL, newnv);
+	nva = calc_and_alloc_stats_ex(names, length, NULL, newnv, type);
 
 	if (cb->cb_literal)
 		format = ZFS_NICENUM_RAW;
@@ -4609,7 +4820,7 @@ print_iostat_queues(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		print_one_stat(val, format, column_width, cb->cb_scripted);
 	}
 
-	free_calc_stats(nva, ARRAY_SIZE(names));
+	free_calc_stats(nva, length);
 }
 
 static void
@@ -4635,8 +4846,9 @@ print_iostat_latency(iostat_cbdata_t *cb, nvlist_t *oldnv,
 
 	unsigned int column_width = default_column_width(cb, IOS_LATENCY);
 	enum zfs_nicenum_format format;
+	unsigned int length = ARRAY_SIZE(names);
 
-	nva = calc_and_alloc_stats_ex(names, ARRAY_SIZE(names), oldnv, newnv);
+	nva = calc_and_alloc_stats_ex(names, length, oldnv, newnv, IOS_L_HISTO);
 
 	if (cb->cb_literal)
 		format = ZFS_NICENUM_RAWTIME;
@@ -4644,12 +4856,12 @@ print_iostat_latency(iostat_cbdata_t *cb, nvlist_t *oldnv,
 		format = ZFS_NICENUM_TIME;
 
 	/* Print our avg latencies on the line */
-	for (i = 0; i < ARRAY_SIZE(names); i++) {
+	for (i = 0; i < length; i++) {
 		/* Compute average latency for a latency histo */
 		val = single_histo_average(nva[i].data, nva[i].count);
 		print_one_stat(val, format, column_width, cb->cb_scripted);
 	}
-	free_calc_stats(nva, ARRAY_SIZE(names));
+	free_calc_stats(nva, length);
 }
 
 /*
@@ -4670,6 +4882,10 @@ print_iostat_default(vdev_stat_t *vs, iostat_cbdata_t *cb, double scale)
 		na = '-';
 	}
 
+	/* Object store iostats omit capacity */
+	if (cb->cb_flags & IOS_OBJECT_ANY_M)
+		goto after_capacity;
+
 	/* only toplevel vdevs have capacity stats */
 	if (vs->vs_space == 0) {
 		if (cb->cb_scripted)
@@ -4684,14 +4900,171 @@ print_iostat_default(vdev_stat_t *vs, iostat_cbdata_t *cb, double scale)
 		    column_width, cb->cb_scripted);
 	}
 
-	print_one_stat((uint64_t)(vs->vs_ops[ZIO_TYPE_READ] * scale),
-	    format, column_width, cb->cb_scripted);
-	print_one_stat((uint64_t)(vs->vs_ops[ZIO_TYPE_WRITE] * scale),
-	    format, column_width, cb->cb_scripted);
+after_capacity:
+	print_one_stat_fractional(vs->vs_ops[ZIO_TYPE_READ] * scale, format,
+	    column_width, cb->cb_scripted);
+	print_one_stat_fractional(vs->vs_ops[ZIO_TYPE_WRITE] * scale, format,
+	    column_width, cb->cb_scripted);
 	print_one_stat((uint64_t)(vs->vs_bytes[ZIO_TYPE_READ] * scale),
 	    format, column_width, cb->cb_scripted);
 	print_one_stat((uint64_t)(vs->vs_bytes[ZIO_TYPE_WRITE] * scale),
 	    format, column_width, cb->cb_scripted);
+}
+
+static void
+print_one_oss(nvlist_t *oldnv, nvlist_t *newnv, const char *type,
+    const char *stat, iostat_cbdata_t *cb, double scale)
+{
+	unsigned int width = default_column_width(cb, IOS_OBJECT_STORE);
+	uint64_t oldval = 0, newval = 0;
+	enum zfs_nicenum_format format;
+	boolean_t scripted = cb->cb_scripted;
+	nvlist_t *nv;
+
+	format = cb->cb_literal ? ZFS_NICENUM_RAW : ZFS_NICENUM_1024;
+
+	if (oldnv != NULL && nvlist_lookup_nvlist(oldnv, type, &nv) == 0)
+		oldval = fnvlist_lookup_uint64(nv, stat);
+	if (nvlist_lookup_nvlist(newnv, type, &nv) == 0)
+		newval = fnvlist_lookup_uint64(nv, stat);
+
+	/*
+	 * If the object agent restarts then counters get reset. When that
+	 * occurs we can ignore the old value.
+	 */
+	if (newval < oldval)
+		oldval = 0;
+
+	/* Don't scale the active column values */
+	if (strcmp(stat, "active") == 0)
+		print_one_stat((uint64_t)(newval - oldval), format,
+		    width, scripted);
+	else
+		print_one_stat_fractional((newval - oldval) * scale, format,
+		    width, scripted);
+}
+
+static double
+get_iostat_object_storage_scale(nvlist_t *oldnv, nvlist_t *newnv)
+{
+	uint64_t oldtime = 0, newtime = 0, timedelta;
+
+	(void) nvlist_lookup_uint64(oldnv, "Timestamp", &oldtime);
+	(void) nvlist_lookup_uint64(newnv, "Timestamp", &newtime);
+	/*
+	 * The Timestamp here is nanosecs since the agent was started. If
+	 * the object agent restarts then timestamp gets reset. When that
+	 * occurs we can ignore the old value.
+	 */
+	if (newtime < oldtime)
+		oldtime = 0;
+
+	timedelta = newtime - oldtime;
+	return ((timedelta == 0) ? 1.0 :(double)NANOSEC / timedelta);
+}
+
+
+/*
+ * Print object storage statistics
+ */
+static void
+print_iostat_object_storage(nvlist_t *oldnv, nvlist_t *newnv,
+    iostat_cbdata_t *cb)
+{
+	nvlist_t *oldoss = NULL, *newoss;
+
+	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
+	if (oldnv != NULL) {
+		oldoss = fnvlist_lookup_nvlist(oldnv,
+		    ZPOOL_CONFIG_OBJECT_STORE_STATS);
+	}
+
+	double scale = get_iostat_object_storage_scale(oldoss, newoss);
+
+	print_one_oss(oldoss, newoss, "ReadsGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "TxgSyncPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "ReadsGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "TxgSyncPut", "total_bytes", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_ACTIVE_M) {
+		print_one_oss(oldoss, newoss, "ReadsGet", "active", cb, 1.0);
+		print_one_oss(oldoss, newoss, "TxgSyncPut", "active", cb, 1.0);
+	}
+
+	print_one_oss(oldoss, newoss, "MetadataGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "MetadataPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "MetadataGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "MetadataPut", "total_bytes", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_ACTIVE_M) {
+		print_one_oss(oldoss, newoss, "MetadataGet", "active", cb, 1.0);
+		print_one_oss(oldoss, newoss, "MetadataPut", "active", cb, 1.0);
+	}
+
+	print_one_oss(oldoss, newoss, "ReclaimGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "ReclaimPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "ReclaimGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "ReclaimPut", "total_bytes", cb, scale);
+	if (cb->cb_flags & IOS_OBJECT_ACTIVE_M) {
+		print_one_oss(oldoss, newoss, "ReclaimGet", "active", cb, 1.0);
+		print_one_oss(oldoss, newoss, "ReclaimPut", "active", cb, 1.0);
+	}
+
+	if (cb->cb_flags & IOS_OBJECT_STORE_M) {
+		print_one_oss(oldoss, newoss, "ObjectDelete", "operations",
+		    cb, scale);
+	}
+}
+
+static void
+print_object_agent_latency(const char **names, unsigned int length,
+    nvlist_t *oldnv, nvlist_t *newnv, iostat_cbdata_t *cb,
+    enum iostat_type type)
+{
+	unsigned int width = default_column_width(cb, IOS_LATENCY);
+	enum zfs_nicenum_format format = cb->cb_literal ?
+	    ZFS_NICENUM_RAWTIME : ZFS_NICENUM_TIME;
+
+	struct stat_array *nva =
+	    calc_and_alloc_stats_ex(names, length, oldnv, newnv, type);
+
+	/* Print average latencies on the line */
+	for (int i = 0; i < length; i++) {
+		uint64_t val = single_histo_average(nva[i].data, nva[i].count);
+		print_one_stat(val, format, width, cb->cb_scripted);
+	}
+	free_calc_stats(nva, length);
+}
+
+static void
+print_iostat_object_latency(nvlist_t *oldnv, nvlist_t *newnv,
+    iostat_cbdata_t *cb)
+{
+	nvlist_t *oldoss = NULL, *newoss;
+	newoss = fnvlist_lookup_nvlist(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS);
+	if (oldnv != NULL) {
+		oldoss = fnvlist_lookup_nvlist(oldnv,
+		    ZPOOL_CONFIG_OBJECT_STORE_STATS);
+	}
+
+	/* print round-trip latency from object agent (uses zio->io_delay) */
+	const char *names[] = {
+		ZPOOL_CONFIG_VDEV_TOT_R_LAT_HISTO,
+		ZPOOL_CONFIG_VDEV_TOT_W_LAT_HISTO,
+	};
+	print_object_agent_latency(names, ARRAY_SIZE(names), oldnv, newnv,
+	    cb, IOS_L_HISTO);
+
+	double scale = get_iostat_object_storage_scale(oldoss, newoss);
+	print_one_oss(oldoss, newoss, "TotalGet", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "TotalPut", "operations", cb, scale);
+	print_one_oss(oldoss, newoss, "TotalGet", "total_bytes", cb, scale);
+	print_one_oss(oldoss, newoss, "TotalPut", "total_bytes", cb, scale);
+
+	const char *onames[] = {
+		"LatencyHistogramGets",
+		"LatencyHistogramPuts",
+	};
+	print_object_agent_latency(onames, ARRAY_SIZE(onames), oldnv, newnv,
+	    cb, IOS_OBJECT_LAT_HISTO);
 }
 
 static const char *class_name[] = {
@@ -4723,6 +5096,19 @@ print_vdev_stats(zpool_handle_t *zhp, const char *name, nvlist_t *oldnv,
 
 	if (strcmp(name, VDEV_TYPE_INDIRECT) == 0)
 		return (ret);
+
+	/*
+	 * When asked to display object store stats (-o), make sure the
+	 * expected stats still exist. If they are missing we can skip
+	 * printing this line and pick up on the next iteration.
+	 */
+	if (cb->cb_flags & IOS_OBJECT_ANY_M) {
+		if (!nvlist_exists(newnv, ZPOOL_CONFIG_OBJECT_STORE_STATS) ||
+		    (oldnv != NULL &&
+		    !nvlist_exists(oldnv, ZPOOL_CONFIG_OBJECT_STORE_STATS))) {
+			return (ret);
+		}
+	}
 
 	calcvs = safe_malloc(sizeof (*calcvs));
 
@@ -4789,10 +5175,21 @@ print_vdev_stats(zpool_handle_t *zhp, const char *name, nvlist_t *oldnv,
 			scale = (double)NANOSEC / tdelta;
 	}
 
-	if (cb->cb_flags & IOS_DEFAULT_M) {
+	/* When not asking for histograms, we need to generate the calcvs */
+	if ((cb->cb_flags & IOS_ANYHISTO_M) == 0)
 		calc_default_iostats(oldvs, newvs, calcvs);
+
+	if (cb->cb_flags & IOS_DEFAULT_M)
 		print_iostat_default(calcvs, cb, scale);
+
+	if (cb->cb_flags & (IOS_OBJECT_STORE_M | IOS_OBJECT_ACTIVE_M)) {
+		print_iostat_default(calcvs, cb, scale);
+		print_iostat_object_storage(oldnv, newnv, cb);
+	} else if (cb->cb_flags & IOS_OBJECT_LATENCY_M) {
+		print_iostat_default(calcvs, cb, scale);
+		print_iostat_object_latency(oldnv, newnv, cb);
 	}
+
 	if (cb->cb_flags & IOS_LATENCY_M)
 		print_iostat_latency(cb, oldnv, newnv);
 	if (cb->cb_flags & IOS_QUEUES_M)
@@ -5133,9 +5530,10 @@ static int
 get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 {
 	uint64_t *mask = data;
-	nvlist_t *config, *nvroot, *nvx;
+	nvlist_t *config, *nvroot, *nvx, *nvo;
 	uint64_t flags = 0;
 	int i, j;
+	boolean_t free_nvo;
 
 	config = zpool_get_config(zhp, NULL);
 	verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
@@ -5144,6 +5542,16 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 	/* Default stats are always supported, but for completeness.. */
 	if (nvlist_exists(nvroot, ZPOOL_CONFIG_VDEV_STATS))
 		flags |= IOS_DEFAULT_M;
+
+	/* Check if Object Store stats are present */
+	if (nvlist_lookup_nvlist(nvroot, ZPOOL_CONFIG_OBJECT_STORE_STATS,
+	    &nvo) == 0) {
+		flags |= IOS_OBJECT_ANY_M;
+		free_nvo = B_FALSE;
+	} else {
+		nvo = fnvlist_alloc();
+		free_nvo = B_TRUE;
+	}
 
 	/* Get our extended stats nvlist from the main list */
 	if (nvlist_lookup_nvlist(nvroot, ZPOOL_CONFIG_VDEV_STATS_EX,
@@ -5163,7 +5571,11 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 		/* Start off by assuming the flag is supported, then check */
 		flags |= (1ULL << j);
 		for (i = 0; vsx_type_to_nvlist[j][i]; i++) {
-			if (!nvlist_exists(nvx, vsx_type_to_nvlist[j][i])) {
+			const char *nv_name = vsx_type_to_nvlist[j][i];
+
+			/* Look in both nvx and nvo */
+			if (!nvlist_exists(nvx, nv_name) &&
+			    !nvlist_exists(nvo, nv_name)) {
 				/* flag isn't supported */
 				flags = flags & ~(1ULL  << j);
 				break;
@@ -5172,6 +5584,8 @@ get_stat_flags_cb(zpool_handle_t *zhp, void *data)
 	}
 end:
 	*mask = *mask & flags;
+	if (free_nvo)
+		nvlist_free(nvo);
 	return (0);
 }
 
@@ -5568,6 +5982,7 @@ zpool_do_iostat(int argc, char **argv)
 	boolean_t verbose = B_FALSE;
 	boolean_t latency = B_FALSE, l_histo = B_FALSE, rq_histo = B_FALSE;
 	boolean_t queues = B_FALSE, parsable = B_FALSE, scripted = B_FALSE;
+	boolean_t object_store = B_FALSE;
 	boolean_t omit_since_boot = B_FALSE;
 	boolean_t guid = B_FALSE;
 	boolean_t follow_links = B_FALSE;
@@ -5577,13 +5992,22 @@ zpool_do_iostat(int argc, char **argv)
 	char *cmd = NULL;
 
 	/* Used for printing error message */
-	const char flag_to_arg[] = {[IOS_LATENCY] = 'l', [IOS_QUEUES] = 'q',
-	    [IOS_L_HISTO] = 'w', [IOS_RQ_HISTO] = 'r'};
+	const char *flag_to_arg[] = {
+	    [IOS_LATENCY] = "l",
+	    [IOS_QUEUES] = "q",
+	    [IOS_L_HISTO] = "w",
+	    [IOS_RQ_HISTO] = "r",
+	    [IOS_OBJECT_STORE] = "o",
+	    [IOS_OBJECT_LATENCY] = "ol",
+	    [IOS_OBJECT_ACTIVE] = "oq",
+	    [IOS_OBJECT_LAT_HISTO] = "ow",
+	    [IOS_OBJECT_REQ_HISTO] = "or"
+	};
 
 	uint64_t unsupported_flags;
 
 	/* check options */
-	while ((c = getopt(argc, argv, "c:gLPT:vyhplqrwnH")) != -1) {
+	while ((c = getopt(argc, argv, "c:gLPT:voyhplqrwnH")) != -1) {
 		switch (c) {
 		case 'c':
 			if (cmd != NULL) {
@@ -5624,6 +6048,9 @@ zpool_do_iostat(int argc, char **argv)
 			break;
 		case 'v':
 			verbose = B_TRUE;
+			break;
+		case 'o':
+			object_store = B_TRUE;
 			break;
 		case 'p':
 			parsable = B_TRUE;
@@ -5773,7 +6200,18 @@ zpool_do_iostat(int argc, char **argv)
 	 */
 	cb.cb_list = list;
 
-	if (l_histo) {
+	if (object_store) {
+		if (latency)
+			cb.cb_flags = IOS_OBJECT_LATENCY_M;
+		else if (queues)
+			cb.cb_flags = IOS_OBJECT_ACTIVE_M;
+		else if (l_histo)
+			cb.cb_flags = IOS_OBJECT_LAT_HISTO_M;
+		else if (rq_histo)
+			cb.cb_flags = IOS_OBJECT_REQ_HISTO_M;
+		else
+			cb.cb_flags =  IOS_OBJECT_STORE_M;
+	} else if (l_histo) {
 		/*
 		 * Histograms tables look out of place when you try to display
 		 * them with the other stats, so make a rule that you can only
@@ -5797,16 +6235,26 @@ zpool_do_iostat(int argc, char **argv)
 	if (unsupported_flags) {
 		uint64_t f;
 		int idx;
-		fprintf(stderr,
-		    gettext("The loaded zfs module doesn't support:"));
+
+		if (cb.cb_flags & IOS_OBJECT_ANY_M)
+			fprintf(stderr,
+			    gettext("The loaded zfs module or one of the"
+			    " specified pools doesn't support:"));
+		else
+			fprintf(stderr,
+			    gettext("The loaded zfs module doesn't support:"));
 
 		/* for each bit set in unsupported_flags */
 		for (f = unsupported_flags; f; f &= ~(1ULL << idx)) {
 			idx = lowbit64(f) - 1;
-			fprintf(stderr, " -%c", flag_to_arg[idx]);
+			fprintf(stderr, " -%s", flag_to_arg[idx]);
 		}
 
-		fprintf(stderr, ".  Try running a newer module.\n");
+		if ((cb.cb_flags & IOS_OBJECT_ANY_M) == 0)
+			fprintf(stderr, ".  Try running a newer module.\n");
+		else
+			fprintf(stderr, ".  Try running a newer module or"
+			    " selecting only object based pools.\n");
 		pool_list_free(list);
 
 		return (1);
@@ -7402,9 +7850,10 @@ zpool_do_trim(int argc, char **argv)
 				    "combined with the -c or -s options\n"));
 				usage(B_FALSE);
 			}
-			if (zfs_nicestrtonum(NULL, optarg, &rate) == -1) {
-				(void) fprintf(stderr,
-				    gettext("invalid value for rate\n"));
+			if (zfs_nicestrtonum(g_zfs, optarg, &rate) == -1) {
+				(void) fprintf(stderr, "%s: %s\n",
+				    gettext("invalid value for rate"),
+				    libzfs_error_description(g_zfs));
 				usage(B_FALSE);
 			}
 			break;
@@ -8648,7 +9097,7 @@ status_callback(zpool_handle_t *zhp, void *data)
 }
 
 /*
- * zpool status [-c [script1,script2,...]] [-igLpPstvx] [-T d|u] [pool] ...
+ * zpool status [-c [script1,script2,...]] [-dDigLpPstvxw] [-T d|u] [pool] ...
  *              [interval [count]]
  *
  *	-c CMD	For each vdev, run command CMD
@@ -8660,8 +9109,10 @@ status_callback(zpool_handle_t *zhp, void *data)
  *	-s	Display slow IOs column.
  *	-v	Display complete error logs
  *	-x	Display only pools with potential problems
- *	-D	Display dedup status (undocumented)
+ *	-D	Display dedup status
  *	-t	Display vdev TRIM status.
+ *	-d	Display destroying zpools.
+ *	-w	Clear destroyed zpools.
  *	-T	Display a timestamp in date(1) or Unix format
  *
  * Describes the health status of all pools or some subset.
@@ -8676,8 +9127,15 @@ zpool_do_status(int argc, char **argv)
 	status_cbdata_t cb = { 0 };
 	char *cmd = NULL;
 
+	struct option long_options[] = {
+		{"list-destroyed",	no_argument,	NULL, 'd'},
+		{"clear-destroyed",	no_argument,	NULL, 'w'},
+		{0, 0, 0, 0}
+	};
+
 	/* check options */
-	while ((c = getopt(argc, argv, "c:igLpPsvxDtT:")) != -1) {
+	while ((c = getopt_long(argc, argv, "c:igLpPsvxDtT:dw", long_options,
+	    NULL)) != -1) {
 		switch (c) {
 		case 'c':
 			if (cmd != NULL) {
@@ -8733,6 +9191,12 @@ zpool_do_status(int argc, char **argv)
 		case 't':
 			cb.cb_print_vdev_trim = B_TRUE;
 			break;
+		case 'd':
+			cb.cb_print_destroyed = B_TRUE;
+			break;
+		case 'w':
+			cb.cb_clear_destroyed = B_TRUE;
+			break;
 		case 'T':
 			get_timestamp_arg(*optarg);
 			break;
@@ -8753,8 +9217,20 @@ zpool_do_status(int argc, char **argv)
 
 	get_interval_count(&argc, argv, &interval, &count);
 
-	if (argc == 0)
+	if (argc == 0) {
 		cb.cb_allpools = B_TRUE;
+	} else {
+		if (cb.cb_clear_destroyed) {
+			(void) fprintf(stderr, gettext("Specifying a "
+			    "pool|id is incompatible with the -c option\n"));
+			exit(1);
+		}
+		if (cb.cb_print_destroyed) {
+			(void) fprintf(stderr, gettext("Specifying a "
+			    "pool|id is incompatible with the -d option\n"));
+			exit(1);
+		}
+	}
 
 	cb.cb_first = B_TRUE;
 	cb.cb_print_status = B_TRUE;
@@ -8763,12 +9239,22 @@ zpool_do_status(int argc, char **argv)
 		if (timestamp_fmt != NODATE)
 			print_timestamp(timestamp_fmt);
 
+		if (cb.cb_print_destroyed)
+			zoa_list_destroyed_pools(g_zfs);
+		if (cb.cb_clear_destroyed)
+			zoa_clear_destroyed_pools(g_zfs);
+		if (cb.cb_clear_destroyed || cb.cb_print_destroyed)
+			return (0);
+
 		if (cmd != NULL)
 			cb.vcdl = all_pools_for_each_vdev_run(argc, argv, cmd,
 			    NULL, NULL, 0, 0);
 
 		ret = for_each_pool(argc, argv, B_TRUE, NULL, ZFS_TYPE_POOL,
 		    cb.cb_literal, status_callback, &cb);
+
+		if (cb.cb_allpools)
+			zoa_list_destroying_pools(g_zfs);
 
 		if (cb.vcdl != NULL)
 			free_vdev_cmd_data_list(cb.vcdl);

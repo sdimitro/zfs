@@ -58,7 +58,7 @@ function cleanup
 log_assert "Pool with active read-only compatible features can be imported."
 log_onexit cleanup
 
-log_must zpool create $TESTPOOL1 $VDEV0
+log_must create_pool -p $TESTPOOL1 -d $VDEV0
 log_must zpool export $TESTPOOL1
 
 for feature in $enabled_features $active_features; do
@@ -69,25 +69,25 @@ for feature in $active_features; do
 	log_must zhack -d $DEVICE_DIR feature ref $TESTPOOL1 $feature
 done
 
-log_mustnot zpool import -d $DEVICE_DIR $TESTPOOL1
+log_mustnot import_pool -s "-d $DEVICE_DIR" -p $TESTPOOL1
 
 # error message should mention "readonly"
-log_must eval "zpool import -d $DEVICE_DIR $TESTPOOL1 | grep readonly"
+log_must eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 | grep readonly"
 log_mustnot poolexists $TESTPOOL1
 
 for feature in $enabled_features; do
-	log_mustnot eval "zpool import -d $DEVICE_DIR $TESTPOOL1 \
+	log_mustnot eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 \
 	    | grep $feature"
 	log_mustnot poolexists $TESTPOOL1
 done
 
 for feature in $active_features; do
-	log_must eval "zpool import -d $DEVICE_DIR $TESTPOOL1 \
+	log_must eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 \
 	    | grep $feature"
 	log_mustnot poolexists $TESTPOOL1
 done
 
-log_must zpool import -o readonly=on -d $DEVICE_DIR $TESTPOOL1
+log_must import_pool -e "-o readonly=on" -s "-d $DEVICE_DIR" -p $TESTPOOL1
 
 for feature in $enabled_features; do
 	state=$(zpool list -Ho unsupported@$feature $TESTPOOL1)

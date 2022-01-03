@@ -60,16 +60,28 @@ function cleanup_testenv
 
 log_assert "Verify slog device can be disk, file, lofi device or any device " \
 	"that presents a block interface."
-verify_disk_count "$DISKS" 2
+#
+# Skip verification of the disk count for object storage
+#
+! use_object_store && verify_disk_count "$DISKS" 2
+
 log_onexit cleanup_testenv
 log_must setup
 
 dsk1=${DISKS%% *}
-log_must zpool create $TESTPOOL ${DISKS#$dsk1}
+log_must create_pool -p $TESTPOOL -d "${DISKS#$dsk1}"
 
-# Add provided disk
-log_must zpool add $TESTPOOL log $dsk1
-log_must verify_slog_device $TESTPOOL $dsk1 'ONLINE'
+#
+# For object storage the variable DISKS remains unset
+# Therefore we skip this test with object storage.
+# Technically a disk based log can be added to the
+# object store backed pool & it'll work
+#
+if ! use_object_store; then
+	# Add provided disk
+	log_must zpool add $TESTPOOL log $dsk1
+	log_must verify_slog_device $TESTPOOL $dsk1 'ONLINE'
+fi
 # Add normal file
 log_must zpool add $TESTPOOL log $LDEV
 ldev=$(random_get $LDEV)

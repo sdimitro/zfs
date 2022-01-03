@@ -60,6 +60,7 @@
 #include <sys/vdev_trim.h>
 #include <sys/zvol.h>
 #include <sys/zfs_ratelimit.h>
+#include <zfeature_common.h>
 #include "zfs_prop.h"
 
 /*
@@ -229,6 +230,7 @@ static vdev_ops_t *vdev_ops_table[] = {
 	&vdev_missing_ops,
 	&vdev_hole_ops,
 	&vdev_indirect_ops,
+	&vdev_object_store_ops,
 	NULL
 };
 
@@ -313,6 +315,18 @@ uint64_t
 vdev_default_min_asize(vdev_t *vd)
 {
 	return (vd->vdev_min_asize);
+}
+
+void
+vdev_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
+{
+	for (int c = 0; c < vd->vdev_children; c++)
+		vdev_enable_feature(vd->vdev_child[c], zfeature);
+
+	if (vd->vdev_ops->vdev_op_leaf &&
+	    vd->vdev_ops->vdev_op_enable_feature != NULL) {
+		vd->vdev_ops->vdev_op_enable_feature(vd, zfeature);
+	}
 }
 
 /*
@@ -694,7 +708,7 @@ vdev_alloc(spa_t *spa, vdev_t **vdp, nvlist_t *nv, vdev_t *parent, uint_t id,
 	vdev_alloc_bias_t alloc_bias = VDEV_BIAS_NONE;
 	boolean_t top_level = (parent && !parent->vdev_parent);
 
-	ASSERT(spa_config_held(spa, SCL_ALL, RW_WRITER) == SCL_ALL);
+	ASSERT3U(spa_config_held(spa, SCL_ALL, RW_WRITER), ==, SCL_ALL);
 
 	if (nvlist_lookup_string(nv, ZPOOL_CONFIG_TYPE, &type) != 0)
 		return (SET_ERROR(EINVAL));
@@ -1348,7 +1362,8 @@ vdev_metaslab_group_create(vdev_t *vd)
 	spa_t *spa = vd->vdev_spa;
 
 	/*
-	 * metaslab_group_create was delayed until allocation bias was available
+	 * metaslab_group_create was delayed until allocation bias
+	 * was available
 	 */
 	if (vd->vdev_mg == NULL) {
 		metaslab_class_t *mc;
@@ -1373,10 +1388,28 @@ vdev_metaslab_group_create(vdev_t *vd)
 			mc = spa_normal_class(spa);
 		}
 
+		/*
+		 * For object store vdevs, we override the normal
+		 * allocator and always use a sequential allocation
+		 * scheme. We also reset the number of allocators
+		 * that will be needed.
+		 */
+		if (vdev_is_object_based(vd)) {
+			ASSERT3P(mc, ==, spa_normal_class(spa));
+			metaslab_class_destroy(spa_normal_class(spa));
+			spa->spa_alloc_count = 1;
+			mc = spa->spa_normal_class = metaslab_class_create(spa,
+			    zfs_objectstore_ops);
+		}
+
 		vd->vdev_mg = metaslab_group_create(mc, vd,
 		    spa->spa_alloc_count);
 
-		if (!vd->vdev_islog) {
+
+		if (vdev_is_object_based(vd))
+			ASSERT3U(vd->vdev_mg->mg_allocators, ==, 1);
+
+		if (!vd->vdev_islog && !vdev_is_object_based(vd)) {
 			vd->vdev_log_mg = metaslab_group_create(
 			    spa_embedded_log_class(spa), vd, 1);
 		}
@@ -1431,6 +1464,8 @@ vdev_metaslab_init(vdev_t *vd, uint64_t txg)
 
 	vd->vdev_ms = mspp;
 	vd->vdev_ms_count = newc;
+	zfs_dbgmsg("vdev_metaslab_init: setting vdev_ms_count: %llu",
+	    (u_longlong_t)vd->vdev_ms_count);
 
 	for (uint64_t m = oldc; m < newc; m++) {
 		uint64_t object = 0;
@@ -1656,6 +1691,12 @@ vdev_probe(vdev_t *vd, zio_t *zio)
 	zio_t *pio;
 
 	ASSERT(vd->vdev_ops->vdev_op_leaf);
+
+	/*
+	 * We can't probe an object store vdev.
+	 */
+	if (vdev_is_object_based(vd))
+		return (NULL);
 
 	/*
 	 * Don't probe the probe.
@@ -2006,10 +2047,17 @@ vdev_open(vdev_t *vd)
 			    VDEV_AUX_TOO_SMALL);
 			return (SET_ERROR(EOVERFLOW));
 		}
-		psize = osize;
-		asize = osize - (VDEV_LABEL_START_SIZE + VDEV_LABEL_END_SIZE);
-		max_asize = max_osize - (VDEV_LABEL_START_SIZE +
-		    VDEV_LABEL_END_SIZE);
+		max_asize = asize = psize = osize;
+
+		/*
+		 * If it's not an object store, then account for the labels.
+		 */
+		if (!vdev_is_object_based(vd)) {
+			asize = osize - (VDEV_LABEL_START_SIZE +
+			    VDEV_LABEL_END_SIZE);
+			max_asize = max_osize - (VDEV_LABEL_START_SIZE +
+			    VDEV_LABEL_END_SIZE);
+		}
 	} else {
 		if (vd->vdev_parent != NULL && osize < SPA_MINDEVSIZE -
 		    (VDEV_LABEL_START_SIZE + VDEV_LABEL_END_SIZE)) {
@@ -2183,7 +2231,7 @@ vdev_validate(vdev_t *vd)
 	uint64_t txg;
 	int children = vd->vdev_children;
 
-	if (vdev_validate_skip)
+	if (vdev_validate_skip || vdev_is_object_based(vd))
 		return (0);
 
 	if (children > 0) {
@@ -2384,6 +2432,7 @@ vdev_validate(vdev_t *vd)
 static void
 vdev_copy_path_impl(vdev_t *svd, vdev_t *dvd)
 {
+	char *old, *new;
 	if (svd->vdev_path != NULL && dvd->vdev_path != NULL) {
 		if (strcmp(svd->vdev_path, dvd->vdev_path) != 0) {
 			zfs_dbgmsg("vdev_copy_path: vdev %llu: path changed "
@@ -2396,6 +2445,29 @@ vdev_copy_path_impl(vdev_t *svd, vdev_t *dvd)
 		dvd->vdev_path = spa_strdup(svd->vdev_path);
 		zfs_dbgmsg("vdev_copy_path: vdev %llu: path set to '%s'",
 		    (u_longlong_t)dvd->vdev_guid, dvd->vdev_path);
+	}
+
+	/*
+	 * Our enclosure sysfs path may have changed between imports
+	 */
+	old = dvd->vdev_enc_sysfs_path;
+	new = svd->vdev_enc_sysfs_path;
+	if ((old != NULL && new == NULL) ||
+	    (old == NULL && new != NULL) ||
+	    ((old != NULL && new != NULL) && strcmp(new, old) != 0)) {
+		zfs_dbgmsg("vdev_copy_path: vdev %llu: vdev_enc_sysfs_path "
+		    "changed from '%s' to '%s'", (u_longlong_t)dvd->vdev_guid,
+		    old, new);
+
+		if (dvd->vdev_enc_sysfs_path)
+			spa_strfree(dvd->vdev_enc_sysfs_path);
+
+		if (svd->vdev_enc_sysfs_path) {
+			dvd->vdev_enc_sysfs_path = spa_strdup(
+			    svd->vdev_enc_sysfs_path);
+		} else {
+			dvd->vdev_enc_sysfs_path = NULL;
+		}
 	}
 }
 
@@ -2643,6 +2715,13 @@ vdev_metaslab_set_size(vdev_t *vd)
 	uint64_t asize = vd->vdev_asize;
 	uint64_t ms_count = asize >> zfs_vdev_default_ms_shift;
 	uint64_t ms_shift;
+
+	if (vdev_is_object_based(vd)) {
+		vd->vdev_ms_shift = highbit64(asize) - 1;
+		zfs_dbgmsg("vdev_metaslab_set_size: %llu",
+		    (u_longlong_t)vd->vdev_ms_shift);
+		return;
+	}
 
 	/*
 	 * There are two dimensions to the metaslab sizing calculation:
@@ -3128,6 +3207,12 @@ vdev_dtl_load(vdev_t *vd)
 
 	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_dtl_object != 0) {
 		ASSERT(vdev_is_concrete(vd));
+
+		/*
+		 * If the dtl cannot be sync'd there is no need to open it.
+		 */
+		if (spa->spa_mode == SPA_MODE_READ && !spa->spa_read_spacemaps)
+			return (0);
 
 		error = space_map_open(&vd->vdev_dtl_sm, mos,
 		    vd->vdev_dtl_object, 0, -1ULL, 0);
@@ -4620,12 +4705,24 @@ vdev_stat_update(zio_t *zio, uint64_t psize)
 			}
 
 			if (zio->io_delta && zio->io_delay) {
-				vsx->vsx_queue_histo[priority]
-				    [L_HISTO(zio->io_delta - zio->io_delay)]++;
-				vsx->vsx_disk_histo[type]
-				    [L_HISTO(zio->io_delay)]++;
 				vsx->vsx_total_histo[type]
 				    [L_HISTO(zio->io_delta)]++;
+
+				hrtime_t qdelta = zio->io_delta - zio->io_delay;
+
+				/* object store pools don't use vdev queues */
+				if (vdev_is_object_based(vd)) {
+					if (priority == ZIO_PRIORITY_SCRUB ||
+					    priority == ZIO_PRIORITY_TRIM) {
+						vsx->vsx_queue_histo[priority]
+						    [L_HISTO(qdelta)]++;
+					}
+				} else {
+					vsx->vsx_queue_histo[priority]
+					    [L_HISTO(qdelta)]++;
+					vsx->vsx_disk_histo[type]
+					    [L_HISTO(zio->io_delay)]++;
+				}
 			}
 		}
 
@@ -5141,6 +5238,45 @@ vdev_is_concrete(vdev_t *vd)
 	} else {
 		return (B_TRUE);
 	}
+}
+
+static boolean_t
+vdev_is_object_based_impl(vdev_t *vd)
+{
+	vdev_ops_t *ops = vd->vdev_ops;
+	if (vd->vdev_ops->vdev_op_leaf && ops == &vdev_object_store_ops)
+		return (B_TRUE);
+
+	for (int c = 0; c < vd->vdev_children; c++) {
+		vdev_t *cvd = vd->vdev_child[c];
+		if (cvd->vdev_islog || cvd->vdev_aux != NULL)
+			continue;
+
+		if (vdev_is_object_based(cvd))
+			return (B_TRUE);
+	}
+	return (B_FALSE);
+}
+
+boolean_t
+vdev_is_object_based(vdev_t *vd)
+{
+	if (vd == NULL)
+		return (B_FALSE);
+
+	/* Are we holding any spa_config_locks? */
+	boolean_t lock_held =
+	    spa_config_held(vd->vdev_spa, SCL_ALL, RW_READER) ||
+	    spa_config_held(vd->vdev_spa, SCL_ALL, RW_WRITER);
+
+	if (!lock_held)
+		spa_config_enter(vd->vdev_spa, SCL_VDEV, FTAG, RW_READER);
+
+	boolean_t object_based = vdev_is_object_based_impl(vd);
+
+	if (!lock_held)
+		spa_config_exit(vd->vdev_spa, SCL_VDEV, FTAG);
+	return (object_based);
 }
 
 /*

@@ -45,15 +45,18 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Multiple zfs copies inapplicable for object storage \
+		run."
+fi
+
 function cleanup
 {
 	if ismounted $mntp $NEWFS_DEFAULT_FS ; then
 		log_must umount $mntp
 	fi
 
-	if datasetexists $vol; then
-		log_must zfs destroy $vol
-	fi
+	datasetexists $vol && destroy_dataset $vol
 
 	if [[ -d $mntp ]]; then
                 rm -rf $mntp

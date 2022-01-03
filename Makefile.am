@@ -103,7 +103,8 @@ endif
 endif
 
 PHONY += codecheck
-codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck
+codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck \
+	rustfmt rustclippy
 
 PHONY += checkstyle
 checkstyle: codecheck commitcheck
@@ -116,12 +117,43 @@ commitcheck:
 
 PHONY += cstyle
 cstyle:
-	@find ${top_srcdir} -name build -prune \
-		-o -type f -name '*.[hc]' \
-		! -name 'zfs_config.*' ! -name '*.mod.c' \
-		! -name 'opt_global.h' ! -name '*_if*.h' \
+	@find ${top_srcdir} \
+		-name build \
+		-prune \
+		-o -type f \
+		-name '*.[hc]' \
+		! -name 'zfs_config.*' \
+		! -name '*.mod.c' \
+		! -name 'opt_global.h' \
+		! -name '*_if*.h' \
+		! -name 'libzoa.h' \
 		! -path './module/zstd/lib/*' \
 		-exec ${top_srcdir}/scripts/cstyle.pl -cpP {} \+
+
+RUSTDIRS = cmd/zfs_object_agent
+
+PHONY += rustfmt
+rustfmt: $(RUSTDIRS)
+	@if type cargo-fmt > /dev/null 2>&1; then \
+		set -e ; \
+		for dir in $(RUSTDIRS) ; do \
+			cargo fmt --all --manifest-path $$dir/Cargo.toml -- --check ; \
+		done \
+	else \
+		echo "skipping rustfmt because cargo-fmt is not installed"; \
+	fi
+
+PHONY += rustclippy
+rustclippy: $(RUSTDIRS)
+	@if type cargo-clippy > /dev/null 2>&1; then \
+		set -e ; \
+		for dir in $(RUSTDIRS) ; do \
+			cargo clippy --workspace --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
+			cargo clippy --tests --workspace --manifest-path $$dir/Cargo.toml -- -Dwarnings ; \
+		done \
+	else \
+		echo "skipping rustclippy because cargo-clippy is not installed"; \
+	fi
 
 filter_executable = -exec test -x '{}' \; -print
 
@@ -129,10 +161,21 @@ SHELLCHECKDIRS = cmd contrib etc scripts tests
 SHELLCHECKSCRIPTS = autogen.sh
 
 PHONY += checkabi storeabi
-checkabi: lib
+
+checklibabiversion:
+	libabiversion=`abidw -v | $(SED) 's/[^0-9]//g'`; \
+	if test $$libabiversion -lt "200"; then \
+        /bin/echo -e "\n" \
+        "*** Please use libabigail 2.0.0 version or newer;\n" \
+        "*** otherwise results are not consistent!\n" \
+        "(or see https://github.com/openzfs/libabigail-docker )\n"; \
+        exit 1; \
+    fi;
+
+checkabi: checklibabiversion lib
 	$(MAKE) -C lib checkabi
 
-storeabi: lib
+storeabi: checklibabiversion lib
 	$(MAKE) -C lib storeabi
 
 PHONY += mancheck

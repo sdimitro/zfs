@@ -51,6 +51,12 @@ log_must eval "echo 'password' > $keyfile"
 log_must eval "bzcat <$sendfile_compressed >$sendfile"
 log_must eval "zstream redup $sendfile | zfs recv $TESTPOOL/recv"
 
+# The default keyfile location was set to /testpool/pkey
+# therefore the zfs load-key was failing to load it as
+# testpool didn't exists.
+# The test pool names has been changed to include
+# uuid https://github.com/delphix/zfs/pull/493
+log_must zfs set keylocation=file://$keyfile $TESTPOOL/recv
 log_must zfs load-key $TESTPOOL/recv
 block_device_wait $volfile
 

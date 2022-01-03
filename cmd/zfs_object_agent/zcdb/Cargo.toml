@@ -1,0 +1,15 @@
+[package]
+name = "zcachedb"
+version = "0.1.0"
+authors = ["Delphix"]
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+clap = "2"
+git-version = "0.3.5"
+libc = "0.2"
+log = "0.4"
+tokio = { version = "1.4", features = ["full"] }
+zettacache = { path = "../zettacache" }

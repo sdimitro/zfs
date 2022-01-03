@@ -108,6 +108,8 @@ zil_stats_t zil_stats = {
 	{ "zil_itx_metaslab_normal_bytes",	KSTAT_DATA_UINT64 },
 	{ "zil_itx_metaslab_slog_count",	KSTAT_DATA_UINT64 },
 	{ "zil_itx_metaslab_slog_bytes",	KSTAT_DATA_UINT64 },
+	{ "zil_slog_alloc_failures",		KSTAT_DATA_UINT64 },
+	{ "zil_skip_zil_commit",		KSTAT_DATA_UINT64 },
 };
 
 static kstat_t *zil_ksp;
@@ -709,6 +711,8 @@ zil_create(zilog_t *zilog)
 
 		if (error == 0)
 			zil_init_log_chain(zilog, &blk);
+		else if (slog)
+			ZIL_STAT_BUMP(zil_slog_alloc_failures);
 	}
 
 	/*
@@ -1178,6 +1182,20 @@ zil_lwb_flush_vdevs_done(zio_t *zio)
 
 		ASSERT3P(zcw->zcw_lwb, ==, lwb);
 		zcw->zcw_lwb = NULL;
+		/*
+		 * We expect any ZIO errors from child ZIOs to have been
+		 * propagated "up" to this specific LWB's root ZIO, in
+		 * order for this error handling to work correctly. This
+		 * includes ZIO errors from either this LWB's write or
+		 * flush, as well as any errors from other dependent LWBs
+		 * (e.g. a root LWB ZIO that might be a child of this LWB).
+		 *
+		 * With that said, it's important to note that LWB flush
+		 * errors are not propagated up to the LWB root ZIO.
+		 * This is incorrect behavior, and results in VDEV flush
+		 * errors not being handled correctly here. See the
+		 * comment above the call to "zio_flush" for details.
+		 */
 
 		zcw->zcw_zio_error = zio->io_error;
 
@@ -1251,6 +1269,12 @@ zil_lwb_write_done(zio_t *zio)
 	 * nodes. We avoid calling zio_flush() since there isn't any
 	 * good reason for doing so, after the lwb block failed to be
 	 * written out.
+	 *
+	 * Additionally, we don't perform any further error handling at
+	 * this point (e.g. setting "zcw_zio_error" appropriately), as
+	 * we expect that to occur in "zil_lwb_flush_vdevs_done" (thus,
+	 * we expect any error seen here, to have been propagated to
+	 * that function).
 	 */
 	if (zio->io_error != 0) {
 		while ((zv = avl_destroy_nodes(t, &cookie)) != NULL)
@@ -1281,8 +1305,17 @@ zil_lwb_write_done(zio_t *zio)
 
 	while ((zv = avl_destroy_nodes(t, &cookie)) != NULL) {
 		vdev_t *vd = vdev_lookup_top(spa, zv->zv_vdev);
-		if (vd != NULL)
+		if (vd != NULL) {
+			/*
+			 * The "ZIO_FLAG_DONT_PROPAGATE" is currently
+			 * always used within "zio_flush". This means,
+			 * any errors when flushing the vdev(s), will
+			 * (unfortunately) not be handled correctly,
+			 * since these "zio_flush" errors will not be
+			 * propagated up to "zil_lwb_flush_vdevs_done".
+			 */
 			zio_flush(lwb->lwb_root_zio, vd);
+		}
 		kmem_free(zv, sizeof (*zv));
 	}
 }
@@ -1399,8 +1432,7 @@ zil_lwb_write_open(zilog_t *zilog, lwb_t *lwb)
 		lwb->lwb_write_zio = zio_rewrite(lwb->lwb_root_zio,
 		    zilog->zl_spa, 0, &lwb->lwb_blk, lwb_abd,
 		    BP_GET_LSIZE(&lwb->lwb_blk), zil_lwb_write_done, lwb,
-		    prio, ZIO_FLAG_CANFAIL | ZIO_FLAG_DONT_PROPAGATE |
-		    ZIO_FLAG_FASTWRITE, &zb);
+		    prio, ZIO_FLAG_CANFAIL | ZIO_FLAG_FASTWRITE, &zb);
 		ASSERT3P(lwb->lwb_write_zio, !=, NULL);
 
 		lwb->lwb_state = LWB_STATE_OPENED;
@@ -1529,6 +1561,8 @@ zil_lwb_write_issue(zilog_t *zilog, lwb_t *lwb)
 	if (slog) {
 		ZIL_STAT_BUMP(zil_itx_metaslab_slog_count);
 		ZIL_STAT_INCR(zil_itx_metaslab_slog_bytes, lwb->lwb_nused);
+		if (error)
+			ZIL_STAT_BUMP(zil_slog_alloc_failures);
 	} else {
 		ZIL_STAT_BUMP(zil_itx_metaslab_normal_count);
 		ZIL_STAT_INCR(zil_itx_metaslab_normal_bytes, lwb->lwb_nused);
@@ -1725,6 +1759,7 @@ cont:
 				ZIL_STAT_INCR(zil_itx_needcopy_bytes, dnow);
 			} else {
 				ASSERT3S(itx->itx_wr_state, ==, WR_INDIRECT);
+				ASSERT(!spa_is_object_based(zilog->zl_spa));
 				dbuf = NULL;
 				ZIL_STAT_BUMP(zil_itx_indirect_count);
 				ZIL_STAT_INCR(zil_itx_indirect_bytes,
@@ -2930,6 +2965,12 @@ zil_commit(zilog_t *zilog, uint64_t foid)
 
 	if (zilog->zl_sync == ZFS_SYNC_DISABLED)
 		return;
+
+	if (spa_is_object_based(zilog->zl_spa) &&
+	    !spa_has_slogs(zilog->zl_spa)) {
+		ZIL_STAT_BUMP(zil_skip_zil_commit);
+		return;
+	}
 
 	if (!spa_writeable(zilog->zl_spa)) {
 		/*

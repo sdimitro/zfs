@@ -120,10 +120,12 @@ function store_core
 		foundcrashes=$((foundcrashes + 1))
 
 		# zdb debugging
-		zdbcmd="$ZDB -U "$workdir/zpool.cache" -dddMmDDG ztest"
-		zdbdebug=$($zdbcmd 2>&1)
-		echo -e "$zdbcmd\n" >>ztest.zdb
-		echo "$zdbdebug" >>ztest.zdb
+		if [[ -e "$workdir/zpool.cache" ]]; then
+			zdbcmd="$ZDB -U "$workdir/zpool.cache" -dddMmDDG ztest"
+			zdbdebug=$($zdbcmd 2>&1)
+			echo -e "$zdbcmd\n" >>ztest.zdb
+			echo "$zdbdebug" >>ztest.zdb
+		fi
 
 		dest=$coredir/$coreid
 		or_die mkdir -p "$dest"
@@ -136,9 +138,14 @@ function store_core
 		echo "*** ztest crash found - moving logs to $dest"
 
 		or_die mv ztest.history "$dest/"
-		or_die mv ztest.zdb "$dest/"
+		[[ -e ztest.zdb ]] && \
+			or_die mv ztest.zdb "$dest/"
 		or_die mv ztest.out "$dest/"
-		or_die mv "$workdir/ztest*" "$dest/vdev/"
+
+		ztest_dirs=$(find "$workdir" -name "ztest*")
+		if [ -n "$ztest_dirs" ]; then
+			or_die mv "$workdir/ztest*" "$dest/vdev/"
+		fi
 
 		if [[ -e "$workdir/zpool.cache" ]]; then
 			or_die mv "$workdir/zpool.cache" "$dest/vdev/"
@@ -179,6 +186,46 @@ function store_core
 			echo "continuing..."
 		fi
 	fi
+}
+
+#
+# Returns if S3 credentials are available for
+# configuring the zloop test
+#
+function are_s3_credentials_available
+{
+	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
+		return 0 || return 1
+}
+
+#
+# Configures and sets the S3 credentials using the aws cli tool
+#
+function configure_and_set_s3_credentials() {
+	# Check and comment out the AWS_ environment variables
+	# from the /etc/environment file
+	if grep -q "^AWS" /etc/environment 2>/dev/null; then
+		sudo sed -i "s/^AWS/# AWS/g" /etc/environment
+	fi
+	# If aws cli is installed and is in path
+	if command -v aws >/dev/null 2>&1; then
+		aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+		aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+		sudo mkdir -p /root/.aws && \
+			sudo cp ~/.aws/credentials /root/.aws/credentials
+	else
+		echo "The aws cli tool is missing or not available in the" \
+			" path. Aborting zloop test with object store."
+		exit 1
+	fi
+}
+
+#
+# Returns if object store is being used
+#
+function use_object_store
+{
+	[ -n "$ZTS_OBJECT_STORE" ] && return 0 || return 1
 }
 
 # parse arguments
@@ -248,66 +295,86 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 		break
 	fi
 
-	zopt="-G -VVVVV"
-
 	# start each run with an empty directory
 	workdir="$basedir/$rundir"
 	or_die rm -rf "$workdir"
 	or_die mkdir "$workdir"
 
-	# switch between three types of configs
-	# 1/3 basic, 1/3 raidz mix, and 1/3 draid mix
-	choice=$((RANDOM % 3))
-
-	# ashift range 9 - 15
-	align=$(((RANDOM % 2) * 3 + 9))
-
-	# randomly use special classes
-	class="special=random"
-
-	if [[ $choice -eq 0 ]]; then
-		# basic mirror only
-		parity=1
-		mirrors=2
-		draid_data=0
-		draid_spares=0
-		raid_children=0
-		vdevs=2
-		raid_type="raidz"
-	elif [[ $choice -eq 1 ]]; then
-		# fully randomized mirror/raidz (sans dRAID)
-		parity=$(((RANDOM % 3) + 1))
-		mirrors=$(((RANDOM % 3) * 1))
-		draid_data=0
-		draid_spares=0
-		raid_children=$((((RANDOM % 9) + parity + 1) * (RANDOM % 2)))
-		vdevs=$(((RANDOM % 3) + 3))
-		raid_type="raidz"
-	else
-		# fully randomized dRAID (sans mirror/raidz)
-		parity=$(((RANDOM % 3) + 1))
-		mirrors=0
-		draid_data=$(((RANDOM % 8) + 3))
-		draid_spares=$(((RANDOM % 2) + parity))
-		stripe=$((draid_data + parity))
-		extra=$((draid_spares + (RANDOM % 4)))
-		raid_children=$(((((RANDOM % 4) + 1) * stripe) + extra))
-		vdevs=$((RANDOM % 3))
-		raid_type="draid"
-	fi
-
-	zopt="$zopt -K $raid_type"
-	zopt="$zopt -m $mirrors"
-	zopt="$zopt -r $raid_children"
-	zopt="$zopt -D $draid_data"
-	zopt="$zopt -S $draid_spares"
-	zopt="$zopt -R $parity"
-	zopt="$zopt -v $vdevs"
-	zopt="$zopt -a $align"
-	zopt="$zopt -C $class"
-	zopt="$zopt -s $size"
+	zopt="-G -VVVVV"
+	# Set common working directory
 	zopt="$zopt -f $workdir"
 
+	if use_object_store; then
+		# If S3 credentials are provided configure and
+		# save it.
+		if are_s3_credentials_available; then
+			configure_and_set_s3_credentials
+		else
+			# For running test using instance profile
+			# we need to remove the underlying credentials
+			# stored in the disk
+			rm -f ~/.aws/credentials
+			sudo rm -f /root/.aws/credentials
+		fi
+		zopt="$zopt -O $ZTS_OBJECT_ENDPOINT"
+		zopt="$zopt -A $ZTS_REGION"
+		zopt="$zopt -b $ZTS_BUCKET_NAME"
+		[ -z "$ZTS_CREDS_PROFILE" ] && ZTS_CREDS_PROFILE="default"
+		zopt="$zopt -z $ZTS_CREDS_PROFILE"
+	else
+
+		# switch between three types of configs
+		# 1/3 basic, 1/3 raidz mix, and 1/3 draid mix
+		choice=$((RANDOM % 3))
+
+		# ashift range 9 - 15
+		align=$(((RANDOM % 2) * 3 + 9))
+
+		# randomly use special classes
+		class="special=random"
+
+		if [[ $choice -eq 0 ]]; then
+			# basic mirror only
+			parity=1
+			mirrors=2
+			draid_data=0
+			draid_spares=0
+			raid_children=0
+			vdevs=2
+			raid_type="raidz"
+		elif [[ $choice -eq 1 ]]; then
+			# fully randomized mirror/raidz (sans dRAID)
+			parity=$(((RANDOM % 3) + 1))
+			mirrors=$(((RANDOM % 3) * 1))
+			draid_data=0
+			draid_spares=0
+			raid_children=$((((RANDOM % 9) + parity + 1) * (RANDOM % 2)))
+			vdevs=$(((RANDOM % 3) + 3))
+			raid_type="raidz"
+		else
+			# fully randomized dRAID (sans mirror/raidz)
+			parity=$(((RANDOM % 3) + 1))
+			mirrors=0
+			draid_data=$(((RANDOM % 8) + 3))
+			draid_spares=$(((RANDOM % 2) + parity))
+			stripe=$((draid_data + parity))
+			extra=$((draid_spares + (RANDOM % 4)))
+			raid_children=$(((((RANDOM % 4) + 1) * stripe) + extra))
+			vdevs=$((RANDOM % 3))
+			raid_type="draid"
+		fi
+
+		zopt="$zopt -K $raid_type"
+		zopt="$zopt -m $mirrors"
+		zopt="$zopt -r $raid_children"
+		zopt="$zopt -D $draid_data"
+		zopt="$zopt -S $draid_spares"
+		zopt="$zopt -R $parity"
+		zopt="$zopt -v $vdevs"
+		zopt="$zopt -a $align"
+		zopt="$zopt -C $class"
+		zopt="$zopt -s $size"
+	fi
 	cmd="$ZTEST $zopt $*"
 	desc="$(date '+%m/%d %T') $cmd"
 	echo "$desc" | tee -a ztest.history

@@ -75,6 +75,7 @@ typedef enum spa_feature {
 	SPA_FEATURE_DEVICE_REBUILD,
 	SPA_FEATURE_ZSTD_COMPRESS,
 	SPA_FEATURE_DRAID,
+	AGENT_FEATURE_CHECKPOINT,
 	SPA_FEATURES
 } spa_feature_t;
 
@@ -91,7 +92,9 @@ typedef enum zfeature_flags {
 	/* Activate this feature at the same time it is enabled. */
 	ZFEATURE_FLAG_ACTIVATE_ON_ENABLE =	(1 << 2),
 	/* Each dataset has a field set if it has ever used this feature. */
-	ZFEATURE_FLAG_PER_DATASET =		(1 << 3)
+	ZFEATURE_FLAG_PER_DATASET =		(1 << 3),
+	/* This featureflag is actually an Object Agent featureflag. */
+	ZFEATURE_FLAG_AGENT =			(1 << 4)
 } zfeature_flags_t;
 
 typedef enum zfeature_type {

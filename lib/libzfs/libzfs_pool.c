@@ -316,7 +316,7 @@ zpool_get_prop(zpool_handle_t *zhp, zpool_prop_t prop, char *buf,
 				    len);
 				break;
 			}
-			/* FALLTHROUGH */
+			fallthrough;
 		default:
 			(void) strlcpy(buf, "-", len);
 			break;
@@ -407,7 +407,7 @@ zpool_get_prop(zpool_handle_t *zhp, zpool_prop_t prop, char *buf,
 				(void) snprintf(buf, len, "-");
 				break;
 			}
-			/* FALLTHROUGH */
+			fallthrough;
 		default:
 			(void) snprintf(buf, len, "%llu", (u_longlong_t)intval);
 		}
@@ -1030,7 +1030,9 @@ zpool_prop_get_feature(zpool_handle_t *zhp, const char *propname, char *buf,
 		spa_feature_t fid;
 
 		ret = zfeature_lookup_name(feature, &fid);
-		if (ret != 0) {
+		if (ret != 0 ||
+		    (spa_feature_table[fid].fi_flags & ZFEATURE_FLAG_AGENT &&
+		    !zpool_is_object_based(zhp))) {
 			(void) strlcpy(buf, "-", len);
 			return (ENOTSUP);
 		}
@@ -1339,6 +1341,41 @@ zpool_has_draid_vdev(nvlist_t *nvroot)
 }
 
 /*
+ * Check if vdev list contains an object store vdev
+ */
+boolean_t
+zpool_has_object_store_vdev(nvlist_t *nvroot)
+{
+	nvlist_t **child;
+	uint_t children;
+
+	if (nvlist_lookup_nvlist_array(nvroot, ZPOOL_CONFIG_CHILDREN,
+	    &child, &children) == 0) {
+		for (uint_t c = 0; c < children; c++) {
+			char *type;
+
+			if (nvlist_lookup_string(child[c],
+			    ZPOOL_CONFIG_TYPE, &type) == 0 &&
+			    strcmp(type, VDEV_TYPE_OBJSTORE) == 0) {
+				return (B_TRUE);
+			}
+		}
+	}
+	return (B_FALSE);
+}
+
+boolean_t
+zpool_is_object_based(zpool_handle_t *zhp)
+{
+	nvlist_t *nvroot;
+
+	verify(nvlist_lookup_nvlist(zpool_get_config(zhp, NULL),
+	    ZPOOL_CONFIG_VDEV_TREE, &nvroot) == 0);
+
+	return (zpool_has_object_store_vdev(nvroot));
+}
+
+/*
  * Output a dRAID top-level vdev name in to the provided buffer.
  */
 static char *
@@ -1424,6 +1461,17 @@ zpool_create(libzfs_handle_t *hdl, const char *pool, nvlist_t *nvroot,
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 			    "%s property requires a special vdev"),
 			    zfs_prop_to_name(ZFS_PROP_SPECIAL_SMALL_BLOCKS));
+			(void) zfs_error(hdl, EZFS_BADPROP, msg);
+			goto create_failed;
+		}
+
+		const char *fs_propname = zfs_prop_to_name(ZFS_PROP_COPIES);
+		if (nvlist_exists(zc_fsprops, fs_propname) &&
+		    zpool_has_object_store_vdev(nvroot) &&
+		    fnvlist_lookup_uint64(zc_fsprops, fs_propname) > 1) {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "%s property must be 1 for object based pools"),
+			    fs_propname);
 			(void) zfs_error(hdl, EZFS_BADPROP, msg);
 			goto create_failed;
 		}
@@ -3469,9 +3517,20 @@ zpool_vdev_attach(zpool_handle_t *zhp, const char *old_disk,
 				    "cannot replace a replacing device"));
 			}
 		} else {
-			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-			    "can only attach to mirrors and top-level "
-			    "disks"));
+			char status[64] = {0};
+			zpool_prop_get_feature(zhp,
+			    "feature@device_rebuild", status, 63);
+			if (rebuild &&
+			    strncmp(status, ZFS_FEATURE_DISABLED, 64) == 0) {
+				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				    "device_rebuild feature must be enabled "
+				    "in order to use sequential "
+				    "reconstruction"));
+			} else {
+				zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+				    "can only attach to mirrors and top-level "
+				    "disks"));
+			}
 		}
 		(void) zfs_error(hdl, EZFS_BADTARGET, msg);
 		break;
@@ -3796,8 +3855,8 @@ zpool_vdev_split(zpool_handle_t *zhp, char *newname, nvlist_t **newroot,
 	}
 
 	/* Add all the children we found */
-	if (nvlist_add_nvlist_array(*newroot, ZPOOL_CONFIG_CHILDREN, varray,
-	    lastlog == 0 ? vcount : lastlog) != 0)
+	if (nvlist_add_nvlist_array(*newroot, ZPOOL_CONFIG_CHILDREN,
+	    (const nvlist_t **)varray, lastlog == 0 ? vcount : lastlog) != 0)
 		goto out;
 
 	/*
@@ -4540,7 +4599,7 @@ zpool_get_history(zpool_handle_t *zhp, nvlist_t **nvhisp, uint64_t *off,
 	if (!err) {
 		verify(nvlist_alloc(nvhisp, NV_UNIQUE_NAME, 0) == 0);
 		verify(nvlist_add_nvlist_array(*nvhisp, ZPOOL_HIST_RECORD,
-		    records, numrecords) == 0);
+		    (const nvlist_t **)records, numrecords) == 0);
 	}
 	for (i = 0; i < numrecords; i++)
 		nvlist_free(records[i]);
@@ -5347,7 +5406,6 @@ zpool_set_vdev_prop(zpool_handle_t *zhp, const char *vdevname,
     const char *propname, const char *propval)
 {
 	int ret;
-	vdev_prop_t vprop;
 	nvlist_t *nvl = NULL;
 	nvlist_t *outnvl = NULL;
 	nvlist_t *props;
@@ -5358,8 +5416,6 @@ zpool_set_vdev_prop(zpool_handle_t *zhp, const char *vdevname,
 
 	if ((ret = zpool_vdev_guid(zhp, vdevname, &vdev_guid)) != 0)
 		return (ret);
-
-	vprop = vdev_name_to_prop(propname);
 
 	if (nvlist_alloc(&nvl, NV_UNIQUE_NAME, 0) != 0)
 		return (no_memory(zhp->zpool_hdl));

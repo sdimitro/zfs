@@ -21,6 +21,7 @@
 import os
 import re
 import sys
+import argparse
 
 #
 # This script parses the stdout of zfstest, which has this format:
@@ -141,6 +142,12 @@ fspacectl_reason = 'fspacectl(2) and truncate -d support required'
 na_reason = "Not applicable"
 
 #
+# Some tests are not applicable for object-store. Any tests which are skipped
+# for this reason will be suppressed in the final analysis output.
+#
+object_store_skip = "Not applicable for object_store"
+
+#
 # Some test cases doesn't have all requirements to run on Github actions CI.
 #
 ci_reason = 'CI runner doesn\'t have all requirements'
@@ -167,6 +174,8 @@ known = {
     'casenorm/mixed_formd_lookup_ci': ['FAIL', '7633'],
     'cli_root/zfs_unshare/zfs_unshare_002_pos': ['SKIP', na_reason],
     'cli_root/zfs_unshare/zfs_unshare_006_pos': ['SKIP', na_reason],
+    'cli_root/zpool_import/import_rewind_device_replaced':
+        ['FAIL', rewind_reason],
     'cli_user/misc/zfs_share_001_neg': ['SKIP', na_reason],
     'cli_user/misc/zfs_unshare_001_neg': ['SKIP', na_reason],
     'privilege/setup': ['SKIP', na_reason],
@@ -192,6 +201,136 @@ elif sys.platform.startswith('linux'):
         'removal/removal_with_zdb': ['SKIP', known_reason],
     })
 
+if os.environ.get('ZTS_OBJECT_STORE') == 'true':
+    known.update({
+        'cli_root/zfs_copies/zfs_copies_002_pos': ['SKIP', object_store_skip],
+        'cli_root/zfs_copies/zfs_copies_003_pos': ['SKIP', object_store_skip],
+        'cli_root/zfs_copies/zfs_copies_005_neg': ['SKIP', object_store_skip],
+        'cli_root/zfs_copies/zfs_copies_006_pos': ['SKIP', object_store_skip],
+        'cli_root/zfs_destroy/zfs_destroy_dev_removal':
+            ['SKIP', object_store_skip],
+        'cli_root/zfs_destroy/zfs_destroy_dev_removal_condense':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool/zpool_003_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool/zpool_colors': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/add-o_ashift': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/add_prop_ashift': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/setup': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_001_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_002_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_003_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_004_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_006_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_007_neg': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_008_neg': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_009_neg': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_010_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_add/zpool_add_dryrun_output':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_attach/attach-o_ashift': ['SKIP', object_store_skip],
+        'cli_root/zpool_attach/setup': ['SKIP', object_store_skip],
+        'cli_root/zpool_attach/zpool_attach_001_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_create/zpool_create_002_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_create/zpool_create_008_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_create/zpool_create_009_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_create/zpool_create_011_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_detach/setup': ['SKIP', object_store_skip],
+        'cli_root/zpool_detach/zpool_detach_001_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_offline/setup': ['SKIP', object_store_skip],
+        'cli_root/zpool_offline/zpool_offline_001_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_offline/zpool_offline_002_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_offline/zpool_offline_003_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_online/setup': ['SKIP', object_store_skip],
+        'cli_root/zpool_online/zpool_online_001_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_online/zpool_online_002_neg':
+            ['SKIP', object_store_skip],
+        'pool_checkpoint/checkpoint_removal': ['SKIP', object_store_skip],
+        'pool_checkpoint/checkpoint_vdev_add': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_003_pos': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_004_pos': ['SKIP', object_store_skip],
+        'cli_root/zdb/zdb_005_pos': ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_device_added':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_device_removed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_device_replaced':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_mirror_attached':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_mirror_detached':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_paths_changed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_cachefile_shared_device':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_devices_missing':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_paths_changed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_rewind_config_changed':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/import_rewind_device_replaced':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_003_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_004_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_005_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_006_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_007_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_008_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_010_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_011_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_013_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_016_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_017_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_errata3':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_errata4':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_missing_001_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_import/zpool_import_missing_002_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_004_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_005_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_print_repairing':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_offline_device':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_scrub/zpool_scrub_multiple_copies':
+            ['SKIP', object_store_skip],
+        'slog/slog_010_neg': ['SKIP', object_store_skip],
+        'slog/slog_014_pos': ['SKIP', object_store_skip],
+        'nopwrite/nopwrite_copies': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_attach_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_detach_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_offline_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_online_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_remove_001_neg': ['SKIP', object_store_skip],
+        'cli_user/misc/zpool_replace_001_neg': ['SKIP', object_store_skip],
+    })
 
 #
 # These tests may occasionally fail or be skipped.  We want there failures
@@ -219,8 +358,6 @@ maybe = {
     'cli_root/zfs_unshare/setup': ['SKIP', share_reason],
     'cli_root/zpool_add/zpool_add_004_pos': ['FAIL', known_reason],
     'cli_root/zpool_destroy/zpool_destroy_001_pos': ['SKIP', '6145'],
-    'cli_root/zpool_import/import_rewind_device_replaced':
-        ['FAIL', rewind_reason],
     'cli_root/zpool_import/import_rewind_config_changed':
         ['FAIL', rewind_reason],
     'cli_root/zpool_import/zpool_import_missing_003_pos': ['SKIP', '6839'],
@@ -281,25 +418,14 @@ if sys.platform.startswith('freebsd'):
         'cli_root/zfs_share/zfs_share_concurrent_shares':
             ['FAIL', known_reason],
         'cli_root/zpool_import/zpool_import_012_pos': ['FAIL', known_reason],
-        'cli_root/zpool_import/zpool_import_features_001_pos':
-            ['FAIL', '11854'],
-        'cli_root/zpool_import/zpool_import_features_002_neg':
-            ['FAIL', '11854'],
-        'cli_root/zpool_import/zpool_import_features_003_pos':
-            ['FAIL', '11854'],
         'delegate/zfs_allow_003_pos': ['FAIL', known_reason],
         'inheritance/inherit_001_pos': ['FAIL', '11829'],
-        'pool_checkpoint/checkpoint_zhack_feat': ['FAIL', '11854'],
         'resilver/resilver_restart_001': ['FAIL', known_reason],
-        'zvol/zvol_misc/zvol_misc_volmode': ['FAIL', known_reason],
+        'pool_checkpoint/checkpoint_big_rewind': ['FAIL', '12622'],
+        'pool_checkpoint/checkpoint_indirect': ['FAIL', '12623'],
     })
 elif sys.platform.startswith('linux'):
     maybe.update({
-        'alloc_class/alloc_class_009_pos': ['FAIL', known_reason],
-        'alloc_class/alloc_class_010_pos': ['FAIL', known_reason],
-        'alloc_class/alloc_class_011_neg': ['FAIL', known_reason],
-        'alloc_class/alloc_class_012_pos': ['FAIL', known_reason],
-        'alloc_class/alloc_class_013_pos': ['FAIL', '11888'],
         'cli_root/zfs_rename/zfs_rename_002_pos': ['FAIL', known_reason],
         'cli_root/zpool_expand/zpool_expand_001_pos': ['FAIL', known_reason],
         'cli_root/zpool_expand/zpool_expand_005_pos': ['FAIL', known_reason],
@@ -316,8 +442,18 @@ elif sys.platform.startswith('linux'):
         'rsend/rsend_010_pos': ['FAIL', known_reason],
         'rsend/rsend_011_pos': ['FAIL', known_reason],
         'snapshot/rollback_003_pos': ['FAIL', known_reason],
+        'zvol/zvol_misc/zvol_misc_snapdev': ['FAIL', '12621'],
+        'zvol/zvol_misc/zvol_misc_volmode': ['FAIL', known_reason],
     })
 
+if os.environ.get('ZTS_OBJECT_STORE') == 'true':
+    maybe.update({
+        'cli_root/zpool_create/zpool_create_003_pos': ['FAIL', 'DOSE-545'],
+        'cli_root/zdb/zdb_checksum': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_decompress': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
+        'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
+    })
 
 # Not all Github actions runners have scsi_debug module, so we may skip
 #   some tests which use it.
@@ -385,10 +521,33 @@ def process_results(pathname):
     return d
 
 
+class ListMaybesAction(argparse.Action):
+    def __init__(self,
+                 option_strings,
+                 dest="SUPPRESS",
+                 default="SUPPRESS",
+                 help="list flaky tests and exit"):
+        super(ListMaybesAction, self).__init__(
+            option_strings=option_strings,
+            dest=dest,
+            default=default,
+            nargs=0,
+            help=help)
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        for test in maybe:
+            print(test)
+        sys.exit(0)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) != 2:
-        usage('usage: %s <pathname>' % sys.argv[0])
-    results = process_results(sys.argv[1])
+    parser = argparse.ArgumentParser(description='Analyze ZTS logs')
+    parser.add_argument('logfile')
+    parser.add_argument('--list-maybes', action=ListMaybesAction)
+    parser.add_argument('--no-maybes', action='store_false', dest='maybes')
+    args = parser.parse_args()
+
+    results = process_results(args.logfile)
 
     if summary['total'] == 0:
         print("\n\nNo test results were found.")
@@ -397,6 +556,7 @@ if __name__ == "__main__":
 
     expected = []
     unexpected = []
+    all_maybes = True
 
     for test in list(results.keys()):
         if results[test] == "PASS":
@@ -409,11 +569,16 @@ if __name__ == "__main__":
             if setup in maybe and maybe[setup][0] == "SKIP":
                 continue
 
-        if ((test not in known or results[test] not in known[test][0]) and
-                (test not in maybe or results[test] not in maybe[test][0])):
-            unexpected.append(test)
-        else:
+        if (test in known and results[test] in known[test][0]):
             expected.append(test)
+        elif test in maybe and results[test] in maybe[test][0]:
+            if results[test] == 'SKIP' or args.maybes:
+                expected.append(test)
+            elif not args.maybes:
+                unexpected.append(test)
+        else:
+            unexpected.append(test)
+            all_maybes = False
 
     print("\nTests with results other than PASS that are expected:")
     for test in sorted(expected):
@@ -459,5 +624,7 @@ if __name__ == "__main__":
 
     if len(unexpected) == 0:
         sys.exit(0)
+    elif not args.maybes and all_maybes:
+        sys.exit(2)
     else:
         sys.exit(1)

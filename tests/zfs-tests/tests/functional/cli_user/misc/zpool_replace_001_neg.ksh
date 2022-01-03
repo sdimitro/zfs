@@ -43,6 +43,10 @@
 #
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 function check_for_replace
 {
 	sleep 10

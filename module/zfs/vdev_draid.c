@@ -1606,7 +1606,8 @@ vdev_draid_rebuild_asize(vdev_t *vd, uint64_t start, uint64_t asize,
  * on metaslab boundaries which vdev_xlate() expects to be aligned.
  */
 static void
-vdev_draid_metaslab_init(vdev_t *vd, uint64_t *ms_start, uint64_t *ms_size)
+vdev_draid_metaslab_init(vdev_t *vd, metaslab_t *msp, uint64_t *ms_start,
+    uint64_t *ms_size)
 {
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
 
@@ -1707,7 +1708,7 @@ vdev_draid_spare_create(nvlist_t *nvroot, vdev_t *vd, uint64_t *ndraidp,
 	if (n > 0) {
 		(void) nvlist_remove_all(nvroot, ZPOOL_CONFIG_SPARES);
 		fnvlist_add_nvlist_array(nvroot, ZPOOL_CONFIG_SPARES,
-		    new_spares, n);
+		    (const nvlist_t **)new_spares, n);
 	}
 
 	for (int i = 0; i < n; i++)
@@ -2137,7 +2138,7 @@ vdev_draid_xlate(vdev_t *cvd, const range_seg64_t *logical_rs,
  * Add dRAID specific fields to the config nvlist.
  */
 static void
-vdev_draid_config_generate(vdev_t *vd, nvlist_t *nv)
+vdev_draid_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
 	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_ops);
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
@@ -2748,7 +2749,7 @@ vdev_draid_spare_fini(vdev_t *vd)
 }
 
 static void
-vdev_draid_spare_config_generate(vdev_t *vd, nvlist_t *nv)
+vdev_draid_spare_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
 	vdev_draid_spare_t *vds = vd->vdev_tsd;
 

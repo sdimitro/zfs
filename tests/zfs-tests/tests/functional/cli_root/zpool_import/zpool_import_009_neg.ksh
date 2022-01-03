@@ -56,7 +56,6 @@ set -A args "blah" "-d" "-R" "-a $TESTPOOL" \
 	"$TESTPOOL ${TESTPOOL}-new ${TESTPOOL}-new" \
 	"$TESTPOOL $TESTPOOL1" \
 	"$TESTPOOL ${TESTPOOL1}*" "$TESTPOOL ${TESTPOOL1}?"
-
 set -A pools "$TESTPOOL" "$TESTPOOL1"
 set -A devs "" "-d $DEVICE_DIR"
 
@@ -71,7 +70,7 @@ function cleanup
 			log_must zpool export ${pools[i]}
 
 		datasetexists "${pools[i]}/$TESTFS" || \
-			log_must zpool import ${devs[i]} ${pools[i]}
+			log_must import_pool  -s "${devs[i]}" -p "${pools[i]}"
 
 		ismounted "${pools[i]}/$TESTFS" || \
 			log_must zfs mount ${pools[i]}/$TESTFS
@@ -95,7 +94,7 @@ log_must zpool export $TESTPOOL
 
 typeset -i i=0
 while (( i < ${#args[*]} )); do
-	log_mustnot zpool import ${args[i]}
+	log_mustnot import_pool -p "${args[i]}"
 	((i = i + 1))
 done
 

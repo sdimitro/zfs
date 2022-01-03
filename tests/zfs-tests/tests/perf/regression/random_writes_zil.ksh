@@ -29,10 +29,10 @@ function cleanup
 	# threads for each test, and there's no good way to get a list
 	# of all the filesystems that should be destroyed on cleanup
 	# (i.e. the list of filesystems used for the last test ran).
-	# Thus, we simply recreate the pool as a way to destroy all
-	# filesystems and leave a fresh pool behind.
+	# Thus, we simply destroy the pool as a way to destroy all
+	# filesystems.
 	#
-	recreate_perf_pool
+	destroy_perf_pool
 }
 
 trap "log_fail \"Measure IO stats during random write load\"" SIGTERM
@@ -41,12 +41,17 @@ log_onexit cleanup
 recreate_perf_pool
 
 # Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
-export TOTAL_SIZE=$(($(get_prop avail $PERFPOOL) * 3 / 2))
+if use_object_store; then
+	export TOTAL_SIZE=$((128 * 1024 * 1024 * 1024))
+else
+	export TOTAL_SIZE=$(($(get_prop avail $PERFPOOL) * 3 / 2))
+fi
 
 # Variables specific to this test for use by fio.
-export PERF_NTHREADS=${PERF_NTHREADS:-'1 4 16 64'}
+export PERF_NTHREADS=${PERF_NTHREADS:-'1 16 64'}
 export PERF_NTHREADS_PER_FS=${PERF_NTHREADS_PER_FS:-'0 1'}
 export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
+export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
 
 # Until the performance tests over NFS can deal with multiple file systems,
 # force the use of only one file system when testing over NFS.
@@ -55,15 +60,14 @@ export PERF_IOSIZES=${PERF_IOSIZES:-'8k'}
 lun_list=$(pool_to_lun_list $PERFPOOL)
 log_note "Collecting backend IO stats with lun list $lun_list"
 if is_linux; then
-	typeset perf_record_cmd="perf record -F 99 -a -g -q \
-	    -o /dev/stdout -- sleep ${PERF_RUNTIME}"
-
 	export collect_scripts=(
 	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
 	    "vmstat -t 1" "vmstat"
 	    "mpstat -P ALL 1" "mpstat"
 	    "iostat -tdxyz 1" "iostat"
-	    "$perf_record_cmd" "perf"
+	    "arcstat 1" "arcstat"
+	    "dstat -at --nocolor 1" "dstat"
+	    "$PERF_RECORD_CMD" "perf"
 	)
 else
 	export collect_scripts=(

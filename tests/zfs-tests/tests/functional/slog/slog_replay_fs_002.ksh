@@ -58,7 +58,7 @@ log_must setup
 #
 # 1. Create a file system (TESTFS) with a lot of files
 #
-log_must zpool create $TESTPOOL $VDEV log mirror $LDEV
+log_must create_pool -p $TESTPOOL -d "$VDEV" -l "log mirror $LDEV"
 log_must zfs set compression=on $TESTPOOL
 log_must zfs create $TESTPOOL/$TESTFS
 
@@ -73,7 +73,7 @@ log_must eval 'for i in $(seq $NFILES); do zfs set dnodesize=${dnsize[$RANDOM % 
 # This is to make sure we will have TX_REMOVE and TX_CREATE on same id
 #
 log_must zpool export $TESTPOOL
-log_must zpool import -f -d $VDIR $TESTPOOL
+log_must import_pool -e "-f" -s "-d $VDIR" -p "$TESTPOOL"
 
 #
 # This dd command works around an issue where ZIL records aren't created
@@ -110,7 +110,7 @@ log_must cp -a /$TESTPOOL/$TESTFS/* $TESTDIR/copy/
 log_must zfs unmount /$TESTPOOL/$TESTFS
 
 log_note "Verify transactions to replay:"
-log_must zdb -iv $TESTPOOL/$TESTFS
+log_must run_zdb -e "-iv" -p "$TESTPOOL/$TESTFS"
 
 log_must zpool export $TESTPOOL
 
@@ -120,13 +120,13 @@ log_must zpool export $TESTPOOL
 # Import the pool to unfreeze it and claim log blocks.  It has to be
 # `zpool import -f` because we can't write a frozen pool's labels!
 #
-log_must zpool import -f -d $VDIR $TESTPOOL
+log_must import_pool -e "-f" -s "-d $VDIR" -p "$TESTPOOL"
 
 #
 # 7. Compare TESTFS against the TESTDIR/copy
 #
 log_note "Verify current block usage:"
-log_must zdb -bcv $TESTPOOL
+log_must run_zdb -e "-bcv" -p "$TESTPOOL"
 
 log_note "Verify number of files"
 log_must test "$(ls /$TESTPOOL/$TESTFS/dir0 | wc -l)" -eq $NFILES

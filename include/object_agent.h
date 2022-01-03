@@ -18,13 +18,21 @@
  *
  * CDDL HEADER END
  */
-#include <sys/types.h>
-#include <sys/param.h>
-#include <sys/zfs_ioctl.h>
-#include <libzutil.h>
+/*
+ * Copyright (c) 2021 by Delphix. All rights reserved.
+ */
 
-int
-zfs_ioctl_fd(int fd, unsigned long request, zfs_cmd_t *zc)
-{
-	return (ioctl(fd, request, zc));
+#ifndef _OBJECT_AGENT_H
+#define	_OBJECT_AGENT_H
+
+#ifdef	__cplusplus
+extern "C" {
+#endif
+
+void set_object_agent_sock_dir(char *ztest_sock_dir);
+
+#ifdef	__cplusplus
 }
+#endif
+
+#endif	/* _OBJECT_AGENT_H */

@@ -67,7 +67,7 @@ function setup_all
 		typeset _saved=$(get_tunable VOL_RECURSIVE)
 		log_must set_tunable64 VOL_RECURSIVE 1
 	fi
-	create_pool $TESTPOOL1 ${ZVOL_DEVDIR}/$TESTPOOL/$TESTVOL
+	create_pool -p $TESTPOOL1 -d "${ZVOL_DEVDIR}/$TESTPOOL/$TESTVOL"
 	if is_freebsd; then
 		# Restore the previous setting.
 		log_must set_tunable64 VOL_RECURSIVE $_saved
@@ -96,8 +96,8 @@ function cleanup_all
 		(( i = i + 4 ))
 	done
 
-	datasetexists $TESTPOOL1/$TESTFS  && \
-		log_must zfs destroy -f $TESTPOOL1/$TESTFS
+	datasetexists $TESTPOOL1/$TESTFS && \
+		destroy_dataset $TESTPOOL1/$TESTFS -f
 
 	destroy_pool $TESTPOOL1
 

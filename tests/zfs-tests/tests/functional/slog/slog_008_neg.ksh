@@ -46,14 +46,12 @@ log_assert "A raidz/raidz2 log is not supported."
 log_onexit cleanup
 log_must setup
 
-for type in "" "mirror" "raidz" "raidz2"
-do
-	for spare in "" "spare"
-	do
-		for logtype in "raidz" "raidz1" "raidz2"
-		do
-			log_mustnot zpool create $TESTPOOL $type $VDEV \
-				$spare $SDEV log $logtype $LDEV $LDEV2
+for type in "" $(get_type); do
+	for spare in "" $(get_spare); do
+		for logtype in "raidz" "raidz1" "raidz2"; do
+			log_mustnot create_pool -p $TESTPOOL \
+				-d "$type $VDEV $spare $SDEV" \
+				-l "log $logtype $LDEV $LDEV2"
 			ldev=$(random_get $LDEV $LDEV2)
 			log_mustnot verify_slog_device \
 				$TESTPOOL $ldev 'ONLINE' $logtype

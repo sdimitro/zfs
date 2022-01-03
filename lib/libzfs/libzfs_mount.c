@@ -595,9 +595,13 @@ unmount_one(zfs_handle_t *zhp, const char *mountpoint, int flags)
 		default:
 			libzfs_err = EZFS_UMOUNTFAILED;
 		}
-		return (zfs_error_fmt(zhp->zfs_hdl, libzfs_err,
-		    dgettext(TEXT_DOMAIN, "cannot unmount '%s'"),
-		    mountpoint));
+		if (zhp) {
+			return (zfs_error_fmt(zhp->zfs_hdl, libzfs_err,
+			    dgettext(TEXT_DOMAIN, "cannot unmount '%s'"),
+			    mountpoint));
+		} else {
+			return (-1);
+		}
 	}
 
 	return (0);
@@ -671,6 +675,8 @@ zfs_unmount(zfs_handle_t *zhp, const char *mountpoint, int flags)
 			return (-1);
 		}
 	}
+
+	zpool_disable_volume_os(zhp->zfs_name);
 
 	return (0);
 }
@@ -1636,6 +1642,8 @@ zpool_disable_datasets(zpool_handle_t *zhp, boolean_t force)
 		if (sets[i].dataset)
 			remove_mountpoint(sets[i].dataset);
 	}
+
+	zpool_disable_datasets_os(zhp, force);
 
 	ret = 0;
 out:

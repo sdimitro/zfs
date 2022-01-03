@@ -45,14 +45,18 @@
 
 verify_runnable "both"
 
+if use_object_store; then
+	log_unsupported "Multiple zfs copies inapplicable for object storage \
+		run."
+fi
+
 function cleanup
 {
 	typeset val
 
 	for val in 1 2 3; do
-		if datasetexists $TESTPOOL/fs_$val; then
-			log_must zfs destroy $TESTPOOL/fs_$val
-		fi
+		datasetexists $TESTPOOL/fs_$val && \
+			destroy_dataset $TESTPOOL/fs_$val
 	done
 }
 

@@ -65,7 +65,7 @@ function cleanup
 			log_must zpool export ${pools[i]}
 
 		datasetexists "${pools[i]}/$TESTFS" || \
-			log_must zpool import ${devs[i]} ${pools[i]}
+			log_must import_pool -s "${devs[i]}" -p ${pools[i]}
 
 		ismounted "${pools[i]}/$TESTFS" || \
 			log_must zfs mount ${pools[i]}/$TESTFS
@@ -113,7 +113,7 @@ while (( i < ${#pools[*]} )); do
 			log_note "Import by guid."
 		fi
 
-		log_must zpool import ${devs[i]} ${options[j]} $target
+		log_must import_pool -s "${devs[i]}" -e "${options[j]}" -p $target
 
 		log_must poolexists ${pools[i]}
 
@@ -130,7 +130,7 @@ while (( i < ${#pools[*]} )); do
 		[[ "$checksum1" != "$checksum2" ]] && \
 			log_fail "Checksums differ ($checksum1 != $checksum2)"
 
-		log_mustnot zpool import ${devs[i]} $target
+		log_mustnot import_pool -s "${devs[i]}" -p $target
 
 		((j = j + 1))
 	done

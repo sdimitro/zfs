@@ -43,7 +43,7 @@ function cleanup
 	# kill fio and iostat
 	pkill fio
 	pkill iostat
-	recreate_perf_pool
+	destroy_perf_pool
 }
 
 trap "log_fail \"Measure IO stats during random read load\"" SIGTERM
@@ -53,12 +53,17 @@ recreate_perf_pool
 populate_perf_filesystems
 
 # Aim to fill the pool to 50% capacity while accounting for a 3x compressratio.
-export TOTAL_SIZE=$(($(get_prop avail $PERFPOOL) * 3 / 2))
+if use_object_store; then
+	export TOTAL_SIZE=$((64 * 1024 * 1024 * 1024))
+else
+	export TOTAL_SIZE=$(($(get_prop avail $PERFPOOL) * 3 / 2))
+fi
 
 # Variables specific to this test for use by fio.
 export PERF_NTHREADS=${PERF_NTHREADS:-'8 16'}
 export PERF_NTHREADS_PER_FS=${PERF_NTHREADS_PER_FS:-'0'}
 export PERF_IOSIZES=${PERF_IOSIZES:-'128k 1m'}
+export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
 
 # Layout the files to be used by the read tests. Create as many files as the
 # largest number of threads. An fio run with fewer threads will use a subset
@@ -68,20 +73,22 @@ export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
 export DIRECTORY=$(get_directory)
 log_must fio $FIO_SCRIPTS/mkfiles.fio
 
+# Populate ZettaCache if applicable
+fill_zetta_cache 1800
+
 # Set up the scripts and output files that will log performance data.
 lun_list=$(pool_to_lun_list $PERFPOOL)
 log_note "Collecting backend IO stats with lun list $lun_list"
 if is_linux; then
-    typeset perf_record_cmd="perf record -F 99 -a -g -q \
-        -o /dev/stdout -- sleep ${PERF_RUNTIME}"
-
 	export collect_scripts=(
 	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
 	    "$PERF_SCRIPTS/prefetch_io.sh $PERFPOOL 1" "prefetch"
 	    "vmstat -t 1" "vmstat"
 	    "mpstat -P ALL 1" "mpstat"
 	    "iostat -tdxyz 1" "iostat"
-	    "$perf_record_cmd" "perf"
+	    "arcstat 1" "arcstat"
+	    "dstat -at --nocolor 1" "dstat"
+	    "$PERF_RECORD_CMD" "perf"
 	)
 else
 	export collect_scripts=(

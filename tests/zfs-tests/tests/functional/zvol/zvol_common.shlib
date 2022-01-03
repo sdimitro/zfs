@@ -47,7 +47,7 @@ function default_zvol_setup # disk_device volume_size block_size
 	typeset -i output
 	typeset create_args
 
-	create_pool $TESTPOOL "$disk"
+	create_pool -p $TESTPOOL -d "$disk"
 
 	if [ -n "$blocksize" ]; then
 		create_args="-b $blocksize"
@@ -63,9 +63,8 @@ function default_zvol_setup # disk_device volume_size block_size
 #
 function default_zvol_cleanup
 {
-        if datasetexists $TESTPOOL/$TESTVOL ; then
-		log_must zfs destroy $TESTPOOL/$TESTVOL
-	fi
+	datasetexists $TESTPOOL/$TESTVOL && \
+		destroy_dataset $TESTPOOL/$TESTVOL
 
         destroy_pool $TESTPOOL
 }

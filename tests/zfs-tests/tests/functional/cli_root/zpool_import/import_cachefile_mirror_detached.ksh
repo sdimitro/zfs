@@ -32,6 +32,11 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import for cachefile with mirroring" \
+		"not supported for object store run."
+fi
+
 log_onexit cleanup
 
 function test_detach_vdev

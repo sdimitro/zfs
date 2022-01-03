@@ -12,7 +12,12 @@ systemdunit_DATA = \
 	zfs-volume-wait.service \
 	zfs-import.target \
 	zfs-volumes.target \
-	zfs.target
+	zfs-object-agent.service \
+	zoa-chaos-monkey.service \
+	zfs.target \
+	zfs-scrub-monthly@.timer \
+	zfs-scrub-weekly@.timer \
+	zfs-scrub@.service
 
 SUBSTFILES += $(systemdpreset_DATA) $(systemdunit_DATA)
 

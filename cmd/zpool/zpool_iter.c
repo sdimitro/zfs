@@ -285,7 +285,7 @@ for_each_vdev(zpool_handle_t *zhp, pool_vdev_iter_f func, void *data)
 		verify(nvlist_lookup_nvlist(config, ZPOOL_CONFIG_VDEV_TREE,
 		    &nvroot) == 0);
 	}
-	return (for_each_vdev_cb(zhp, nvroot, func, data));
+	return (for_each_vdev_cb((void *) zhp, nvroot, func, data));
 }
 
 /*

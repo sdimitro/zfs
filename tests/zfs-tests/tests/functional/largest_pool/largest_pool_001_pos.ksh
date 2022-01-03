@@ -91,13 +91,13 @@ function cleanup
 		if ismounted $TESTPOOL/$TESTFS ; then
 			log_must zfs unmount $TESTPOOL/$TESTFS
 		fi
-		log_must zfs destroy $TESTPOOL/$TESTFS
+		destroy_dataset $TESTPOOL/$TESTFS
 	fi
 
 	destroy_pool $TESTPOOL
 
 	datasetexists $TESTPOOL2/$TESTVOL && \
-		log_must zfs destroy $TESTPOOL2/$TESTVOL
+		destroy_dataset $TESTPOOL2/$TESTVOL
 
 	destroy_pool $TESTPOOL2
 
@@ -120,7 +120,7 @@ typeset str
 typeset -i ret
 for volsize in $VOLSIZES; do
 	log_note "Create a pool which will contain a volume device"
-	create_pool $TESTPOOL2 "$DISKS"
+	create_pool -p $TESTPOOL2 -d "$DISKS"
 
 	log_note "Create a volume device of desired sizes: $volsize"
 	str=$(zfs create -sV $volsize $TESTPOOL2/$TESTVOL 2>&1)
@@ -140,7 +140,7 @@ for volsize in $VOLSIZES; do
 	block_device_wait
 
 	log_note "Create the largest pool allowed using the volume vdev"
-	create_pool $TESTPOOL "$VOL_PATH"
+	create_pool -p $TESTPOOL -d "$VOL_PATH"
 
 	log_note "Create a zfs file system in the largest pool"
 	log_must zfs create $TESTPOOL/$TESTFS
@@ -154,7 +154,7 @@ for volsize in $VOLSIZES; do
 	log_note "Destroy zfs, volume & zpool"
 	log_must zfs destroy $TESTPOOL/$TESTFS
 	destroy_pool $TESTPOOL
-	log_must zfs destroy $TESTPOOL2/$TESTVOL
+	log_must_busy zfs destroy $TESTPOOL2/$TESTVOL
 	destroy_pool $TESTPOOL2
 done
 

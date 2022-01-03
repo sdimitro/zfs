@@ -38,6 +38,10 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Not supported for object store with multiple copies"
+fi
+
 function cleanup
 {
 	destroy_dataset $TESTPOOL/$TESTFS2

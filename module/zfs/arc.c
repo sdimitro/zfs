@@ -870,6 +870,14 @@ static void l2arc_hdr_arcstats_update(arc_buf_hdr_t *hdr, boolean_t incr,
 	l2arc_hdr_arcstats_update((hdr), B_FALSE, B_TRUE)
 
 /*
+ * l2arc_exclude_special : A zfs module parameter that controls whether buffers
+ * 		present on special vdevs are eligibile for caching in L2ARC. If
+ * 		set to 1, exclude dbufs on special vdevs from being cached to
+ * 		L2ARC.
+ */
+int l2arc_exclude_special = 0;
+
+/*
  * l2arc_mfuonly : A ZFS module parameter that controls whether only MFU
  * 		metadata and data are cached from ARC into L2ARC.
  */
@@ -2062,7 +2070,6 @@ arc_buf_fill(arc_buf_t *buf, spa_t *spa, const zbookmark_phys_t *zb,
 	} else {
 		ASSERT(hdr_compressed);
 		ASSERT(!compressed);
-		ASSERT3U(HDR_GET_LSIZE(hdr), !=, HDR_GET_PSIZE(hdr));
 
 		/*
 		 * If the buf is sharing its data with the hdr, unlink it and
@@ -3775,8 +3782,13 @@ arc_hdr_destroy(arc_buf_hdr_t *hdr)
 		 * to acquire the l2ad_mtx. If that happens, we don't
 		 * want to re-destroy the header's L2 portion.
 		 */
-		if (HDR_HAS_L2HDR(hdr))
+		if (HDR_HAS_L2HDR(hdr)) {
+
+			if (!HDR_EMPTY(hdr))
+				buf_discard_identity(hdr);
+
 			arc_hdr_l2hdr_destroy(hdr);
+		}
 
 		if (!buflist_held)
 			mutex_exit(&dev->l2ad_mtx);
@@ -5669,17 +5681,20 @@ arc_read_done(zio_t *zio)
 		zio_crypt_decode_params_bp(bp, hdr->b_crypt_hdr.b_salt,
 		    hdr->b_crypt_hdr.b_iv);
 
-		if (BP_GET_TYPE(bp) == DMU_OT_INTENT_LOG) {
-			void *tmpbuf;
+		if (zio->io_error == 0) {
+			if (BP_GET_TYPE(bp) == DMU_OT_INTENT_LOG) {
+				void *tmpbuf;
 
-			tmpbuf = abd_borrow_buf_copy(zio->io_abd,
-			    sizeof (zil_chain_t));
-			zio_crypt_decode_mac_zil(tmpbuf,
-			    hdr->b_crypt_hdr.b_mac);
-			abd_return_buf(zio->io_abd, tmpbuf,
-			    sizeof (zil_chain_t));
-		} else {
-			zio_crypt_decode_mac_bp(bp, hdr->b_crypt_hdr.b_mac);
+				tmpbuf = abd_borrow_buf_copy(zio->io_abd,
+				    sizeof (zil_chain_t));
+				zio_crypt_decode_mac_zil(tmpbuf,
+				    hdr->b_crypt_hdr.b_mac);
+				abd_return_buf(zio->io_abd, tmpbuf,
+				    sizeof (zil_chain_t));
+			} else {
+				zio_crypt_decode_mac_bp(bp,
+				    hdr->b_crypt_hdr.b_mac);
+			}
 		}
 	}
 
@@ -5911,17 +5926,24 @@ arc_read(zio_t *pio, spa_t *spa, const blkptr_t *bp,
 	 */
 	fstrans_cookie_t cookie = spl_fstrans_mark();
 top:
+	/*
+	 * Verify the block pointer contents are reasonable.  This should
+	 * always be the case since the blkptr is protected by a checksum.
+	 * However, if there is damage it's desirable to detect this early
+	 * and treat it as a checksum error.  This allows an alternate blkptr
+	 * to be tried when one is available (e.g. ditto blocks).
+	 */
+	if (!zfs_blkptr_verify(spa, bp, zio_flags & ZIO_FLAG_CONFIG_WRITER,
+	    BLK_VERIFY_LOG)) {
+		rc = SET_ERROR(ECKSUM);
+		goto out;
+	}
+
 	if (!embedded_bp) {
 		/*
 		 * Embedded BP's have no DVA and require no I/O to "read".
 		 * Create an anonymous arc buf to back it.
 		 */
-		if (!zfs_blkptr_verify(spa, bp, zio_flags &
-		    ZIO_FLAG_CONFIG_WRITER, BLK_VERIFY_LOG)) {
-			rc = SET_ERROR(ECKSUM);
-			goto out;
-		}
-
 		hdr = buf_hash_find(guid, bp, &hash_lock);
 	}
 
@@ -6535,7 +6557,6 @@ arc_release(arc_buf_t *buf, void *tag)
 		ASSERT(!HDR_IO_IN_PROGRESS(hdr));
 		ASSERT(!HDR_IN_HASH_TABLE(hdr));
 		ASSERT(!HDR_HAS_L2HDR(hdr));
-		ASSERT(HDR_EMPTY(hdr));
 
 		ASSERT3U(hdr->b_l1hdr.b_bufcnt, ==, 1);
 		ASSERT3S(zfs_refcount_count(&hdr->b_l1hdr.b_refcnt), ==, 1);
@@ -6967,12 +6988,13 @@ arc_write_done(zio_t *zio)
 
 		exists = buf_hash_insert(hdr, &hash_lock);
 		if (exists != NULL) {
-			/*
-			 * This can only happen if we overwrite for
-			 * sync-to-convergence, because we remove
-			 * buffers from the hash table when we arc_free().
-			 */
 			if (zio->io_flags & ZIO_FLAG_IO_REWRITE) {
+				/*
+				 * This can only happen if we overwrite for
+				 * sync-to-convergence, because we remove
+				 * buffers from the hash table when we
+				 * arc_free().
+				 */
 				if (!BP_EQUAL(&zio->io_bp_orig, zio->io_bp))
 					panic("bad overwrite, hdr=%p exists=%p",
 					    (void *)hdr, (void *)exists);
@@ -11085,6 +11107,10 @@ ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, rebuild_blocks_min_l2size, ULONG, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, mfuonly, INT, ZMOD_RW,
 	"Cache only MFU data from ARC into L2ARC");
+
+ZFS_MODULE_PARAM(zfs_l2arc, l2arc_, exclude_special, INT, ZMOD_RW,
+	"If set to 1 exclude dbufs on special vdevs from being cached to "
+	"L2ARC.");
 
 ZFS_MODULE_PARAM_CALL(zfs_arc, zfs_arc_, lotsfree_percent, param_set_arc_int,
 	param_get_int, ZMOD_RW, "System free memory I/O throttle in bytes");

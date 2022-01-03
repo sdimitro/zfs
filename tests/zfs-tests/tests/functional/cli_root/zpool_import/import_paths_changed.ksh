@@ -30,6 +30,12 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "zpool import succeeded after changing device paths" \
+		"not supported for object store run."
+fi
+
+
 log_onexit cleanup
 
 function test_new_paths

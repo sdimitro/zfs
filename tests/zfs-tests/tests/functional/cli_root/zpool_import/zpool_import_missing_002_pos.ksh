@@ -64,6 +64,9 @@
 #
 
 verify_runnable "global"
+if use_object_store; then
+	log_unsupported "zpool import not supported for mirror/raidz for object store run."
+fi
 
 # Randomly test a subset of combinations to speed up the test.
 (( rc=RANDOM % 3 ))

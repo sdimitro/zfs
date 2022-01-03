@@ -52,7 +52,7 @@ log_must setup
 for PCT in 0 1 2 4 8 16 32 64 128 256 512 1024; do
 	log_must set_tunable64 COMMIT_TIMEOUT_PCT $PCT
 
-	log_must zpool create $TESTPOOL $VDEV log $SDEV
+	log_must create_pool -p $TESTPOOL -d "$VDEV" -l "log $SDEV"
 
 	for i in {1..10}; do
 		log_must fio --rw write --sync 1 --directory "/$TESTPOOL" \

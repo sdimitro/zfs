@@ -42,6 +42,11 @@
 #	4. Verify slog device can not be replaced with hotspare device in pool2.
 #
 
+if use_object_store; then
+    log_unsupported "Slog device replacement test with hotspare" \
+        " devices not supported for object store run."
+fi
+
 verify_runnable "global"
 
 log_assert "Slog device can not be replaced with spare device."

@@ -47,8 +47,11 @@ verify_runnable "global"
 ADD_DISK="${DISKS%% }"
 ADD_DISK="${ADD_DISK##* }"
 
-[[ -z $ADD_DISK ]] && \
-        log_fail "No spare disks available."
+# Verify if ADD_DISK is not empty only with block based test.
+if ! use_object_store; then
+	[[ -z $ADD_DISK ]] && \
+		log_fail "No spare disks available."
+fi
 
 # Under Linux dry-run commands have no legitimate reason to fail.
 if is_linux; then

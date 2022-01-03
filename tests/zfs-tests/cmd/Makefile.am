@@ -21,6 +21,7 @@ SUBDIRS = \
 	mktree \
 	mmap_exec \
 	mmap_libaio \
+	mmap_seek \
 	mmapwrite \
 	nvlist_to_lua \
 	randwritecomp \
@@ -33,6 +34,7 @@ SUBDIRS = \
 
 if BUILD_LINUX
 SUBDIRS += \
+	getversion \
 	randfree_file \
 	user_ns_exec \
 	xattrtest

@@ -46,6 +46,10 @@
 
 verify_runnable "global"
 
+if use_object_store; then
+	log_unsupported "Zpool import with -D not supported for object store"
+fi
+
 function cleanup
 {
 	destroy_pool $TESTPOOL1

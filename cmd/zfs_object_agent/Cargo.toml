@@ -1,0 +1,21 @@
+[profile.dev]
+panic = "abort"
+
+[profile.release]
+panic = "abort"
+debug = true
+overflow-checks = true
+incremental = true
+
+[workspace]
+members = [
+    "client",
+    "object_perf",
+    "server",
+    "util",
+    "zcache",
+    "zcdb",
+    "zettacache",
+    "zettaobject",
+    "zoa",
+]

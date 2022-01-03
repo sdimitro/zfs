@@ -21,6 +21,10 @@
 # CDDL HEADER END
 #
 
+#
+# Copyright 2020 OmniOS Community Edition (OmniOSce) Association.
+#
+
 BASE_DIR=$(dirname "$0")
 SCRIPT_COMMON=common.sh
 if [ -f "${BASE_DIR}/${SCRIPT_COMMON}" ]; then
@@ -48,6 +52,25 @@ ITERATIONS=1
 ZFS_DBGMSG="$STF_SUITE/callbacks/zfs_dbgmsg.ksh"
 ZFS_DMESG="$STF_SUITE/callbacks/zfs_dmesg.ksh"
 UNAME=$(uname -s)
+RERUN=""
+ZOA_LOG="/var/tmp/zoa.log"
+ZOA_OUTPUT="/var/tmp/zoa.stdout"
+ZOA_CONF="/etc/zfs/zoa.conf"
+ZOA_CONFIG="/etc/zfs/zoa_config.toml"
+HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
+    awk '/^zfs-object-agent/ {found=1}
+    END{if(found) print "true"; else print "false"}')"
+
+ZOA_TUNABLE_LIST="die_mtbf_secs die_file"
+ZOA_DIE_MTBF_SECS_DEFAULT_VALUE="150"
+#
+# Create a marker file for finding crash dumps that
+# was created during the test run.
+# The find command can take this with argument -newer
+# to print crashes whose timestamp was greater than
+# the marker file
+#
+MARKER_FILE=$(mktemp)
 
 # Override some defaults if on FreeBSD
 if [ "$UNAME" = "FreeBSD" ] ; then
@@ -90,7 +113,7 @@ cleanup_freebsd_loopback() {
 
 cleanup_linux_loopback() {
 	for TEST_LOOPBACK in ${LOOPBACKS}; do
-		LOOP_DEV=$(basename "$TEST_LOOPBACK")
+		LOOP_DEV="${TEST_LOOPBACK##*/}"
 		DM_DEV=$(sudo "${DMSETUP}" ls 2>/dev/null | \
 		    grep "${LOOP_DEV}" | cut -f1)
 
@@ -129,6 +152,104 @@ cleanup() {
 		rm -f "${TEST_FILE}" >/dev/null 2>&1
 	done
 
+
+	# Cleanup zfs_object_agent process
+	if [ -n "$ZTS_OBJECT_STORE" ]; then
+		sudo pkill -f -TERM zfs_object_agent
+	fi
+
+	# Find all the crash files that were created after the start
+	# of the test
+	crash_files=$(find /var/crash -name "core.*" -newer "$MARKER_FILE")
+
+	# If the list is not empty we try to find the binary name that
+	# caused the crash & copy it to the $RESULTS_DIR
+	if [ -n "$crash_files" ]; then
+		# Try to infer from the output of file command
+		crash_binaries=$(echo "$crash_files" | xargs sudo file | \
+			sed -n 's/.*execfn: .\(.*\).,.*/\1/p' | sort | uniq
+		)
+
+		# Try figure out from the crash file name
+		# The crash file name is of following format
+		# core.<name>.<pid>.<timestamp>
+		if [ -z "$crash_binaries" ]; then
+			crash_binaries=$(echo "$crash_files" | cut -d '.' -f2 | \
+				sort | uniq | xargs which
+			)
+		fi
+
+		# Get the list of shared dependencies from the binaries
+		dependencies=$(echo "$crash_binaries" | xargs ldd | \
+			awk '/=>/ {print $3 }'
+		)
+		# Add the binaries to the list of dependencies
+		# as those were not included in the previous step
+		dependencies="$crash_binaries $dependencies"
+		# Copy the shared files and its dependencies
+		for dependency in $dependencies; do
+			[ -e "$dependency" ] || continue
+			cp "$dependency" "$RESULTS_DIR"
+
+			[ -d "$RESULTS_DIR/.build-id" ] || \
+				mkdir -p  "$RESULTS_DIR/.build-id"
+
+			uuid=$(readelf -n "$dependency" | awk '/Build ID/ {print $3}')
+			[ -n "$uuid" ] || continue
+
+			prefix="$(echo "$uuid" | cut -c1-2)"
+			debug_file="$(echo "$uuid" | cut -c3-40).debug"
+
+			[ -f "/usr/lib/debug/.build-id/$prefix/$debug_file" ] || continue
+
+			mkdir -p "$RESULTS_DIR/.build-id/$prefix"
+			cp "/usr/lib/debug/.build-id/$prefix/$debug_file" \
+				"$RESULTS_DIR/.build-id/$prefix"
+		done
+
+		# Copy the crash files to $RESULTS_DIR/crash
+		mkdir -p "$RESULTS_DIR/crash"
+		echo "$crash_files" | xargs -I{} sudo cp {} "$RESULTS_DIR/crash"
+		# Change the ownership of core files from root to current user
+		sudo chown "$(id -un):$(id -gn)" -R "$RESULTS_DIR/crash"
+
+		# Create a convenience script to launch a gdb debugging session
+		# with options to load the debug information just gathered
+		cat >"$RESULTS_DIR/run-gdb.sh" <<-EOF
+			#!/usr/bin/env bash
+			crash_dir="\$(realpath \$(dirname \$0))/crash"
+			debug_dir="\$(realpath \$(dirname \$0))"
+			core_file="\$1"
+
+			if [ ! -f "\$core_file" ]; then
+			    core_file="\$crash_dir/\$(basename \$core_file)"
+			    [ ! -f "\$core_file" ] && echo "Not a valid core file" && exit 1
+			fi
+
+			core_prog=\$(file \$core_file | \\
+			    sed -n 's/.*execfn: .\\(.*\\).,.*/\\1/p' | \\
+			    xargs basename
+			)
+			# Fallback to find core name from the prog itself
+			if [ -z "\$core_prog" ]; then
+			    core_prog=\$(basename \$core_file | cut -d '.' -f2)
+			fi
+
+			gdb -iex "set print thread-events off" \\
+			    -iex "set sysroot /dev/null" \\
+			    -iex "set debug-file-directory \$debug_dir" \\
+			    -iex "set solib-search-path \$debug_dir" \\
+			    -iex "file \$debug_dir/\$core_prog" \\
+			    -iex "core-file \$core_file"
+
+		EOF
+		chmod +x "$RESULTS_DIR/run-gdb.sh"
+	fi
+
+	# Finally remove the marker file
+	rm -f "$MARKER_FILE"
+
+	# From this point onwards, the script will run with an empty $PATH
 	if [ "$STF_PATH_REMOVE" = "yes" ] && [ -d "$STF_PATH" ]; then
 		rm -Rf "$STF_PATH"
 	fi
@@ -322,6 +443,7 @@ OPTIONS:
 	-f          Use files only, disables block device tests
 	-S          Enable stack tracer (negative performance impact)
 	-c          Only create and populate constrained path
+	-R          Automatically rerun failing tests
 	-n NFSFILE  Use the nfsfile to determine the NFS configuration
 	-I NUM      Number of iterations
 	-d DIR      Use DIR for files and loopback devices
@@ -348,7 +470,182 @@ $0 -x
 EOF
 }
 
-while getopts 'hvqxkfScn:d:s:r:?t:T:u:I:' OPTION; do
+# Take a Zettacache device as either an absolute or relative path and
+# return the /dev/disk/by-id name for the cache partition.
+get_cache_part() {
+	devname="$(basename "$1")"
+
+	[ -z "$devname" ] && fail "Missing argument"
+
+	devname="${devname}p2"
+	udevadm settle -E "/dev/disk/by-id/$devname"
+	# shellcheck disable=SC2012
+	cache_part=$(ls -l /dev/disk/by-id 2>/dev/null | \
+	    awk "/$devname/ {print \$9; exit}" 2>/dev/null)
+
+	[ -z "$cache_part" ] && fail "Could not find cache partition for $devname"
+
+	echo "/dev/disk/by-id/$cache_part"
+}
+
+configure_zettacache() {
+	cache_parts=""
+	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		# Dedicate 8G at the start of the zettacache disk for a slog.
+		printf "size=16777216, bootable\n," | \
+		    sudo sfdisk --wipe always \
+		    "/dev/$(basename "$cache_dev")"
+		if [ -z "$cache_parts" ]; then
+			cache_parts="$(get_cache_part "$cache_dev")"
+		else
+			cache_parts="${cache_parts},$(get_cache_part "$cache_dev")"
+		fi
+	done
+	sudo -E sed -i 's/ZETTACACHE_DEVICES=.*//g' $ZOA_CONF
+	sudo sh -c "echo ZETTACACHE_DEVICES=$cache_parts >>$ZOA_CONF"
+}
+
+# Add a tunable with name and value in the
+# /etc/zfs/zoa_config.toml
+add_tunable() {
+    name="$1"
+    value="$2"
+    echo "$name=$value" | sudo tee -a $ZOA_CONFIG > /dev/null
+}
+
+# Returns if a tunable is already configured
+# in the zoa configuration file
+is_tunable_configured() {
+    grep "$1" $ZOA_CONFIG 1>/dev/null 2>&1
+    return $?
+}
+
+# Adds or updates a tunable into the /etc/zfs/zoa_config.toml
+add_or_update_tunable() {
+    name="$1"
+    value="$2"
+
+    if is_tunable_configured "$name"; then
+        # sed -E enables extended regexp
+
+        # Anything that has 0 or more whitespace
+        # followed by keyword identified by $name
+        # followed by 0 or more white spaces
+        # followed by a =
+        # followed by 0 or more white spaces
+        # followed by group that captures anything
+        sudo -E \
+            sed -E -i "s/\s*${name}\s*=\s*(.*)/${name}=${value}/" $ZOA_CONFIG
+    else
+        add_tunable "$name" "$value"
+    fi
+}
+
+# Returns if the tunable is in allowed list
+is_tunable_allowed() {
+    tunable_name="$1"
+    for tunable in $ZOA_TUNABLE_LIST; do
+        if [ "$tunable" = "$tunable_name" ]; then
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Checks and sets the ZOA tunables in
+# the /etc/zfs/zoa_config.toml
+check_and_set_zoa_tunables() {
+    # A tunable can be defined using the environment
+    # variable in following format
+    # ZTS_ZOA_TUNABLE_<TUNABLE_NAME>=<TUNABLE_VALUE>
+
+    # As a convention any environment variable prefixed
+    # with ZTS_ZOA_TUNABLE_ would be considered as a
+    # valid tunable and shall be added to the /etc/zfs/zoa_config.toml
+    # only if the tunable is allowed
+
+    # Loop through all environment variables that begins
+    # with ZTS_ZOA_TUNABLE_ in a sorted form
+    for zoa_tunable in $(env | grep "ZTS_ZOA_TUNABLE_" | sort | xargs); do
+        # Chop the prefix
+        tunable=${zoa_tunable#ZTS_ZOA_TUNABLE_}
+
+        # Convert the tunable to its lowercase format
+        # A tunable name is the first field separated
+        # by a "="
+        tunable_name=$(echo "$tunable" | cut -d "=" -f1 |\
+            tr "[:upper:]" "[:lower:]")
+
+        # Tunable value is the second field separated
+        # by a "="
+        tunable_value=$(echo "$tunable" | cut -d "=" -f2)
+
+        if is_tunable_allowed "$tunable_name"; then
+            add_or_update_tunable "$tunable_name" "$tunable_value"
+        else
+            msg "Skipping zoa tunable $tunable_name as it is not" \
+                "in the allowed list of tunables"
+        fi
+    done
+    # Finally if the variable ZTS_ZOA_TUNABLE_DIE_MTBF_SECS is not
+    # set in the environment variable then add a default
+    # one to the config
+    if ! is_tunable_configured "die_mtbf_secs"; then
+        add_tunable "die_mtbf_secs" $ZOA_DIE_MTBF_SECS_DEFAULT_VALUE
+    fi
+}
+
+
+# Checks if the S3 credentials are available
+# for the connectivity test
+are_s3_credentials_available() {
+	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
+		return 0 || return 1
+}
+
+
+# Tests the S3 connectivity using the s3 credentials
+# or the instance profile.
+# To test using instance profile pass "true"
+# as the first positional argument
+test_s3_connectivity() {
+	# Flag to check if connectivity should be
+	# tested using the instance profile
+	# Defaults to false
+	use_instance_profile="${1:-false}"
+
+	# Build the common part
+	zoa_cmd="/sbin/zfs_object_agent test_connectivity"
+	zoa_cmd="$zoa_cmd --region $ZTS_REGION"
+	zoa_cmd="$zoa_cmd --endpoint $ZTS_OBJECT_ENDPOINT"
+	zoa_cmd="$zoa_cmd --bucket $ZTS_BUCKET_NAME"
+
+	if [ "$use_instance_profile" = "true" ]; then
+		zoa_cmd="$zoa_cmd --aws_instance_profile"
+	elif [ "$use_instance_profile" = "false" ]; then
+		zoa_cmd="$zoa_cmd --aws_access_key_id $AWS_ACCESS_KEY_ID"
+		zoa_cmd="$zoa_cmd --aws_secret_access_key $AWS_SECRET_ACCESS_KEY"
+	fi
+	$zoa_cmd >/dev/null 2>&1 || fail "Unable to connect to S3"
+}
+
+# Configures and sets the S3 credentials to the disk
+configure_and_set_s3_credentials() {
+	# Check and comment out the AWS_ environment variables
+	# from the /etc/environment file
+	if grep -q "^AWS" /etc/environment 2>/dev/null; then
+		sudo sed -i "s/^AWS/# AWS/g" /etc/environment
+	fi
+	# If aws cli is installed and is in path
+	if command -v aws >/dev/null 2>&1; then
+		aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
+		aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
+		sudo mkdir -p /root/.aws && \
+			sudo cp ~/.aws/credentials /root/.aws/credentials
+	fi
+}
+
+while getopts 'hvqxkfScRn:d:s:r:?t:T:u:I:' OPTION; do
 	case $OPTION in
 	h)
 		usage
@@ -375,6 +672,9 @@ while getopts 'hvqxkfScn:d:s:r:?t:T:u:I:' OPTION; do
 	c)
 		constrain_path
 		exit
+		;;
+	R)
+		RERUN="yes"
 		;;
 	n)
 		nfsfile=$OPTARG
@@ -568,10 +868,86 @@ fi
 . "$STF_SUITE/include/default.cfg"
 
 #
-# No DISKS have been provided so a basic file or loopback based devices
-# must be created for the test suite to use.
+# If ZTS_OBJECT_STORE is set, it implies that we are using object storage.
+# Hence, no need to specify disks.
+# If ZTS_OBJECT_STORE is not set and DISKS have not been provided, a basic file
+# or loopback based devices must be created for the test suite to use.
 #
-if [ -z "${DISKS}" ]; then
+
+if [ -n "$ZTS_OBJECT_STORE" ]; then
+	# No need to specify disks if we're using object storage
+
+	#
+	# Ensure that all the required environment variables for object
+	# storage are set. If any of them is unset, exit the script.
+	#
+	[ -n "$ZTS_OBJECT_ENDPOINT" ] || fail "ZTS_OBJECT_ENDPOINT is unset."
+	[ -n "$ZTS_BUCKET_NAME" ] || fail "ZTS_BUCKET_NAME is unset."
+	[ -n "$ZTS_REGION" ] || fail "ZTS_REGION is unset."
+	[ -n "$ZTS_CREDS_PROFILE" ] || export ZTS_CREDS_PROFILE=default
+
+	#
+	# Set RUST_BACKTRACE environment variable to generate proper stack
+	# traces for zfs_object_agent service crash.
+	#
+	export RUST_BACKTRACE=1
+
+	# Use ZETTACACHE_DEVICE to be backward compatible
+	ZETTACACHE_DEVICE=${ZETTACACHE_DEVICE:-""}
+	if [ -n "$ZETTACACHE_DEVICE" ]; then
+		export ZETTACACHE_DEVICES=$ZETTACACHE_DEVICE
+		unset ZETTACACHE_DEVICE
+	fi
+
+	if [ -n "$ZETTACACHE_DEVICES" ]; then
+		configure_zettacache
+	else
+		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
+		    $ZOA_CONF
+	fi
+
+	# Enable zfs-object-agent to automatically
+	# kill itself with the tunables set
+	if [ -n "$ZTS_KILL_ZOA" ]; then
+		check_and_set_zoa_tunables
+	fi
+
+	#
+	# Start zfs_object_agent using the service if available, otherwise
+	# start it manually.
+	#
+	if $HAS_ZOA_SERVICE; then
+		sudo systemctl restart zfs-object-agent
+	else
+		sudo -E /sbin/zfs_object_agent -vv -t $ZOA_CONFIG \
+		    --output-file=$ZOA_LOG 2>&1 | \
+		    sudo tee $ZOA_OUTPUT > /dev/null &
+	fi
+
+	#
+	# Check connectivity to s3 and configure the system
+	# to correctly run test either by using the S3 creds
+	# or the instance profile role.
+	#
+	if are_s3_credentials_available; then
+		test_s3_connectivity
+		configure_and_set_s3_credentials
+		msg "zfs-test for object storage configured" \
+			"to run via S3 credentials"
+	else
+		# Test using instance profile
+		test_s3_connectivity "true"
+		# For running test using instance profile
+		# we need to remove the underlying credentials
+		# stored in the disk
+		rm -f ~/.aws/credentials
+
+		sudo rm -f /root/.aws/credentials
+		msg "zfs-test for object storage configured" \
+			"to run via the instance profile role"
+	fi
+
+elif [ -z "${DISKS}" ]; then
 	#
 	# If this is a performance run, prevent accidental use of
 	# loopback devices.
@@ -606,7 +982,7 @@ if [ -z "${DISKS}" ]; then
 				TEST_LOOPBACK=$(sudo "${LOSETUP}" -f)
 				sudo "${LOSETUP}" "${TEST_LOOPBACK}" "${TEST_FILE}" ||
 				    fail "Failed: ${TEST_FILE} -> ${TEST_LOOPBACK}"
-				BASELOOPBACK=$(basename "$TEST_LOOPBACK")
+				BASELOOPBACK="${TEST_LOOPBACK##*/}"
 				DISKS="$DISKS $BASELOOPBACK"
 				LOOPBACKS="$LOOPBACKS $TEST_LOOPBACK"
 			fi
@@ -622,9 +998,11 @@ fi
 # It may be desirable to test with fewer disks than the default when running
 # the performance tests, but the functional tests require at least three.
 #
-NUM_DISKS=$(echo "${DISKS}" | awk '{print NF}')
-if [ "$TAGS" != "perf" ]; then
-	[ "$NUM_DISKS" -lt 3 ] && fail "Not enough disks ($NUM_DISKS/3 minimum)"
+if [ -z "$ZTS_OBJECT_STORE" ]; then
+	NUM_DISKS=$(echo "${DISKS}" | awk '{print NF}')
+	if [ "$TAGS" != "perf" ]; then
+		[ "$NUM_DISKS" -lt 3 ] && fail "Not enough disks ($NUM_DISKS/3 minimum)"
+	fi
 fi
 
 #
@@ -659,6 +1037,10 @@ msg "TAGS:            $TAGS"
 msg "STACK_TRACER:    $STACK_TRACER"
 msg "Keep pool(s):    $KEEP"
 msg "Missing util(s): $STF_MISSING_BIN"
+msg "ZTS_OBJECT_STORE:      $ZTS_OBJECT_STORE"
+msg "ZETTACACHE_DEVICES:     $ZETTACACHE_DEVICES"
+msg "RUST_BACKTRACE:        $RUST_BACKTRACE"
+msg "ZTS_KILL_ZOA:          $ZTS_KILL_ZOA"
 msg ""
 
 export STF_TOOLS
@@ -694,12 +1076,35 @@ ${TEST_RUNNER} ${QUIET:+-q} \
     -i "${STF_SUITE}" \
     -I "${ITERATIONS}" \
     2>&1 | tee "$RESULTS_FILE"
-
 #
 # Analyze the results.
 #
-${ZTS_REPORT} "$RESULTS_FILE" >"$REPORT_FILE"
+${ZTS_REPORT} ${RERUN:+--no-maybes} "$RESULTS_FILE" >"$REPORT_FILE"
 RESULT=$?
+
+if [ "$RESULT" -eq "2" ] && [ -n "$RERUN" ]; then
+	MAYBES="$($ZTS_REPORT --list-maybes)"
+	TEMP_RESULTS_FILE=$(mktemp -u -t zts-results-tmp.XXXXX -p "$FILEDIR")
+	TEST_LIST=$(mktemp -u -t test-list.XXXXX -p "$FILEDIR")
+	grep "^Test:.*\[FAIL\]" "$RESULTS_FILE" >"$TEMP_RESULTS_FILE"
+	for test_name in $MAYBES; do
+		grep "$test_name " "$TEMP_RESULTS_FILE" >>"$TEST_LIST"
+	done
+	${TEST_RUNNER} ${QUIET:+-q} \
+	    -c "${RUNFILES}" \
+	    -T "${TAGS}" \
+	    -i "${STF_SUITE}" \
+	    -I "${ITERATIONS}" \
+	    -l "${TEST_LIST}" \
+	    2>&1 | tee "$RESULTS_FILE"
+	#
+	# Analyze the results.
+	#
+	${ZTS_REPORT} --no-maybes "$RESULTS_FILE" >"$REPORT_FILE"
+	RESULT=$?
+fi
+
+
 cat "$REPORT_FILE"
 
 RESULTS_DIR=$(awk '/^Log directory/ { print $3 }' "$RESULTS_FILE")

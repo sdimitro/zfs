@@ -69,12 +69,12 @@ function cleanup
 			[[ -d /${pools[i]}-new ]] && \
 				log_must rm -rf /${pools[i]}-new
 
-			log_must zpool import ${devs[i]} \
-				"${pools[i]}-new" ${pools[i]}
+			log_must import_pool -s "${devs[i]}" \
+				-p "${pools[i]}-new ${pools[i]}"
 		fi
 
 		datasetexists "${pools[i]}" || \
-			log_must zpool import ${devs[i]} ${pools[i]}
+			log_must import_pool -s "${devs[i]}" -p "${pools[i]}"
 
 		ismounted "${pools[i]}/$TESTFS" || \
 			log_must zfs mount ${pools[i]}/$TESTFS
@@ -126,8 +126,8 @@ while (( i < ${#pools[*]} )); do
 			log_note "Import by guid."
 		fi
 
-		log_must zpool import ${devs[i]} ${options[j]} \
-			$target ${pools[i]}-new
+		log_must import_pool -s "${devs[i]}"  -e "${options[j]}" \
+			-p "$target ${pools[i]}-new"
 
 		log_must poolexists "${pools[i]}-new"
 
@@ -153,7 +153,7 @@ while (( i < ${#pools[*]} )); do
 		if (( RANDOM % 2 == 0 )) ; then
 			target=$guid
 		fi
-		log_must zpool import ${devs[i]} $target ${pools[i]}
+		log_must import_pool -s "${devs[i]}" -p "$target ${pools[i]}"
 
 		((j = j + 1))
 	done
@@ -164,11 +164,11 @@ done
 VDEV_FILE=$(mktemp $TEST_BASE_DIR/tmp.XXXXXX)
 
 log_must mkfile -n 128M $VDEV_FILE
-log_must zpool create overflow $VDEV_FILE
+log_must create_pool -p overflow -d $VDEV_FILE
 log_must zfs create overflow/testfs
 ID=$(zpool get -Ho value guid overflow)
 log_must zpool export overflow
-log_mustnot zpool import -d $TEST_BASE_DIR $(echo id) \
-    $(printf "%*s\n" 250 "" | tr ' ' 'c')
+log_mustnot import_pool -s "-d $TEST_BASE_DIR" \
+	-p "$(echo $ID) $(printf "%*s\n" 250 "" | tr ' ' 'c')"
 
 log_pass "Successfully imported and renamed a ZPOOL"

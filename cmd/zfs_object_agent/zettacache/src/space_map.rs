@@ -1,0 +1,132 @@
+use crate::base_types::Extent;
+use crate::base_types::OnDisk;
+use crate::block_access::BlockAccess;
+use crate::block_allocator::SlabGeneration;
+use crate::block_allocator::SlabId;
+use crate::block_based_log::BlockBasedLog;
+use crate::block_based_log::BlockBasedLogEntry;
+use crate::block_based_log::BlockBasedLogPhys;
+use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
+use futures::future;
+use futures::stream::StreamExt;
+use serde::Deserialize;
+use serde::Serialize;
+use std::sync::Arc;
+
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+pub struct MarkGenerationEntry {
+    pub slab_id: SlabId,
+    pub generation: SlabGeneration,
+}
+
+#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+pub enum SpaceMapEntry {
+    Alloc(Extent),
+    Free(Extent),
+    MarkGeneration(MarkGenerationEntry),
+}
+impl OnDisk for SpaceMapEntry {}
+impl BlockBasedLogEntry for SpaceMapEntry {}
+
+pub struct SpaceMap {
+    log: BlockBasedLog<SpaceMapEntry>,
+    // This is only used currently for printing out the ideal size that the
+    // spacemap would have if it was condensed to our logs.
+    alloc_entries: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+pub struct SpaceMapPhys {
+    log: BlockBasedLogPhys<SpaceMapEntry>,
+    alloc_entries: u64,
+}
+impl OnDisk for SpaceMapPhys {}
+
+impl SpaceMapPhys {
+    pub fn new() -> SpaceMapPhys {
+        SpaceMapPhys {
+            log: Default::default(),
+            alloc_entries: 0,
+        }
+    }
+
+    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+        self.log.claim(builder);
+    }
+
+    pub fn bytes(&self) -> u64 {
+        self.log.bytes()
+    }
+
+    pub fn capacity_bytes(&self) -> u64 {
+        self.log.capacity_bytes()
+    }
+}
+
+impl SpaceMap {
+    pub fn open(
+        block_access: Arc<BlockAccess>,
+        extent_allocator: Arc<ExtentAllocator>,
+        phys: SpaceMapPhys,
+    ) -> SpaceMap {
+        SpaceMap {
+            log: BlockBasedLog::open(block_access, extent_allocator, phys.log),
+            alloc_entries: phys.alloc_entries,
+        }
+    }
+
+    pub async fn load<F>(&self, mut import_cb: F)
+    where
+        F: FnMut(SpaceMapEntry),
+    {
+        self.log
+            .iter()
+            .for_each(|entry| {
+                import_cb(entry);
+                future::ready(())
+            })
+            .await;
+    }
+
+    pub fn alloc(&mut self, extent: Extent) {
+        if extent.size != 0 {
+            self.log.append(SpaceMapEntry::Alloc(extent));
+            self.alloc_entries += 1;
+        }
+    }
+
+    pub fn free(&mut self, extent: Extent) {
+        if extent.size != 0 {
+            self.log.append(SpaceMapEntry::Free(extent));
+        }
+    }
+
+    pub fn mark_generation(&mut self, slab_id: SlabId, generation: SlabGeneration) {
+        self.log
+            .append(SpaceMapEntry::MarkGeneration(MarkGenerationEntry {
+                slab_id,
+                generation,
+            }));
+    }
+
+    pub async fn flush(&mut self) -> SpaceMapPhys {
+        SpaceMapPhys {
+            log: self.log.flush().await,
+            alloc_entries: self.alloc_entries,
+        }
+    }
+
+    pub fn total_entries(&self) -> u64 {
+        self.log.len()
+    }
+
+    pub fn alloc_entries(&self) -> u64 {
+        self.alloc_entries
+    }
+
+    pub fn clear(&mut self) {
+        self.log.clear();
+        self.alloc_entries = 0;
+    }
+}

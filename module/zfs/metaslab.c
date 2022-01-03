@@ -33,6 +33,7 @@
 #include <sys/metaslab_impl.h>
 #include <sys/vdev_impl.h>
 #include <sys/vdev_draid.h>
+#include <sys/vdev_object_store.h>
 #include <sys/zio.h>
 #include <sys/spa_impl.h>
 #include <sys/zfeature.h>
@@ -1717,7 +1718,8 @@ metaslab_df_alloc(metaslab_t *msp, uint64_t size)
 }
 
 static metaslab_ops_t metaslab_df_ops = {
-	metaslab_df_alloc
+	metaslab_df_alloc,
+	B_TRUE
 };
 
 metaslab_ops_t *zfs_metaslab_ops = &metaslab_df_ops;
@@ -1767,7 +1769,8 @@ metaslab_cf_alloc(metaslab_t *msp, uint64_t size)
 }
 
 static metaslab_ops_t metaslab_cf_ops = {
-	metaslab_cf_alloc
+	metaslab_cf_alloc,
+	B_TRUE
 };
 
 metaslab_ops_t *zfs_metaslab_ops = &metaslab_cf_ops;
@@ -1831,12 +1834,28 @@ metaslab_ndf_alloc(metaslab_t *msp, uint64_t size)
 }
 
 static metaslab_ops_t metaslab_ndf_ops = {
-	metaslab_ndf_alloc
+	metaslab_ndf_alloc,
+	B_TRUE
 };
 
 metaslab_ops_t *zfs_metaslab_ops = &metaslab_ndf_ops;
 #endif /* WITH_NDF_BLOCK_ALLOCATOR */
 
+static uint64_t
+metaslab_sequential_alloc(metaslab_t *msp, uint64_t size)
+{
+	uint64_t *cursor = &msp->ms_lbas[0];
+	uint64_t offset = *cursor;
+	*cursor += size;
+	return (offset);
+}
+
+static metaslab_ops_t metaslab_sequential_ops = {
+	metaslab_sequential_alloc,
+	B_FALSE
+};
+
+metaslab_ops_t *zfs_objectstore_ops = &metaslab_sequential_ops;
 
 /*
  * ==========================================================================
@@ -2657,11 +2676,12 @@ metaslab_init(metaslab_group_t *mg, uint64_t id, uint64_t object,
 
 	vdev_ops_t *ops = vd->vdev_ops;
 	if (ops->vdev_op_metaslab_init != NULL)
-		ops->vdev_op_metaslab_init(vd, &ms->ms_start, &ms->ms_size);
+		ops->vdev_op_metaslab_init(vd, ms, &ms->ms_start, &ms->ms_size);
 
 	/*
 	 * We only open space map objects that already exist. All others
-	 * will be opened when we finally allocate an object for it.
+	 * will be opened when we finally allocate an object for it. For
+	 * readonly pools there is no need to open the space map object.
 	 *
 	 * Note:
 	 * When called from vdev_expand(), we can't call into the DMU as
@@ -2670,7 +2690,8 @@ metaslab_init(metaslab_group_t *mg, uint64_t id, uint64_t object,
 	 * that case, the object parameter is zero though, so we won't
 	 * call into the DMU.
 	 */
-	if (object != 0) {
+	if (object != 0 && !(spa->spa_mode == SPA_MODE_READ &&
+	    !spa->spa_read_spacemaps)) {
 		error = space_map_open(&ms->ms_sm, mos, object, ms->ms_start,
 		    ms->ms_size, vd->vdev_ashift);
 
@@ -2787,9 +2808,16 @@ metaslab_fini(metaslab_t *msp)
 	 * subtracted.
 	 */
 	if (!msp->ms_new) {
+		int64_t allocated;
+		if (vdev_is_object_based(vd)) {
+			// object-based vdevs have a single placeholder metaslab
+			ASSERT0(msp->ms_id);
+			allocated = vd->vdev_stat.vs_alloc;
+		} else {
+			allocated = metaslab_allocated_space(msp);
+		}
 		metaslab_space_update(vd, mg->mg_class,
-		    -metaslab_allocated_space(msp), 0, -msp->ms_size);
-
+		    -allocated, 0, -msp->ms_size);
 	}
 	space_map_close(msp->ms_sm);
 	msp->ms_sm = NULL;
@@ -3951,6 +3979,14 @@ metaslab_sync(metaslab_t *msp, uint64_t txg)
 		return;
 	}
 
+	if (vdev_is_object_based(vd)) {
+		ASSERT0(range_tree_space(alloctree));
+		ASSERT0(range_tree_space(msp->ms_freeing));
+		ASSERT0(range_tree_space(msp->ms_freed));
+		ASSERT0(range_tree_space(msp->ms_checkpointing));
+		ASSERT0(range_tree_space(msp->ms_trim));
+	}
+
 	/*
 	 * Normally, we don't want to process a metaslab if there are no
 	 * allocations or frees to perform. However, if the metaslab is being
@@ -4721,6 +4757,34 @@ metaslab_active_mask_verify(metaslab_t *msp)
 
 /* ARGSUSED */
 static uint64_t
+metaslab_group_alloc_object(metaslab_group_t *mg, zio_alloc_list_t *zal,
+    uint64_t asize, uint64_t txg, boolean_t want_unique, dva_t *dva, int d,
+    int allocator, boolean_t try_hard)
+{
+	metaslab_class_t *mc = mg->mg_class;
+
+	mutex_enter(&mg->mg_lock);
+	metaslab_t *msp = avl_first(&mg->mg_metaslab_tree);
+	mutex_exit(&mg->mg_lock);
+
+	mutex_enter(&msp->ms_lock);
+	int activation_error =
+	    metaslab_activate(msp, allocator, METASLAB_WEIGHT_PRIMARY);
+	VERIFY0(activation_error);
+
+	uint64_t offset = mc->mc_ops->msop_alloc(msp, 1);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("ALLOC: %llu, next %llu", (u_longlong_t)offset,
+		    (u_longlong_t)msp->ms_lbas[0]);
+	}
+	VERIFY3U(offset, !=, -1ULL);
+
+	mutex_exit(&msp->ms_lock);
+	return (offset);
+}
+
+/* ARGSUSED */
+static uint64_t
 metaslab_group_alloc_normal(metaslab_group_t *mg, zio_alloc_list_t *zal,
     uint64_t asize, uint64_t txg, boolean_t want_unique, dva_t *dva, int d,
     int allocator, boolean_t try_hard)
@@ -4741,8 +4805,8 @@ metaslab_group_alloc_normal(metaslab_group_t *mg, zio_alloc_list_t *zal,
 	}
 
 	/*
-	 * If we don't have enough metaslabs active to fill the entire array, we
-	 * just use the 0th slot.
+	 * If we don't have enough metaslabs active to fill the entire array,
+	 * we just use the 0th slot.
 	 */
 	if (mg->mg_ms_ready < mg->mg_allocators * 3)
 		allocator = 0;
@@ -5034,8 +5098,13 @@ metaslab_group_alloc(metaslab_group_t *mg, zio_alloc_list_t *zal,
 	uint64_t offset;
 	ASSERT(mg->mg_initialized);
 
-	offset = metaslab_group_alloc_normal(mg, zal, asize, txg, want_unique,
-	    dva, d, allocator, try_hard);
+	if (vdev_is_object_based(mg->mg_vd)) {
+		offset = metaslab_group_alloc_object(mg, zal, asize, txg,
+		    want_unique, dva, d, allocator, try_hard);
+	} else {
+		offset = metaslab_group_alloc_normal(mg, zal, asize, txg,
+		    want_unique, dva, d, allocator, try_hard);
+	}
 
 	mutex_enter(&mg->mg_lock);
 	if (offset == -1ULL) {
@@ -5196,10 +5265,11 @@ top:
 		/*
 		 * Avoid writing single-copy data to a failing,
 		 * non-redundant vdev, unless we've already tried all
-		 * other vdevs.
+		 * other vdevs and it's not an object-based pool.
 		 */
 		if ((vd->vdev_stat.vs_write_errors > 0 ||
 		    vd->vdev_state < VDEV_STATE_HEALTHY) &&
+		    !vdev_is_object_based(mg->mg_vd) &&
 		    d == 0 && !try_hard && vd->vdev_children == 0) {
 			metaslab_trace_add(zal, mg, NULL, psize, d,
 			    TRACE_VDEV_ERROR, allocator);
@@ -5274,8 +5344,13 @@ top:
 				mca->mca_aliquot = 0;
 			}
 
+			if (vdev_is_object_based(vd)) {
+				DVA_SET_OBJECTID(&dva[d], offset);
+			} else {
+				DVA_SET_OFFSET(&dva[d], offset);
+			}
+
 			DVA_SET_VDEV(&dva[d], vd->vdev_id);
-			DVA_SET_OFFSET(&dva[d], offset);
 			DVA_SET_GANG(&dva[d],
 			    ((flags & METASLAB_GANG_HEADER) ? 1 : 0));
 			DVA_SET_ASIZE(&dva[d], asize);
@@ -5336,7 +5411,15 @@ metaslab_free_concrete(vdev_t *vd, uint64_t offset, uint64_t asize,
 		vdev_dirty(vd, VDD_METASLAB, msp, spa_syncing_txg(spa));
 	}
 
-	if (checkpoint) {
+	/*
+	 * For object-based pools, checkpoints are managed by the agent
+	 * because it is responsible for handling the freeing of blocks. As a
+	 * result, we bypass the kernel checkpointing data structures,and let
+	 * the agent take care of it.
+	 */
+	if (vdev_is_object_based(vd)) {
+		object_store_free_block(vd, offset, asize);
+	} else if (checkpoint) {
 		ASSERT(spa_has_checkpoint(spa));
 		range_tree_add(msp->ms_checkpointing, offset, asize);
 	} else {
@@ -5989,6 +6072,9 @@ metaslab_check_free_impl(vdev_t *vd, uint64_t offset, uint64_t size)
 	spa_t *spa __maybe_unused = vd->vdev_spa;
 
 	if ((zfs_flags & ZFS_DEBUG_ZIO_FREE) == 0)
+		return;
+
+	if (vdev_is_object_based(vd))
 		return;
 
 	if (vd->vdev_ops->vdev_op_remap != NULL) {

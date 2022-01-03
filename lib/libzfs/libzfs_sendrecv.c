@@ -1059,9 +1059,14 @@ dump_snapshot(zfs_handle_t *zhp, void *arg)
 			nvlist_t *nvfs = fsavl_find(sdd->fsavl,
 			    zhp->zfs_dmustats.dds_guid, &snapname);
 
-			snapprops = fnvlist_lookup_nvlist(nvfs, "snapprops");
-			snapprops = fnvlist_lookup_nvlist(snapprops, thissnap);
-			exclude = !nvlist_exists(snapprops, "is_clone_origin");
+			if (nvfs != NULL) {
+				snapprops = fnvlist_lookup_nvlist(nvfs,
+				    "snapprops");
+				snapprops = fnvlist_lookup_nvlist(snapprops,
+				    thissnap);
+				exclude = !nvlist_exists(snapprops,
+				    "is_clone_origin");
+			}
 		} else {
 			exclude = B_TRUE;
 		}
@@ -2144,6 +2149,23 @@ zfs_send(zfs_handle_t *zhp, const char *fromsnap, const char *tosnap,
 		return (zfs_error(zhp->zfs_hdl, EZFS_NOENT, errbuf));
 	}
 
+	if (fromsnap) {
+		char full_fromsnap_name[ZFS_MAX_DATASET_NAME_LEN];
+		if (snprintf(full_fromsnap_name, sizeof (full_fromsnap_name),
+		    "%s@%s", zhp->zfs_name, fromsnap) >=
+		    sizeof (full_fromsnap_name)) {
+			err = EINVAL;
+			goto stderr_out;
+		}
+		zfs_handle_t *fromsnapn = zfs_open(zhp->zfs_hdl,
+		    full_fromsnap_name, ZFS_TYPE_SNAPSHOT);
+		if (fromsnapn == NULL) {
+			err = -1;
+			goto err_out;
+		}
+		zfs_close(fromsnapn);
+	}
+
 	if (flags->replicate || flags->doall || flags->props ||
 	    flags->holds || flags->backup) {
 		char full_tosnap_name[ZFS_MAX_DATASET_NAME_LEN];
@@ -2520,7 +2542,7 @@ zfs_send_one(zfs_handle_t *zhp, const char *from, int fd, sendflags_t *flags,
 			    "progress thread exited nonzero")));
 	}
 
-	if (flags->props || flags->holds || flags->backup) {
+	if (err == 0 && (flags->props || flags->holds || flags->backup)) {
 		/* Write the final end record. */
 		err = send_conclusion_record(fd, NULL);
 		if (err != 0)
@@ -3936,6 +3958,19 @@ zfs_setup_cmdline_props(libzfs_handle_t *hdl, zfs_type_t type,
 		const char *name = nvpair_name(nvp);
 		zfs_prop_t prop = zfs_name_to_prop(name);
 
+		/*
+		 * It turns out, if we don't normalize "aliased" names
+		 * e.g. compress= against the "real" names (e.g. compression)
+		 * here, then setting/excluding them does not work as
+		 * intended.
+		 *
+		 * But since user-defined properties wouldn't have a valid
+		 * mapping here, we do this conditional dance.
+		 */
+		const char *newname = name;
+		if (prop >= ZFS_PROP_TYPE)
+			newname = zfs_prop_to_name(prop);
+
 		/* "origin" is processed separately, don't handle it here */
 		if (prop == ZFS_PROP_ORIGIN)
 			continue;
@@ -3982,11 +4017,12 @@ zfs_setup_cmdline_props(libzfs_handle_t *hdl, zfs_type_t type,
 			 * locally-set, in which case its value will take
 			 * priority over the received anyway.
 			 */
-			if (nvlist_exists(origprops, name)) {
+			if (nvlist_exists(origprops, newname)) {
 				nvlist_t *attrs;
 				char *source = NULL;
 
-				attrs = fnvlist_lookup_nvlist(origprops, name);
+				attrs = fnvlist_lookup_nvlist(origprops,
+				    newname);
 				if (nvlist_lookup_string(attrs,
 				    ZPROP_SOURCE, &source) == 0 &&
 				    strcmp(source, ZPROP_SOURCE_VAL_RECVD) != 0)
@@ -3999,10 +4035,10 @@ zfs_setup_cmdline_props(libzfs_handle_t *hdl, zfs_type_t type,
 			 */
 			if (!zfs_prop_inheritable(prop) &&
 			    !zfs_prop_user(name) && /* can be inherited too */
-			    nvlist_exists(recvprops, name))
-				fnvlist_remove(recvprops, name);
+			    nvlist_exists(recvprops, newname))
+				fnvlist_remove(recvprops, newname);
 			else
-				fnvlist_add_nvpair(*oxprops, nvp);
+				fnvlist_add_boolean(*oxprops, newname);
 			break;
 		case DATA_TYPE_STRING: /* -o property=value */
 			/*
@@ -4023,7 +4059,8 @@ zfs_setup_cmdline_props(libzfs_handle_t *hdl, zfs_type_t type,
 				ret = zfs_error(hdl, EZFS_BADPROP, errbuf);
 				goto error;
 			}
-			fnvlist_add_nvpair(oprops, nvp);
+			fnvlist_add_string(oprops, newname,
+			    fnvpair_value_string(nvp));
 			break;
 		default:
 			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
@@ -4075,6 +4112,30 @@ error:
 		zpool_close(zpool_hdl);
 	fnvlist_free(oprops);
 	return (ret);
+}
+
+static void
+zfs_adjust_copies_prop(libzfs_handle_t *hdl, char *fsname, nvlist_t *recvprops)
+{
+	uint64_t copies;
+	char namebuf[ZFS_MAX_DATASET_NAME_LEN];
+
+	if (nvlist_lookup_uint64(recvprops, zfs_prop_to_name(ZFS_PROP_COPIES),
+	    &copies) == 0 && copies > 1) {
+		strlcpy(namebuf, fsname, ZFS_MAX_DATASET_NAME_LEN);
+		char *cp = strchr(namebuf, '/');
+		if (cp != NULL)
+			*cp = '\0';
+		zpool_handle_t *zpool_hdl = zpool_open(hdl, namebuf);
+		if (zpool_hdl != NULL) {
+			/* object based pools only support copies = 1 */
+			if (zpool_is_object_based(zpool_hdl)) {
+				(void) nvlist_remove_all(recvprops,
+				    zfs_prop_to_name(ZFS_PROP_COPIES));
+			}
+			zpool_close(zpool_hdl);
+		}
+	}
 }
 
 /*
@@ -4629,6 +4690,10 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 		    zfs_prop_to_name(ZFS_PROP_ENCRYPTION), ZIO_CRYPT_OFF);
 	}
 
+	/* Adjust for an object based pool that is receiving copies > 1 */
+	if (rcvprops != NULL)
+		zfs_adjust_copies_prop(hdl, name, rcvprops);
+
 	if (flags->dryrun) {
 		void *buf = zfs_alloc(hdl, SPA_MAXBLOCKSIZE);
 
@@ -4866,7 +4931,7 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 				(void) zfs_error(hdl, EZFS_BUSY, errbuf);
 				break;
 			}
-			/* fallthru */
+			fallthrough;
 		default:
 			(void) zfs_standard_error(hdl, ioctl_errno, errbuf);
 		}
@@ -5066,9 +5131,24 @@ zfs_receive_impl(libzfs_handle_t *hdl, const char *tosnap,
 
 	if (!DMU_STREAM_SUPPORTED(featureflags) ||
 	    (hdrtype != DMU_SUBSTREAM && hdrtype != DMU_COMPOUNDSTREAM)) {
-		zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
-		    "stream has unsupported feature, feature flags = %llx"),
-		    (unsigned long long)featureflags);
+		/*
+		 * Let's be explicit about this one, since rather than
+		 * being a new feature we can't know, it's an old
+		 * feature we dropped.
+		 */
+		if (featureflags & DMU_BACKUP_FEATURE_DEDUP) {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "stream has deprecated feature: dedup, try "
+			    "'zstream redup [send in a file] | zfs recv "
+			    "[...]'"));
+		} else {
+			zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
+			    "stream has unsupported feature, feature flags = "
+			    "%llx (unknown flags = %llx)"),
+			    (u_longlong_t)featureflags,
+			    (u_longlong_t)((featureflags) &
+			    ~DMU_BACKUP_FEATURE_MASK));
+		}
 		return (zfs_error(hdl, EZFS_BADSTREAM, errbuf));
 	}
 
