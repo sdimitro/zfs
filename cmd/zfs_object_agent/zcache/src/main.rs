@@ -3,6 +3,7 @@
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
 mod clear_hit_data;
+mod list_devices;
 mod remote_channel;
 mod report_hits;
 mod subcommand;
@@ -11,6 +12,7 @@ use anyhow::Result;
 use clap::AppSettings;
 use clap::Arg;
 use clear_hit_data::ClearHitData;
+use list_devices::ListDevices;
 use log::*;
 use report_hits::ReportHits;
 use subcommand::ZcacheSubCommand;
@@ -34,8 +36,11 @@ async fn async_main() -> Result<()> {
     // When adding a new sub-command:
     // 1. Create a new module that implements the sub-command with the ZcacheSubCommand trait
     // 2. Add an entry here to add an instance of the new sub-command to the sub_commands vector
-    let sub_commands: Vec<Box<dyn ZcacheSubCommand>> =
-        vec![Box::new(ClearHitData::new()), Box::new(ReportHits::new())];
+    let sub_commands: Vec<Box<dyn ZcacheSubCommand>> = vec![
+        Box::new(ClearHitData),
+        Box::new(ListDevices),
+        Box::new(ReportHits),
+    ];
 
     // Define global command arguments
     let mut app = clap::App::new("zcache")

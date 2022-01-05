@@ -2745,6 +2745,8 @@ dependencies = [
  "more-asserts",
  "num-traits 0.2.14",
  "nvpair",
+ "serde 1.0.130",
+ "serde_json",
  "tokio",
  "util",
 ]

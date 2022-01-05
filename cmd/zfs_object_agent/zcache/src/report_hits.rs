@@ -115,13 +115,7 @@ impl SizeHistogram {
     }
 }
 
-pub struct ReportHits {}
-
-impl ReportHits {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+pub struct ReportHits;
 
 #[async_trait]
 impl ZcacheSubCommand for ReportHits {

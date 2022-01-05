@@ -28,6 +28,7 @@ use util::get_tunable;
 use util::AlignedBytes;
 use util::AlignedVec;
 use util::From64;
+use util::{DeviceEntry, DeviceList};
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
@@ -54,6 +55,7 @@ pub struct BlockAccess {
 #[derive(Debug)]
 pub struct Disk {
     file: File,
+    device_path: String,
     size: u64,
     sector_size: usize,
     outstanding_reads: Semaphore,
@@ -121,6 +123,7 @@ impl Disk {
         }
         let this = Disk {
             file,
+            device_path: disk_path.to_string(),
             size,
             sector_size,
             outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
@@ -157,6 +160,19 @@ impl BlockAccess {
     /// need not assume anything about the values inside the DiskId's.
     pub fn disks(&self) -> impl Iterator<Item = DiskId> {
         (0..u16::try_from(self.disks.len()).unwrap()).map(DiskId)
+    }
+
+    // Gather a list of devices for zcache list_devices command.
+    pub fn list_devices(&self) -> DeviceList {
+        let devices = self
+            .disks
+            .iter()
+            .map(|d| DeviceEntry {
+                name: d.device_path.to_string(),
+                size: d.size,
+            })
+            .collect();
+        DeviceList { devices }
     }
 
     fn disk(&self, disk: DiskId) -> &Disk {

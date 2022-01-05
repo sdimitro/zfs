@@ -1206,6 +1206,10 @@ impl ZettaCache {
             *QUANTILES_IN_SIZE_HISTOGRAM,
         )
     }
+
+    pub fn devices_as_json(&self) -> String {
+        serde_json::to_string(&self.block_access.list_devices()).unwrap()
+    }
 }
 
 pub struct ZCacheDBHandle {

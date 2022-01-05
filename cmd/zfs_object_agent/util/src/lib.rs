@@ -14,6 +14,7 @@ mod nicenum;
 mod range_tree;
 mod tunable;
 mod vec_ext;
+mod zcache_devices;
 
 pub use bitmap_range_iterator::BitmapRangeIterator;
 pub use btreemap_ext::iter_wrapping;
@@ -30,3 +31,4 @@ pub use tunable::read_tunable_config;
 pub use vec_ext::AlignedBytes;
 pub use vec_ext::AlignedVec;
 pub use vec_ext::TerseVec;
+pub use zcache_devices::{DeviceEntry, DeviceList};

@@ -5,13 +5,7 @@ use async_trait::async_trait;
 use clap::SubCommand;
 
 static NAME: &str = "clear_hit_data";
-pub struct ClearHitData {}
-
-impl ClearHitData {
-    pub fn new() -> Self {
-        Self {}
-    }
-}
+pub struct ClearHitData;
 
 #[async_trait]
 impl ZcacheSubCommand for ClearHitData {

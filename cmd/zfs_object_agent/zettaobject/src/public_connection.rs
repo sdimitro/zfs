@@ -60,6 +60,7 @@ impl PublicConnectionState {
             Box::new(Self::clear_destroyed_pools),
         );
         server.register_handler("report_hits", Box::new(Self::report_hits));
+        server.register_handler("list_devices", Box::new(Self::list_devices));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -221,6 +222,32 @@ impl PublicConnectionState {
                 debug!("sending response: {:?}", response);
                 handler_return_ok(Some(response))
             }
+        }
+    }
+
+    fn list_devices(&mut self, nvl: NvList) -> HandlerReturn {
+        debug!("got request: {:?}", nvl);
+        let mut response = NvList::new_unique_names();
+        let cache = self.cache.as_ref().cloned();
+
+        if let Some(zettacache) = cache {
+            Ok(Box::pin(async move {
+                response.insert("Type", "list_devices").unwrap();
+                response.insert("result", "ok").unwrap();
+                response
+                    .insert("devices_json", zettacache.devices_as_json().as_str())
+                    .unwrap();
+
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        } else {
+            Ok(Box::pin(async move {
+                response.insert("Type", "list_devices").unwrap();
+                response.insert("result", "err").unwrap();
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
         }
     }
 }
