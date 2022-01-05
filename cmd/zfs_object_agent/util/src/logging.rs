@@ -113,7 +113,7 @@ impl BufferAppender {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct BufferAppenderConfig;
+pub struct BufferAppenderConfig {}
 
 pub struct BufferAppenderDeserializer;
 
