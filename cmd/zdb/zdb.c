@@ -83,6 +83,7 @@
 #include <libnvpair.h>
 #include <libzutil.h>
 #include <libzoa_util.h>
+#include <libzoa.h>
 #include "zdb.h"
 
 #define	ZDB_COMPRESS_NAME(idx) ((idx) < ZIO_COMPRESS_FUNCTIONS ?	\
@@ -166,6 +167,11 @@ uint64_t max_inflight_bytes = 256 * 1024 * 1024; /* 256MB */
 static int leaked_objects = 0;
 static range_tree_t *mos_refd_objs;
 static int objstore = 0;
+char *endpoint;
+char *region;
+char *bucket;
+char *creds_profile = "default";
+zoa_handle_t *zoa_handle;
 
 static void snprintf_blkptr_compact(char *, size_t, const blkptr_t *,
     boolean_t);
@@ -7346,11 +7352,88 @@ dump_leftover_checkpoint_blocks(spa_t *spa)
 	}
 }
 
+#define	MAX_ARRAY_PRINT_SIZE 16
+
+static int
+quiet_uint8_array_printer(nvlist_prtctl_t ctl, void *unused, nvlist_t *nvl,
+    const char *name, uint8_t *value, uint_t count)
+{
+	int verbosity = dump_opt['v'];
+	FILE *fp = nvlist_prtctl_getdest(ctl);
+	nvlist_prtctl_doindent(ctl, 1);
+	nvlist_prtctl_dofmt(ctl, NVLIST_FMT_MEMBER_NAME, name);
+	uint_t limit = (verbosity < 4 ? MIN(count, MAX_ARRAY_PRINT_SIZE) :
+	    count);
+	for (uint_t i = 0; i < limit; i++) {
+		if (i != 0)
+			nvlist_prtctl_dofmt(ctl, NVLIST_FMT_BTWN_ARRAY);
+		fprintf(fp, "0x%x", value[i]);
+	}
+
+	if (limit != count)
+		fprintf(fp, " ... [%u more]", count - limit);
+	return (1);
+}
+
+static nvlist_prtctl_t
+get_zoa_prtctl(void)
+{
+	nvlist_prtctl_t ctl = nvlist_prtctl_alloc();
+	nvlist_prtctl_setdest(ctl, stdout);
+	nvlist_prtctlop_uint8_array(ctl, quiet_uint8_array_printer, NULL);
+	return (ctl);
+}
+
+static void
+print_zoa_nvlist(nvlist_t *nvl)
+{
+	nvlist_prtctl_t ctl = get_zoa_prtctl();
+	nvlist_prt(nvl, ctl);
+	nvlist_prtctl_free(ctl);
+}
+
 static int
 verify_checkpoint(spa_t *spa)
 {
 	uberblock_t checkpoint;
 	int error;
+
+#ifdef HAVE_LIBZOA
+	if (spa_is_object_based(spa)) {
+		nvlist_t *pool_phys = NULL;
+		int err = libzoa_get_pool_phys(zoa_handle, spa_guid(spa),
+		    &pool_phys);
+		uint64_t checkpoint_txg;
+		if (err != 0) {
+			(void) printf("\nAgent metadata lookup failed: %s\n",
+			    strerror(err));
+			return (err);
+		}
+		if (nvlist_lookup_uint64(pool_phys, "checkpoint_txg",
+		    &checkpoint_txg) != 0) {
+			return (0);
+		}
+		fnvlist_free(pool_phys);
+
+		nvlist_t *uberblock_phys = NULL;
+		err = libzoa_get_uberblock_phys(zoa_handle, spa_guid(spa),
+		    checkpoint_txg, &uberblock_phys);
+		if (err != 0) {
+			(void) printf("\nAgent checkpoint detected, "
+			    "uberblock not found for txg %llu: %s\n",
+			    checkpoint_txg, strerror(err));
+			return (err);
+		}
+		(void) printf("\nAgent checkpoint uberblock found:\n");
+		print_zoa_nvlist(uberblock_phys);
+		uint_t len;
+		uberblock_t *checkpoint =
+		    (uberblock_t *)fnvlist_lookup_uint8_array(uberblock_phys,
+		    "zfs_uberblock", &len);
+		dump_uberblock(checkpoint, "\nZFS Uberblock:\n", "\n");
+		fnvlist_free(uberblock_phys);
+	}
+#endif
 
 	if (!spa_feature_is_active(spa, SPA_FEATURE_POOL_CHECKPOINT))
 		return (0);
@@ -7669,6 +7752,26 @@ dump_log_spacemap_obsolete_stats(spa_t *spa)
 	    (u_longlong_t)lsos.lsos_total_entries);
 }
 
+#ifdef HAVE_LIBZOA
+static void
+dump_agent_metadata(spa_t *spa)
+{
+	nvlist_t *pool_phys = NULL;
+	int err = libzoa_get_pool_phys(zoa_handle, spa_guid(spa), &pool_phys);
+	printf("Pool phys (object agent):\n");
+	print_zoa_nvlist(pool_phys);
+	uint64_t last_txg = fnvlist_lookup_uint64(pool_phys, "last_txg");
+	fnvlist_free(pool_phys);
+
+	nvlist_t *uberblock_phys = NULL;
+	err = libzoa_get_uberblock_phys(zoa_handle, spa_guid(spa), last_txg,
+	    &uberblock_phys);
+	printf("Uberblock (object agent):\n");
+	print_zoa_nvlist(uberblock_phys);
+	fnvlist_free(uberblock_phys);
+}
+#endif
+
 static void
 dump_zpool(spa_t *spa)
 {
@@ -7694,6 +7797,12 @@ dump_zpool(spa_t *spa)
 
 	if (dump_opt['u'])
 		dump_uberblock(&spa->spa_uberblock, "\nUberblock:\n", "\n");
+
+#ifdef HAVE_LIBZOA
+	if (spa_is_object_based(spa)) {
+		dump_agent_metadata(spa);
+	}
+#endif
 
 	if (dump_opt['D'])
 		dump_all_ddts(spa);
@@ -8396,8 +8505,7 @@ zdb_embedded_block(char *thing)
 
 
 static nvlist_t *
-make_objectstore_prop(char *endpoint, char *region, char *bucket,
-    char *creds_profile)
+make_objectstore_prop(void)
 {
 	if (endpoint == NULL) {
 		(void) fprintf(stderr,
@@ -8438,10 +8546,6 @@ main(int argc, char **argv)
 	int verbose = 0;
 	int error = 0;
 	char **searchdirs = NULL;
-	char *endpoint = NULL;
-	char *region = NULL;
-	char *bucket = NULL;
-	char *creds_profile = "default";
 	char *zoa_log_file = DEFAULT_ZOA_LOG;
 	int nsearch = 0;
 	char *target, *target_pool, dsname[ZFS_MAX_DATASET_NAME_LEN];
@@ -8641,7 +8745,7 @@ main(int argc, char **argv)
 			    "unsupported for an object-store based zpool.\n");
 			exit(1);
 		}
-		if (start_zfs_object_agent(zoa_log_file) != 0) {
+		if (start_zfs_object_agent(zoa_log_file, &zoa_handle) != 0) {
 			(void) fprintf(stderr, "Error initializing libzoa.\n");
 			exit(1);
 		}
@@ -8763,8 +8867,7 @@ main(int argc, char **argv)
 		args.path = searchdirs;
 		args.can_be_active = B_TRUE;
 		if (objstore) {
-			args.props = make_objectstore_prop(endpoint, region,
-			    bucket, creds_profile);
+			args.props = make_objectstore_prop();
 		}
 		error = zpool_find_config(NULL, target_pool, &cfg, &args,
 		    &libzpool_config_ops);
@@ -8897,6 +9000,28 @@ main(int argc, char **argv)
 
 	if (error)
 		fatal("can't open '%s': %s", target, strerror(error));
+
+	if (spa != NULL && spa_is_object_based(spa)) {
+		nvlist_t *nvl = zoa_create_connection_nvl(endpoint, region,
+		    bucket, creds_profile);
+		/*
+		 * We open the pool again here for the debugging
+		 * connection. Rust can't easily expose the same internal
+		 * state to the debugging connection that it does for the
+		 * normal root connection (which is used by the IO path to
+		 * perform reads and writes), so there is a separate interface
+		 * for opening the pool for debugging. This allows information
+		 * to be cached from query to query, improving performance
+		 * significantly when requesting complex metadata.
+		 */
+		error = libzoa_open_pool(zoa_handle, spa_guid(spa), nvl);
+		fnvlist_free(nvl);
+		if (error) {
+			fatal("can't open '%s' in agent: %s", target,
+			    strerror(error));
+		}
+
+	}
 
 	/*
 	 * Set the pool failure mode to panic in order to prevent the pool

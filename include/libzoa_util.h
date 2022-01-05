@@ -30,7 +30,7 @@
 extern "C" {
 #endif
 
-int start_zfs_object_agent(char *);
+int start_zfs_object_agent(char *, void**);
 
 #ifdef	__cplusplus
 }

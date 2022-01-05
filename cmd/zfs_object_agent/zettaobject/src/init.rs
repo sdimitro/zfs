@@ -8,6 +8,7 @@ use std::io::{Read, Write};
 use std::mem;
 use std::path::Path;
 use std::process;
+use tokio::runtime::Runtime;
 use uuid::Uuid;
 use zettacache::ZettaCache;
 
@@ -62,44 +63,39 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
     Ok(Uuid::parse_str(std::str::from_utf8(&bytes)?)?)
 }
 
-pub fn start(socket_dir: &str, cache_paths: Vec<&str>) {
+pub fn start(socket_dir: &str, cache_paths: Vec<&str>, runtime: Runtime) {
     /*
      * Take an exclusive lock on a lock file. This prevents multiple agent
      * processes from operating out of the same socket_dir.
      */
     lock_socket_dir(socket_dir);
 
-    tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("zoa")
-        .build()
-        .unwrap()
-        .block_on(async move {
-            // Kick off zpool destroy tasks.
-            pool_destroy::init_pool_destroyer(socket_dir).await;
+    runtime.block_on(async move {
+        // Kick off zpool destroy tasks.
+        pool_destroy::init_pool_destroyer(socket_dir).await;
 
-            let cache = match cache_paths.is_empty() {
-                false => Some(ZettaCache::open(cache_paths).await),
-                true => None,
-            };
+        let cache = match cache_paths.is_empty() {
+            false => Some(ZettaCache::open(cache_paths).await),
+            true => None,
+        };
 
-            PublicServerState::start(socket_dir, cache.as_ref().cloned());
+        PublicServerState::start(socket_dir, cache.as_ref().cloned());
 
-            let id_path = Path::new("/run/zfs_agent_id");
+        let id_path = Path::new("/run/zfs_agent_id");
 
-            let id = parse_id_from_file(id_path).unwrap_or_else(|err| {
-                trace!("Opening agent id failed: {:?}", err);
-                let mut file = File::create(id_path).unwrap();
-                let uuid = Uuid::new_v4();
-                let mut buf = [0; uuid::adapter::Hyphenated::LENGTH];
-                uuid.to_hyphenated().encode_lower(&mut buf);
-                file.write_all(&buf).unwrap();
-                uuid
-            });
-
-            RootServerState::start(socket_dir, cache, id);
-
-            // keep the process from exiting
-            let () = futures::future::pending().await;
+        let id = parse_id_from_file(id_path).unwrap_or_else(|err| {
+            trace!("Opening agent id failed: {:?}", err);
+            let mut file = File::create(id_path).unwrap();
+            let uuid = Uuid::new_v4();
+            let mut buf = [0; uuid::adapter::Hyphenated::LENGTH];
+            uuid.to_hyphenated().encode_lower(&mut buf);
+            file.write_all(&buf).unwrap();
+            uuid
         });
+
+        RootServerState::start(socket_dir, cache, id);
+
+        // keep the process from exiting
+        let () = futures::future::pending().await;
+    });
 }

@@ -1,13 +1,25 @@
+use foreign_types::ForeignType;
+use libc::c_void;
+use nix::errno::Errno;
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use zettaobject::base_types::Txg;
+use zettaobject::debug::DebugHandle;
+
+use nvpair::{NvList, NvListRef};
+use zettacache::base_types::PoolGuid;
+
+#[allow(non_camel_case_types)]
+pub type zoa_handle_t = c_void;
 
 /// # Safety
-/// The pointers must be to actual C strings.
+/// The c_char pointers must be to actual C strings. handle must be a valid pointer to a void *, or NULL.
 #[no_mangle]
 pub unsafe extern "C" fn libzoa_init(
     socket_dir_ptr: *const c_char,
     log_file_ptr: *const c_char,
     cache_path_ptr: *const c_char, // XXX change to take a list of paths
+    handle: *mut *mut zoa_handle_t,
 ) {
     let socket_dir = CStr::from_ptr(socket_dir_ptr)
         .to_string_lossy()
@@ -17,12 +29,79 @@ pub unsafe extern "C" fn libzoa_init(
     let verbosity = 2;
     util::setup_logging(verbosity, Some(log_file.as_str()), None);
 
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("zoa")
+        .build()
+        .unwrap();
+
+    if !handle.is_null() {
+        *handle = Box::into_raw(Box::new(DebugHandle::new(runtime.handle().clone()))).cast();
+    }
+
     if cache_path_ptr.is_null() {
-        zettaobject::init::start(&socket_dir, Vec::new());
+        zettaobject::init::start(&socket_dir, Vec::new(), runtime);
     } else {
         let cache = CStr::from_ptr(cache_path_ptr)
             .to_string_lossy()
             .into_owned();
-        zettaobject::init::start(&socket_dir, vec![cache.as_str()]);
+        zettaobject::init::start(&socket_dir, vec![cache.as_str()], runtime);
     }
+}
+
+unsafe fn set_out_nvl(out: *mut *mut nvpair_sys::nvlist_t, result: Result<NvList, Errno>) -> i32 {
+    match result {
+        Ok(result) => {
+            *out = result.into_ptr();
+            0
+        }
+        Err(i) => i as i32,
+    }
+}
+
+/// # Safety
+/// In order to use this function safely, handle must be a pointer that was previously returned by
+/// libzoa_init().
+#[no_mangle]
+pub unsafe extern "C" fn libzoa_open_pool(
+    raw_handle: *mut zoa_handle_t,
+    guid: u64,
+    raw_nvl: *const nvpair_sys::nvlist_t,
+) -> i32 {
+    let handle = raw_handle.cast::<DebugHandle>().as_mut().unwrap();
+    let nvl = NvListRef::from_ptr(raw_nvl);
+    handle
+        .open_pool(PoolGuid(guid), nvl)
+        .map_or_else(|errno| errno as i32, |_| 0)
+}
+
+/// # Safety
+/// In order to use this function safely:
+/// * out must be a valid pointer to a not-necessarily valid pointer to an nvlist_t.
+/// * handle must be a pointer that was previously returned by libzoa_init().
+#[no_mangle]
+pub unsafe extern "C" fn libzoa_get_pool_phys(
+    raw_handle: *mut zoa_handle_t,
+    guid: u64,
+    out: *mut *mut nvpair_sys::nvlist_t,
+) -> i32 {
+    let handle = raw_handle.cast::<DebugHandle>().as_mut().unwrap();
+    let res = handle.get_pool_phys(PoolGuid(guid));
+    set_out_nvl(out, res)
+}
+
+/// # Safety
+/// In order to use this function safely:
+/// * out must be a valid pointer to a not-necessarily valid pointer to an nvlist_t.
+/// * handle must be a pointer that was previously returned by libzoa_init().
+#[no_mangle]
+pub unsafe extern "C" fn libzoa_get_uberblock_phys(
+    raw_handle: *mut zoa_handle_t,
+    guid: u64,
+    txg: u64,
+    out: *mut *mut nvpair_sys::nvlist_t,
+) -> i32 {
+    let handle = raw_handle.cast::<DebugHandle>().as_mut().unwrap();
+    let res = handle.get_uberblock_phys(PoolGuid(guid), Txg(txg));
+    set_out_nvl(out, res)
 }

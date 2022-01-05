@@ -8254,7 +8254,8 @@ main(int argc, char **argv)
 	zs = ztest_shared;
 
 	if (ztest_opts.zo_obj_store) {
-		if (start_zfs_object_agent(ztest_opts.zo_zoa_log_file) != 0) {
+		if (start_zfs_object_agent(ztest_opts.zo_zoa_log_file, NULL) !=
+		    0) {
 			(void) fprintf(stderr, "Error initializing libzoa.\n");
 			exit(1);
 		}

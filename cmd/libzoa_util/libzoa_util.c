@@ -96,7 +96,7 @@ static void
 zoa_thread(void *arg)
 {
 	set_object_agent_sock_dir(zoa_sock_dir);
-	libzoa_init(zoa_sock_dir, zoa_log_file, NULL);
+	libzoa_init(zoa_sock_dir, zoa_log_file, NULL, (void **)arg);
 }
 #endif
 
@@ -105,14 +105,14 @@ zoa_thread(void *arg)
  * initialization to finish.
  */
 int
-start_zfs_object_agent(char *logfile)
+start_zfs_object_agent(char *logfile, void **handle)
 {
 #ifdef HAVE_LIBZOA
 	(void) strlcpy(zoa_log_file, logfile, sizeof (zoa_log_file));
 	char *dir = mkdtemp(zoa_sock_dir);
 	ASSERT3S(dir, !=, NULL);
 
-	thread_create(NULL, 0, zoa_thread, NULL, 0, NULL,
+	thread_create(NULL, 0, zoa_thread, handle, 0, NULL,
 	    TS_RUN | TS_JOINABLE, defclsyspri);
 
 	return (zoa_init_wait(zoa_sock_dir));

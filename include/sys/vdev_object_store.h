@@ -49,6 +49,8 @@
 #define	AGENT_TYPE_CLEAR_DESTROYED_POOLS "clear destroyed pools"
 #define	AGENT_TYPE_RESUME_DESTROY_POOL	"resume destroy pool"
 #define	AGENT_TYPE_RESUME_DESTROY_POOL_DONE "resume destroy pool done"
+#define	AGENT_TYPE_GET_POOL_PHYS	"get pool phys"
+#define	AGENT_TYPE_GET_UBERBLOCK_PHYS	"get uberblock phys"
 
 #define	AGENT_NAME			"name"
 #define	AGENT_SIZE			"size"

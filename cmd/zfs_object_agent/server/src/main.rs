@@ -164,7 +164,15 @@ fn main() {
                 chrono::Local::now().format("%Z (%:z)")
             );
 
-            zettaobject::init::start(socket_dir, cache_paths);
+            zettaobject::init::start(
+                socket_dir,
+                cache_paths,
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("zoa")
+                    .build()
+                    .unwrap(),
+            );
         }
     }
 }

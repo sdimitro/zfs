@@ -352,7 +352,7 @@ impl UberblockPhys {
         &self.features
     }
 
-    async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
+    pub async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
         let buf = object_access
             .get_object(Self::key(guid, txg), ObjectAccessStatType::MetadataGet)
             .await?;

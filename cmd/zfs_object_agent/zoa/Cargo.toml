@@ -14,6 +14,17 @@ crate-type = ["cdylib"]      # Creates dynamic lib
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+anyhow = "1.0"
+foreign-types = "0.5.0"
+futures = "0.3.13"
+libc = "0.2"
+log = "0.4"
+log4rs = "1.0.0"
+nix = "0.23.1"
+nvpair = { git = "https://github.com/ahrens/rust-libzfs", branch = "work"}
+nvpair-sys = { git = "https://github.com/ahrens/rust-libzfs", branch = "work"}
+tokio = { version = "1.4", features = ["full"] }
 util = { path =  "../util" }
+uuid = {version = "0.8.2", features = ["v4"]}
 zettacache = { path =  "../zettacache" }
 zettaobject = { path =  "../zettaobject" }

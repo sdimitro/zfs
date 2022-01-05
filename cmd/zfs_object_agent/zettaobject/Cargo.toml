@@ -28,6 +28,7 @@ log = "0.4"
 log4rs = "1.0.0"
 lru = "0.7.0"
 more-asserts = "0.2.1"
+nix = "0.23.1"
 num = "0.4.0"
 nvpair = { git = "https://github.com/ahrens/rust-libzfs", branch = "work"}
 rand = "0.8.3"

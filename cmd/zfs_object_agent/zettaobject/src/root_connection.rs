@@ -489,7 +489,7 @@ impl RootConnectionState {
             debug!("got request: {:?}", nvl);
 
             let guid = PoolGuid(nvl.lookup_uint64("GUID").unwrap());
-            let object_access = RootConnectionState::get_object_access(&nvl).unwrap();
+            let object_access = Self::get_object_access(&nvl).unwrap();
 
             let mut response = NvList::new_unique_names();
 
