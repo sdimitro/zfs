@@ -95,18 +95,29 @@ impl RangeTree {
         self.space -= size;
     }
 
-    pub fn verify_absent(&self, start: u64, size: u64) {
+    pub fn overlap(&self, start: u64, size: u64) -> Option<(u64, u64)> {
         assert_ne!(size, 0);
 
         let end = start + size;
         if let Some((&existing_start, &existing_size)) = self.tree.range(..end).next_back() {
             let existing_end = existing_start + existing_size;
             if existing_start <= start && existing_end >= end {
-                panic!(
-                    "range_tree segment [{}, {}) is not absent (overlaps with segment [{}, {}))",
-                    start, end, existing_start, existing_end
-                );
+                return Some((existing_start, existing_size));
             }
+        }
+
+        None
+    }
+
+    pub fn verify_absent(&self, start: u64, size: u64) {
+        if let Some((existing_start, existing_size)) = self.overlap(start, size) {
+            panic!(
+                "range_tree segment [{}, {}) is not absent (overlaps with segment [{}, {}))",
+                start,
+                start + size,
+                existing_start,
+                existing_start + existing_size
+            );
         }
     }
 

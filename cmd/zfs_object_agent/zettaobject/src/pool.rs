@@ -1711,7 +1711,7 @@ impl Pool {
                     .lookup(self.state.shared_state.guid, block, LookupSource::Read)
                     .await
                 {
-                    LookupResponse::Present((cached_bytes, _key, _value)) => cached_bytes.into(),
+                    LookupResponse::Present((cached_bytes, _key)) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
                         let mut data_object = self.read_object_for_block(block, heal).await;
                         let bytes = data_object.blocks.remove(&block).unwrap();

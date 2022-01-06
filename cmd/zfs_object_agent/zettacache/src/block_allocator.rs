@@ -26,6 +26,12 @@ lazy_static! {
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =
         get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
     static ref SLAB_CONDENSE_PER_CHECKPOINT: u64 = get_tunable("slab_condense_per_checkpoint", 10);
+
+    // The target amount of free space that should be contained in free slabs, as a percentage;
+    // i.e. 50% of all free space within the allocator, should be contained in free slabs.
+    // The special value of "0" can be used to diable rebalancing entirely.
+    static ref SLAB_REBALANCING_TARGET_FREE_SLABS_PCT: u64 =
+        get_tunable("slab_rebalancing_target_free_slabs_pct", 50);
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -70,10 +76,12 @@ trait SlabTrait {
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap);
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap);
     fn max_size(&self) -> u32;
+    fn capacity_bytes(&self) -> u64;
     fn free_space(&self) -> u64;
     fn allocated_space(&self) -> u64;
     fn phys_type(&self) -> SlabPhysType;
     fn num_segments(&self) -> u64;
+    fn allocated_extents(&self) -> Vec<Extent>;
     fn dump_info(&self);
 }
 
@@ -110,12 +118,12 @@ impl BitmapSlab {
         )
     }
 
-    fn slot_to_offset(&self, slot: u32) -> DiskLocation {
+    fn slot_to_location(&self, slot: u32) -> DiskLocation {
         self.location + u64::from(slot * self.slot_size)
     }
 
     fn slab_end(&self) -> DiskLocation {
-        self.slot_to_offset(self.total_slots)
+        self.slot_to_location(self.total_slots)
     }
 
     fn verify_contains(&self, extent: Extent) {
@@ -184,7 +192,7 @@ impl SlabTrait for BitmapSlab {
         assert!(!self.freeing.contains(slot));
 
         Some(Extent {
-            location: self.slot_to_offset(slot),
+            location: self.slot_to_location(slot),
             size: self.slot_size.into(),
         })
     }
@@ -202,8 +210,14 @@ impl SlabTrait for BitmapSlab {
             slot
         );
 
-        let inserted = self.freeing.insert(slot);
-        assert!(inserted);
+        if self.allocating.contains(slot) {
+            assert!(!self.freeing.contains(slot));
+            let removed = self.allocating.remove(slot);
+            assert!(removed);
+        } else {
+            let inserted = self.freeing.insert(slot);
+            assert!(inserted);
+        }
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
@@ -216,7 +230,7 @@ impl SlabTrait for BitmapSlab {
         for (first, last) in self.allocating.iter_ranges() {
             assert_ge!(last, first);
             spacemap.alloc(Extent {
-                location: self.slot_to_offset(first),
+                location: self.slot_to_location(first),
                 size: u64::from((last - first + 1) * self.slot_size),
             });
         }
@@ -225,7 +239,7 @@ impl SlabTrait for BitmapSlab {
         for (first, last) in self.freeing.iter_ranges() {
             assert_ge!(last, first);
             spacemap.free(Extent {
-                location: self.slot_to_offset(first),
+                location: self.slot_to_location(first),
                 size: u64::from((last - first + 1) * self.slot_size),
             });
         }
@@ -245,7 +259,7 @@ impl SlabTrait for BitmapSlab {
         for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
             assert_ge!(last, first);
             spacemap.alloc(Extent {
-                location: self.slot_to_offset(first),
+                location: self.slot_to_location(first),
                 size: u64::from((last - first + 1) * self.slot_size),
             });
             written_slots += u64::from(last - first + 1);
@@ -261,7 +275,7 @@ impl SlabTrait for BitmapSlab {
         // entries will be later marked as allocated in flush_to_spacemap().
         for (first, last) in self.allocating.iter_ranges() {
             spacemap.free(Extent {
-                location: self.slot_to_offset(first),
+                location: self.slot_to_location(first),
                 size: u64::from((last - first + 1) * self.slot_size),
             });
         }
@@ -269,6 +283,12 @@ impl SlabTrait for BitmapSlab {
 
     fn max_size(&self) -> u32 {
         self.slot_size
+    }
+
+    fn capacity_bytes(&self) -> u64 {
+        // Compute from slot size rather than return slab size since the slot size
+        // may not evenly divide the slab size, so some slab space may not be available.
+        u64::from(self.total_slots * self.slot_size)
     }
 
     fn free_space(&self) -> u64 {
@@ -296,8 +316,8 @@ impl SlabTrait for BitmapSlab {
             (used_slots * 100) / self.total_slots
         );
         for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
-            let first_offset = self.slot_to_offset(first);
-            let last_offset = self.slot_to_offset(last + 1);
+            let first_offset = self.slot_to_location(first);
+            let last_offset = self.slot_to_location(last + 1);
             println!(
                 "\tALLOC {:?} offset: [{}, {}) length: {} - slots: [{}, {}) count: {}",
                 first_offset.disk,
@@ -316,6 +336,26 @@ impl SlabTrait for BitmapSlab {
         self.allocatable
             .iter_inverse_ranges(self.total_slots)
             .count() as u64
+    }
+
+    // Each extent may cover multiple adjacent allocated slots/blocks on disk. Additionally,
+    // the list of extents are sorted in no particular order.
+    fn allocated_extents(&self) -> Vec<Extent> {
+        let mut all = RoaringBitmap::new();
+        all.insert_range(0..u64::from(self.total_slots));
+        let allocated = all - &self.allocatable - &self.freeing;
+
+        allocated
+            .iter_ranges()
+            .map(|(first, last)| {
+                let size = (last - first + 1) * self.slot_size;
+                let location = self.slot_to_location(first);
+                Extent {
+                    size: size.into(),
+                    location,
+                }
+            })
+            .collect()
     }
 }
 
@@ -405,11 +445,22 @@ impl SlabTrait for ExtentSlab {
 
     fn free(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
-        self.allocatable
-            .verify_absent(extent.location.offset, extent.size);
-        self.allocating
-            .verify_absent(extent.location.offset, extent.size);
-        self.freeing.add(extent.location.offset, extent.size);
+
+        let offset = extent.location.offset;
+        let size = extent.size;
+
+        self.allocatable.verify_absent(offset, size);
+
+        match self.allocating.overlap(offset, size) {
+            Some(_) => {
+                self.freeing.verify_absent(offset, size);
+                self.allocating.remove(offset, size);
+            }
+            None => {
+                self.allocating.verify_absent(offset, size);
+                self.freeing.add(offset, size);
+            }
+        }
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
@@ -464,6 +515,10 @@ impl SlabTrait for ExtentSlab {
         self.max_allowed_alloc_size
     }
 
+    fn capacity_bytes(&self) -> u64 {
+        self.total_space
+    }
+
     fn free_space(&self) -> u64 {
         self.allocatable.space()
     }
@@ -504,6 +559,27 @@ impl SlabTrait for ExtentSlab {
         self.allocatable
             .iter_inverse(self.location.offset, self.slab_end().offset)
             .count() as u64
+    }
+
+    fn allocated_extents(&self) -> Vec<Extent> {
+        let mut allocated: RangeTree = Default::default();
+
+        self.allocatable
+            .iter_inverse(self.location.offset, self.slab_end().offset)
+            .for_each(|(offset, size)| {
+                allocated.add(offset, size);
+            });
+
+        // Due to how frees are not immediately reflected in "allocatable", we need to be careful
+        // to account for them seperately, here.
+        self.freeing.iter().for_each(|(&offset, &size)| {
+            allocated.remove(offset, size);
+        });
+
+        allocated
+            .iter()
+            .map(|(&offset, &size)| Extent::new(self.location.disk, offset, size))
+            .collect()
     }
 }
 
@@ -549,6 +625,10 @@ impl SlabTrait for FreeSlab {
         panic!("free slab doesn't have a maximum allocation size");
     }
 
+    fn capacity_bytes(&self) -> u64 {
+        self.extent.size
+    }
+
     fn free_space(&self) -> u64 {
         self.extent.size
     }
@@ -569,11 +649,95 @@ impl SlabTrait for FreeSlab {
     fn num_segments(&self) -> u64 {
         0
     }
+
+    fn allocated_extents(&self) -> Vec<Extent> {
+        vec![]
+    }
+}
+
+struct EvacuatingSlab {
+    extent: Extent,
+}
+
+impl EvacuatingSlab {
+    fn new_slab(id: SlabId, generation: SlabGeneration, extent: Extent) -> Slab {
+        Slab::new(
+            id,
+            generation,
+            SlabType::Evacuating(EvacuatingSlab { extent }),
+        )
+    }
+}
+
+impl SlabTrait for EvacuatingSlab {
+    fn import_alloc(&mut self, extent: Extent) {
+        panic!("attempting to import alloc {:?} on evacuating slab", extent);
+    }
+
+    fn import_free(&mut self, extent: Extent) {
+        panic!("attempting to import free {:?} on evacuating slab", extent);
+    }
+
+    fn allocate(&mut self, size: u32) -> Option<Extent> {
+        panic!(
+            "attempting to allocate block from evacuating slab: size = {}",
+            size
+        );
+    }
+
+    fn free(&mut self, extent: Extent) {
+        panic!(
+            "attempting to free block from evacuating slab: {:?}",
+            extent
+        );
+    }
+
+    fn flush_to_spacemap(&mut self, _: &mut SpaceMap) {
+        panic!("attempting to flush evacuating slab",);
+    }
+
+    fn condense_to_spacemap(&self, _: &mut SpaceMap) {
+        // Nothing to condense for evacuating slabs
+    }
+
+    fn max_size(&self) -> u32 {
+        panic!("evacuating slab doesn't have a maximum allocation size");
+    }
+
+    fn capacity_bytes(&self) -> u64 {
+        0
+    }
+
+    fn free_space(&self) -> u64 {
+        0
+    }
+
+    fn allocated_space(&self) -> u64 {
+        0
+    }
+
+    fn phys_type(&self) -> SlabPhysType {
+        SlabPhysType::Evacuating
+    }
+
+    fn dump_info(&self) {
+        println!("{:?}", self.extent);
+        println!();
+    }
+
+    fn num_segments(&self) -> u64 {
+        0
+    }
+
+    fn allocated_extents(&self) -> Vec<Extent> {
+        panic!("evacuating slab doesn't track allocated extents");
+    }
 }
 
 enum SlabType {
     BitmapBased(BitmapSlab),
     ExtentBased(ExtentSlab),
+    Evacuating(EvacuatingSlab),
     Free(FreeSlab),
 }
 
@@ -585,6 +749,7 @@ impl SlabType {
         match self {
             SlabType::BitmapBased(t) => cb(t),
             SlabType::ExtentBased(t) => cb(t),
+            SlabType::Evacuating(t) => cb(t),
             SlabType::Free(t) => cb(t),
         }
     }
@@ -596,6 +761,7 @@ impl SlabType {
         match self {
             SlabType::BitmapBased(t) => cb(t),
             SlabType::ExtentBased(t) => cb(t),
+            SlabType::Evacuating(t) => cb(t),
             SlabType::Free(t) => cb(t),
         }
     }
@@ -661,8 +827,16 @@ impl Slab {
         self.info.with_trait(|t| t.allocated_space())
     }
 
+    fn capacity_bytes(&self) -> u64 {
+        self.info.with_trait(|t| t.capacity_bytes())
+    }
+
     fn num_segments(&self) -> u64 {
         self.info.with_trait(|t| t.num_segments())
+    }
+
+    fn allocated_extents(&self) -> Vec<Extent> {
+        self.info.with_trait(|t| t.allocated_extents())
     }
 
     fn get_phys(&self) -> SlabPhys {
@@ -748,9 +922,29 @@ impl SortedSlabs {
         self.get_current()
     }
 
-    fn insert(&mut self, sorted_slab_entry: SortedSlabEntry) {
-        self.by_freeness.insert(sorted_slab_entry);
-        self.last_allocated = Some(sorted_slab_entry);
+    fn insert(&mut self, entry: SortedSlabEntry) {
+        self.by_freeness.insert(entry);
+        self.last_allocated = Some(entry);
+    }
+
+    fn remove(&mut self, id: SlabId) {
+        if let Some(last) = self.last_allocated {
+            // If we are removing the slab that matches the allocation cursor, we need to ensure we advance the cursor
+            // so that future allocations don't attempt to allocate from this removed slab.
+            if last.slab_id == id {
+                self.advance();
+            }
+        }
+
+        let removed = self.by_freeness.remove(
+            &self
+                .by_freeness
+                .iter()
+                .find(|e| e.slab_id == id)
+                .unwrap()
+                .clone(),
+        );
+        assert!(removed);
     }
 }
 
@@ -786,6 +980,11 @@ impl SlabAllocationBuckets {
             .range_mut(request_size..)
             .next()
             .expect("allocation request larger than largest configured slab type")
+    }
+
+    fn remove_slab(&mut self, slab: &Slab) {
+        let bucket = slab.max_size();
+        self.0.get_mut(&bucket).unwrap().remove(slab.id);
     }
 }
 
@@ -835,6 +1034,9 @@ impl Slabs {
                         }
                         SlabPhysType::Free => {
                             FreeSlab::new_slab(sid, phys_slab.generation, slab_extent)
+                        }
+                        SlabPhysType::Evacuating => {
+                            EvacuatingSlab::new_slab(sid, phys_slab.generation, slab_extent)
                         }
                     }
                 })
@@ -929,6 +1131,7 @@ pub struct BlockAllocator {
     slabs: Slabs,
     dirty_slabs: Vec<SlabId>,
     free_slabs: Vec<SlabId>,
+    evacuating_slabs: Vec<SlabId>,
 
     slab_buckets: SlabAllocationBuckets,
 
@@ -971,20 +1174,23 @@ impl BlockAllocator {
 
         let mut available_space = 0u64;
         let mut free_slabs = Vec::new();
+        let mut evacuating_slabs = Vec::new();
         let mut slabs_by_bucket: BTreeMap<u32, Vec<SortedSlabEntry>> = BTreeMap::new();
-
         for slab in slabs.0.iter() {
+            available_space += slab.free_space();
+
             match &slab.info {
                 SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => {
                     slabs_by_bucket
                         .entry(slab.max_size())
                         .or_default()
                         .push(slab.to_sorted_slab_entry());
-                    available_space += slab.free_space();
                 }
                 SlabType::Free(_) => {
                     free_slabs.push(slab.id);
-                    available_space += u64::from(slab_size);
+                }
+                SlabType::Evacuating(_) => {
+                    evacuating_slabs.push(slab.id);
                 }
             }
         }
@@ -1007,6 +1213,7 @@ impl BlockAllocator {
             slabs,
             dirty_slabs: Default::default(),
             free_slabs,
+            evacuating_slabs,
             slab_buckets,
             available_space,
             freeing_space: 0,
@@ -1149,6 +1356,234 @@ impl BlockAllocator {
         self.dirty_slab_id(slab_id);
     }
 
+    pub fn rebalance_needed(&self) -> bool {
+        self.num_slabs_to_rebalance() != 0
+    }
+
+    //
+    // This function is the entry-point to starting the cache rebalancing process. This will select which slab(s)
+    // need to be rebalanced, mark those slabs as undergoing evacuation, and allocate new disk locations for the
+    // data currently stored on those slabs. The value returned by this function is a map of key-value pairs,
+    // where the key denotes the current location on disk (i.e. on the slab(s) being evacuated), and the value is
+    // the newly allocated disk location where the data should be moved (to facilitate the evacuation).
+    //
+    // It is the responsibility of the consumer of this function to actually move the data from the old location,
+    // to the new location. This way, the allocator remains responsible only for the allocation of disk extents,
+    // and not for the reading and writing of the block data.
+    //
+    // Once the consumer has finished the process of moving the data blocks to their new locations, it is also the
+    // consumer's responsibility to call the "rebalance_fini" function, marking the rebalance process as finished.
+    // This allows the allocator to transition the slabs that were undergoing evacuation to free slabs, such that
+    // the slabs can later be used for allocation.
+    //
+    pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, DiskLocation>> {
+        if *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT == 0 {
+            trace!("rebalance requested, but not enabled");
+            return None;
+        }
+
+        // For now, ensure rebalance_fini() is called before this function can be called a second time.
+        assert!(self.evacuating_slabs.is_empty());
+
+        let slabs = self.slabs_to_rebalance();
+        if slabs.is_empty() {
+            info!("cache rebalance is not needed");
+            return None;
+        }
+
+        info!("initializing rebalance of {} slabs", slabs.len());
+
+        // In order to ensure the allocations performed in rebalance_slab() (called below) are not satisfied by any
+        // of the slabs we're going to rebalance, we need to remove these slabs from the list of slabs available
+        // for allocation. Further, we must remove all slabs before we do any allocations, to ensure we don't move
+        // an extent multiple times; otherwise, data corruption could occur, as the data contained in the extents,
+        // can be moved by the caller in any order.
+        //
+        // For example, if we mark an extent as moving from disk location A to B, and then again from B to C, the
+        // final data contained at disk location C could be incorrect, if the caller does the move of B to C before
+        // the move of A to B. Since we do not enforce the order in which the caller will do the copies, we need to
+        // ensure this cannot happen, by never moving an extent more than once.
+        for &id in slabs.iter() {
+            trace!("prepping slab '{:?}' for rebalancing", id);
+            self.slab_buckets.remove_slab(self.slabs.get(id));
+        }
+
+        let map: BTreeMap<Extent, DiskLocation> = slabs
+            .iter()
+            .map(|&id| self.rebalance_slab(id))
+            .flatten()
+            .collect();
+
+        assert!(!self.evacuating_slabs.is_empty());
+        Some(map)
+    }
+
+    fn num_slabs_to_rebalance(&self) -> u64 {
+        let available = self.available();
+        let target_number_of_free_slabs =
+            (available * *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
+        let current_number_of_free_slabs = self.free_slabs.len() as u64;
+
+        target_number_of_free_slabs.saturating_sub(current_number_of_free_slabs)
+    }
+
+    fn slabs_to_rebalance(&self) -> Vec<SlabId> {
+        let num_slabs_to_rebalance = self.num_slabs_to_rebalance();
+
+        trace!(
+            "attempting to find {} slabs to rebalance",
+            num_slabs_to_rebalance
+        );
+
+        let mut free_space_per_bucket: BTreeMap<u32, u64> = self
+            .slab_buckets
+            .0
+            .iter()
+            .map(|(bucket, slabs)| {
+                (
+                    *bucket,
+                    slabs
+                        .by_freeness
+                        .iter()
+                        .map(|entry| self.slabs.get(entry.slab_id).free_space())
+                        .sum(),
+                )
+            })
+            .collect();
+
+        // list of slabs, sorted by free space; most free first.
+        let slabs: BTreeSet<SortedSlabEntry> = self
+            .slabs
+            .0
+            .iter()
+            // TODO: Add support for rebalacing of non-bitmap based slab types.
+            // The rebalance_slab() function does not currently handle allocation failures. Thus, we currently
+            // only support the rebalancing of bitmap based slabs, as we can avoid allocation failures of these
+            // slab types relatively easily.
+            .filter(|&slab| matches!(slab.info, SlabType::BitmapBased(_)))
+            .map(|slab| slab.to_sorted_slab_entry())
+            .collect();
+
+        // The goal of the rebalance, is to generate more free slabs, such that we can satisfy future allocations. It doesn't
+        // matter which bucket the free slab came from; if the free slab comes from a very fragmented bucket, or a very compact
+        // bucket, it doesn't really matter. The only thing that matters, is that we have free slabs available, such that future
+        // allocations do not fail.
+        //
+        // Further, a secondary goal, is to accomplish the aformentioned primary goal, but while minimizing the cost of doing so;
+        // i.e. minimizing the bytes read and written by the rebalacing process.
+        //
+        // As such, we select the slabs that we intend to rebalance, by seeking to rebalance the most free slabs first. This way,
+        // we will choose the slabs that can be evacuated with the least about of data transfer (i.e. disk reads and writes),
+        // regardless of the bucket the slab belongs too.
+        slabs
+            .iter()
+            .filter_map(|entry| {
+                let slab = self.slabs.get(entry.slab_id);
+
+                // We currently only support rebalancing of bitmap based slabs; see comment above.
+                // The logic below only works for bitmap based slabs.
+                assert!(matches!(slab.info, SlabType::BitmapBased(_)));
+
+                let bucket = slab.max_size();
+                let bytes_free_in_bucket = free_space_per_bucket.get_mut(&bucket).unwrap();
+
+                // If there's not enough free space in the bucket to completely evacuate this slab's allocated bytes,
+                // then we skip it, and move on to the next slab in the (sorted) list. This way, we don't have to handle
+                // allocation failures when rebalance_slab() is called.
+                *bytes_free_in_bucket = bytes_free_in_bucket.checked_sub(slab.capacity_bytes())?;
+
+                Some(slab.id)
+            })
+            .take(usize::try_from(num_slabs_to_rebalance).unwrap())
+            .collect()
+    }
+
+    fn rebalance_slab(&mut self, id: SlabId) -> Vec<(Extent, DiskLocation)> {
+        trace!("starting rebalance of slab '{:?}'", id);
+
+        let slab = self.slabs.get(id);
+
+        // We currently only support rebalancing of bitmap based slabs; see comment in rebalance_init().
+        // The logic below only works for bitmap based slabs.
+        assert!(matches!(slab.info, SlabType::BitmapBased(_)));
+
+        let slot_size = u64::from(slab.max_size());
+
+        // We must do the new allocations prior to transitioning the slab to an evacuating slab type, since
+        // we don't support allocations from evacuating slabs.
+        let map = slab
+            .allocated_extents()
+            .iter()
+            // Note, this logic only works for bitmap based slabs, but that's fine, as we only support rebalancing of
+            // bitmap based slabs.
+            //
+            // We need to perform a seperate allocation for each allocated slot in the bitmap extent we're attempting to
+            // rebalance. This is so that the allocations we make, are guaranteed to be fulfilled by the same slab bucket
+            // the data is currently contained in. We don't want to coalesce multiple slots into a single allocation, as
+            // that would cause the new allocation to occur in a different sized slab bucket. Thus, this step converts
+            // each allocated extent, representing a contiguous range of allocated slots in the bitmap slab, into multiple
+            // extents, one for each allocated slot in the range. This way, the extent for each allocated slot can then be
+            // used to perform the new allocations, and generate a mapping of old location to new location, for each allocated
+            // slot in the bitmap slab.
+            .flat_map(|&extent| {
+                // For bitmap based slabs, allocations can only come in multiples of the slot size.
+                assert_eq!(extent.size % slot_size, 0);
+
+                (0..(extent.size / slot_size)).map(move |slot| Extent {
+                    size: slot_size,
+                    location: extent.location + (slot * slot_size),
+                })
+            })
+            // Now that we have a unique extent for each allocated slot, we can perform the new allocation, marking the location
+            // the old data should be moved to.
+            .map(|old| {
+                let size = u32::try_from(old.size).unwrap();
+
+                // It's the caller's responsibility to ensure allocation failures do not occur.
+                let new = self.allocate(size).unwrap_or_else(|| {
+                    panic!("cache rebalance allocation failed for size: '{:?}'", size)
+                });
+
+                (old, new.location)
+            })
+            .collect();
+
+        // Since evacuating slabs don't have any allocatable space, we must account for that here; we must do
+        // this before we transition to an evacuating slab (evacuating slabs have no free space).
+        let slab = self.slabs.get(id);
+        self.available_space -= slab.free_space();
+
+        trace!("marking slab '{:?}' as evacuating", id);
+
+        self.evacuating_slabs.push(id);
+        *self.slabs.get_mut(id) =
+            EvacuatingSlab::new_slab(id, slab.generation.next(), self.slab_extent_from_id(id));
+
+        map
+    }
+
+    // See comment above rebalance_init() for more details.
+    pub fn rebalance_fini(&mut self) {
+        for id in mem::take(&mut self.evacuating_slabs) {
+            // evacuating slabs cannot allocate() or free(); thus, they should never be dirty.
+            assert!(!self.slabs.get(id).is_dirty);
+
+            trace!("marking slab '{:?}' as free", id);
+
+            self.free_slabs.push(id);
+            *self.slabs.get_mut(id) = FreeSlab::new_slab(
+                id,
+                self.slabs.get(id).generation.next(),
+                self.slab_extent_from_id(id),
+            );
+
+            // Since we reduce the available space when transitioning a slab to be evacuating, we need to
+            // ensure we increase the available space when transitioning the slab to be free. We must do
+            // this after the slab has been marked a free slab, since evacuating slabs have no free space.
+            self.available_space += self.slabs.get(id).free_space();
+        }
+    }
+
     pub async fn flush(&mut self) -> BlockAllocatorPhys {
         // We first condense any slabs so later when we flush any of them that
         // are dirty we've already migrated their entries of this checkpoint to
@@ -1194,6 +1629,14 @@ impl BlockAllocator {
         for slab_id in std::mem::take(&mut self.dirty_slabs) {
             let extent = self.slab_extent_from_id(slab_id);
             let slab = self.slabs.get_mut(slab_id);
+
+            // It's possible for a slab in the dirty list, to be converted to a different slab type, such that the actual
+            // slab object is no longer dirty, but the slab's id is still in the dirty list. For example, if an already dirtied
+            // slab is chosen to be rebalanced. Thus, prior to flushing the slab, we double check that the slab is still dirty.
+            if !slab.is_dirty {
+                continue;
+            }
+
             let target_spacemap = if self.next_slab_to_condense <= slab_id {
                 &mut self.spacemap
             } else {
@@ -1320,6 +1763,7 @@ enum SlabPhysType {
     BitmapBased { block_size: u32 },
     ExtentBased { max_size: u32 },
     Free,
+    Evacuating,
 }
 impl OnDisk for SlabPhysType {}
 
@@ -1657,7 +2101,7 @@ impl SlabBucketsReport {
     }
 
     fn add_slab(&mut self, slab: &Slab) {
-        // Free slabs don't belong on a bucket, just log them for the total stats
+        // Free and Evacuating slabs don't belong on a bucket, just log them for the total stats
         match slab.info {
             SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => {
                 let bucket_info = self.buckets.range_mut(slab.max_size()..).next().unwrap().1;
@@ -1665,7 +2109,7 @@ impl SlabBucketsReport {
                 let nslabs = bucket_info.stats.nslabs;
                 self.reset_hist_scaling_factor(nslabs);
             }
-            SlabType::Free(_) => {}
+            SlabType::Free(_) | SlabType::Evacuating(_) => {}
         }
         self.total.add_slab(slab);
     }
@@ -1764,6 +2208,7 @@ pub async fn zcachedb_dump_slabs(
         .collect();
     let mut extent_based_summary = SlabBucketsReport::new(&extent_summary_dist, slab_size);
     let mut empty_total = AllocationBucketStatistics::new(slab_size);
+    let mut evacuating_total = AllocationBucketStatistics::new(slab_size);
 
     let slabs = zcachedb_load_slab_state(block_access, extent_allocator, phys).await;
 
@@ -1777,6 +2222,7 @@ pub async fn zcachedb_dump_slabs(
             SlabType::BitmapBased(_) => bitmap_based_summary.add_slab(slab),
             SlabType::ExtentBased(_) => extent_based_summary.add_slab(slab),
             SlabType::Free(_) => empty_total.add_slab(slab),
+            SlabType::Evacuating(_) => evacuating_total.add_slab(slab),
         }
     }
     let max_scaling_factor = cmp::max(
@@ -1804,6 +2250,8 @@ pub async fn zcachedb_dump_slabs(
     println!("    EXTENT: {}", extent_based_summary.total);
     println!("------------------------------------------------------------");
     println!("     EMPTY: {}", empty_total);
+    println!("------------------------------------------------------------");
+    println!("EVACUATING: {}", evacuating_total);
     println!("============================================================");
     println!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
     println!("     TOTAL: {}", buckets_by_max_size.total);
