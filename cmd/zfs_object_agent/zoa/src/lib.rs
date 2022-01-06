@@ -27,7 +27,7 @@ pub unsafe extern "C" fn libzoa_init(
     let log_file = CStr::from_ptr(log_file_ptr).to_string_lossy().into_owned();
 
     let verbosity = 2;
-    util::setup_logging(verbosity, Some(log_file.as_str()), None);
+    util::setup_logging(verbosity, Some(log_file.as_str()), None, false);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

@@ -78,6 +78,7 @@ async fn async_main() -> Result<()> {
         matches.occurrences_of("verbose"),
         matches.value_of("log-file"),
         None,
+        true,
     );
 
     // Search for and invoke the appropriate sub-command

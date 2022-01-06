@@ -195,7 +195,12 @@ fn setup_logfile(verbosity: u64, logfile: &str) {
     log4rs::init_config(config).unwrap();
 }
 
-pub fn setup_logging(verbosity: u64, file_name: Option<&str>, log_config: Option<&str>) {
+pub fn setup_logging(
+    verbosity: u64,
+    file_name: Option<&str>,
+    log_config: Option<&str>,
+    quiet_start: bool,
+) {
     /*
      * Panic hook to dump trace logs to a file, in case of a panic.
      */
@@ -229,31 +234,33 @@ pub fn setup_logging(verbosity: u64, file_name: Option<&str>, log_config: Option
         }
     };
 
-    // error!() should be used when an invalid state is encountered; the related
-    // operation will fail and the program may exit.  E.g. an invalid request
-    // was received from the client (kernel).
-    error!("logging level ERROR enabled");
+    if !quiet_start {
+        // error!() should be used when an invalid state is encountered; the related
+        // operation will fail and the program may exit.  E.g. an invalid request
+        // was received from the client (kernel).
+        error!("logging level ERROR enabled");
 
-    // warn!() should be used when something unexpected has happened, but it can
-    // be recovered from.
-    warn!("logging level WARN enabled");
+        // warn!() should be used when something unexpected has happened, but it can
+        // be recovered from.
+        warn!("logging level WARN enabled");
 
-    // info!() should be used for very high level operations which are expected
-    // to happen infrequently (no more than once per minute in typical
-    // operation).  e.g. opening/closing a pool, long-lived background tasks,
-    // things that might be in `zpool history -i`.
-    info!("logging level INFO enabled");
+        // info!() should be used for very high level operations which are expected
+        // to happen infrequently (no more than once per minute in typical
+        // operation).  e.g. opening/closing a pool, long-lived background tasks,
+        // things that might be in `zpool history -i`.
+        info!("logging level INFO enabled");
 
-    // debug!() can be used for all but the most frequent operations.
-    // e.g. not every single read/write/free operation, but perhaps for every
-    // call to S3.
-    debug!("logging level DEBUG enabled");
+        // debug!() can be used for all but the most frequent operations.
+        // e.g. not every single read/write/free operation, but perhaps for every
+        // call to S3.
+        debug!("logging level DEBUG enabled");
 
-    // trace!() can be used for frequent operation. But note that we evaluate
-    // all the trace! statements in prod and there is some cost involved in
-    // string processing, memory allocation, global lock etc.
-    trace!("logging level TRACE enabled");
+        // trace!() can be used for frequent operation. But note that we evaluate
+        // all the trace! statements in prod and there is some cost involved in
+        // string processing, memory allocation, global lock etc.
+        trace!("logging level TRACE enabled");
 
-    // Log all the tunables.
-    log_tunable_config();
+        // Log all the tunables.
+        log_tunable_config();
+    }
 }
