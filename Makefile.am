@@ -115,6 +115,11 @@ commitcheck:
 		${top_srcdir}/scripts/commitcheck.sh; \
 	fi
 
+if HAVE_PARALLEL
+cstyle_line = -print0 | parallel -X0 ${top_srcdir}/scripts/cstyle.pl -cpP {}
+else
+cstyle_line = -exec ${top_srcdir}/scripts/cstyle.pl -cpP {} +
+endif
 PHONY += cstyle
 cstyle:
 	@find ${top_srcdir} \
@@ -128,7 +133,7 @@ cstyle:
 		! -name '*_if*.h' \
 		! -name 'libzoa.h' \
 		! -path './module/zstd/lib/*' \
-		-exec ${top_srcdir}/scripts/cstyle.pl -cpP {} \+
+		$(cstyle_line)
 
 RUSTDIRS = cmd/zfs_object_agent
 
