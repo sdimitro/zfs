@@ -3,6 +3,7 @@
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
 mod clear_hit_data;
+mod iostat;
 mod list_devices;
 mod remote_channel;
 mod report_hits;
@@ -12,6 +13,7 @@ use anyhow::Result;
 use clap::AppSettings;
 use clap::Arg;
 use clear_hit_data::ClearHitData;
+use iostat::IoStat;
 use list_devices::ListDevices;
 use log::*;
 use report_hits::ReportHits;
@@ -40,6 +42,7 @@ async fn async_main() -> Result<()> {
         Box::new(ClearHitData),
         Box::new(ListDevices),
         Box::new(ReportHits),
+        Box::new(IoStat),
     ];
 
     // Define global command arguments
@@ -59,7 +62,6 @@ async fn async_main() -> Result<()> {
             Arg::with_name("log-file")
                 .requires("verbose")
                 .global(true)
-                .short("l")
                 .long("log-file")
                 .value_name("FILE")
                 .help("File to log debugging output to")

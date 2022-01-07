@@ -25,6 +25,7 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Instant;
 use util::get_tunable;
+use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
 
 lazy_static! {
@@ -96,7 +97,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
                 let truncated_extent =
                     extent.range(0, min(extent.size, (next_chunk_offset - *offset)));
-                let extent_bytes = block_access.read_raw(truncated_extent).await;
+                let extent_bytes = block_access.read_raw(truncated_extent, DiskIoType::MaintenanceRead).await;
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
                     let chunk_location = extent.location.offset + total_consumed as u64;
@@ -317,10 +318,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                     if extent.location != pending_location + pending_vec.len()
                         || pending_vec.unused_capacity() < raw_chunk.len() =>
                 {
-                    writes_stream.push(
-                        self.block_access
-                            .write_raw(pending_location, pending_vec.into()),
-                    );
+                    writes_stream.push(self.block_access.write_raw(
+                        pending_location,
+                        pending_vec.into(),
+                        DiskIoType::MaintenanceWrite,
+                    ));
                     pending_write = None;
                 }
                 _ => (),
@@ -339,7 +341,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                     assert_eq!(*pending_location + pending_vec.len(), extent.location);
                     pending_vec.extend_from_slice(&raw_chunk);
                 }
-                None => writes_stream.push(self.block_access.write_raw(extent.location, raw_chunk)),
+                None => writes_stream.push(self.block_access.write_raw(
+                    extent.location,
+                    raw_chunk,
+                    DiskIoType::MaintenanceWrite,
+                )),
             }
 
             new_chunk_fn(chunk.id, chunk.offset, first_entry);
@@ -349,10 +355,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             self.phys.next_chunk_offset.0 += raw_size;
         }
         if let Some((pending_location, pending_vec)) = pending_write {
-            writes_stream.push(
-                self.block_access
-                    .write_raw(pending_location, pending_vec.into()),
-            );
+            writes_stream.push(self.block_access.write_raw(
+                pending_location,
+                pending_vec.into(),
+                DiskIoType::MaintenanceWrite,
+            ));
         }
         writes_stream.for_each(|_| async move {}).await;
         self.pending_entries.truncate(0);
@@ -554,7 +561,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
             chunk_extent,
             key
         );
-        let chunk_bytes = self.this.block_access.read_raw(chunk_extent).await;
+        let chunk_bytes = self
+            .this
+            .block_access
+            .read_raw(chunk_extent, DiskIoType::ReadIndexForLookup)
+            .await;
         let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) =
             self.this.block_access.chunk_from_raw(&chunk_bytes).unwrap();
         assert_eq!(chunk.id, ChunkId(chunk_id as u64));

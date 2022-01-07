@@ -61,6 +61,7 @@ impl PublicConnectionState {
         );
         server.register_handler("report_hits", Box::new(Self::report_hits));
         server.register_handler("list_devices", Box::new(Self::list_devices));
+        server.register_handler("zcache_iostat", Box::new(Self::zcache_iostat));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -244,6 +245,34 @@ impl PublicConnectionState {
         } else {
             Ok(Box::pin(async move {
                 response.insert("Type", "list_devices").unwrap();
+                response.insert("result", "err").unwrap();
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        }
+    }
+
+    fn zcache_iostat(&mut self, nvl: NvList) -> HandlerReturn {
+        debug!("got request: {:?}", nvl);
+        let mut response = NvList::new_unique_names();
+        let cache = self.cache.as_ref().cloned();
+
+        if let Some(zettacache) = cache {
+            Ok(Box::pin(async move {
+                let json_stats = zettacache.io_stats_as_json();
+
+                response
+                    .insert("iostats_json", &json_stats.as_str())
+                    .unwrap();
+                response.insert("Type", "zcache_iostat").unwrap();
+                response.insert("result", "ok").unwrap();
+
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        } else {
+            Ok(Box::pin(async move {
+                response.insert("Type", "zcache_iostat").unwrap();
                 response.insert("result", "err").unwrap();
                 debug!("sending response: {:?}", response);
                 Ok(Some(response))

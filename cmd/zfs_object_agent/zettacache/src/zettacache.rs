@@ -49,6 +49,7 @@ use tokio::time::{sleep_until, timeout_at};
 use util::get_tunable;
 use util::maybe_die_with;
 use util::nice_p2size;
+use util::zettacache_stats::DiskIoType;
 use util::AlignedBytes;
 use util::From64;
 use util::LockSet;
@@ -99,7 +100,9 @@ struct ZettaCheckpointPhys {
 
 impl ZettaCheckpointPhys {
     async fn read(block_access: &BlockAccess, extent: Extent) -> ZettaCheckpointPhys {
-        let raw = block_access.read_raw(extent).await;
+        let raw = block_access
+            .read_raw(extent, DiskIoType::MaintenanceRead)
+            .await;
         let (this, _): (Self, usize) = block_access.chunk_from_raw(&raw).unwrap();
         debug!("got {:#?}", this);
         this
@@ -484,8 +487,12 @@ impl MergeState {
             .for_each_concurrent(
                 *CACHE_REBALANCE_CONCURRENCY_LIMIT,
                 |(old, new)| async move {
-                    let bytes = block_access.read_raw(*old).await;
-                    block_access.write_raw(*new, bytes).await;
+                    let bytes = block_access
+                        .read_raw(*old, DiskIoType::MaintenanceRead)
+                        .await;
+                    block_access
+                        .write_raw(*new, bytes, DiskIoType::MaintenanceWrite)
+                        .await;
                 },
             )
             .await;
@@ -655,7 +662,11 @@ impl ZettaCache {
         let checkpoint_extent = checkpoint_capacity.range(0, raw.len() as u64);
 
         block_access
-            .write_raw(checkpoint_extent.location, raw)
+            .write_raw(
+                checkpoint_extent.location,
+                raw,
+                DiskIoType::MaintenanceWrite,
+            )
             .await;
         let num_disks = block_access.disks().count();
         PrimaryPhys {
@@ -1140,7 +1151,7 @@ impl ZettaCache {
     {
         // Hold the index lock over the whole operation
         // so that the index can't change after we get the value from it.
-        // Lock ordering requres that we lock the index before locking the state.
+        // Lock ordering requires that we lock the index before locking the state.
         let index = self.index.read().await;
         let read_data_fut_opt = {
             // We don't want to hold the state lock while reading from disk so we
@@ -1310,7 +1321,7 @@ impl ZettaCache {
         if let LookupResponse::Present((cache_bytes, locked_key)) =
             self.lookup(guid, block, LookupSource::Write).await
         {
-            // For (hopefully) obvious rasonse, we only need to do the eviction when the bytes contained in the cache differ
+            // For (hopefully) obvious reasons, we only need to do the eviction when the bytes contained in the cache differ
             // from the bytes contained in the object store. The bytes contained in the object store are always preferred
             // over the bytes contained in the cache; we assume the bytes passed were retrieved from the object store.
             if *cache_bytes != *object_bytes {
@@ -1346,6 +1357,10 @@ impl ZettaCache {
 
     pub fn devices_as_json(&self) -> String {
         serde_json::to_string(&self.block_access.list_devices()).unwrap()
+    }
+
+    pub fn io_stats_as_json(&self) -> String {
+        self.block_access.io_stats_as_json()
     }
 }
 
@@ -1664,7 +1679,9 @@ impl ZettaCacheState {
                 let _permit = write_sem.acquire().await.unwrap();
             }
 
-            let bytes = block_access.read_raw(value.extent()).await;
+            let bytes = block_access
+                .read_raw(value.extent(), DiskIoType::ReadDataForLookup)
+                .await;
             sem.add_permits(1);
             // XXX we can easily handle an io error here by returning None
             Some(bytes)
@@ -1788,7 +1805,9 @@ impl ZettaCacheState {
         // Note: locked_key can be dropped before the i/o completes, since the
         // changes to the State have already been made.
         future::Either::Right(async move {
-            block_access.write_raw(location, bytes).await;
+            block_access
+                .write_raw(location, bytes, DiskIoType::WriteDataForInsert)
+                .await;
             sem.add_permits(1);
         })
     }
@@ -1956,7 +1975,11 @@ impl ZettaCacheState {
         debug!("writing to {:?}: {:#?}", checkpoint_extent, checkpoint);
 
         self.block_access
-            .write_raw(checkpoint_extent.location, raw)
+            .write_raw(
+                checkpoint_extent.location,
+                raw,
+                DiskIoType::MaintenanceWrite,
+            )
             .await;
 
         self.primary.checkpoint = checkpoint_extent;

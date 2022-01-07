@@ -7,6 +7,7 @@ use futures::stream::*;
 use log::*;
 use serde::{Deserialize, Serialize};
 use util::maybe_die_with;
+use util::zettacache_stats::DiskIoType;
 
 pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
 
@@ -109,7 +110,10 @@ impl PrimaryPhys {
 impl SuperblockPhys {
     async fn read(block_access: &BlockAccess, disk: DiskId) -> Result<SuperblockPhys> {
         let raw = block_access
-            .read_raw(Extent::new(disk, 0, SUPERBLOCK_SIZE))
+            .read_raw(
+                Extent::new(disk, 0, SUPERBLOCK_SIZE),
+                DiskIoType::MaintenanceRead,
+            )
             .await;
         let (this, _): (Self, usize) = block_access.chunk_from_raw(&raw)?;
         debug!("got {:#?}", this);
@@ -132,7 +136,11 @@ impl SuperblockPhys {
         let raw = block_access.chunk_to_raw(EncodeType::Json, self);
         // XXX pad it out to SUPERBLOCK_SIZE?
         block_access
-            .write_raw(DiskLocation { offset: 0, disk }, raw)
+            .write_raw(
+                DiskLocation { offset: 0, disk },
+                raw,
+                DiskIoType::MaintenanceWrite,
+            )
             .await;
     }
 }

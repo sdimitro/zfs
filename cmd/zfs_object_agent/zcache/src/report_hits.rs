@@ -130,8 +130,8 @@ impl ZcacheSubCommand for ReportHits {
                     .help("Divide report data into this many buckets"),
             )
             .arg(
-                Arg::with_name("non_cumulative")
-                    .long("non_cumulative")
+                Arg::with_name("non-cumulative")
+                    .long("non-cumulative")
                     .short("n")
                     .help("Don't accumulate hits from previous quantiles"),
             )
@@ -143,7 +143,7 @@ impl ZcacheSubCommand for ReportHits {
 
     async fn invoke(&mut self, args: &clap::ArgMatches) -> Result<()> {
         let quantiles = args.value_of("quantiles").unwrap().parse()?;
-        let cumulative = !args.is_present("non_cumulative");
+        let cumulative = !args.is_present("non-cumulative");
 
         let mut remote = RemoteChannel::new(false).await?;
         match remote.call(NAME, None).await {
