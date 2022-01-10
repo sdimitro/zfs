@@ -48,6 +48,10 @@
 #	10. Import the pool.
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run."
+fi
+
 verify_runnable "global"
 
 log_assert "Verify zpool export succeed or fail with spare."

@@ -31,6 +31,10 @@
 
 . $STF_SUITE/include/libtest.shlib
 
+if use_object_store; then
+    log_unsupported "Not supported with object store run."
+fi
+
 verify_runnable "global"
 
 log_pass
