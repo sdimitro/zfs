@@ -20,13 +20,18 @@ pub struct Feature {
 }
 
 lazy_static! {
-    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = [ORIGIN.clone()]
-        .map(|feature| (feature.name, feature.info))
-        .into_iter()
-        .collect();
+    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> =
+        [ORIGIN.clone(), EXPAND.clone()]
+            .map(|feature| (feature.name, feature.info))
+            .into_iter()
+            .collect();
     pub static ref ORIGIN: Feature = Feature {
         name: FeatureName("com.delphix:origin".to_string()),
         info: FeatureType::Upgradeable
+    };
+    pub static ref EXPAND: Feature = Feature {
+        name: FeatureName("com.delphix:expand".to_string()),
+        info: FeatureType::NonUpgradeable
     };
 }
 
@@ -53,7 +58,7 @@ impl std::error::Error for FeatureError {}
 
 pub fn check_features<'a, I>(feature_list: I) -> Result<(), FeatureError>
 where
-    I: Iterator<Item = &'a FeatureName>,
+    I: IntoIterator<Item = &'a FeatureName>,
 {
     let mut upgradeable_features = vec![];
     let mut non_upgradeable_features = vec![];

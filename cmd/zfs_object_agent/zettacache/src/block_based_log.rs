@@ -14,7 +14,6 @@ use log::*;
 use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
@@ -29,8 +28,6 @@ use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
 
 lazy_static! {
-    // XXX maybe this is wasteful for the smaller logs?
-    pub static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
     static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
     // Note: kernel sends writes to disk in at most 256K chunks (at least with nvme driver)
     static ref WRITE_AGGREGATION_SIZE: usize = get_tunable("write_aggregation_size", 256 * 1024);
@@ -283,27 +280,34 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
             let first_entry = *chunk.entries.first().unwrap();
 
-            let mut extent = self.next_write_location();
             // XXX I think we only want to use Bincode for the main index?
             let raw_chunk = self.block_access.chunk_to_raw(EncodeType::Bincode, &chunk);
             let raw_size = raw_chunk.len() as u64;
-            if raw_size > extent.size {
-                // free the unused tail of this extent
-                self.extent_allocator.free(&extent);
-                let capacity = match self.phys.extents.iter_mut().next_back() {
-                    Some((last_offset, last_extent)) => {
+            let extent = match self.next_write_location() {
+                Some(extent) if extent.size >= raw_size => extent,
+                Some(extent) => {
+                    // free the unused tail of this extent
+                    self.extent_allocator.free(&extent);
+                    if let Some((_, last_extent)) = self.phys.extents.iter_mut().next_back() {
+                        assert!(last_extent.contains(&extent));
                         last_extent.size -= extent.size;
-                        LogOffset(last_offset.0 + last_extent.size)
-                    }
-                    None => LogOffset(0),
-                };
+                    };
 
-                extent = self
-                    .extent_allocator
-                    .allocate(raw_size, max(raw_size, *DEFAULT_EXTENT_SIZE));
-                self.phys.extents.insert(capacity, extent);
-                assert_ge!(extent.size, raw_size);
-            }
+                    let extent = self.extent_allocator.allocate(raw_size);
+                    self.phys
+                        .extents
+                        .insert(self.phys.next_chunk_offset, extent);
+                    extent
+                }
+                None => {
+                    let extent = self.extent_allocator.allocate(raw_size);
+                    self.phys
+                        .extents
+                        .insert(self.phys.next_chunk_offset, extent);
+                    extent
+                }
+            };
+            assert_ge!(extent.size, raw_size);
             // XXX add name of this log for debug purposes?
             trace!(
                 "flushing BlockBasedLog: writing {:?} ({:?}) with {} entries ({} bytes) to {:?}",
@@ -370,24 +374,19 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.phys.clear(&self.extent_allocator);
     }
 
-    fn next_write_location(&self) -> Extent {
-        match self.phys.extents.iter().next_back() {
-            Some((offset, extent)) => {
+    fn next_write_location(&self) -> Option<Extent> {
+        self.phys
+            .extents
+            .iter()
+            .next_back()
+            .map(|(&offset, extent)| {
                 // There shouldn't be any extents after the last (partially-full) one.
                 assert_ge!(self.phys.next_chunk_offset, offset);
-                let offset_within_extent = self.phys.next_chunk_offset.0 - offset.0;
+                let offset_within_extent = self.phys.next_chunk_offset - offset;
                 // The last extent should go at least to the end of the chunks.
                 assert_le!(offset_within_extent, extent.size);
                 extent.range(offset_within_extent, extent.size - offset_within_extent)
-            }
-            None => Extent {
-                location: DiskLocation {
-                    disk: DiskId(0),
-                    offset: 0,
-                },
-                size: 0,
-            },
-        }
+            })
     }
 
     /// Iterates the on-disk state; panics if there are pending changes.

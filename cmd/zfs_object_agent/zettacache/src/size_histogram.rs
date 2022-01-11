@@ -22,7 +22,11 @@ impl SizeHistogramPhys {
 
     pub fn hit(&mut self, size_at_hit: u64) {
         let index = usize::try_from(size_at_hit / self.bucket_size).unwrap();
-        self.histogram[index] += 1;
+        // The histogram may not be large enough if we've expanded the capacity
+        // since the histogram was created (e.g. by adding disks).
+        if let Some(value) = self.histogram.get_mut(index) {
+            *value += 1;
+        }
     }
 
     pub fn lookup(&mut self) {

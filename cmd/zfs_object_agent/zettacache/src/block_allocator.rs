@@ -1000,13 +1000,14 @@ impl Slabs {
     }
 
     async fn open(
-        capacity: &BiBTreeMap<Extent, SlabId>,
+        capacity: &BiBTreeMap<SlabId, Extent>,
         spacemap: &SpaceMap,
         spacemap_next: &SpaceMap,
         slab_size: u32,
         slabs_phys: &TerseVec<SlabPhys>,
     ) -> Self {
-        let mut extent_iter = capacity.iter().map(|(&extent, _)| extent);
+        // Note, BiBTreeMap::iter() is sorted by the left value (SlabId's), which we rely on here.
+        let mut extent_iter = capacity.iter().map(|(_, &extent)| extent);
         let mut current_extent = extent_iter.next().unwrap();
 
         let mut slabs = Slabs(
@@ -1079,7 +1080,10 @@ impl Slabs {
 }
 
 pub struct BlockAllocator {
-    capacity: BiBTreeMap<Extent, SlabId>,
+    // BiBTreeMap::iter() is sorted by the left value, and we always want to
+    // think of the capacity as having the SlabId's in order, so we want SlabId
+    // to be the left value.
+    capacity: BiBTreeMap<SlabId, Extent>,
     slab_size: u32,
 
     // # Spacemap Condensing - Design Overview
@@ -1159,14 +1163,14 @@ impl BlockAllocator {
             phys.spacemap_next,
         );
         let slab_size = phys.slab_size;
-        let capacity: BiBTreeMap<Extent, SlabId> = {
+        let capacity: BiBTreeMap<SlabId, Extent> = {
             let mut id = SlabId(0);
             phys.capacity
                 .into_iter()
                 .map(|extent| {
                     let start = id;
                     id = id + extent.size / u64::from(slab_size);
-                    (extent, start)
+                    (start, extent)
                 })
                 .collect()
         };
@@ -1679,7 +1683,8 @@ impl BlockAllocator {
             futures::future::join(self.spacemap.flush(), self.spacemap_next.flush()).await;
 
         let phys = BlockAllocatorPhys {
-            capacity: self.capacity.iter().map(|(&extent, _)| extent).collect(),
+            // BiBTreeMap::iter() is orderd by left value (SlabId), which we rely on here.
+            capacity: self.capacity.iter().map(|(_, &extent)| extent).collect(),
             slab_size: self.slab_size,
             spacemap,
             spacemap_next,
@@ -1716,16 +1721,16 @@ impl BlockAllocator {
     }
 
     pub fn size(&self) -> u64 {
-        self.capacity.iter().map(|(extent, _)| extent.size).sum()
+        self.capacity.iter().map(|(_, extent)| extent.size).sum()
     }
 
     fn slab_id_from_extent_impl(
-        capacity: &BiBTreeMap<Extent, SlabId>,
+        capacity: &BiBTreeMap<SlabId, Extent>,
         slab_size: u64,
         extent: Extent,
     ) -> SlabId {
-        let (capacity_extent, &capacity_slab) = capacity
-            .left_range((Unbounded, Included(extent.location)))
+        let (&capacity_slab, capacity_extent) = capacity
+            .right_range((Unbounded, Included(extent.location)))
             .next_back()
             .unwrap();
 
@@ -1746,9 +1751,9 @@ impl BlockAllocator {
     }
 
     fn slab_extent_from_id(&self, slab_id: SlabId) -> Extent {
-        let (containing_extent, &extent_slab) = self
+        let (&extent_slab, containing_extent) = self
             .capacity
-            .right_range((Unbounded, Included(slab_id)))
+            .left_range((Unbounded, Included(slab_id)))
             .next_back()
             .unwrap();
         containing_extent.range(
@@ -1879,6 +1884,10 @@ impl BlockAllocatorPhys {
     pub fn spacemap_next_capacity_bytes(&self) -> u64 {
         self.spacemap_next.capacity_bytes()
     }
+
+    pub fn slab_size(&self) -> u64 {
+        u64::from(self.slab_size)
+    }
 }
 
 pub async fn zcachedb_dump_spacemaps(
@@ -1922,14 +1931,14 @@ async fn zcachedb_load_slab_state(
         phys.spacemap_next,
     );
     let slab_size = phys.slab_size;
-    let capacity: BiBTreeMap<Extent, SlabId> = {
+    let capacity: BiBTreeMap<SlabId, Extent> = {
         let mut id = SlabId(0);
         phys.capacity
             .into_iter()
             .map(|extent| {
                 let start = id;
                 id = id + extent.size / u64::from(slab_size);
-                (extent, start)
+                (start, extent)
             })
             .collect()
     };
