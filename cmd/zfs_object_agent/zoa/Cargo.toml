@@ -4,6 +4,7 @@ version = "0.1.0"
 authors = ["Delphix"]
 edition = "2021"
 build = "src/build.rs"
+publish = false
 
 [build-dependencies]
 cbindgen = "0.20"
