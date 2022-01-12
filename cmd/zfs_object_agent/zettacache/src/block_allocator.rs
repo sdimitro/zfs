@@ -1631,7 +1631,6 @@ impl BlockAllocator {
         trace!("flushing {} dirty slabs", self.dirty_slabs.len());
         let mut dirty_buckets = HashSet::new();
         for slab_id in std::mem::take(&mut self.dirty_slabs) {
-            let extent = self.slab_extent_from_id(slab_id);
             let slab = self.slabs.get_mut(slab_id);
 
             // It's possible for a slab in the dirty list, to be converted to a different slab type, such that the actual
@@ -1648,11 +1647,6 @@ impl BlockAllocator {
             };
             slab.flush_to_spacemap(target_spacemap);
             dirty_buckets.insert(slab.max_size());
-            if slab.free_space() == u64::from(self.slab_size) {
-                self.free_slabs.push(slab.id);
-                *slab = FreeSlab::new_slab(slab_id, slab.generation.next(), extent);
-                target_spacemap.mark_generation(slab.id, slab.generation);
-            }
         }
 
         // So that we'll hit multiple disks.
