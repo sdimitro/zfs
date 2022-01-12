@@ -680,20 +680,20 @@ impl ZettaCache {
             false,
         ));
 
-        let feature_flags = PrimaryPhys::read_features(&block_access).await.unwrap();
+        let feature_flags = match PrimaryPhys::read_features(&block_access).await {
+            Ok(feature_flags) => feature_flags,
+            Err(_) => {
+                // XXX need proper create CLI
+                Self::create(&block_access).await;
+                PrimaryPhys::read_features(&block_access).await.unwrap()
+            }
+        };
         if let Err(feature_error) = check_features(&feature_flags) {
             panic!("{}", feature_error)
         };
 
         let (mut primary, primary_disk, guid, extra_disks) =
-            match PrimaryPhys::read(&block_access).await {
-                Ok(tuple) => tuple,
-                Err(_) => {
-                    // XXX need proper create CLI
-                    Self::create(&block_access).await;
-                    PrimaryPhys::read(&block_access).await.unwrap()
-                }
-            };
+            PrimaryPhys::read(&block_access).await.unwrap();
 
         // XXX proper error handling
         assert!(primary.checkpoint_capacity.contains(&primary.checkpoint));
