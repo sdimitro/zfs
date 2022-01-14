@@ -5,6 +5,7 @@
 
 mod bitmap_range_iterator;
 mod btreemap_ext;
+mod credentials;
 mod die;
 mod from64;
 mod lock_set;
@@ -19,6 +20,7 @@ pub mod zettacache_stats;
 
 pub use bitmap_range_iterator::BitmapRangeIterator;
 pub use btreemap_ext::iter_wrapping;
+pub use credentials::ResilientCredentialsProvider;
 pub use die::maybe_die_with;
 pub use from64::From64;
 pub use lock_set::LockSet;

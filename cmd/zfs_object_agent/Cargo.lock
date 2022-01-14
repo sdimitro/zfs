@@ -2550,6 +2550,7 @@ dependencies = [
  "num-traits 0.2.14",
  "rand",
  "roaring",
+ "rusoto_credential",
  "serde 1.0.133",
  "tokio",
 ]
