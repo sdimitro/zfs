@@ -58,7 +58,7 @@ obj=${array[0]}
 log_note "file $init_data has object number $obj"
 sync_pool $TESTPOOL
 
-output=$(zdb -d $TESTPOOL/$TESTFS)
+output=$(run_zdb -e "-d" -p "$TESTPOOL/$TESTFS")
 objset_id=$(echo $output | awk '{split($0,array,",")} END{print array[2]}' |
     awk '{split($0,array," ")} END{print array[2]}')
 objset_hex=$(printf "0x%X" $objset_id)
@@ -67,7 +67,7 @@ log_note "objset $TESTPOOL/$TESTFS has objset ID $objset_id ($objset_hex)"
 for id in "$objset_id" "$objset_hex"
 do
 	log_note "zdb -dddddd $TESTPOOL/$id $obj"
-	output=$(zdb -dddddd $TESTPOOL/$id $obj)
+	output=$(run_zdb -e "-dddddd" -p "$TESTPOOL/$id $obj")
 	reason="($TESTPOOL/$TESTFS not in zdb output)"
 	echo $output |grep "$TESTPOOL/$TESTFS" > /dev/null
 	(( $? != 0 )) && log_fail \
@@ -87,7 +87,7 @@ if is_linux; then
 	log_note "checking zdb output for $name_from_proc"
 	reason="(name $name_from_proc from proc not in zdb output)"
 	log_note "zdb -dddddd $TESTPOOL/$objset_hex"
-	output=$(zdb -dddddd $TESTPOOL/$objset_hex)
+	output=$(run_zdb -e "-dddddd" -p "$TESTPOOL/$objset_hex")
 	echo $output |grep "$name_from_proc" > /dev/null
 	(( $? != 0 )) && log_fail \
 	    "zdb -dddddd $TESTPOOL/$objset_hex failed $reason"

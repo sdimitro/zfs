@@ -144,7 +144,7 @@ function check_dataset
 # $1   clone name
 function check_livelist_exists
 {
-	zdb -vvvvv $TESTPOOL/$1 | grep "Livelist" || \
+	run_zdb -e "-vvvvv" -p "$TESTPOOL/$1" | grep "Livelist" || \
 		log_fail "zdb could not find Livelist"
 }
 
@@ -154,7 +154,7 @@ function check_livelist_gone
 {
 	log_must zpool wait -t free $TESTPOOL
 	zpool sync
-	zdb -vvvvv $TESTPOOL | grep "Livelist" && \
+	run_zdb -e "-vvvvv" -p "$TESTPOOL" | grep "Livelist" && \
 		log_fail "zdb found Livelist after the clone is deleted."
 }
 

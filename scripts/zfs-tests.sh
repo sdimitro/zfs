@@ -190,6 +190,13 @@ cleanup() {
 		# Copy the shared files and its dependencies
 		for dependency in $dependencies; do
 			[ -e "$dependency" ] || continue
+			if [ "$(basename "$dependency")" = "zdb" ]; then
+				# Check & move the zdb test logs to a different
+				# directory. Else it'll raise conflict copying
+				# the crash binary
+				[ -d "$RESULTS_DIR/zdb" ] && \
+					mv "$RESULTS_DIR/zdb" "$RESULTS_DIR/zdb-test-log"
+			fi
 			cp "$dependency" "$RESULTS_DIR"
 
 			[ -d "$RESULTS_DIR/.build-id" ] || \

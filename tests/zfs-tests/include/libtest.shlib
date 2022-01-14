@@ -2293,7 +2293,7 @@ function verify_filesys # pool filesystem dir
 
 	log_must import_pool -p $pool -e "$search_path"
 
-	zdb -cudi $filesys > $zdbout 2>&1
+	run_zdb -e "-cudi" -p "$filesys" > $zdbout 2>&1
 	if [[ $? != 0 ]]; then
 		log_note "Output: zdb -cudi $filesys"
 		cat $zdbout
@@ -3205,10 +3205,10 @@ function get_config
 	fi
 	alt_root=$(zpool list -H $pool | awk '{print $NF}')
 	if [[ $alt_root == "-" ]]; then
-		value=$(zdb -C $pool | grep "$config:" | awk -F: \
+		value=$(run_zdb -e "-C" -p "$pool" | grep "$config:" | awk -F: \
 		    '{print $2}')
 	else
-		value=$(zdb -e $pool | grep "$config:" | awk -F: \
+		value=$(run_zdb -e "-e" -p "$pool" | grep "$config:" | awk -F: \
 		    '{print $2}')
 	fi
 	if [[ -n $value ]] ; then

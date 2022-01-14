@@ -60,7 +60,7 @@ function verify_nopwrite
 	# The comparisons below should pass regardless of nopwrite. They're
 	# here for sanity.
 	#
-	typeset deadlist=$(zdb -Pddd $clone | awk '/Deadlist:/ {print $2}')
+	typeset deadlist=$(run_zdb -e "-Pddd" -p "$clone" | awk '/Deadlist:/ {print $2}')
 	within_percent $deadlist $clone_written $high || return 1
 	within_percent $snap_refer $snap_written $high || return 1
 

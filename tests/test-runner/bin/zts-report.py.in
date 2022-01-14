@@ -466,6 +466,7 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_root/zdb/zdb_decompress': ['FAIL', 'DOSE-737'],
         'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
         'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_objset_id': ['FAIL', 'DOSE-915'],
     })
 
 # Not all Github actions runners have scsi_debug module, so we may skip

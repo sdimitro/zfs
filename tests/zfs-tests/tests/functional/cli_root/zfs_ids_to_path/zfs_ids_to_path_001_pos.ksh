@@ -87,7 +87,7 @@ log_must mkdir /$mntpnt/$TESTDIR2
 log_must touch /$mntpnt/$TESTFILE3
 log_must touch /$mntpnt/$TESTFILE4
 
-typeset ds_id=$(zdb $BASE | grep "^Dataset" | sed 's/.* ID \([0-9]*\).*/\1/')
+typeset ds_id=$(run_zdb -p "$BASE" | grep "^Dataset" | sed 's/.* ID \([0-9]*\).*/\1/')
 test_one $ds_id $BASE $TESTFILE1
 test_one $ds_id $BASE $TESTFILE2
 test_one $ds_id $BASE $TESTFILE3
