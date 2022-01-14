@@ -16,10 +16,10 @@ use std::ops::{Add, Bound::*, Sub};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{fmt, iter, mem};
-use util::BitmapRangeIterator;
 use util::RangeTree;
 use util::{get_tunable, TerseVec};
 use util::{nice_p2size, From64};
+use util::{super_trace, BitmapRangeIterator};
 
 lazy_static! {
     static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
@@ -1308,7 +1308,7 @@ impl BlockAllocator {
             match sorted_slabs.get_current() {
                 Some(id) => match self.slabs.get_mut(id).allocate(request_size) {
                     Some(extent) => {
-                        trace!(
+                        super_trace!(
                             "satisfied {} byte allocation request: {:?}",
                             request_size,
                             extent
@@ -1352,7 +1352,7 @@ impl BlockAllocator {
     pub fn free(&mut self, extent: Extent) {
         self.block_access.verify_aligned(extent.location.offset);
         self.block_access.verify_aligned(extent.size);
-        trace!("free request: {:?}", extent);
+        super_trace!("free request: {:?}", extent);
 
         let slab_id = self.slab_id_from_extent(extent);
         self.slabs.get_mut(slab_id).free(extent);

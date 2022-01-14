@@ -13,7 +13,8 @@ use nix::sys::stat::SFlag;
 use num::Num;
 use num::NumCast;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::io::Read;
@@ -26,6 +27,7 @@ use std::time::Instant;
 use tokio::fs::File;
 use tokio::sync::Semaphore;
 use util::get_tunable;
+use util::super_trace;
 use util::zettacache_stats::*;
 use util::From64;
 use util::{AlignedBytes, AlignedVec};
@@ -321,7 +323,7 @@ impl BlockAccess {
         let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
         tokio::task::spawn_blocking(move || {
             nix::sys::uio::pwrite(fd, &bytes, i64::try_from(offset).unwrap()).unwrap();
-            trace!(
+            super_trace!(
                 "write({:?} len={}) returned in {}us",
                 location,
                 length,

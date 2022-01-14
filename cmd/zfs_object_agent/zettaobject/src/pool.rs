@@ -53,6 +53,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::super_trace;
 use util::AlignedBytes;
 use util::TerseVec;
 use uuid::Uuid;
@@ -1590,7 +1591,7 @@ impl Pool {
 
         let mut next_block = syncing_state.next_block();
         while let Some((buf, sender)) = syncing_state.pending_unordered_writes.remove(&next_block) {
-            trace!(
+            super_trace!(
                 "found next {:?} in unordered pending writes; transferring to pending object",
                 next_block
             );
@@ -1621,7 +1622,7 @@ impl Pool {
             assert_ge!(block, syncing_state.next_block());
 
             let (sender, receiver) = oneshot::channel();
-            trace!("inserting {:?} to unordered pending writes", block);
+            super_trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
                 .insert(block, (bytes.clone(), sender));

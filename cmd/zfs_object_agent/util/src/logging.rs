@@ -15,6 +15,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::PanicInfo;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::RwLock;
 use std::{panic, process, ptr, thread};
 
 static LOG_MESSAGES_PTR: AtomicPtr<std::sync::Mutex<VecDeque<String>>> =
@@ -33,6 +34,17 @@ lazy_static! {
     static ref PANIC_LOG_FOLDER: String =
         get_tunable("panic_log_folder", "/var/log/zoa".to_string());
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
+    pub static ref SUPER_EXPENSIVE_TRACE: RwLock<bool> =
+        RwLock::new(get_tunable("super_expensive_trace", false));
+}
+
+#[macro_export]
+macro_rules! super_trace {
+    ($($arg:tt)+) => ({
+        if $crate::SUPER_EXPENSIVE_TRACE.read().unwrap().to_owned() {
+            log!(log::Level::Trace, $($arg)+)
+        }
+    })
 }
 
 pub fn get_logging_level(verbosity: u64) -> LevelFilter {
@@ -131,6 +143,7 @@ impl Deserialize for BufferAppenderDeserializer {
 }
 
 fn setup_console_logging(verbosity: u64) {
+    *SUPER_EXPENSIVE_TRACE.write().unwrap() = verbosity > 3;
     let config = Config::builder()
         .appender(
             Appender::builder()
@@ -259,6 +272,10 @@ pub fn setup_logging(
         // all the trace! statements in prod and there is some cost involved in
         // string processing, memory allocation, global lock etc.
         trace!("logging level TRACE enabled");
+
+        // super_trace!() can be used for log statements that are very frequent.
+        // There is a very high performance penalty for enabling these statements.
+        super_trace!("logging super expensive TRACE enabled");
 
         // Log all the tunables.
         log_tunable_config();

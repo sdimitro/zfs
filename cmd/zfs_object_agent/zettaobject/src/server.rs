@@ -23,6 +23,7 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
 use util::get_tunable;
+use util::super_trace;
 use util::From64;
 
 lazy_static! {
@@ -170,7 +171,7 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
         let len64 = buf.len() as u64;
         let mut w = output.lock().await;
         // XXX kernel expects this as host byte order
-        trace!("sending response of {} bytes", len64);
+        super_trace!("sending response of {} bytes", len64);
         w.write_u64_le(len64).await.unwrap();
         w.write_all(buf.as_slice()).await.unwrap();
     }

@@ -50,6 +50,7 @@ use tokio::time::{sleep_until, timeout_at};
 use util::get_tunable;
 use util::maybe_die_with;
 use util::nice_p2size;
+use util::super_trace;
 use util::zettacache_stats::DiskIoType;
 use util::AlignedBytes;
 use util::From64;
@@ -330,7 +331,7 @@ impl MergeState {
             // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
             if let Some(start_key) = start_key {
                 if entry.key <= start_key {
-                    //trace!("skipping index entry: {:?}", entry.key);
+                    super_trace!("skipping index entry: {:?}", entry.key);
                     index_skips += 1;
                     continue;
                 }
@@ -1119,8 +1120,9 @@ impl ZettaCache {
                             // free the extent ranges associated with the evicted blocks
                             // XXX - should check to see if the extent is still in the "coverage" area.
                             // it seems possible that the meta-data area could grow during the merge cycle.
+
                             for extent in merge_checkpoint.free_list {
-                                trace!("eviction requested for {:?}", extent);
+                                super_trace!("eviction requested for {:?}", extent);
                                 self.state.lock().await.block_allocator.free(extent);
                             }
                         }
@@ -1161,27 +1163,27 @@ impl ZettaCache {
 
     #[measure(HitCount)]
     fn cache_miss_without_index_read(&self, key: &IndexKey) {
-        trace!("cache miss without reading index for {:?}", key);
+        super_trace!("cache miss without reading index for {:?}", key);
     }
 
     #[measure(HitCount)]
     fn cache_miss_after_index_read(&self, key: &IndexKey) {
-        trace!("cache miss after reading index for {:?}", key);
+        super_trace!("cache miss after reading index for {:?}", key);
     }
 
     #[measure(HitCount)]
     fn cache_hit_without_index_read(&self, key: &IndexKey) {
-        trace!("cache hit without reading index for {:?}", key);
+        super_trace!("cache hit without reading index for {:?}", key);
     }
 
     #[measure(HitCount)]
     fn cache_hit_after_index_read(&self, key: &IndexKey) {
-        trace!("cache hit after reading index for {:?}", key);
+        super_trace!("cache hit after reading index for {:?}", key);
     }
 
     #[measure(HitCount)]
     fn insert_failed_max_queue_depth(&self, key: &IndexKey) {
-        trace!("insertion failed due to max queue depth for {:?}", key);
+        super_trace!("insertion failed due to max queue depth for {:?}", key);
     }
 
     #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
@@ -1329,7 +1331,7 @@ impl ZettaCache {
             Either::Right(f) => f,
         };
 
-        trace!(
+        super_trace!(
             "lookup has no pending_change and is absent from the index-cache; checking index for {:?}",
             key
         );
@@ -1935,13 +1937,13 @@ impl ZettaCacheState {
                 }
             },
             btree_map::Entry::Vacant(ve) => {
-                trace!("adding Insert to pending_changes {:?} {:?}", key, value);
+                super_trace!("adding Insert to pending_changes {:?} {:?}", key, value);
                 ve.insert(PendingChange::Insert(value));
             }
         }
         self.atime_histogram.insert(value);
 
-        trace!("adding Insert to operation_log {:?} {:?}", key, value);
+        super_trace!("adding Insert to operation_log {:?} {:?}", key, value);
         self.operation_log
             .append(OperationLogEntry::Insert(key, value));
 
@@ -2017,7 +2019,7 @@ impl ZettaCacheState {
         );
         self.outstanding_writes.clear();
 
-        trace!(
+        debug!(
             "{:?} pending changes at checkpoint",
             self.pending_changes.len()
         );
