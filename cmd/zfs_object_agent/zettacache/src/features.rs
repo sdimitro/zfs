@@ -33,6 +33,10 @@ lazy_static! {
         name: FeatureName("com.delphix:expand".to_string()),
         info: FeatureType::NonUpgradeable
     };
+    pub static ref GHOSTS: Feature = Feature {
+        name: FeatureName("com.delphix:ghosts".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
 }
 
 #[derive(Debug)]

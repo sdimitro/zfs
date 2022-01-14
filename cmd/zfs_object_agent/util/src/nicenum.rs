@@ -7,10 +7,12 @@ use std::time::Duration;
 pub fn nice_p2size(number: u64) -> String {
     let mut scaled: f64 = number as f64;
     for unit in ["B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"] {
+        // Note: !format() will "round" floating point data to the precision requested,
+        // so the comparisons below take that into account when computing places
         let places = match scaled {
-            x if x < 10.0 => 2,
-            x if x < 100.0 => 1,
-            x if x < 1024.0 => 0,
+            x if x <= 9.995 => 2,
+            x if x <= 99.95 => 1,
+            x if x <= 1023.5 => 0,
             _ => {
                 scaled /= 1024.0;
                 continue;

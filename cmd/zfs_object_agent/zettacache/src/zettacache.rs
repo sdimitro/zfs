@@ -66,6 +66,7 @@ lazy_static! {
     static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
     static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
+    static ref GHOST_CACHE_SIZE_PCT: u64 = get_tunable("ghost_cache_size_pct", 100);
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
     static ref CACHE_INSERT_BLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_blocking_buffer_bytes", 256_000_000);
     static ref CACHE_INSERT_NONBLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_nonblocking_buffer_bytes", 256_000_000);
@@ -183,10 +184,9 @@ impl BlockBasedLogEntry for RebalanceLogEntry {}
 #[derive(Debug, Serialize, Deserialize)]
 struct MergeProgress {
     new_index: ZettaCacheIndexPhys,
-    free_list: Vec<IndexValue>,
+    free_list: Vec<Extent>,
 }
 
-// #[derive(Serialize, Deserialize)]
 #[derive(Debug)]
 enum MergeMessage {
     Progress(MergeProgress),
@@ -195,7 +195,7 @@ enum MergeMessage {
 
 impl MergeMessage {
     /// Compose a progress update to send to the checkpoint task.
-    async fn new_progress(next_index: &mut ZettaCacheIndex, free_list: Vec<IndexValue>) -> Self {
+    async fn new_progress(next_index: &mut ZettaCacheIndex, free_list: Vec<Extent>) -> Self {
         let timer = Instant::now();
         let free_count = free_list.len();
         let message = MergeProgress {
@@ -223,6 +223,7 @@ struct MergeState {
     old_pending_changes: BTreeMap<IndexKey, PendingChange>,
     old_operation_log_phys: BlockBasedLogPhys<OperationLogEntry>,
     eviction_cutoff: Atime,
+    ghost_cutoff: Atime,
 }
 
 impl MergeState {
@@ -232,8 +233,8 @@ impl MergeState {
             // the entry using the new location for the data. This way, once the cache commits to this new
             // index (containing this new entry), the old location for this entries data will no longer be
             // referenced (and thus, that location can be freed).
-            if let Some(new_location) = rebalance.map.get(&entry.value.extent()) {
-                entry.value.location = *new_location;
+            if let Some(new_location) = rebalance.map.get(&entry.value.extent().unwrap()) {
+                entry.value.location = Some(*new_location);
             }
         }
 
@@ -245,15 +246,29 @@ impl MergeState {
         &self,
         entry: IndexEntry,
         index: &mut ZettaCacheIndex,
-        free_list: &mut Vec<IndexValue>,
+        free_list: &mut Vec<Extent>,
     ) {
-        let entry = self.map_index_entry_to_rebalanced_location(entry);
-
         if entry.value.atime >= self.eviction_cutoff {
-            index.append(entry);
+            index.append(self.map_index_entry_to_rebalanced_location(entry));
         } else {
-            free_list.push(entry.value);
-            index.update_last_key(entry.key);
+            let mut ghost_entry = entry;
+            if ghost_entry.value.location.is_some() {
+                // This is a new ghost entry, free and strip old location infomation
+                free_list.push(
+                    self.map_index_entry_to_rebalanced_location(ghost_entry)
+                        .value
+                        .extent()
+                        .unwrap(),
+                );
+                ghost_entry.value.location = None;
+            }
+            if ghost_entry.value.atime >= self.ghost_cutoff {
+                // Preserve ghost entry to our ghost history
+                index.append(ghost_entry);
+            } else {
+                // Entry is now gone from Index, update our traversal postion
+                index.update_last_key(ghost_entry.key);
+            }
         }
     }
 
@@ -274,13 +289,15 @@ impl MergeState {
         let begin = Instant::now();
         let old_index = old_index.read().await;
         info!(
-            "writing new index to merge {} pending changes into index of {} entries ({} MB)",
+            "writing new index to merge {} pending changes into index of {} entries ({} MB), eviction cutoff {:?}, ghost cutoff {:?}",
             self.old_pending_changes.len(),
             old_index.log.len(),
             old_index.log.num_bytes() / 1024 / 1024,
+            self.eviction_cutoff,
+            self.ghost_cutoff,
         );
 
-        let mut free_list: Vec<IndexValue> = Vec::new();
+        let mut free_list: Vec<Extent> = Vec::new();
         let mut timer = Instant::now();
 
         let start_key = next_index.last_key;
@@ -349,7 +366,12 @@ impl MergeState {
                         pending_changes_iter.next();
 
                         let entry = self.map_index_entry_to_rebalanced_location(entry);
-                        free_list.push(entry.value);
+                        free_list.push(
+                            entry
+                                .value
+                                .extent()
+                                .expect("PendingChange::Remove of ghost entry"),
+                        );
                     } else {
                         // There shouldn't be a pending removal of an entry that doesn't exist in the index.
                         assert_gt!(pc_key, entry.key);
@@ -357,19 +379,34 @@ impl MergeState {
                     }
                 }
                 Some((&pc_key, &PendingChange::Insert(pc_value))) => {
-                    // Insertions are processed above.  There can't be an
-                    // index entry with the same key.  If there were, it has
-                    // to be removed first, resulting in a
+                    // Most insertions are processed above.  There can't be an index
+                    // entry with the same key unless we are replacing a ghost entry.
+                    // Otherwise, it has to be removed first, resulting in a
                     // PendingChange::RemoveThenInsert.
-                    assert_gt!(
-                        pc_key,
-                        entry.key,
-                        "pc_key: {:?}, pc_value: {:?}, entry: {:?}",
-                        pc_key,
-                        pc_value,
-                        entry
-                    );
-                    self.add_to_index_or_evict(entry, next_index, &mut free_list);
+                    if pc_key == entry.key {
+                        // This key was re-inserted after falling out of the index.
+                        // Replace the ghost index entry with the newly inserted entry.
+                        assert!(
+                            entry.value.location.is_none(),
+                            "Insert of {:?} {:?} but {:?} is not ghost",
+                            pc_key,
+                            pc_value,
+                            entry
+                        );
+                        self.add_to_index_or_evict(
+                            IndexEntry {
+                                key: pc_key,
+                                value: pc_value,
+                            },
+                            next_index,
+                            &mut free_list,
+                        );
+                        // this pending change is consumed
+                        pending_changes_iter.next();
+                    } else {
+                        assert_gt!(pc_key, entry.key);
+                        self.add_to_index_or_evict(entry, next_index, &mut free_list);
+                    }
                 }
                 Some((&pc_key, &PendingChange::RemoveThenInsert(pc_value))) => {
                     if pc_key == entry.key {
@@ -638,7 +675,14 @@ impl ZettaCache {
             index: Default::default(),
             operation_log: Default::default(),
             last_atime: Atime(0),
-            size_histogram: SizeHistogramPhys::new(total_capacity, *QUANTILES_IN_SIZE_HISTOGRAM),
+            size_histogram: SizeHistogramPhys::new(
+                total_capacity + (total_capacity / 100 * *GHOST_CACHE_SIZE_PCT),
+                total_capacity,
+                (total_capacity as f64 * *DEFAULT_METADATA_SIZE_PCT / 100.0)
+                    .approx_as::<u64>()
+                    .unwrap(),
+                *QUANTILES_IN_SIZE_HISTOGRAM,
+            ),
 
             merge_progress: None,
         };
@@ -1075,9 +1119,9 @@ impl ZettaCache {
                             // free the extent ranges associated with the evicted blocks
                             // XXX - should check to see if the extent is still in the "coverage" area.
                             // it seems possible that the meta-data area could grow during the merge cycle.
-                            for value in merge_checkpoint.free_list {
-                                trace!("eviction requested for {:?}", value);
-                                self.state.lock().await.block_allocator.free(value.extent());
+                            for extent in merge_checkpoint.free_list {
+                                trace!("eviction requested for {:?}", extent);
+                                self.state.lock().await.block_allocator.free(extent);
                             }
                         }
                         // merge task complete, replace the current index with the new index
@@ -1118,13 +1162,11 @@ impl ZettaCache {
     #[measure(HitCount)]
     fn cache_miss_without_index_read(&self, key: &IndexKey) {
         trace!("cache miss without reading index for {:?}", key);
-        // XXX - possibly add entry to hit-by-size ghost histogram
     }
 
     #[measure(HitCount)]
     fn cache_miss_after_index_read(&self, key: &IndexKey) {
         trace!("cache miss after reading index for {:?}", key);
-        // XXX - possibly add entry to hit-by-size ghost histogram
     }
 
     #[measure(HitCount)]
@@ -1164,7 +1206,7 @@ impl ZettaCache {
             self.evict(locked_key).await
         } else {
             let bytes = self
-                .lookup_impl(&key, |state, value| {
+                .lookup_impl(&key, source, |state, value| {
                     if matches!(source, LookupSource::Read) {
                         state.size_histogram.lookup();
                     }
@@ -1197,7 +1239,7 @@ impl ZettaCache {
     pub async fn evict(&self, locked_key: LockedKey) -> LookupResponse {
         let key = *locked_key.0.value();
         let response = self
-            .lookup_impl(&key, |state, value| {
+            .lookup_impl(&key, LookupSource::Write, |state, value| {
                 if let Some(value) = value {
                     state.evict(key, value);
                 }
@@ -1209,7 +1251,7 @@ impl ZettaCache {
         response
     }
 
-    async fn lookup_impl<F, R, Fut>(&self, key: &IndexKey, f: F) -> R
+    async fn lookup_impl<F, R, Fut>(&self, key: &IndexKey, source: LookupSource, f: F) -> R
     where
         F: FnOnce(&mut ZettaCacheState, Option<ValidIndexValue>) -> Fut,
         Fut: Future<Output = R>,
@@ -1229,6 +1271,8 @@ impl ZettaCache {
                         | PendingChange::RemoveThenInsert(value)
                         | PendingChange::UpdateAtime(value, _) => {
                             let validated = state.validate(value);
+                            // All entries in the pending changes should be valid
+                            assert!(validated.is_some());
                             Either::Left(f(&mut state, validated))
                         }
                         PendingChange::Remove() => {
@@ -1244,6 +1288,7 @@ impl ZettaCache {
                                 PendingChange::Insert(value)
                                 | PendingChange::RemoveThenInsert(value)
                                 | PendingChange::UpdateAtime(value, _) => {
+                                    state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
                                     Either::Left(f(&mut state, validated))
                                 }
@@ -1255,6 +1300,7 @@ impl ZettaCache {
                         } else {
                             match state.index_cache.get(key) {
                                 Some(&value) => {
+                                    state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
                                     Either::Left(f(&mut state, validated))
                                 }
@@ -1264,6 +1310,7 @@ impl ZettaCache {
                     } else {
                         match state.index_cache.get(key) {
                             Some(&value) => {
+                                state.ghost_hit_check(value, source);
                                 let validated = state.validate(value);
                                 Either::Left(f(&mut state, validated))
                             }
@@ -1304,7 +1351,7 @@ impl ZettaCache {
                         self.cache_miss_after_index_read(key);
                         None
                     }
-                    Some(_) | None => state.lookup_with_value_from_index(key, entry.value),
+                    Some(_) | None => state.lookup_with_value_from_index(key, entry.value, source),
                 };
 
                 f(&mut state, value)
@@ -1639,25 +1686,55 @@ impl ZCacheDBHandle {
 
 pub struct ValidIndexValue(IndexValue);
 
+impl ValidIndexValue {
+    pub fn extent(&self) -> Extent {
+        Extent {
+            location: self.0.location.unwrap(),
+            size: u64::from(self.0.size),
+        }
+    }
+}
+
 impl ZettaCacheState {
-    // Validates the passed in index value; returns the value back if it's still valid, or None.
+    /// Validates the passed in index value; returns the value back if it's still valid, or None.
     fn validate(&self, value: IndexValue) -> Option<ValidIndexValue> {
-        let cutoff = match &self.merge {
+        let live_cutoff = match &self.merge {
             Some(ms) => ms.eviction_cutoff,
-            None => self.atime_histogram.first(),
+            None => self.atime_histogram.first_live(),
         };
 
-        if value.atime < cutoff {
+        if value.atime < live_cutoff {
             None
         } else {
+            assert!(value.location.is_some());
             Some(ValidIndexValue(value))
+        }
+    }
+
+    fn ghost_hit_check(&mut self, value: IndexValue, source: LookupSource) {
+        let (live_cutoff, ghost_cutoff) = match &self.merge {
+            Some(ms) => (ms.eviction_cutoff, ms.ghost_cutoff),
+            None => (
+                self.atime_histogram.first_live(),
+                self.atime_histogram.first(),
+            ),
+        };
+
+        if value.atime >= ghost_cutoff
+            && value.atime < live_cutoff
+            && matches!(source, LookupSource::Read)
+        {
+            // This is a hit in the ghost range of the hit-by-size histogram
+            let size = self.atime_histogram.size_at(value.atime);
+            self.size_histogram.hit(size);
         }
     }
 
     fn lookup_with_value_from_index(
         &mut self,
         key: &IndexKey,
-        value_from_index_opt: IndexValue,
+        value_from_index: IndexValue,
+        source: LookupSource,
     ) -> Option<ValidIndexValue> {
         // Note: we're here because there was no PendingChange for this key, but
         // since we dropped the lock, a PendingChange may have been inserted
@@ -1665,13 +1742,15 @@ impl ZettaCacheState {
         // value from the index.
         // XXX is this still true, given that now we have the LockedKey
         // (outstanding_lookups lock)?
-        match self.pending_changes.get(key) {
+        let value = match self.pending_changes.get(key) {
             Some(PendingChange::Insert(value_ref))
             | Some(PendingChange::RemoveThenInsert(value_ref))
-            | Some(PendingChange::UpdateAtime(value_ref, _)) => self.validate(*value_ref),
-            Some(PendingChange::Remove()) => None,
-            None => self.validate(value_from_index_opt),
-        }
+            | Some(PendingChange::UpdateAtime(value_ref, _)) => *value_ref,
+            Some(PendingChange::Remove()) => return None,
+            None => value_from_index,
+        };
+        self.ghost_hit_check(value, source);
+        self.validate(value)
     }
 
     fn evict(&mut self, key: IndexKey, value: ValidIndexValue) {
@@ -1682,11 +1761,10 @@ impl ZettaCacheState {
     fn lookup(
         &mut self,
         key: IndexKey,
-        value: ValidIndexValue,
+        valid_value: ValidIndexValue,
         source: LookupSource,
     ) -> impl Future<Output = Option<AlignedBytes>> {
-        let mut value = value.0;
-
+        let mut value = valid_value.0;
         trace!("cache hit: reading {:?} from {:?}", key, value);
         let original_atime = value.atime;
         if value.atime != self.atime {
@@ -1703,7 +1781,9 @@ impl ZettaCacheState {
             | Some(PendingChange::UpdateAtime(value_ref, _)) => {
                 *value_ref = value;
             }
-            Some(PendingChange::Remove()) => panic!("invalid state"),
+            Some(PendingChange::Remove()) => {
+                panic!("invalid state")
+            }
             None => {
                 // only in Index, not pending_changes
                 trace!(
@@ -1720,7 +1800,13 @@ impl ZettaCacheState {
         }
         if matches!(source, LookupSource::Read) {
             // Add an entry to the hit-by-size histogram
-            let size = self.atime_histogram.size_at(value.atime);
+            let size = self.atime_histogram.size_at(original_atime);
+            trace!(
+                "cache size {} at atime {:?}, current atime_histogram size: {:?}",
+                size,
+                original_atime,
+                self.atime_histogram.size_at(self.atime_histogram.first())
+            );
             self.size_histogram.hit(size);
         }
         // If there's a write to this location in progress, we will need to wait for it to complete before reading.
@@ -1741,7 +1827,7 @@ impl ZettaCacheState {
             }
 
             let bytes = block_access
-                .read_raw(value.extent(), DiskIoType::ReadDataForLookup)
+                .read_raw(valid_value.extent(), DiskIoType::ReadDataForLookup)
                 .await;
             sem.add_permits(1);
             // XXX we can easily handle an io error here by returning None
@@ -1822,7 +1908,7 @@ impl ZettaCacheState {
         let key = *locked_key.0.value();
         let value = IndexValue {
             atime: self.atime,
-            location,
+            location: Some(location),
             size: u32::try_from(buf_size).unwrap(),
         };
 
@@ -2127,8 +2213,9 @@ impl ZettaCacheState {
         };
 
         let merge = Arc::new(MergeState {
-            eviction_cutoff: next_index.first_atime(),
             old_operation_log_phys: progress.operation_log.clone(),
+            ghost_cutoff: next_index.first_atime(),
+            eviction_cutoff: next_index.first_live_atime(),
             old_pending_changes,
             rebalance,
         });
@@ -2165,6 +2252,9 @@ impl ZettaCacheState {
             self.atime_histogram.sum() / 1024 / 1024,
         );
         let eviction_atime = self.atime_histogram.atime_for_target_size(target_size);
+        let ghost_atime = self
+            .atime_histogram
+            .atime_for_target_size(target_size + target_size / 100 * *GHOST_CACHE_SIZE_PCT);
 
         let old_operation_log_phys = self.operation_log.flush().await;
 
@@ -2179,7 +2269,7 @@ impl ZettaCacheState {
         let next_index = ZettaCacheIndex::open(
             self.block_access.clone(),
             self.extent_allocator.clone(),
-            ZettaCacheIndexPhys::new(eviction_atime),
+            ZettaCacheIndexPhys::new(ghost_atime, eviction_atime),
         )
         .await;
 
@@ -2205,6 +2295,7 @@ impl ZettaCacheState {
         // Note that we are "taking" the current set of pending changes for the merge
         // and leaving an empty log behind to accumulate new changes.
         let merge = Arc::new(MergeState {
+            ghost_cutoff: ghost_atime,
             eviction_cutoff: eviction_atime,
             old_pending_changes: std::mem::take(&mut self.pending_changes),
             old_operation_log_phys,
@@ -2234,13 +2325,13 @@ impl ZettaCacheState {
                         // return the "old" location of the block (which is valid while we are merging) and will be
                         // stored in an UpdateAtime record in pending_changes. Now that the merge is complete, we need
                         // to remap these old locations to their "new" rebalanced locations.
-                        if let Some(new_location) = rebalance.map.get(&value.extent()) {
-                            value.location = *new_location;
+                        if let Some(new_location) = rebalance.map.get(&value.extent().unwrap()) {
+                            value.location = Some(*new_location);
                         }
                     }
                     PendingChange::Insert(value) | PendingChange::RemoveThenInsert(value) => {
                         // Inserts in the "pending changes" list will never be moved as part of a rebalance.
-                        assert!(rebalance.map.get(&value.extent()).is_none());
+                        assert!(rebalance.map.get(&value.extent().unwrap()).is_none());
                     }
                     PendingChange::Remove() => {
                         // Nothing to do for removes.
@@ -2260,8 +2351,9 @@ impl ZettaCacheState {
             // by the cache will point to the new (rebalanced) locations on disk; otherwise, index cache hits would refer
             // to disk locations that have been freed.
             for (_, value) in self.index_cache.iter_mut() {
-                if let Some(new_location) = rebalance.map.get(&value.extent()) {
-                    value.location = *new_location;
+                // XXX - should we validate() the value and remove from index cache if no longer valid?
+                if let Some(new_location) = rebalance.map.get(&value.extent().unwrap()) {
+                    value.location = Some(*new_location);
                 }
             }
 
@@ -2273,11 +2365,12 @@ impl ZettaCacheState {
         }
 
         // Move the "start" of the zettacache state histogram to reflect the new index
-        self.atime_histogram.reset_first(next_index.first_atime());
+        self.atime_histogram.reset_first(merge.ghost_cutoff);
         trace!(
             "reset incore histogram start to {:?}",
             self.atime_histogram.first()
         );
+        self.atime_histogram.reset_first_live(merge.eviction_cutoff);
 
         let begin = Instant::now();
 
@@ -2291,10 +2384,16 @@ impl ZettaCacheState {
                     // for inserts. This is because an insert could have occurred just prior to the merge starting, and
                     // then the location for that new insert may have been rebalanced via the merge. In this case, we need
                     // to ensure index cache is populated correctly with the new location(s).
-                    if let Some(rebalance) = &merge.rebalance {
-                        if let Some(new_location) = rebalance.map.get(&value.extent()) {
-                            value.location = *new_location;
+                    match self.validate(value) {
+                        Some(valid_value) => {
+                            if let Some(rebalance) = &merge.rebalance {
+                                if let Some(new_location) = rebalance.map.get(&valid_value.extent())
+                                {
+                                    value.location = Some(*new_location);
+                                }
+                            }
                         }
+                        None => continue,
                     }
 
                     self.index_cache.put(key, value);
@@ -2327,8 +2426,11 @@ impl ZettaCacheState {
     }
 
     fn clear_hit_data(&mut self) {
+        let cache_capacity = self.block_access.total_capacity();
         self.size_histogram = SizeHistogramPhys::new(
-            self.block_access.total_capacity(),
+            cache_capacity + cache_capacity / 100 * *GHOST_CACHE_SIZE_PCT,
+            cache_capacity,
+            cache_capacity - self.block_allocator.size(),
             *QUANTILES_IN_SIZE_HISTOGRAM,
         )
     }

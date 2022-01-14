@@ -204,6 +204,9 @@ impl PublicConnectionState {
                     .insert("histogram", &size_data.histogram[..])
                     .unwrap();
                 response
+                    .insert("cache_capacity", &size_data.cache_capacity)
+                    .unwrap();
+                response
                     .insert("bucket_size", &size_data.bucket_size)
                     .unwrap();
                 response.insert("lookups", &size_data.lookups).unwrap();

@@ -19,7 +19,7 @@ pub struct IndexKey {
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct IndexValue {
-    pub location: DiskLocation,
+    pub location: Option<DiskLocation>,
     // XXX remove this and figure out based on which slab it's in?  However,
     // currently we need to return the right buffer size to the kernel, and it
     // isn't passing us the expected read size.  So we need to change some
@@ -29,11 +29,11 @@ pub struct IndexValue {
 }
 
 impl IndexValue {
-    pub fn extent(&self) -> Extent {
-        Extent {
-            location: self.location,
+    pub fn extent(&self) -> Option<Extent> {
+        self.location.map(|location| Extent {
+            location,
             size: u64::from(self.size),
-        }
+        })
     }
 }
 
@@ -53,10 +53,10 @@ pub struct ZettaCacheIndexPhys {
 }
 
 impl ZettaCacheIndexPhys {
-    pub fn new(min_atime: Atime) -> Self {
+    pub fn new(first_ghost_atime: Atime, first_live_atime: Atime) -> Self {
         Self {
             last_key: None,
-            atime_histogram: AtimeHistogramPhys::new(min_atime),
+            atime_histogram: AtimeHistogramPhys::new(first_ghost_atime, first_live_atime),
             log: Default::default(),
         }
     }
@@ -138,6 +138,10 @@ impl ZettaCacheIndex {
 
     pub fn first_atime(&self) -> Atime {
         self.atime_histogram.first()
+    }
+
+    pub fn first_live_atime(&self) -> Atime {
+        self.atime_histogram.first_live()
     }
 
     pub fn update_last_key(&mut self, key: IndexKey) {
