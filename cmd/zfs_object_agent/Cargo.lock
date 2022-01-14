@@ -1589,7 +1589,7 @@ checksum = "b8f8bdf33df195859076e54ab11ee78a1b208382d3a26ec40d142ffc1ecc49ef"
 [[package]]
 name = "nvpair"
 version = "0.5.1-delphix0"
-source = "git+https://github.com/ahrens/rust-libzfs?branch=work#2487e7e991486d4071e84628e9b6051b40ad9e4e"
+source = "git+https://github.com/delphix/rust-libzfs#8d79a112d29464b3c9137a28c028c11538875de4"
 dependencies = [
  "cstr-argument",
  "foreign-types 0.5.0",
@@ -1600,7 +1600,7 @@ dependencies = [
 [[package]]
 name = "nvpair-sys"
 version = "0.4.1-delphix0"
-source = "git+https://github.com/ahrens/rust-libzfs?branch=work#2487e7e991486d4071e84628e9b6051b40ad9e4e"
+source = "git+https://github.com/delphix/rust-libzfs#8d79a112d29464b3c9137a28c028c11538875de4"
 
 [[package]]
 name = "object"
