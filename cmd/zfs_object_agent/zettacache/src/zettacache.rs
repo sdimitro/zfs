@@ -28,10 +28,6 @@ use futures::Future;
 use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
-use metered::common::*;
-use metered::hdr_histogram::AtomicHdrHistogram;
-use metered::metered;
-use metered::time_source::StdInstantMicros;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map;
@@ -51,7 +47,9 @@ use util::get_tunable;
 use util::maybe_die_with;
 use util::nice_p2size;
 use util::super_trace;
+use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::DiskIoType;
+use util::zettacache_stats::*;
 use util::AlignedBytes;
 use util::From64;
 use util::LockSet;
@@ -152,7 +150,8 @@ pub struct ZettaCache {
     // XXX may need to break up this big lock.  At least we aren't holding it while doing i/o
     state: Arc<tokio::sync::Mutex<ZettaCacheState>>,
     outstanding_lookups: LockSet<IndexKey>,
-    metrics: Arc<ZettaCacheMetrics>,
+    stats: Arc<CacheStats>,
+    timebase: Instant, // used when collecting stats
     blocking_buffer_bytes_available: Arc<Semaphore>,
     nonblocking_buffer_bytes_available: Arc<Semaphore>,
     write_slots: Arc<Semaphore>,
@@ -225,6 +224,7 @@ struct MergeState {
     old_operation_log_phys: BlockBasedLogPhys<OperationLogEntry>,
     eviction_cutoff: Atime,
     ghost_cutoff: Atime,
+    stats: Arc<CacheStats>,
 }
 
 impl MergeState {
@@ -270,6 +270,7 @@ impl MergeState {
                 // Entry is now gone from Index, update our traversal postion
                 index.update_last_key(ghost_entry.key);
             }
+            self.stats.track_count(Evictions);
         }
     }
 
@@ -576,6 +577,7 @@ struct ZettaCacheState {
     outstanding_writes: BTreeMap<IndexValue, Arc<Semaphore>>,
 
     atime: Atime,
+    stats: Arc<CacheStats>,
 }
 
 pub struct LockedKey(LockedItem<IndexKey>);
@@ -596,6 +598,7 @@ pub enum InsertSource {
 pub enum LookupSource {
     Write,
     Read,
+    Evict,
 }
 
 pub enum LookupOperation {
@@ -611,7 +614,6 @@ fn checkpoint_size(block_access: &BlockAccess) -> u64 {
     )
 }
 
-#[metered(registry=ZettaCacheMetrics)]
 impl ZettaCache {
     /// Returns (checkpoint, metadata, data)
     fn divide_new_capacity(
@@ -887,6 +889,8 @@ impl ZettaCache {
         let pending_changes = Self::load_operation_log(&operation_log, &mut atime_histogram).await;
         debug!("atime_histogram: {:#?}", atime_histogram);
 
+        let stats = Arc::new(CacheStats::default());
+
         let mut state = ZettaCacheState {
             block_access: block_access.clone(),
             pending_changes,
@@ -908,7 +912,12 @@ impl ZettaCache {
             )
             .await,
             extent_allocator,
+            stats: stats.clone(),
         };
+
+        // Now that BlockAllocator is open grab its size stats (these will be updated periodically)
+        stats.track_instantaneous(BlockAllocatorSize, state.block_allocator.size());
+        stats.track_instantaneous(BlockAllocatorAvailable, state.block_allocator.available());
 
         if size_changed {
             // The hit data isn't accurate across cache size changes, so clear
@@ -932,7 +941,6 @@ impl ZettaCache {
             index: Arc::new(tokio::sync::RwLock::new(index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
             outstanding_lookups: LockSet::new(),
-            metrics: Default::default(),
             blocking_buffer_bytes_available: Arc::new(Semaphore::new(
                 *CACHE_INSERT_BLOCKING_BUFFER_BYTES,
             )),
@@ -943,6 +951,8 @@ impl ZettaCache {
                 block_access.disks().count() * *DISK_WRITE_MAX_QUEUE_DEPTH,
             )),
             block_access,
+            stats,
+            timebase: Instant::now(),
         };
 
         let (merge_rx, merge_index) = match checkpoint.merge_progress {
@@ -966,15 +976,6 @@ impl ZettaCache {
         let my_cache = this.clone();
         tokio::spawn(async move {
             my_cache.checkpoint_task(merge_rx, merge_index).await;
-        });
-
-        let metrics = this.metrics.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
-            loop {
-                interval.tick().await;
-                debug!("metrics: {:#?}", metrics);
-            }
         });
 
         let state = this.state.clone();
@@ -1161,35 +1162,6 @@ impl ZettaCache {
         }
     }
 
-    #[measure(HitCount)]
-    fn cache_miss_without_index_read(&self, key: &IndexKey) {
-        super_trace!("cache miss without reading index for {:?}", key);
-    }
-
-    #[measure(HitCount)]
-    fn cache_miss_after_index_read(&self, key: &IndexKey) {
-        super_trace!("cache miss after reading index for {:?}", key);
-    }
-
-    #[measure(HitCount)]
-    fn cache_hit_without_index_read(&self, key: &IndexKey) {
-        super_trace!("cache hit without reading index for {:?}", key);
-    }
-
-    #[measure(HitCount)]
-    fn cache_hit_after_index_read(&self, key: &IndexKey) {
-        super_trace!("cache hit after reading index for {:?}", key);
-    }
-
-    #[measure(HitCount)]
-    fn insert_failed_max_queue_depth(&self, key: &IndexKey) {
-        super_trace!("insertion failed due to max queue depth for {:?}", key);
-    }
-
-    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
-    #[measure(InFlight)]
-    #[measure(Throughput)]
-    #[measure(HitCount)]
     pub async fn lookup(
         &self,
         guid: PoolGuid,
@@ -1201,11 +1173,14 @@ impl ZettaCache {
         let key = IndexKey { guid, block };
         let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
 
-        if *CACHE_EVICT_EACH_N_LOOKUPS != 0
+        let response = if *CACHE_EVICT_EACH_N_LOOKUPS != 0
             && COUNTER.fetch_add(1, Ordering::Relaxed) == *CACHE_EVICT_EACH_N_LOOKUPS
         {
             COUNTER.store(0, Ordering::Relaxed);
-            self.evict(locked_key).await
+            let evict_response = self.evict(locked_key).await;
+            // bump stat after waiting so that it coincides with the lookup count stat
+            self.stats.track_count(CacheMissForcedEviction);
+            evict_response
         } else {
             let bytes = self
                 .lookup_impl(&key, source, |state, value| {
@@ -1221,23 +1196,23 @@ impl ZettaCache {
 
             match bytes {
                 Some(bytes) => {
-                    // XXX we don't really know whether it was before or after the index read
-                    self.cache_hit_without_index_read(&key);
+                    self.stats.track_bytes(LookupBytes, bytes.len() as u64);
+                    super_trace!("cache hit for {:?}", key);
                     LookupResponse::Present((bytes, locked_key))
                 }
-                None => {
-                    // XXX we don't really know whether it was before or after the index read
-                    self.cache_miss_without_index_read(&key);
-                    LookupResponse::Absent(locked_key)
-                }
+                None => LookupResponse::Absent(locked_key),
             }
+        };
+
+        match source {
+            LookupSource::Write => self.stats.track_count(LookupForWrite),
+            LookupSource::Read => self.stats.track_count(LookupForRead),
+            LookupSource::Evict => {} // not possible for this code path
         }
+
+        response
     }
 
-    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
-    #[measure(InFlight)]
-    #[measure(Throughput)]
-    #[measure(HitCount)]
     pub async fn evict(&self, locked_key: LockedKey) -> LookupResponse {
         let key = *locked_key.0.value();
         let response = self
@@ -1249,6 +1224,7 @@ impl ZettaCache {
             })
             .await;
 
+        self.stats.track_count(Evictions);
         assert!(matches!(response, LookupResponse::Absent(_)));
         response
     }
@@ -1326,7 +1302,11 @@ impl ZettaCache {
         let f = match read_data_fut_opt {
             Either::Left(read_data_fut) => {
                 // pending state tells us what to do
-                return read_data_fut.await;
+                let result = read_data_fut.await;
+                if matches!(source, LookupSource::Read | LookupSource::Write) {
+                    self.stats.track_count(CacheHitWithoutIndexRead);
+                }
+                return result;
             }
             Either::Right(f) => f,
         };
@@ -1336,10 +1316,13 @@ impl ZettaCache {
             key
         );
 
+        // TODO -- is CacheMissWithoutIndexRead possible anymore? See DOSE-939
+        let stat_counter;
         let read_data_fut = match index.log.lookup_by_key(key, |entry| entry.key).await {
             None => {
                 // key not in index
-                self.cache_miss_after_index_read(key);
+                stat_counter = CacheMissAfterIndexRead;
+                super_trace!("cache miss after reading index for {:?}", key);
                 let mut state = self.state.lock_non_send().await;
                 f(&mut state, None)
             }
@@ -1350,27 +1333,44 @@ impl ZettaCache {
                 let value = match &state.merge {
                     Some(ms) if entry.value.atime < ms.eviction_cutoff => {
                         // Block is being evicted, abort the read attempt
-                        self.cache_miss_after_index_read(key);
+                        stat_counter = CacheMissAfterIndexRead;
+                        super_trace!("cache miss after reading index, eviction cutoff {:?}", key);
                         None
                     }
-                    Some(_) | None => state.lookup_with_value_from_index(key, entry.value, source),
+                    Some(_) | None => {
+                        stat_counter = CacheHitAfterIndexRead;
+                        state.lookup_with_value_from_index(key, entry.value, source)
+                    }
                 };
 
                 f(&mut state, value)
             }
         };
-        read_data_fut.await
+        let result = read_data_fut.await;
+        // Update relevant stat after waiting
+
+        if matches!(source, LookupSource::Read | LookupSource::Write) {
+            self.stats.track_count(stat_counter);
+        }
+        result
     }
 
     /// Initiates insertion of this block; doesn't wait for the write to disk.
-    #[measure(type = ResponseTime<AtomicHdrHistogram, StdInstantMicros>)]
-    #[measure(InFlight)]
-    #[measure(Throughput)]
-    #[measure(HitCount)]
     pub async fn insert(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
         // The passed in buffer is only for a single block, which is capped to SPA_MAXBLOCKSIZE,
         // and thus we should never have an issue converting the length to a "u32" here.
         let len = u32::try_from(bytes.len()).unwrap();
+
+        self.stats.track_instantaneous(
+            BlockingBufferBytesAvailable,
+            (*CACHE_INSERT_BLOCKING_BUFFER_BYTES
+                - self.blocking_buffer_bytes_available.available_permits()) as u64,
+        );
+        self.stats.track_instantaneous(
+            NonblockingBufferBytesAvailable,
+            (*CACHE_INSERT_NONBLOCKING_BUFFER_BYTES
+                - self.nonblocking_buffer_bytes_available.available_permits()) as u64,
+        );
 
         // This permit will be dropped when the write to disk completes.  It
         // serves to limit the number of insert()'s that we can buffer before
@@ -1383,7 +1383,7 @@ impl ZettaCache {
             {
                 Ok(permit) => permit,
                 Err(tokio::sync::TryAcquireError::NoPermits) => {
-                    self.insert_failed_max_queue_depth(locked_key.0.value());
+                    self.stats.track_count(InsertDropQueueFull);
                     return;
                 }
                 Err(e) => panic!("unexpected error from try_acquire_many_owned: {:?}", e),
@@ -1398,6 +1398,13 @@ impl ZettaCache {
                 Err(e) => panic!("unexpected error from acquire_many_owned: {:?}", e),
             },
         };
+        self.stats.track_bytes(InsertBytes, bytes.len() as u64);
+        self.stats.track_count(match source {
+            InsertSource::Heal => InsertForHealing,
+            InsertSource::Read => InsertForRead,
+            InsertSource::SpeculativeRead => InsertForSpecRead,
+            InsertSource::Write => InsertForWrite,
+        });
 
         let state = self.state.clone();
         let write_slots = self.write_slots.clone();
@@ -1426,11 +1433,6 @@ impl ZettaCache {
         });
     }
 
-    #[measure(HitCount)]
-    fn healing(&self, locked_key: &LockedKey) {
-        debug!("Healing cache: {:?}", locked_key.0.value());
-    }
-
     pub async fn heal(&self, guid: PoolGuid, block: BlockId, object_bytes: AlignedBytes) {
         if let LookupResponse::Present((cache_bytes, locked_key)) =
             self.lookup(guid, block, LookupSource::Write).await
@@ -1439,7 +1441,8 @@ impl ZettaCache {
             // from the bytes contained in the object store. The bytes contained in the object store are always preferred
             // over the bytes contained in the cache; we assume the bytes passed were retrieved from the object store.
             if *cache_bytes != *object_bytes {
-                self.healing(&locked_key);
+                self.stats.track_count(HealedBlocks);
+                debug!("Healing cache: {:?}", locked_key.0.value());
                 match self.evict(locked_key).await {
                     LookupResponse::Present((_, locked_key)) => {
                         panic!("evicted key is present! {:?}", locked_key.0.value());
@@ -1471,6 +1474,12 @@ impl ZettaCache {
 
     pub fn io_stats_as_json(&self) -> String {
         self.block_access.io_stats_as_json()
+    }
+
+    pub async fn stats_as_json(&self) -> String {
+        let mut stats = CacheStats::clone(&self.stats);
+        stats.timestamp = self.timebase.elapsed();
+        serde_json::to_string(&stats).unwrap()
     }
 }
 
@@ -1798,6 +1807,8 @@ impl ZettaCacheState {
                 // don't have to traverse the tree again.
                 self.pending_changes
                     .insert(key, PendingChange::UpdateAtime(value, original_atime));
+                self.stats
+                    .track_instantaneous(PendingChanges, self.pending_changes.len() as u64);
             }
         }
         if matches!(source, LookupSource::Read) {
@@ -1892,6 +1903,8 @@ impl ZettaCacheState {
         self.atime_histogram.remove(value);
         self.operation_log
             .append(OperationLogEntry::Remove(key, oplog_value));
+        self.stats
+            .track_instantaneous(PendingChanges, self.pending_changes.len() as u64);
     }
 
     /// Insert this block to the cache, if space and performance parameters
@@ -1980,6 +1993,11 @@ impl ZettaCacheState {
             "flushing checkpoint {:?}",
             self.primary.checkpoint_id.next()
         );
+        self.stats
+            .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
+        self.stats
+            .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
+
         let begin_checkpoint = Instant::now();
 
         // Wait for all outstanding reads, so that if the ExtentAllocator needs
@@ -2220,6 +2238,7 @@ impl ZettaCacheState {
             eviction_cutoff: next_index.first_live_atime(),
             old_pending_changes,
             rebalance,
+            stats: self.stats.clone(),
         });
         self.merge = Some(merge.clone());
 
@@ -2253,6 +2272,11 @@ impl ZettaCacheState {
             self.block_allocator.freeing() / 1024 / 1024,
             self.atime_histogram.sum() / 1024 / 1024,
         );
+        self.stats
+            .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
+        self.stats
+            .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
+
         let eviction_atime = self.atime_histogram.atime_for_target_size(target_size);
         let ghost_atime = self
             .atime_histogram
@@ -2302,6 +2326,7 @@ impl ZettaCacheState {
             old_pending_changes: std::mem::take(&mut self.pending_changes),
             old_operation_log_phys,
             rebalance,
+            stats: self.stats.clone(),
         });
         self.merge = Some(merge.clone());
 

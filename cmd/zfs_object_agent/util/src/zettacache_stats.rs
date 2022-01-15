@@ -339,3 +339,109 @@ impl IoStats {
             .len()
     }
 }
+
+//
+// Stat structs for zcache stats subcommand
+//
+
+#[derive(Debug, Enum, Clone, Serialize, Deserialize)]
+/// The stats collected for zcache stats subcommand.
+pub enum CacheStatCounter {
+    // These stats are collected as part of the ZettaCache.stats struct.
+    // They are consumed in the StatsDisplay.display_stat_values() function.
+    LookupBytes,
+    LookupForRead,
+    LookupForWrite,
+    CacheMissWithoutIndexRead, // pending work in DOSE-939
+    CacheMissAfterIndexRead,
+    CacheMissForcedEviction,
+    CacheMissLockBusy, // pending, DOSE-905
+    CacheHitWithoutIndexRead,
+    CacheHitAfterIndexRead,
+    InsertBytes,
+    InsertForRead,
+    InsertForWrite,
+    InsertForSpecRead,
+    InsertForHealing,
+    InsertDropQueueFull,
+    InsertDropLockBusy, // pending, DOSE-905
+    HealedBlocks,
+    PendingChanges,
+    Evictions,
+    BlockingBufferBytesAvailable,
+    NonblockingBufferBytesAvailable,
+    BlockAllocatorSize,
+    BlockAllocatorAvailable,
+}
+
+impl Display for CacheStatCounter {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{:?}", self)
+    }
+}
+
+/// A snapshot of the cache stats collected from the zettacache.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct CacheStats {
+    pub timestamp: Duration,
+    pub stats: EnumMap<CacheStatCounter, StatCount>,
+}
+
+impl CacheStats {
+    pub fn new() -> CacheStats {
+        CacheStats {
+            timestamp: Duration::default(),
+            stats: Default::default(),
+        }
+    }
+    pub fn value(&self, counter: CacheStatCounter) -> u64 {
+        self.stats[counter].0.load(Relaxed)
+    }
+
+    pub fn track_count(&self, stat: CacheStatCounter) {
+        self.stats[stat].0.fetch_add(1, Relaxed);
+    }
+
+    pub fn track_bytes(&self, stat: CacheStatCounter, bytes: u64) {
+        self.stats[stat].0.fetch_add(bytes, Relaxed);
+    }
+
+    pub fn track_instantaneous(&self, stat: CacheStatCounter, value: u64) {
+        self.stats[stat].0.store(value, Relaxed);
+    }
+}
+
+impl Sub<&Self> for &CacheStats {
+    type Output = CacheStats;
+
+    /// Subtract two CacheStats. Used to create the net values between two samples.
+    fn sub(self, other: &Self) -> CacheStats {
+        let mut difference = CacheStats {
+            timestamp: self.timestamp - other.timestamp,
+            ..Default::default()
+        };
+
+        for (((counter_type, self_stat), other_stat), diff_stat) in self
+            .stats
+            .iter()
+            .zip(other.stats.values())
+            .zip(difference.stats.values_mut())
+        {
+            match counter_type {
+                // The following are instantaneous values and don't require subtraction
+                CacheStatCounter::PendingChanges
+                | CacheStatCounter::BlockingBufferBytesAvailable
+                | CacheStatCounter::NonblockingBufferBytesAvailable
+                | CacheStatCounter::BlockAllocatorSize
+                | CacheStatCounter::BlockAllocatorAvailable => {
+                    *diff_stat = self_stat.clone();
+                }
+                // Everything else should be subtracted
+                _ => {
+                    *diff_stat = self_stat - other_stat;
+                }
+            }
+        }
+        difference
+    }
+}

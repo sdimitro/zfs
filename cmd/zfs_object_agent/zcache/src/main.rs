@@ -7,6 +7,7 @@ mod iostat;
 mod list_devices;
 mod remote_channel;
 mod report_hits;
+mod stats;
 mod subcommand;
 
 use anyhow::Result;
@@ -17,6 +18,7 @@ use iostat::IoStat;
 use list_devices::ListDevices;
 use log::*;
 use report_hits::ReportHits;
+use stats::Stats;
 use subcommand::ZcacheSubCommand;
 
 fn main() -> Result<()> {
@@ -40,9 +42,10 @@ async fn async_main() -> Result<()> {
     // 2. Add an entry here to add an instance of the new sub-command to the sub_commands vector
     let sub_commands: Vec<Box<dyn ZcacheSubCommand>> = vec![
         Box::new(ClearHitData),
+        Box::new(IoStat),
         Box::new(ListDevices),
         Box::new(ReportHits),
-        Box::new(IoStat),
+        Box::new(Stats),
     ];
 
     // Define global command arguments

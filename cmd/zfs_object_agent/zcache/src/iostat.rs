@@ -22,6 +22,7 @@ struct IoStatDisplay {
     show_active: bool,
     show_devices: bool,
     show_time: bool,
+    interval_is_subsecond: bool,
     interval: Option<Duration>,
     count: Option<u64>,
     max_name_length: usize, // used for the device name column
@@ -33,6 +34,16 @@ impl IoStatDisplay {
     const VALUE_WIDTH: usize = 6;
     const HEADER_HEIGHT: usize = 3;
 
+    fn time_width(&self) -> usize {
+        // When the time interval is under a second display sub-second time
+        if self.interval_is_subsecond {
+            // we add 4 chars (e.g. ".756") but there were 2 free chars (so net of +2)
+            IoStatDisplay::TIME_WIDTH + 2
+        } else {
+            IoStatDisplay::TIME_WIDTH
+        }
+    }
+
     fn display_dashes(width: usize) {
         print!("{0:-<1$}  ", "-", width);
     }
@@ -40,7 +51,7 @@ impl IoStatDisplay {
     /// Display centered column group titles, such as 'Lookup: Read-Data'
     fn display_header(&self, titles: Vec<&str>, columns_per_group: usize) {
         if self.show_time {
-            print!("{:^1$}  ", "timestamp", IoStatDisplay::TIME_WIDTH);
+            print!("{:^1$}  ", "timestamp", self.time_width());
         }
         if self.show_devices {
             print!("{:^1$}  ", "zcache", self.max_name_length);
@@ -60,7 +71,11 @@ impl IoStatDisplay {
         // First print column headers
         if self.show_time {
             // Note: we use the date as the header over the timestamp column
-            print!("{}  ", Local::now().format("%Y-%m-%d"));
+            print!(
+                "{0:>1$}  ",
+                format!("{}", Local::now().format("%Y-%m-%d")),
+                self.time_width()
+            );
         }
         if self.show_devices {
             print!("{:^1$}  ", "device", self.max_name_length);
@@ -83,7 +98,7 @@ impl IoStatDisplay {
 
         // Now print dashes underneath each column
         if self.show_time {
-            IoStatDisplay::display_dashes(IoStatDisplay::TIME_WIDTH);
+            IoStatDisplay::display_dashes(self.time_width());
         }
         if self.show_devices {
             IoStatDisplay::display_dashes(self.max_name_length);
@@ -184,13 +199,18 @@ impl IoStatDisplay {
         for (i, disk_stats) in stat_delta.disk_stats.iter().enumerate() {
             if self.show_time {
                 let time = if i == 0 {
-                    // Note: only display time here since the date is in the column header
-                    format!("{}", Local::now().format("%H:%M:%S"))
+                    if self.interval_is_subsecond {
+                        // e.g. "05:43:54.254"
+                        Local::now().format("%H:%M:%S%.3f").to_string()
+                    } else {
+                        // e.g. "05:43:54"
+                        Local::now().format("%H:%M:%S").to_string()
+                    }
                 } else {
                     // Show the time once (above) in 'summary' row, but not with each device row
                     String::from("")
                 };
-                print!("{:>1$}  ", time, IoStatDisplay::TIME_WIDTH);
+                print!("{:>1$}  ", time, self.time_width());
             }
             if self.show_devices {
                 let (width, indent) = if i == 0 {
@@ -224,7 +244,11 @@ impl IoStatDisplay {
     fn display_iostat_histogram(&self, histogram_name: &str, stat_delta: &IoStats) {
         for disk_stat in stat_delta.disk_stats.iter() {
             if self.show_time {
-                println!("{}", Local::now().format("%Y-%m-%d %H:%M:%S UTC"));
+                if self.interval_is_subsecond {
+                    println!("{}", Local::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"));
+                } else {
+                    println!("{}", Local::now().format("%Y-%m-%d %H:%M:%S UTC"));
+                }
             }
             println!();
             let device_name = if self.show_devices {
@@ -462,6 +486,7 @@ impl ZcacheSubCommand for IoStat {
             histogram_name,
             interval,
             count,
+            interval_is_subsecond: interval.map_or(false, |d| d.as_secs() < 1),
         }
         .display_io_stats()
         .await
