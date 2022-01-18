@@ -53,6 +53,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::super_trace;
 use util::AlignedBytes;
 use util::TerseVec;
 use uuid::Uuid;
@@ -69,7 +70,7 @@ lazy_static! {
     static ref FREE_LOWWATER_PCT: f64 = get_tunable("free_lowwater_pct", 40.0);
     // don't bother freeing unless there are at least this number of free blocks
     static ref FREE_MIN_BLOCKS: u64 = get_tunable("free_min_blocks", 1000);
-    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 1024 * 1024);
+    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 2 * 1024 * 1024);
 
     // Split a reclaim free log when it exceeds this many entries.  We picked 10 million to
     // keep the memory size for loading pending frees and object sizes logs at about 1/2 GB.
@@ -77,9 +78,9 @@ lazy_static! {
     // If this value is smaller than the number of blocks that could be freed in one object
     // group (1000 objects), then we may end up trying to repeatedly split a log that contains
     // blocks of only a single object group, because we'll send all the records to a single
-    // "side" of the split. Given object size=1MB, group size=1000 objects, and min block
-    // size=512b, the maximum blocks (and thus entries) in one object group is 2 million.
-    // Therefore this setting should be >2M.
+    // "side" of the split. Given object size=2MB, group size=1000 objects, and min block
+    // size=512b, the maximum blocks (and thus entries) in one object group is 4 million.
+    // Therefore this setting should be >4M.
     static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = get_tunable("reclaim_log_entries_limit", 10_000_000);
 
     // When reclaiming free blocks, allow this many concurrent
@@ -1590,7 +1591,7 @@ impl Pool {
 
         let mut next_block = syncing_state.next_block();
         while let Some((buf, sender)) = syncing_state.pending_unordered_writes.remove(&next_block) {
-            trace!(
+            super_trace!(
                 "found next {:?} in unordered pending writes; transferring to pending object",
                 next_block
             );
@@ -1621,7 +1622,7 @@ impl Pool {
             assert_ge!(block, syncing_state.next_block());
 
             let (sender, receiver) = oneshot::channel();
-            trace!("inserting {:?} to unordered pending writes", block);
+            super_trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
                 .insert(block, (bytes.clone(), sender));

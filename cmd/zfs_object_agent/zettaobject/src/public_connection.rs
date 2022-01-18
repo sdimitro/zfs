@@ -61,6 +61,8 @@ impl PublicConnectionState {
         );
         server.register_handler("report_hits", Box::new(Self::report_hits));
         server.register_handler("list_devices", Box::new(Self::list_devices));
+        server.register_handler("zcache_iostat", Box::new(Self::zcache_iostat));
+        server.register_handler("zcache_stats", Box::new(Self::zcache_stats));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -203,6 +205,9 @@ impl PublicConnectionState {
                     .insert("histogram", &size_data.histogram[..])
                     .unwrap();
                 response
+                    .insert("cache_capacity", &size_data.cache_capacity)
+                    .unwrap();
+                response
                     .insert("bucket_size", &size_data.bucket_size)
                     .unwrap();
                 response.insert("lookups", &size_data.lookups).unwrap();
@@ -244,6 +249,60 @@ impl PublicConnectionState {
         } else {
             Ok(Box::pin(async move {
                 response.insert("Type", "list_devices").unwrap();
+                response.insert("result", "err").unwrap();
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        }
+    }
+
+    fn zcache_iostat(&mut self, nvl: NvList) -> HandlerReturn {
+        debug!("got request: {:?}", nvl);
+        let mut response = NvList::new_unique_names();
+        let cache = self.cache.as_ref().cloned();
+
+        if let Some(zettacache) = cache {
+            Ok(Box::pin(async move {
+                let json_stats = zettacache.io_stats_as_json();
+
+                response
+                    .insert("iostats_json", &json_stats.as_str())
+                    .unwrap();
+                response.insert("Type", "zcache_iostat").unwrap();
+                response.insert("result", "ok").unwrap();
+
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        } else {
+            Ok(Box::pin(async move {
+                response.insert("Type", "zcache_iostat").unwrap();
+                response.insert("result", "err").unwrap();
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        }
+    }
+
+    fn zcache_stats(&mut self, nvl: NvList) -> HandlerReturn {
+        debug!("got request: {:?}", nvl);
+        let mut response = NvList::new_unique_names();
+        let cache = self.cache.as_ref().cloned();
+
+        if let Some(zettacache) = cache {
+            Ok(Box::pin(async move {
+                let json_stats = zettacache.stats_as_json().await;
+
+                response.insert("stats_json", &json_stats[..]).unwrap();
+                response.insert("Type", "zcache_stats").unwrap();
+                response.insert("result", "ok").unwrap();
+
+                debug!("sending response: {:?}", response);
+                Ok(Some(response))
+            }))
+        } else {
+            Ok(Box::pin(async move {
+                response.insert("Type", "zcache_stats").unwrap();
                 response.insert("result", "err").unwrap();
                 debug!("sending response: {:?}", response);
                 Ok(Some(response))

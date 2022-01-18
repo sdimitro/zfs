@@ -55,11 +55,11 @@ function check_config
 		log_fail "compatibility property set incorrectly $curval"
 	fi
 
-	if ! zdb -C -U $CACHE_FILE | grep "compatibility: '$propval'"; then
+	if ! run_zdb -e "-C -U" -p "$CACHE_FILE" | grep "compatibility: '$propval'"; then
 		log_fail "compatibility property missing in cache file"
 	fi
 
-	if ! zdb -C -U $CACHE_FILE $TESTPOOL | grep "compatibility: '$propval'"; then
+	if ! run_zdb -e "-C -U" -p "$CACHE_FILE $TESTPOOL" | grep "compatibility: '$propval'"; then
 		log_fail "compatibility property missing from MOS object"
 	fi
 }

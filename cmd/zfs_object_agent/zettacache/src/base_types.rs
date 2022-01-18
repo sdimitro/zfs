@@ -97,6 +97,18 @@ impl Extent {
             && sub.location.offset >= self.location.offset
             && sub.location.offset + sub.size <= self.location.offset + self.size
     }
+
+    /// returns the sub-range of self that is after `sub`, or None if self does not contain sub
+    pub fn after(&self, sub: &Extent) -> Option<Extent> {
+        match self.contains(sub) {
+            true => Some(Extent::new(
+                self.location.disk,
+                sub.location.offset + sub.size,
+                self.location.offset + self.size - (sub.location.offset + sub.size),
+            )),
+            false => None,
+        }
+    }
 }
 
 /// This allows Extents to be compared by their `location`s, ignoring the `size`s.

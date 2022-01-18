@@ -447,3 +447,25 @@ tags = ['functional', 'cli_user', 'misc']
 [tests/functional/large_files]
 tests = ['large_files_001_pos', 'large_files_002_pos']
 tags = ['functional', 'large_files']
+
+[tests/functional/cli_root/zpool_export]
+tests = ['zpool_export_001_pos', 'zpool_export_002_pos',
+	'zpool_export_003_neg', 'zpool_export_004_pos']
+tags = ['functional', 'cli_root', 'zpool_export']
+
+[tests/functional/largest_pool]
+tests = ['largest_pool_001_pos']
+pre =
+post =
+tags = ['functional', 'largest_pool']
+
+[tests/functional/inuse]
+tests = ['inuse_004_pos', 'inuse_005_pos', 'inuse_008_pos', 'inuse_009_pos']
+post =
+tags = ['functional', 'inuse']
+
+[tests/functional/log_spacemap]
+tests = ['log_spacemap_import_logs']
+pre =
+post =
+tags = ['functional', 'log_spacemap']

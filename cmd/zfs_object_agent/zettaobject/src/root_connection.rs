@@ -14,10 +14,10 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::sync::Arc;
-use util::get_tunable;
 use util::maybe_die_with;
 use util::AlignedBytes;
 use util::From64;
+use util::{get_tunable, super_trace};
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -309,7 +309,7 @@ impl RootConnectionState {
         let slice = u8_array_value(&nvl, "data")?;
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
-        trace!(
+        super_trace!(
             "got write request id={}: {:?} len={}",
             request_id,
             block,
@@ -334,7 +334,7 @@ impl RootConnectionState {
             response.insert("block", &block.0).unwrap();
             response.insert("request_id", &request_id).unwrap();
             response.insert("token", &token).unwrap();
-            trace!("sending response: {:?}", response);
+            super_trace!("sending response: {:?}", response);
             Ok(Some(response))
         }))
     }

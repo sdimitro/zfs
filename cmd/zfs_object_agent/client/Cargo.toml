@@ -3,6 +3,7 @@ name = "zoa_test"
 version = "0.1.0"
 authors = ["Delphix"]
 edition = "2021"
+publish = false
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
@@ -14,7 +15,7 @@ clap = "2"
 futures = "0.3.13"
 git-version = "0.3.5"
 lazy_static = "1.4.0"
-nvpair = { git = "https://github.com/ahrens/rust-libzfs", branch = "work"}
+nvpair = { git = "https://github.com/delphix/rust-libzfs"}
 rand = "0.8.3"
 rusoto_core = "0.47.0"
 rusoto_credential = "0.47.0"

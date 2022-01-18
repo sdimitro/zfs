@@ -330,6 +330,19 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_user/misc/zpool_online_001_neg': ['SKIP', object_store_skip],
         'cli_user/misc/zpool_remove_001_neg': ['SKIP', object_store_skip],
         'cli_user/misc/zpool_replace_001_neg': ['SKIP', object_store_skip],
+        'cli_root/zpool_export/zpool_export_004_pos':
+            ['SKIP', object_store_skip],
+        'inuse/setup': ['SKIP', object_store_skip],
+        'inuse/inuse_001_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_003_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_004_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_005_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_006_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_007_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_008_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_009_pos': ['SKIP', object_store_skip],
+        'log_spacemap/log_spacemap_import_logs': ['SKIP', object_store_skip],
+
     })
 
 #
@@ -442,6 +455,7 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_root/zdb/zdb_decompress': ['FAIL', 'DOSE-737'],
         'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
         'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_objset_id': ['FAIL', 'DOSE-915'],
     })
 
 # Not all Github actions runners have scsi_debug module, so we may skip

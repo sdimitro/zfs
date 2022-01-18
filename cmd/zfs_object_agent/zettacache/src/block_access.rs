@@ -21,13 +21,16 @@ use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::prelude::OpenOptionsExt;
+use std::path::Path;
+use std::sync::atomic::Ordering;
 use std::time::Instant;
 use tokio::fs::File;
 use tokio::sync::Semaphore;
 use util::get_tunable;
-use util::AlignedBytes;
-use util::AlignedVec;
+use util::super_trace;
+use util::zettacache_stats::*;
 use util::From64;
+use util::{AlignedBytes, AlignedVec};
 use util::{DeviceEntry, DeviceList};
 
 lazy_static! {
@@ -45,11 +48,62 @@ struct BlockHeader {
     checksum: u64,
 }
 
+#[must_use]
+struct OpInProgress<'a> {
+    begin: Instant,
+    counters: &'a IoStatValues,
+}
+
+impl<'a> OpInProgress<'a> {
+    fn new(counters: &'a IoStatValues) -> Self {
+        counters.active_count.0.fetch_add(1, Ordering::Relaxed);
+        OpInProgress {
+            begin: Instant::now(),
+            counters,
+        }
+    }
+
+    fn end(self, bytes: u64) {
+        let counters = self.counters;
+        counters.operations.0.fetch_add(1, Ordering::Relaxed);
+        counters.total_bytes.0.fetch_add(bytes, Ordering::Relaxed);
+        counters.total_nanoseconds.0.fetch_add(
+            self.begin.elapsed().as_nanos().try_into().unwrap(),
+            Ordering::Relaxed,
+        );
+
+        // The first latency bucket is 1 microsecond
+        let latency = self.begin.elapsed().as_micros();
+        let histo = &counters.latency_histogram.0;
+        histo
+            .get(latency.next_power_of_two().trailing_zeros() as usize)
+            .unwrap_or_else(|| histo.last().unwrap())
+            .0
+            .fetch_add(1, Ordering::Relaxed);
+
+        // The first request size bucket is 512 bytes
+        let size = bytes >> 9;
+        let histo = &counters.request_histogram.0;
+        histo
+            .get(size.next_power_of_two().trailing_zeros() as usize)
+            .unwrap_or_else(|| histo.last().unwrap())
+            .0
+            .fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+impl<'a> Drop for OpInProgress<'a> {
+    fn drop(&mut self) {
+        self.counters.active_count.0.fetch_sub(1, Ordering::Relaxed);
+    }
+}
+
 #[derive(Debug)]
 pub struct BlockAccess {
     sector_size: usize,
     disks: Vec<Disk>,
     readonly: bool,
+    timebase: Instant,
 }
 
 #[derive(Debug)]
@@ -58,6 +112,7 @@ pub struct Disk {
     device_path: String,
     size: u64,
     sector_size: usize,
+    io_stats: DiskIoStats,
     outstanding_reads: Semaphore,
     outstanding_writes: Semaphore,
 }
@@ -121,11 +176,20 @@ impl Disk {
         } else {
             panic!("{}: invalid file type {:?}", disk_path, mode);
         }
+
+        let device = Path::new(disk_path)
+            .file_name()
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+
         let this = Disk {
             file,
             device_path: disk_path.to_string(),
             size,
             sector_size,
+            io_stats: DiskIoStats::new(device),
             outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
             outstanding_writes: Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH),
         };
@@ -148,10 +212,12 @@ impl BlockAccess {
             })
             .unwrap()
             .sector_size;
+
         BlockAccess {
             sector_size,
             disks,
             readonly,
+            timebase: Instant::now(),
         }
     }
 
@@ -188,7 +254,7 @@ impl BlockAccess {
     }
 
     // offset and length must be sector-aligned
-    pub async fn read_raw(&self, extent: Extent) -> AlignedBytes {
+    pub async fn read_raw(&self, extent: Extent, io_type: DiskIoType) -> AlignedBytes {
         self.verify_aligned(extent.location.offset);
         self.verify_aligned(extent.size);
         let disk = self.disk(extent.location.disk);
@@ -196,7 +262,8 @@ impl BlockAccess {
         let sector_size = self.sector_size;
         let begin = Instant::now();
         let _permit = disk.outstanding_reads.acquire().await.unwrap();
-        let bytes = tokio::task::spawn_blocking(move || {
+        let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
+        let bytes: AlignedBytes = tokio::task::spawn_blocking(move || {
             let mut v = AlignedVec::with_capacity(usize::from64(extent.size), sector_size);
             // By using the unsafe libc::pread() instead of
             // nix::sys::uio::pread(), we avoid the cost of zeroing out the
@@ -216,6 +283,7 @@ impl BlockAccess {
         })
         .await
         .unwrap();
+        op.end(bytes.len() as u64);
         trace!(
             "read({:?}) returned in {}us",
             extent,
@@ -226,7 +294,12 @@ impl BlockAccess {
 
     // location.offset and bytes.len() must be sector-aligned.  However,
     // bytes.alignment() need not be the sector size (it will be copied if not).
-    pub async fn write_raw(&self, location: DiskLocation, mut bytes: AlignedBytes) {
+    pub async fn write_raw(
+        &self,
+        location: DiskLocation,
+        mut bytes: AlignedBytes,
+        io_type: DiskIoType,
+    ) {
         assert!(
             !self.readonly,
             "attempting zettacache write in readonly mode"
@@ -247,9 +320,10 @@ impl BlockAccess {
         assert_eq!(bytes.as_ptr() as usize % self.sector_size, 0);
         let begin = Instant::now();
         let _permit = disk.outstanding_writes.acquire().await.unwrap();
+        let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
         tokio::task::spawn_blocking(move || {
             nix::sys::uio::pwrite(fd, &bytes, i64::try_from(offset).unwrap()).unwrap();
-            trace!(
+            super_trace!(
                 "write({:?} len={}) returned in {}us",
                 location,
                 length,
@@ -258,6 +332,7 @@ impl BlockAccess {
         })
         .await
         .unwrap();
+        op.end(length as u64);
     }
 
     pub fn round_up_to_sector<N: Num + NumCast + Copy>(&self, n: N) -> N {
@@ -376,5 +451,17 @@ impl BlockAccess {
             struct_obj,
             self.round_up_to_sector(header_size + data.len()),
         ))
+    }
+
+    /// Return the I/O stats collected as a serialized json string.
+    pub fn io_stats_as_json(&self) -> String {
+        let timestamp = self.timebase.elapsed();
+        // TODO -- should pass the timebase to differentiate previous stats across agent restart
+
+        serde_json::to_string(&IoStatsRef {
+            timestamp,
+            disk_stats: self.disks.iter().map(|disk| &disk.io_stats).collect(),
+        })
+        .unwrap()
     }
 }

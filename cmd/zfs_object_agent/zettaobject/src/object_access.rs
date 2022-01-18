@@ -14,9 +14,7 @@ use log::*;
 use lru::LruCache;
 use rand::prelude::*;
 use rusoto_core::{ByteStream, RusotoError};
-use rusoto_credential::{
-    AutoRefreshingProvider, ChainProvider, InstanceMetadataProvider, ProfileProvider,
-};
+use rusoto_credential::{ChainProvider, InstanceMetadataProvider, ProfileProvider};
 use rusoto_s3::{
     Delete, DeleteObjectsRequest, GetObjectRequest, HeadObjectOutput, HeadObjectRequest,
     ListObjectsV2Request, ObjectIdentifier, PutObjectError, PutObjectOutput, PutObjectRequest,
@@ -268,13 +266,56 @@ where
     E: core::fmt::Debug,
     F: Future<Output = Result<O, OAError<E>>>,
 {
+    let mut time_skew_retried = false;
+    let mut expired_token_retried = false;
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
     loop {
+        let begin = Instant::now();
         match f().await {
             res @ Ok(_) => return res,
             res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
             res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
             Err(OAError::RequestError(RusotoError::Unknown(bhr))) => {
+                let elapsed = begin.elapsed();
+                if bhr.status == StatusCode::BAD_REQUEST
+                    && bhr.body_as_str().contains("ExpiredToken")
+                {
+                    // Tokens are refreshed on expiry. But if a request is delivered late, the token might have expired
+                    // by the time it is processsed. We retry once in the event of this error.
+                    if !expired_token_retried {
+                        info!(
+                            "Retrying on ExpiredToken error; request took {} secs.",
+                            elapsed.as_secs()
+                        );
+                        expired_token_retried = true;
+                        continue;
+                    } else {
+                        error!(
+                            "ExpiredToken error hit repeatedly; request took {} secs.",
+                            elapsed.as_secs()
+                        );
+                    }
+                }
+                if bhr.status == StatusCode::FORBIDDEN
+                    && bhr.body_as_str().contains("RequestTimeTooSkewed")
+                {
+                    // If the request is delivered late, it is rejected by the S3 server. In the event of this error,
+                    // a request is retried. If the system time is too skewed (15 minutes for Amazon S3), requests will
+                    // get rejected repeatedly and will never succeed. To avoid this, we retry just once and then give up.
+                    if !time_skew_retried {
+                        info!(
+                            "Retrying on RequestTimeTooSkewed error; request took {} secs.",
+                            elapsed.as_secs()
+                        );
+                        time_skew_retried = true;
+                        continue;
+                    } else {
+                        error!(
+                            "RequestTimeTooSkewed error hit repeatedly; request took {} secs.",
+                            elapsed.as_secs()
+                        );
+                    }
+                }
                 if NON_RETRYABLE_ERRORS.contains(&bhr.status) {
                     return Err(OAError::RequestError(RusotoError::Unknown(bhr)));
                 }
@@ -378,8 +419,8 @@ impl ObjectAccess {
         info!("Endpoint: {}", endpoint);
         info!("Profile: {:?}", credentials_profile);
 
-        let auto_refreshing_provider =
-            AutoRefreshingProvider::new(ChainProvider::with_profile_provider(
+        let provider =
+            util::ResilientCredentialsProvider::new(ChainProvider::with_profile_provider(
                 ProfileProvider::with_default_credentials(
                     credentials_profile.unwrap_or_else(|| "default".to_owned()),
                 )
@@ -389,7 +430,7 @@ impl ObjectAccess {
 
         let http_client = rusoto_core::HttpClient::new().unwrap();
         let region = ObjectAccess::get_custom_region(endpoint, region_str);
-        rusoto_s3::S3Client::new_with(http_client, auto_refreshing_provider, region)
+        rusoto_s3::S3Client::new_with(http_client, provider, region)
     }
 
     pub fn from_client(
