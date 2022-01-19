@@ -284,7 +284,7 @@ impl BlockAccess {
         .await
         .unwrap();
         op.end(bytes.len() as u64);
-        trace!(
+        super_trace!(
             "read({:?}) returned in {}us",
             extent,
             begin.elapsed().as_micros()

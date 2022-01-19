@@ -55,7 +55,7 @@ impl<V: Hash + Eq + Copy + Debug> LockSet<V> {
                     }
                 }
             };
-            trace!("{:?}: waiting for existing lock", value);
+            super_trace!("{:?}: waiting for existing lock", value);
             // Note: since we don't hold the locks mutex now, the corresponding
             // LockedItem may have been dropped, in which case the sender was
             // dropped.  In this case, the changed() Result will be an Err,

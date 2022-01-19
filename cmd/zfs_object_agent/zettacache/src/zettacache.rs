@@ -1013,7 +1013,7 @@ impl ZettaCache {
                         match pending_changes.entry(key) {
                             btree_map::Entry::Occupied(mut oe) => match oe.get() {
                                 PendingChange::Remove() => {
-                                    trace!("insert with existing removal; changing to RemoveThenInsert: {:?} {:?}", key, value);
+                                    super_trace!("insert with existing removal; changing to RemoveThenInsert: {:?} {:?}", key, value);
                                     oe.insert(PendingChange::RemoveThenInsert(value));
                                 }
                                 pc  => {
@@ -1026,7 +1026,7 @@ impl ZettaCache {
                                 }
                             },
                             btree_map::Entry::Vacant(ve) => {
-                                trace!("insert {:?} {:?}", key, value);
+                                super_trace!("insert {:?} {:?}", key, value);
                                 ve.insert(PendingChange::Insert(value));
                             }
                         }
@@ -1037,11 +1037,11 @@ impl ZettaCache {
                         match pending_changes.entry(key) {
                             btree_map::Entry::Occupied(mut oe) => match oe.get() {
                                 PendingChange::Insert(value) => {
-                                    trace!("remove with existing insert; clearing {:?} {:?}", key, value);
+                                    super_trace!("remove with existing insert; clearing {:?} {:?}", key, value);
                                     oe.remove();
                                 }
                                 PendingChange::RemoveThenInsert(value) => {
-                                    trace!("remove with existing removetheninsert; changing to remove: {:?} {:?}", key, value);
+                                    super_trace!("remove with existing removetheninsert; changing to remove: {:?} {:?}", key, value);
                                     oe.insert(PendingChange::Remove());
                                 }
                                 pc  => {
@@ -1053,7 +1053,7 @@ impl ZettaCache {
                                 }
                             },
                             btree_map::Entry::Vacant(ve) => {
-                                trace!("remove {:?} {:?}", key, value);
+                                super_trace!("remove {:?} {:?}", key, value);
                                 ve.insert(PendingChange::Remove());
                             }
                         }

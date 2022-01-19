@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
 use tokio::{sync::watch, time::error::Elapsed};
-use util::get_tunable;
+use util::{get_tunable, super_trace};
 
 struct ObjectCache {
     // XXX cache key should include Bucket
@@ -553,7 +553,7 @@ impl ObjectAccess {
             let mut c = CACHE.lock().unwrap();
             match c.cache.get(&key) {
                 Some(v) => {
-                    trace!("found {} in cache", key);
+                    super_trace!("found {} in cache", key);
                     return Ok(v.clone());
                 }
                 None => match c.reading.get(&key) {
@@ -580,7 +580,7 @@ impl ObjectAccess {
                         })
                     }
                     Some(rx) => {
-                        debug!("found {} read in progress", key);
+                        trace!("found {} read in progress", key);
                         let mut myrx = rx.clone();
                         Either::Right(async move {
                             if let Some(vec) = myrx.borrow().as_ref() {
