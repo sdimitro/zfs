@@ -27,9 +27,14 @@ lazy_static! {
         get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
     static ref SLAB_CONDENSE_PER_CHECKPOINT: u64 = get_tunable("slab_condense_per_checkpoint", 10);
 
+    // The minimum amount of free space that should be contained in free slabs, as a percentage;
+    // i.e. at a minimum, 25% of all free space within the allocator, should be contained in free slabs.
+    // We use this to determine when to start a rebalance operation, such that we can get back to our
+    // target percentage. The special value of "0" can be used to diable rebalancing entirely.
+    static ref SLAB_REBALANCING_MIN_FREE_SLABS_PCT: u64 = get_tunable("slab_rebalancing_min_free_slabs_pct", 25);
+
     // The target amount of free space that should be contained in free slabs, as a percentage;
     // i.e. 50% of all free space within the allocator, should be contained in free slabs.
-    // The special value of "0" can be used to diable rebalancing entirely.
     static ref SLAB_REBALANCING_TARGET_FREE_SLABS_PCT: u64 =
         get_tunable("slab_rebalancing_target_free_slabs_pct", 50);
 }
@@ -1381,11 +1386,6 @@ impl BlockAllocator {
     // the slabs can later be used for allocation.
     //
     pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, DiskLocation>> {
-        if *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT == 0 {
-            trace!("rebalance requested, but not enabled");
-            return None;
-        }
-
         // For now, ensure rebalance_fini() is called before this function can be called a second time.
         assert!(self.evacuating_slabs.is_empty());
 
@@ -1423,16 +1423,32 @@ impl BlockAllocator {
     }
 
     fn num_slabs_to_rebalance(&self) -> u64 {
-        let available = self.available();
-        let target_number_of_free_slabs =
-            (available * *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
         let current_number_of_free_slabs = self.free_slabs.len() as u64;
 
+        let available = self.available();
+        let min_number_of_free_slabs =
+            (available * *SLAB_REBALANCING_MIN_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
+
+        // We only want to trigger a new rebalance operation once we drop below the minimum number of free slabs
+        // currently available. This way, there's a buffer between the minimum and target number of free slabs,
+        // such that we're never constantly in a state of needing to rebalance; i.e. we balance between reaching
+        // the minimum, starting a rebalance to reach the target, and then not rebalancing again until we reach
+        // the minimum again.
+        if current_number_of_free_slabs >= min_number_of_free_slabs {
+            return 0;
+        }
+
+        let target_number_of_free_slabs =
+            (available * *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
         target_number_of_free_slabs.saturating_sub(current_number_of_free_slabs)
     }
 
     fn slabs_to_rebalance(&self) -> Vec<SlabId> {
         let num_slabs_to_rebalance = self.num_slabs_to_rebalance();
+
+        if num_slabs_to_rebalance == 0 {
+            return vec![];
+        }
 
         trace!(
             "attempting to find {} slabs to rebalance",
