@@ -20,6 +20,7 @@ use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 use anyhow::Result;
+use bytes::Bytes;
 use conv::ConvUtil;
 use either::Either;
 use futures::future;
@@ -32,6 +33,7 @@ use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map;
 use std::collections::BTreeMap;
+use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::mem;
 use std::ops::Bound::{Excluded, Unbounded};
@@ -1448,6 +1450,91 @@ impl ZettaCache {
             // insertion, which isn't released until the io completes.
             // Similarly, the write_permit (roughly) represents the disks'
             // capacity to perform i/o.
+            drop(insert_permit);
+        });
+    }
+
+    pub async fn ingest_all(
+        &self,
+        guid: PoolGuid,
+        blocks: &HashMap<BlockId, Bytes>,
+        source: InsertSource,
+    ) {
+        let insert_permit = match self
+            .reserve_buffer_space(
+                blocks.values().map(|bytes| bytes.len()).sum::<usize>(),
+                source,
+            )
+            .await
+        {
+            Some(permit) => permit,
+            None => {
+                // Pretend that it's bytes so we can add many at once
+                self.stats
+                    .track_bytes(InsertDropQueueFull, blocks.len() as u64);
+                return;
+            }
+        };
+
+        let futures = FuturesUnordered::new();
+
+        for (block, bytes) in blocks.iter() {
+            let cache = self.clone();
+            let block = *block;
+            let aligned_bytes = AlignedBytes::from((*bytes).clone());
+            futures.push(async move {
+                let key = IndexKey { guid, block };
+                let locked_key = LockedKey(cache.outstanding_lookups.lock(key).await);
+
+                // We need to check for presence in the cache even for
+                // InsertSource::Write, where we expect to be writing a "new"
+                // BlockId that's never been written before, because if the
+                // system crashed or the pool was rewound, a BlockId that was
+                // already persisted to the cache may be reused.
+
+                let present = cache
+                    .lookup_impl(&key, LookupSource::Write, |_state, value| {
+                        future::ready(value.is_some())
+                    })
+                    .await;
+
+                if !present {
+                    // Get a permit to write to disk before waiting on the state lock.
+                    // This ensures that once we assign this insertion to a checkpoint,
+                    // the insertion will complete relatively quickly (e.g.
+                    // milliseconds).  This way, we don't have outstanding_writes that
+                    // take a long time to complete, preventing a checkpoint from making
+                    // progress.  Acquiring the WritePermit may take a long time,
+                    // because we have to wait for any in-progress insertions (up to
+                    // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
+                    let _write_permit = cache.write_slots.acquire_owned().await.unwrap();
+                    let len = aligned_bytes.len();
+
+                    // Now that we are ready to issue the write to disk, insert to the
+                    // cache in the current checkpoint (allocate a block, add to
+                    // pending_changes and outstanding_writes).
+                    let fut = cache
+                        .state
+                        .lock_non_send()
+                        .await
+                        .insert(locked_key, aligned_bytes);
+                    fut.await;
+
+                    cache.stats.track_bytes(InsertBytes, len as u64);
+                    cache.stats.track_count(match source {
+                        InsertSource::Heal => InsertForHealing,
+                        InsertSource::Read => InsertForRead,
+                        InsertSource::SpeculativeRead => InsertForSpeculativeRead,
+                        InsertSource::Write => InsertForWrite,
+                    });
+                }
+            });
+        }
+        tokio::spawn(async move {
+            futures.for_each(|_| async {}).await;
+            // We want to hold onto the insert_permit until the write completes
+            // because it represents the memory that's required to buffer this
+            // insertion, which isn't released until the io completes.
             drop(insert_permit);
         });
     }

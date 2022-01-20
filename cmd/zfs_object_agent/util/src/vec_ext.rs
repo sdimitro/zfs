@@ -49,10 +49,15 @@ impl Deref for AlignedBytes {
 
 impl From<Bytes> for AlignedBytes {
     fn from(bytes: Bytes) -> Self {
-        AlignedBytes {
-            alignment: 1,
-            bytes,
+        // determine pointer alignment; we only care about valid sector sizes so we check 512 -> 16K
+        let mut alignment = 1;
+        for i in (9..15).rev() {
+            if bytes.as_ptr().align_offset(1 << i) == 0 {
+                alignment = 1 << i;
+                break;
+            }
         }
+        AlignedBytes { alignment, bytes }
     }
 }
 
