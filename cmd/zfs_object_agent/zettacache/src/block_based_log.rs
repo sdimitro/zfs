@@ -24,6 +24,7 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::time::Instant;
 use util::get_tunable;
+use util::super_trace;
 use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
 
@@ -98,7 +99,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
                     let chunk_location = extent.location.offset + total_consumed as u64;
-                    trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
+                    super_trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
                     // XXX handle checksum error here
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
                         .chunk_from_raw(&extent_bytes[total_consumed..])
@@ -309,7 +310,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             };
             assert_ge!(extent.size, raw_size);
             // XXX add name of this log for debug purposes?
-            trace!(
+            super_trace!(
                 "flushing BlockBasedLog: writing {:?} ({:?}) with {} entries ({} bytes) to {:?}",
                 chunk.id,
                 chunk.offset,
@@ -554,7 +555,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
 
         // Read the chunk from disk.
         let chunk_extent = self.chunk_extent(chunk_id);
-        trace!(
+        super_trace!(
             "reading log chunk {} at {:?} to lookup {:?}",
             chunk_id,
             chunk_extent,

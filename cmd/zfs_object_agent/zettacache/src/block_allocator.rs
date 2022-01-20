@@ -3,6 +3,7 @@ use crate::extent_allocator::{ExtentAllocator, ExtentAllocatorBuilder};
 use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
 use crate::{base_types::*, DumpSlabsOptions};
 use bimap::BiBTreeMap;
+use either::Either;
 use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
@@ -27,9 +28,14 @@ lazy_static! {
         get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
     static ref SLAB_CONDENSE_PER_CHECKPOINT: u64 = get_tunable("slab_condense_per_checkpoint", 10);
 
+    // The minimum amount of free space that should be contained in free slabs, as a percentage;
+    // i.e. at a minimum, 25% of all free space within the allocator, should be contained in free slabs.
+    // We use this to determine when to start a rebalance operation, such that we can get back to our
+    // target percentage. The special value of "0" can be used to diable rebalancing entirely.
+    static ref SLAB_REBALANCING_MIN_FREE_SLABS_PCT: u64 = get_tunable("slab_rebalancing_min_free_slabs_pct", 25);
+
     // The target amount of free space that should be contained in free slabs, as a percentage;
     // i.e. 50% of all free space within the allocator, should be contained in free slabs.
-    // The special value of "0" can be used to diable rebalancing entirely.
     static ref SLAB_REBALANCING_TARGET_FREE_SLABS_PCT: u64 =
         get_tunable("slab_rebalancing_target_free_slabs_pct", 50);
 }
@@ -434,7 +440,9 @@ impl SlabTrait for ExtentSlab {
     }
 
     fn allocate(&mut self, size: u32) -> Option<Extent> {
-        assert_le!(size, self.max_size());
+        // It doesn't make any sense to do an allocation of 0 size.
+        assert_ne!(size, 0);
+
         let request_size = u64::from(size);
         // find next segment where this fits
         match self.allocate_impl(request_size, self.last_location, u64::MAX) {
@@ -975,11 +983,18 @@ impl SlabAllocationBuckets {
         SlabAllocationBuckets(buckets)
     }
 
-    fn get_bucket_for_allocation_size(&mut self, request_size: u32) -> (&u32, &mut SortedSlabs) {
-        self.0
+    fn get_bucket_for_allocation_size(&mut self, request_size: u32) -> u32 {
+        let (bucket, _) = self
+            .0
             .range_mut(request_size..)
             .next()
-            .expect("allocation request larger than largest configured slab type")
+            .expect("allocation request larger than largest configured slab type");
+
+        *bucket
+    }
+
+    fn get_sorted_slabs_for_bucket(&mut self, bucket: u32) -> &mut SortedSlabs {
+        self.0.get_mut(&bucket).unwrap()
     }
 
     fn remove_slab(&mut self, slab: &Slab) {
@@ -1243,14 +1258,16 @@ impl BlockAllocator {
         let extent = self.slab_extent_from_id(new_id);
         let slab_next_generation = self.slabs.get(new_id).generation.next();
 
-        let (&max_allocation_size, sorted_slabs) = self
+        let bucket = self
             .slab_buckets
             .get_bucket_for_allocation_size(request_size);
 
+        let sorted_slabs = self.slab_buckets.get_sorted_slabs_for_bucket(bucket);
+
         let mut new_slab = if sorted_slabs.is_extent_based {
-            ExtentSlab::new_slab(new_id, slab_next_generation, extent, max_allocation_size)
+            ExtentSlab::new_slab(new_id, slab_next_generation, extent, bucket)
         } else {
-            BitmapSlab::new_slab(new_id, slab_next_generation, extent, max_allocation_size)
+            BitmapSlab::new_slab(new_id, slab_next_generation, extent, bucket)
         };
         let target_spacemap = if self.next_slab_to_condense <= new_id {
             &mut self.spacemap
@@ -1265,7 +1282,7 @@ impl BlockAllocator {
         assert!(matches!(self.slabs.get(new_id).info, SlabType::Free(_)));
         *self.slabs.get_mut(new_id) = new_slab;
         self.dirty_slab_id(new_id);
-        trace!("{:?} added to {} byte bucket", new_id, max_allocation_size,);
+        trace!("{:?} added to {} byte bucket", new_id, bucket);
         self.available_space -= extent.unwrap().size;
         extent
     }
@@ -1277,9 +1294,17 @@ impl BlockAllocator {
         // from the caller for now.
         self.block_access.verify_aligned(request_size);
 
-        let (&max_allocation_size, sorted_slabs) = self
+        let bucket = self
             .slab_buckets
             .get_bucket_for_allocation_size(request_size);
+
+        self.allocate_impl(bucket, request_size)
+    }
+
+    fn allocate_impl(&mut self, bucket: u32, request_size: u32) -> Option<Extent> {
+        let max_allocation_size = bucket;
+        let sorted_slabs = self.slab_buckets.get_sorted_slabs_for_bucket(bucket);
+
         let slabs_in_bucket = sorted_slabs.by_freeness.len();
 
         // TODO - WIP Allocation Algorithm
@@ -1380,14 +1405,11 @@ impl BlockAllocator {
     // This allows the allocator to transition the slabs that were undergoing evacuation to free slabs, such that
     // the slabs can later be used for allocation.
     //
-    pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, DiskLocation>> {
-        if *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT == 0 {
-            trace!("rebalance requested, but not enabled");
-            return None;
-        }
-
+    pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, Option<DiskLocation>>> {
         // For now, ensure rebalance_fini() is called before this function can be called a second time.
         assert!(self.evacuating_slabs.is_empty());
+
+        let begin = Instant::now();
 
         let slabs = self.slabs_to_rebalance();
         if slabs.is_empty() {
@@ -1412,27 +1434,49 @@ impl BlockAllocator {
             self.slab_buckets.remove_slab(self.slabs.get(id));
         }
 
-        let map: BTreeMap<Extent, DiskLocation> = slabs
+        let map: BTreeMap<Extent, Option<DiskLocation>> = slabs
             .iter()
-            .map(|&id| self.rebalance_slab(id))
-            .flatten()
+            .flat_map(|&id| self.rebalance_slab(id))
             .collect();
+
+        info!(
+            "took {}ms to initialize rebalance of {} slabs with {} allocated extents",
+            begin.elapsed().as_millis(),
+            slabs.len(),
+            map.len(),
+        );
 
         assert!(!self.evacuating_slabs.is_empty());
         Some(map)
     }
 
     fn num_slabs_to_rebalance(&self) -> u64 {
-        let available = self.available();
-        let target_number_of_free_slabs =
-            (available * *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
         let current_number_of_free_slabs = self.free_slabs.len() as u64;
 
+        let available = self.available();
+        let min_number_of_free_slabs =
+            (available * *SLAB_REBALANCING_MIN_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
+
+        // We only want to trigger a new rebalance operation once we drop below the minimum number of free slabs
+        // currently available. This way, there's a buffer between the minimum and target number of free slabs,
+        // such that we're never constantly in a state of needing to rebalance; i.e. we balance between reaching
+        // the minimum, starting a rebalance to reach the target, and then not rebalancing again until we reach
+        // the minimum again.
+        if current_number_of_free_slabs >= min_number_of_free_slabs {
+            return 0;
+        }
+
+        let target_number_of_free_slabs =
+            (available * *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
         target_number_of_free_slabs.saturating_sub(current_number_of_free_slabs)
     }
 
     fn slabs_to_rebalance(&self) -> Vec<SlabId> {
         let num_slabs_to_rebalance = self.num_slabs_to_rebalance();
+
+        if num_slabs_to_rebalance == 0 {
+            return vec![];
+        }
 
         trace!(
             "attempting to find {} slabs to rebalance",
@@ -1460,11 +1504,10 @@ impl BlockAllocator {
             .slabs
             .0
             .iter()
-            // TODO: Add support for rebalacing of non-bitmap based slab types.
-            // The rebalance_slab() function does not currently handle allocation failures. Thus, we currently
-            // only support the rebalancing of bitmap based slabs, as we can avoid allocation failures of these
-            // slab types relatively easily.
-            .filter(|&slab| matches!(slab.info, SlabType::BitmapBased(_)))
+            .filter(|&slab| match slab.info {
+                SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => true,
+                SlabType::Evacuating(_) | SlabType::Free(_) => false,
+            })
             .map(|slab| slab.to_sorted_slab_entry())
             .collect();
 
@@ -1484,10 +1527,6 @@ impl BlockAllocator {
             .filter_map(|entry| {
                 let slab = self.slabs.get(entry.slab_id);
 
-                // We currently only support rebalancing of bitmap based slabs; see comment above.
-                // The logic below only works for bitmap based slabs.
-                assert!(matches!(slab.info, SlabType::BitmapBased(_)));
-
                 let bucket = slab.max_size();
                 let bytes_free_in_bucket = free_space_per_bucket.get_mut(&bucket).unwrap();
 
@@ -1502,53 +1541,57 @@ impl BlockAllocator {
             .collect()
     }
 
-    fn rebalance_slab(&mut self, id: SlabId) -> Vec<(Extent, DiskLocation)> {
+    fn rebalance_slab(&mut self, id: SlabId) -> Vec<(Extent, Option<DiskLocation>)> {
         trace!("starting rebalance of slab '{:?}'", id);
 
         let slab = self.slabs.get(id);
+        let bucket = self
+            .slab_buckets
+            .get_bucket_for_allocation_size(slab.max_size());
 
-        // We currently only support rebalancing of bitmap based slabs; see comment in rebalance_init().
-        // The logic below only works for bitmap based slabs.
-        assert!(matches!(slab.info, SlabType::BitmapBased(_)));
-
-        let slot_size = u64::from(slab.max_size());
-
-        // We must do the new allocations prior to transitioning the slab to an evacuating slab type, since
-        // we don't support allocations from evacuating slabs.
-        let map = slab
+        let extents: Vec<Extent> = slab
             .allocated_extents()
             .iter()
-            // Note, this logic only works for bitmap based slabs, but that's fine, as we only support rebalancing of
-            // bitmap based slabs.
-            //
-            // We need to perform a seperate allocation for each allocated slot in the bitmap extent we're attempting to
-            // rebalance. This is so that the allocations we make, are guaranteed to be fulfilled by the same slab bucket
-            // the data is currently contained in. We don't want to coalesce multiple slots into a single allocation, as
-            // that would cause the new allocation to occur in a different sized slab bucket. Thus, this step converts
-            // each allocated extent, representing a contiguous range of allocated slots in the bitmap slab, into multiple
-            // extents, one for each allocated slot in the range. This way, the extent for each allocated slot can then be
-            // used to perform the new allocations, and generate a mapping of old location to new location, for each allocated
-            // slot in the bitmap slab.
-            .flat_map(|&extent| {
-                // For bitmap based slabs, allocations can only come in multiples of the slot size.
-                assert_eq!(extent.size % slot_size, 0);
+            .flat_map(|&old| {
+                match slab.info {
+                    SlabType::BitmapBased(_) => {
+                        let extent_size = u32::try_from(old.size).unwrap();
+                        let slot_size = slab.max_size();
+                        assert_eq!(extent_size % slot_size, 0);
 
-                (0..(extent.size / slot_size)).map(move |slot| Extent {
-                    size: slot_size,
-                    location: extent.location + (slot * slot_size),
-                })
+                        // For bitmap based slabs, we know the boundaries of each allocation, since each allocation must have
+                        // been done in a slot-sized chuck. Thus, we can break up a multi-slot allocated extent into single-slot
+                        // extents, which is what we're doing here. We choose to do this, so that when we later allocate the
+                        // new location for these extents, we'll allocate in slot-sized chunks, ensuring we fill all holes in
+                        // the slabs we're allocating from. Otherwise, we would have to (potentially) allocate in multi-slot
+                        // contiguous chunks, and due to slab fragmentation, the slabs may not be able to fulfill those requests.
+                        Either::Left(
+                            (0..(extent_size / slot_size)).map(move |slot_index| Extent {
+                                size: u64::from(slot_size),
+                                location: old.location + u64::from(slot_index * slot_size),
+                            }),
+                        )
+                    }
+                    SlabType::ExtentBased(_) => Either::Right(std::iter::once(old)),
+                    SlabType::Evacuating(_) | SlabType::Free(_) => panic!("invalid slab type"),
+                }
             })
-            // Now that we have a unique extent for each allocated slot, we can perform the new allocation, marking the location
-            // the old data should be moved to.
-            .map(|old| {
-                let size = u32::try_from(old.size).unwrap();
+            .collect();
 
-                // It's the caller's responsibility to ensure allocation failures do not occur.
-                let new = self.allocate(size).unwrap_or_else(|| {
-                    panic!("cache rebalance allocation failed for size: '{:?}'", size)
-                });
-
-                (old, new.location)
+        let map = extents
+            .iter()
+            .map(|&old| {
+                match self.allocate_impl(bucket, u32::try_from(old.size).unwrap()) {
+                    Some(new) => (old, Some(new.location)),
+                    None => {
+                        trace!(
+                            "cache rebalance allocation failed for old extent '{:?}' in bucket '{:?}'",
+                            old,
+                            bucket
+                        );
+                        (old, None)
+                    }
+                }
             })
             .collect();
 

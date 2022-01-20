@@ -103,7 +103,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
                 Self::key(name, generation, chunk)
             )
         })?;
-        debug!(
+        trace!(
             "deserialized {} log entries in {}ms",
             this.entries.len(),
             begin.elapsed().as_millis()
@@ -116,7 +116,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
     async fn put(&self, object_access: &ObjectAccess, name: &str) {
         let begin = Instant::now();
         let buf = serde_json::to_vec(&self).unwrap();
-        debug!(
+        trace!(
             "serialized {} log entries in {}ms",
             self.entries.len(),
             begin.elapsed().as_millis()

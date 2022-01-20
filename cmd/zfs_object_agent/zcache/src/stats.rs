@@ -250,7 +250,7 @@ impl StatsDisplay {
         // INSERTS
         let inserts = (values.value(InsertForRead)
             + values.value(InsertForWrite)
-            + values.value(InsertForSpecRead)
+            + values.value(InsertForSpeculativeRead)
             + values.value(InsertForHealing)) as f64
             * scale;
         self.display_count(inserts);
@@ -260,7 +260,10 @@ impl StatsDisplay {
         if self.show_insert_detail {
             self.display_percent(values.value(InsertForRead) as f64 * scale, inserts);
             self.display_percent(values.value(InsertForWrite) as f64 * scale, inserts);
-            self.display_percent(values.value(InsertForSpecRead) as f64 * scale, inserts);
+            self.display_percent(
+                values.value(InsertForSpeculativeRead) as f64 * scale,
+                inserts,
+            );
             self.display_count(values.value(InsertDropQueueFull) as f64 * scale);
             self.display_count(values.value(InsertDropLockBusy) as f64 * scale);
         }

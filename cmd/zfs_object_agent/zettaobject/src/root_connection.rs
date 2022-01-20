@@ -351,7 +351,7 @@ impl RootConnectionState {
     }
 
     fn read_block(&mut self, nvl: NvList) -> HandlerReturn {
-        trace!("got request: {:?}", nvl);
+        super_trace!("got request: {:?}", nvl);
         let block = BlockId(nvl.lookup_uint64("block")?);
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
@@ -384,7 +384,7 @@ impl RootConnectionState {
             nvl.insert("request_id", &request_id).unwrap();
             nvl.insert("token", &token).unwrap();
             nvl.insert("data", data.as_ref()).unwrap();
-            trace!(
+            super_trace!(
                 "sending read done response: block={} req={} data=[{} bytes]",
                 block,
                 request_id,

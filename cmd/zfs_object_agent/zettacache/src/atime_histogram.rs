@@ -65,15 +65,14 @@ impl AtimeHistogramPhys {
         let mut remaining = target_size;
         for (index, &bytes) in self.histogram.iter().enumerate().rev() {
             if remaining <= bytes {
-                trace!("found target size {} at bucket {}", target_size, index);
+                debug!("found target size {} at bucket {}", target_size, index);
                 return self.first_ghost + index;
             }
             remaining -= bytes;
         }
-        trace!(
+        debug!(
             "cache smaller than target size {} by {} bytes",
-            target_size,
-            remaining
+            target_size, remaining
         );
         self.first_ghost
     }

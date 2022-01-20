@@ -361,7 +361,7 @@ pub enum CacheStatCounter {
     InsertBytes,
     InsertForRead,
     InsertForWrite,
-    InsertForSpecRead,
+    InsertForSpeculativeRead,
     InsertForHealing,
     InsertDropQueueFull,
     InsertDropLockBusy, // pending, DOSE-905
