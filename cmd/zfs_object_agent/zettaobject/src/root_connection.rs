@@ -335,6 +335,9 @@ impl RootConnectionState {
             response.insert("request_id", &request_id).unwrap();
             response.insert("token", &token).unwrap();
             super_trace!("sending response: {:?}", response);
+            if nvl.exists("reissued") {
+                maybe_die_with(|| "after reissued write block request".to_string());
+            }
             Ok(Some(response))
         }))
     }

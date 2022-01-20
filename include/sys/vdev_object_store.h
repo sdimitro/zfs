@@ -86,6 +86,7 @@
 #define	AGENT_MESSAGE			"message"
 #define	AGENT_CHECKPOINT		"checkpoint"
 #define	AGENT_ROLLBACK			"rollback"
+#define	AGENT_REISSUE			"reissue"
 
 typedef struct vdev_object_store_stats {
 	uint64_t voss_blocks_count;
