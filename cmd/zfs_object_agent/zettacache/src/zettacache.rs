@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::mem;
-use std::ops::Bound::{Excluded, Unbounded};
+use std::ops::Bound::{Excluded, Included, Unbounded};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
@@ -179,7 +179,7 @@ impl BlockBasedLogEntry for OperationLogEntry {}
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 struct RebalanceLogEntry {
     old: Extent,
-    new: DiskLocation,
+    new: Option<DiskLocation>,
 }
 impl OnDisk for RebalanceLogEntry {}
 impl BlockBasedLogEntry for RebalanceLogEntry {}
@@ -216,8 +216,45 @@ impl MergeMessage {
 
 #[derive(Debug)]
 struct RebalanceState {
-    map: BTreeMap<Extent, DiskLocation>,
+    map: BTreeMap<Extent, Option<DiskLocation>>,
     log_phys: BlockBasedLogPhys<RebalanceLogEntry>,
+}
+
+impl RebalanceState {
+    fn remap(&self, extent: Extent) -> Option<DiskLocation> {
+        if let Some((old, new)) = self
+            .map
+            .range((Unbounded, Included(extent.location)))
+            .next_back()
+        {
+            if old.contains(&extent) {
+                match new {
+                    Some(new_location) => {
+                        // This represents the offset of the passed in extent, into the extent that was moved as part
+                        // of the rebalance operation. For example, multiple contiguously allocated blocks maybe have
+                        // been moved via a single extent. Thus, to remap one of those blocks' to it's new location on
+                        // disk, we need this offset (this offset is maintained when the blocks are copied).
+                        let offset = extent.location - old.location;
+
+                        return Some(DiskLocation {
+                            disk: new_location.disk,
+                            offset: new_location.offset + offset,
+                        });
+                    }
+                    None => {
+                        // This means the extent was part of a rebalance operation, but when attempting to remap
+                        // the old location to a new location, the allocation failed. Thus, the old extent does not
+                        // have new location, and it will be invalid after the rebalance completes.
+                        return None;
+                    }
+                }
+            }
+        }
+
+        // If we reach this point, we didn't find an extent in the mapping that contains the passed in extent, which means
+        // the passed in extent was not remapped; thus, we simply return the old extent's location.
+        Some(extent.location)
+    }
 }
 
 #[derive(Debug)]
@@ -231,18 +268,20 @@ struct MergeState {
 }
 
 impl MergeState {
-    fn map_index_entry_to_rebalanced_location(&self, mut entry: IndexEntry) -> IndexEntry {
-        if let Some(rebalance) = self.rebalance.as_ref() {
+    fn map_index_entry_to_rebalanced_location(&self, mut entry: IndexEntry) -> Option<IndexEntry> {
+        match self.rebalance.as_ref() {
             // If the data for an entry has been moved, due a cache rebalance operation, we need to update
             // the entry using the new location for the data. This way, once the cache commits to this new
             // index (containing this new entry), the old location for this entries data will no longer be
             // referenced (and thus, that location can be freed).
-            if let Some(new_location) = rebalance.map.get(&entry.value.extent().unwrap()) {
-                entry.value.location = Some(*new_location);
-            }
+            Some(rebalance) => rebalance
+                .remap(entry.value.extent().unwrap())
+                .map(|location| {
+                    entry.value.location = Some(location);
+                    entry
+                }),
+            None => Some(entry),
         }
-
-        entry
     }
 
     /// Add an entry to the new index, or evict it if its atime is before the eviction cut off.
@@ -253,17 +292,18 @@ impl MergeState {
         free_list: &mut Vec<Extent>,
     ) {
         if entry.value.atime >= self.eviction_cutoff {
-            index.append(self.map_index_entry_to_rebalanced_location(entry));
+            // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
+            if let Some(entry) = self.map_index_entry_to_rebalanced_location(entry) {
+                index.append(entry);
+            }
         } else {
             let mut ghost_entry = entry;
             if ghost_entry.value.location.is_some() {
-                // This is a new ghost entry, free and strip old location infomation
-                free_list.push(
-                    self.map_index_entry_to_rebalanced_location(ghost_entry)
-                        .value
-                        .extent()
-                        .unwrap(),
-                );
+                // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
+                if let Some(entry) = self.map_index_entry_to_rebalanced_location(ghost_entry) {
+                    // This is a new ghost entry, free and strip old location infomation
+                    free_list.push(entry.value.extent().unwrap());
+                }
                 ghost_entry.value.location = None;
                 self.stats.track_count(Evictions);
             }
@@ -370,13 +410,15 @@ impl MergeState {
                         // this pending change is consumed
                         pending_changes_iter.next();
 
-                        let entry = self.map_index_entry_to_rebalanced_location(entry);
-                        free_list.push(
-                            entry
-                                .value
-                                .extent()
-                                .expect("PendingChange::Remove of ghost entry"),
-                        );
+                        // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
+                        if let Some(entry) = self.map_index_entry_to_rebalanced_location(entry) {
+                            free_list.push(
+                                entry
+                                    .value
+                                    .extent()
+                                    .expect("PendingChange::Remove of ghost entry"),
+                            );
+                        }
                     } else {
                         // There shouldn't be a pending removal of an entry that doesn't exist in the index.
                         assert_gt!(pc_key, entry.key);
@@ -530,13 +572,15 @@ impl MergeState {
         futures::stream::iter(map)
             .for_each_concurrent(
                 *CACHE_REBALANCE_CONCURRENCY_LIMIT,
-                |(old, new)| async move {
-                    let bytes = block_access
-                        .read_raw(*old, DiskIoType::MaintenanceRead)
-                        .await;
-                    block_access
-                        .write_raw(*new, bytes, DiskIoType::MaintenanceWrite)
-                        .await;
+                |(old, maybe_new)| async move {
+                    if let Some(new) = maybe_new {
+                        let bytes = block_access
+                            .read_raw(*old, DiskIoType::MaintenanceRead)
+                            .await;
+                        block_access
+                            .write_raw(*new, bytes, DiskIoType::MaintenanceWrite)
+                            .await;
+                    }
                 },
             )
             .await;
@@ -544,9 +588,9 @@ impl MergeState {
         let bytes_copied = map.iter().map(|(old, _)| old.size).sum::<u64>();
 
         info!(
-            "rebalance copied {} MB in {:.1}s ({:.1}MB/s)",
+            "took {}ms for rebalance to copy {} MB ({:.1}MB/s)",
+            begin.elapsed().as_millis(),
             bytes_copied / 1024 / 1024,
-            begin.elapsed().as_secs_f64(),
             (bytes_copied as f64 / 1024f64 / 1024f64) / begin.elapsed().as_secs_f64(),
         );
     }
@@ -2339,11 +2383,12 @@ impl ZettaCacheState {
         let rebalance = match progress.rebalance_log {
             None => None,
             Some(log_phys) => {
-                let map = log_phys
+                let map: BTreeMap<Extent, Option<DiskLocation>> = log_phys
                     .iter_entries(self.block_access.clone())
                     .map(|entry| (entry.old, entry.new))
                     .collect()
                     .await;
+
                 Some(RebalanceState { log_phys, map })
             }
         };
@@ -2424,8 +2469,9 @@ impl ZettaCacheState {
                     Default::default(),
                 );
 
-                map.iter()
-                    .for_each(|(&old, &new)| log.append(RebalanceLogEntry { old, new }));
+                for (&old, &new) in map.iter() {
+                    log.append(RebalanceLogEntry { old, new });
+                }
 
                 let log_phys = log.flush().await;
 
@@ -2461,25 +2507,34 @@ impl ZettaCacheState {
         if let Some(rebalance) = &merge.rebalance {
             let begin = Instant::now();
 
-            for pc in self.pending_changes.values_mut() {
+            let mut evicted_keys = Vec::new();
+            for (key, pc) in self.pending_changes.iter_mut() {
                 match pc {
                     PendingChange::UpdateAtime(value, _) => {
                         // If a lookup occurs on a block that is being moved as part of rebalancing, the lookup will
                         // return the "old" location of the block (which is valid while we are merging) and will be
                         // stored in an UpdateAtime record in pending_changes. Now that the merge is complete, we need
-                        // to remap these old locations to their "new" rebalanced locations.
-                        if let Some(new_location) = rebalance.map.get(&value.extent().unwrap()) {
-                            value.location = Some(*new_location);
+                        // to either: 1) remap these old locations to their "new" rebalanced locations, or 2) remove
+                        // the UpdateAtime due to rebalancing having had to evict the entry from the cache (i.e. due
+                        // to an allocation failure when attempting to allocate the new disk location).
+                        match rebalance.remap(value.extent().unwrap()) {
+                            Some(location) => value.location = Some(location),
+                            None => evicted_keys.push(*key),
                         }
                     }
                     PendingChange::Insert(value) | PendingChange::RemoveThenInsert(value) => {
                         // Inserts in the "pending changes" list will never be moved as part of a rebalance.
-                        assert!(rebalance.map.get(&value.extent().unwrap()).is_none());
+                        let extent = value.extent().unwrap();
+                        assert_eq!(rebalance.remap(extent).unwrap(), extent.location);
                     }
                     PendingChange::Remove() => {
                         // Nothing to do for removes.
                     }
                 }
+            }
+
+            for key in evicted_keys.iter() {
+                self.pending_changes.remove(key);
             }
 
             debug!(
@@ -2491,13 +2546,18 @@ impl ZettaCacheState {
             let begin = Instant::now();
 
             // Similar to the pending changes above, we also need to update the index cache, so that any values contained
-            // by the cache will point to the new (rebalanced) locations on disk; otherwise, index cache hits would refer
-            // to disk locations that have been freed.
-            for (_, value) in self.index_cache.iter_mut() {
-                // XXX - should we validate() the value and remove from index cache if no longer valid?
-                if let Some(new_location) = rebalance.map.get(&value.extent().unwrap()) {
-                    value.location = Some(*new_location);
+            // by the cache will properly reflect the state of the cache post-rebalancing; otherwise, index cache hits could
+            // refer to disk locations that have been freed or entries that have been evicted.
+            let mut evicted_keys = Vec::new();
+            for (key, value) in self.index_cache.iter_mut() {
+                match rebalance.remap(value.extent().unwrap()) {
+                    Some(location) => value.location = Some(location),
+                    None => evicted_keys.push(*key),
                 }
+            }
+
+            for key in evicted_keys.iter() {
+                self.index_cache.pop(key);
             }
 
             debug!(
@@ -2518,7 +2578,7 @@ impl ZettaCacheState {
         let begin = Instant::now();
 
         // Populate index_cache with old_pending_changes
-        for (&key, &pc) in &merge.old_pending_changes {
+        for (key, pc) in &merge.old_pending_changes {
             match pc {
                 PendingChange::Insert(mut value)
                 | PendingChange::UpdateAtime(mut value, _)
@@ -2528,24 +2588,34 @@ impl ZettaCacheState {
                     // then the location for that new insert may have been rebalanced via the merge. In this case, we need
                     // to ensure index cache is populated correctly with the new location(s).
                     match self.validate(value) {
-                        Some(valid_value) => {
-                            if let Some(rebalance) = &merge.rebalance {
-                                if let Some(new_location) = rebalance.map.get(&valid_value.extent())
-                                {
-                                    value.location = Some(*new_location);
+                        Some(_) => {
+                            let remapped = match merge.rebalance.as_ref() {
+                                Some(rebalance) => {
+                                    rebalance.remap(value.extent().unwrap()).map(|location| {
+                                        value.location = Some(location);
+                                        value
+                                    })
+                                }
+                                None => Some(value),
+                            };
+
+                            match remapped {
+                                Some(value) => {
+                                    self.index_cache.put(*key, value);
+                                }
+                                None => {
+                                    self.index_cache.pop(key);
                                 }
                             }
                         }
                         None => continue,
                     }
-
-                    self.index_cache.put(key, value);
                 }
                 PendingChange::Remove() => {
                     // LruCache.pop() doesn't blow up if the key is not part of
                     // the cache - it just returns None. Thus it is safe to use
                     // here unconditionally.
-                    self.index_cache.pop(&key);
+                    self.index_cache.pop(key);
                 }
             }
         }
