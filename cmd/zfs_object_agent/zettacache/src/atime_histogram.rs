@@ -3,6 +3,8 @@ use crate::index::IndexValue;
 use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
+use std::fmt::Display;
+use util::nice_p2size;
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
 /// This data structure records the number of bytes cached
@@ -128,5 +130,45 @@ impl AtimeHistogramPhys {
         // This could be improved to O(log(N)) with something like a segment tree.
         let index = atime - self.first_ghost;
         self.histogram[index..].iter().sum()
+    }
+
+    pub fn assert_eq(&self, other: &AtimeHistogramPhys) {
+        assert_eq!(self.first_ghost, other.first_ghost);
+        assert_eq!(self.first_live, other.first_live);
+        assert_eq!(self.histogram.len(), other.histogram.len());
+        for (index, (&value, &other_value)) in self
+            .histogram
+            .iter()
+            .zip(other.histogram.iter())
+            .enumerate()
+        {
+            assert_eq!(
+                value,
+                other_value,
+                "index {} ({:?}) does not match",
+                index,
+                self.first_ghost + index
+            );
+        }
+    }
+}
+
+impl Display for AtimeHistogramPhys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        writeln!(
+            f,
+            "AtimeHistogramPhys(first_ghost={:?}, first_live={:?}):",
+            self.first_ghost, self.first_live
+        )?;
+        for (index, &value) in self.histogram.iter().enumerate() {
+            writeln!(
+                f,
+                "    [{:?}] = {} ({})",
+                self.first_ghost + index,
+                nice_p2size(value),
+                value
+            )?;
+        }
+        Ok(())
     }
 }

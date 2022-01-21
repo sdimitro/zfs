@@ -163,6 +163,10 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummaryPhys<T> {
         self.chunk_summary.claim(builder);
     }
 
+    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+        self.this.iter_entries(block_access)
+    }
+
     pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,

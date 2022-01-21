@@ -36,6 +36,7 @@ pub enum ZettaCacheDBCommand {
     DumpStructures(DumpStructuresOptions),
     DumpSlabs(DumpSlabsOptions),
     DumpSpaceUsage,
+    VerifyIndex,
 }
 
 #[derive(Debug)]
@@ -119,6 +120,7 @@ impl ZettaCacheDBCommand {
             ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
             ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
             ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_free_space().await,
+            ZettaCacheDBCommand::VerifyIndex => handle.verify_index().await,
         }
     }
 }

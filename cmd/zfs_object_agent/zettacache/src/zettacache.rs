@@ -1879,6 +1879,20 @@ impl ZCacheDBHandle {
         )
         .await;
     }
+
+    pub async fn verify_index(&self) {
+        println!("iterating current (old) index to verify histogram...");
+        self.checkpoint
+            .index
+            .verify_histogram(self.block_access.clone())
+            .await;
+
+        if let Some(mpp) = &self.checkpoint.merge_progress {
+            println!("iterating merge (new) index to verify histogram...");
+            mpp.index.verify_histogram(self.block_access.clone()).await;
+        }
+        println!("histograms correct");
+    }
 }
 
 pub struct ValidIndexValue(IndexValue);

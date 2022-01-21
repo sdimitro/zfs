@@ -4,6 +4,8 @@ use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
+use futures::future;
+use futures::StreamExt;
 use futures_core::Stream;
 use log::*;
 use more_asserts::*;
@@ -65,6 +67,10 @@ impl ZettaCacheIndexPhys {
         self.log.claim(builder);
     }
 
+    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = IndexEntry> {
+        self.log.iter_entries(block_access)
+    }
+
     pub fn iter_log_chunks(
         &self,
         block_access: Arc<BlockAccess>,
@@ -85,6 +91,21 @@ impl ZettaCacheIndexPhys {
 
     pub fn log_capacity_bytes(&self) -> u64 {
         self.log.capacity_bytes()
+    }
+
+    pub async fn verify_histogram(&self, block_access: Arc<BlockAccess>) {
+        let mut histogram = AtimeHistogramPhys::new(
+            self.atime_histogram.first(),
+            self.atime_histogram.first_live(),
+        );
+        self.iter_entries(block_access)
+            .for_each(|entry| {
+                histogram.insert(entry.value);
+                future::ready(())
+            })
+            .await;
+        histogram.assert_eq(&self.atime_histogram);
+        println!("Verified index histogram: {}", histogram);
     }
 }
 
