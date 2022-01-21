@@ -1172,14 +1172,15 @@ impl ZettaCache {
                                 "merge checkpoint with {} free requests",
                                 merge_checkpoint.free_list.len()
                             );
+                            super_trace!("eviction requested for {:?}", merge_checkpoint.free_list);
                             next_index = Some(merge_checkpoint.new_index);
                             // free the extent ranges associated with the evicted blocks
                             // XXX - should check to see if the extent is still in the "coverage" area.
                             // it seems possible that the meta-data area could grow during the merge cycle.
 
+                            let mut state = self.state.lock().await;
                             for extent in merge_checkpoint.free_list {
-                                super_trace!("eviction requested for {:?}", extent);
-                                self.state.lock().await.block_allocator.free(extent);
+                                state.block_allocator.free(extent);
                             }
                         }
                         // merge task complete, replace the current index with the new index
