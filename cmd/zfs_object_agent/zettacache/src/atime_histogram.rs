@@ -55,26 +55,45 @@ impl AtimeHistogramPhys {
         self.first_live = new_first;
     }
 
-    pub fn atime_for_target_size(&self, target_size: u64) -> Atime {
-        info!(
-            "histogram starts at {:?} (live at {:?}) and has {} entries",
-            self.first_ghost,
-            self.first_live,
-            self.histogram.len()
-        );
-        let mut remaining = target_size;
-        for (index, &bytes) in self.histogram.iter().enumerate().rev() {
+    /// Given an atime "starting point", calculate the "end" atime such that
+    /// self.histogram[start..end].sum() is >= the provided target value or
+    /// return the next atime past the end of the vector if sum() < "target"
+    /// data in the vector. Return "start" if the target value is 0.
+    fn atime_for_target(&self, start: Atime, target: u64) -> Atime {
+        if target == 0 {
+            return start;
+        }
+        let mut end = start;
+        let mut remaining = target;
+        for &bytes in self.histogram[start - self.first_ghost..].iter() {
+            end = end.next();
             if remaining <= bytes {
-                debug!("found target size {} at bucket {}", target_size, index);
-                return self.first_ghost + index;
+                break;
             }
             remaining -= bytes;
         }
+        end
+    }
+
+    pub fn atime_for_eviction_target(&self, eviction_size: u64) -> Atime {
         debug!(
-            "cache smaller than target size {} by {} bytes",
-            target_size, remaining
+            "histogram live start at {:?} with {} entries, evicting {}MB",
+            self.first_live,
+            self.histogram.len(),
+            eviction_size / 1024 / 1024,
         );
-        self.first_ghost
+        self.atime_for_target(self.first_live, eviction_size)
+    }
+
+    pub fn atime_for_ghost_target(&self, ghost_reduction: u64) -> Atime {
+        let atime = self.atime_for_target(self.first_ghost, ghost_reduction);
+        debug!(
+            "ghost size reduction of {}MB moves start from {:?} to {:?}",
+            ghost_reduction / 1024 / 1024,
+            self.first_ghost,
+            atime
+        );
+        std::cmp::min(atime, self.first_live)
     }
 
     pub fn insert(&mut self, value: IndexValue) {
@@ -96,8 +115,8 @@ impl AtimeHistogramPhys {
         self.histogram.clear();
     }
 
-    pub fn sum(&self) -> u64 {
-        self.histogram.iter().sum()
+    pub fn sum_live(&self) -> u64 {
+        self.size_at(self.first_live)
     }
 
     /// Add up all the atime histogram buckets from key atime

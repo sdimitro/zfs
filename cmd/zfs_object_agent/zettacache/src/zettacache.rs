@@ -2426,7 +2426,7 @@ impl ZettaCacheState {
         old_index: Arc<tokio::sync::RwLock<ZettaCacheIndex>>,
     ) -> Option<tokio::sync::mpsc::Receiver<MergeMessage>> {
         if self.pending_changes.len() < *MAX_PENDING_CHANGES
-            && self.atime_histogram.sum()
+            && self.block_allocator.size() - self.block_allocator.available()
                 < (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
             && !self.block_allocator.rebalance_needed()
         {
@@ -2437,15 +2437,17 @@ impl ZettaCacheState {
             return None;
         }
 
+        let used = self.block_allocator.size() - self.block_allocator.available();
         let target_size = (self.block_allocator.size() / 100) * *TARGET_CACHE_SIZE_PCT;
+        let target_reduction = used.checked_sub(target_size).unwrap_or_default();
         info!(
             "target cache size for storage size {}GB is {}GB; {}MB used; {}MB high-water; {}MB freeing; histogram covers {}MB",
             self.block_allocator.size() / 1024 / 1024 / 1024,
             target_size / 1024 / 1024 / 1024,
-            (self.block_allocator.size() - self.block_allocator.available()) / 1024 / 1024,
+            used / 1024 / 1024,
             (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT / 1024 / 1024,
             self.block_allocator.freeing() / 1024 / 1024,
-            self.atime_histogram.sum() / 1024 / 1024,
+            self.atime_histogram.sum_live() / 1024 / 1024,
         );
         self.stats
             .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
@@ -2456,10 +2458,12 @@ impl ZettaCacheState {
             self.block_allocator.free_slabs_size(),
         );
 
-        let eviction_atime = self.atime_histogram.atime_for_target_size(target_size);
+        let eviction_atime = self
+            .atime_histogram
+            .atime_for_eviction_target(target_reduction);
         let ghost_atime = self
             .atime_histogram
-            .atime_for_target_size(target_size + target_size / 100 * *GHOST_CACHE_SIZE_PCT);
+            .atime_for_ghost_target(target_reduction / 100 * *GHOST_CACHE_SIZE_PCT);
 
         let old_operation_log_phys = self.operation_log.flush().await;
 
