@@ -7,11 +7,12 @@ use either::Either;
 use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
+use num_traits::cast::ToPrimitive;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
-use std::cmp::{self, min};
+use std::cmp::{self, max, min};
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::ops::{Add, Bound::*, Sub};
 use std::sync::Arc;
@@ -26,7 +27,56 @@ lazy_static! {
     static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =
         get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
-    static ref SLAB_CONDENSE_PER_CHECKPOINT: u64 = get_tunable("slab_condense_per_checkpoint", 10);
+
+
+    //
+    // The rate that we condense our slabs every checkpoint is guided by two factors:
+    //
+    // [1] The Incoming Rate Heuristic
+    //
+    // This is based on the reasoning that the more incoming changes we have the quicker
+    // the spacemaps become inefficient from the spacemap entries of these changes. We
+    // record the size of the incoming changes for each specific checkpoint (currently
+    // measured as the bytes allocated by the block allocator within a checkpoint) and
+    // approximate how many slabs these changes can fill up. Finally we multiply the
+    // result with a tunable factor and end up with the following formula:
+    //
+    // slabs_to_condense = SLAB_CONDENSE_RATE_FACTOR * (bytes_written_this_checkpoint / slab_size)
+    //
+    // There are a few things to consider on the above formula:
+    // * It doesn't take into account the bytes freed by the allocator, even though these
+    //   add entries to the spacemaps too. Frees can be very bursty depending on how
+    //   merging/eviction works. Given that this is an LRU cache though and we want to
+    //   model the rate of change, we assume that ingestion (allocs) and evictions (frees)
+    //   are coupled in the long term.
+    // * An alternative and potentially more accurate measurement for rate of change in our
+    //   spacemaps could be the number of spacemap entries to be appended every checkpoint.
+    //   The problem with this measurement though is that it's trickier to tie back to the
+    //   question of how many slabs we should condense this checkpoint (especially given our
+    //   two spacemap scheme).
+    // * The SLAB_CONDENSE_RATE_FACTOR's current default is less than 1. This may seem
+    //   counter-intuitive as it implies that we are condensing at a rate that's slower
+    //   than the ingestion rate and our spacemaps could be growing without bounds. That
+    //   said, our experience so far (though limited) has shown that the coalescing of adjacent
+    //   bitmap-slots in ranges represented by spacemap entries can decrease the overall bytes
+    //   appended to a spacemap by a significant amount. Thus, we keep our tunable lower
+    //   than 1 for now.
+    //
+    // [2] The Minimum Tunable (SLAB_CONDENSE_MIN_PER_CHECKPOINT)
+    //
+    // This tunable exists to make sure that we're still doing some condensing work even
+    // when the incoming rate of changes is low. It currently represents the minimum number
+    // of slabs that we want to condense every checkpoint. The reasoning behind making this
+    // tunable an absolute number, and not say a percentage of the total number of slabs,
+    // is that we can at least keep the CPU runtime of condensing constant regardless of
+    // the cache's size. This means that bigger pools may need more time to condense their
+    // spacemaps but at least the CPU overhead will stay the same (which currently seems the
+    // right trade-off as storage space is easier to increase compared to CPU speeds). Besides
+    // that, our experience with spacemaps so far is that they are still relatively small
+    // compared to other structures in the metadata space.
+    //
+    static ref SLAB_CONDENSE_RATE_FACTOR: f64 = get_tunable("slab_condense_rate_factor", 0.5);
+    static ref SLAB_CONDENSE_MIN_PER_CHECKPOINT: u64 = get_tunable("slab_condense_min_per_checkpoint", 100);
 
     // The minimum amount of free space that should be contained in free slabs, as a percentage;
     // i.e. at a minimum, 25% of all free space within the allocator, should be contained in free slabs.
@@ -1140,9 +1190,9 @@ pub struct BlockAllocator {
     // With the above design we use at most 2 I/Os where we expect the blocksize
     // to be utilized as the two spacemaps represent all the slabs in the
     // Zettacache. Furthermore, we can dynamically adjust the condensing rate
-    // (TODO: see DOSE-629) however we see fit, making sure that our spacemaps
-    // don't grow too long and that condensing itself doesn't interfere too much
-    // with other activity.
+    // however we see fit, making sure that our spacemaps don't grow too long
+    // and that condensing itself doesn't interfere too much with other
+    // activity. [see block comment above SLAB_CONDENSE_* tunables]
     spacemap: SpaceMap,
     spacemap_next: SpaceMap,
     next_slab_to_condense: SlabId,
@@ -1156,6 +1206,9 @@ pub struct BlockAllocator {
 
     available_space: u64,
     freeing_space: u64,
+
+    // used only by incoming rate heuristic for condensing
+    checkpoint_allocated_bytes: u64,
 
     block_access: Arc<BlockAccess>,
 }
@@ -1236,6 +1289,7 @@ impl BlockAllocator {
             slab_buckets,
             available_space,
             freeing_space: 0,
+            checkpoint_allocated_bytes: 0,
             block_access,
         }
     }
@@ -1284,6 +1338,7 @@ impl BlockAllocator {
         self.dirty_slab_id(new_id);
         trace!("{:?} added to {} byte bucket", new_id, bucket);
         self.available_space -= extent.unwrap().size;
+        self.checkpoint_allocated_bytes += extent.unwrap().size;
         extent
     }
 
@@ -1340,6 +1395,7 @@ impl BlockAllocator {
                         );
                         self.dirty_slab_id(id);
                         self.available_space -= extent.size;
+                        self.checkpoint_allocated_bytes += extent.size;
                         return Some(extent);
                     }
                     None => {
@@ -1632,18 +1688,20 @@ impl BlockAllocator {
     }
 
     pub async fn flush(&mut self) -> BlockAllocatorPhys {
+        let begin = Instant::now();
+
         // We first condense any slabs so later when we flush any of them that
         // are dirty we've already migrated their entries of this checkpoint to
         // spacemap_next.
-        let begin = Instant::now();
+        let starting_slab = self.next_slab_to_condense;
+        let incoming_rate_heuristic = (*SLAB_CONDENSE_RATE_FACTOR
+            * (self.checkpoint_allocated_bytes as f64 / f64::from(self.slab_size)))
+        .ceil()
+        .to_u64()
+        .unwrap();
         let slabs_to_condense = min(
-            *SLAB_CONDENSE_PER_CHECKPOINT,
+            max(*SLAB_CONDENSE_MIN_PER_CHECKPOINT, incoming_rate_heuristic),
             (self.slabs.0.len() - self.next_slab_to_condense.as_index()) as u64,
-        );
-        trace!(
-            "condensing the next {} slabs starting from {:?}",
-            slabs_to_condense,
-            self.next_slab_to_condense
         );
         for _ in 0..slabs_to_condense {
             self.slabs
@@ -1651,27 +1709,28 @@ impl BlockAllocator {
                 .condense_to_spacemap(&mut self.spacemap_next);
             self.next_slab_to_condense = self.next_slab_to_condense.next();
         }
+        let condensing_delta = self.spacemap_next.pending_bytes();
         if self.next_slab_to_condense.as_index() == self.slabs.0.len() {
             self.next_slab_to_condense = SlabId(0);
             self.spacemap.clear();
             mem::swap(&mut self.spacemap_next, &mut self.spacemap);
         }
         assert_lt!(self.next_slab_to_condense.as_index(), self.slabs.0.len());
-        trace!(
-            "spacemap has {} alloc and {} total entries",
-            self.spacemap.alloc_entries(),
-            self.spacemap.total_entries()
-        );
-        trace!(
-            "spacemap_next has {} alloc and {} total entries",
-            self.spacemap_next.alloc_entries(),
-            self.spacemap_next.total_entries()
+        let condensing_duration = begin.elapsed();
+        debug!(
+            "condensed {} slabs (incoming heuristic: {} bytes -> {} slabs) starting from {:?} in {}ms ({} bytes appended to spacemap_next)",
+            slabs_to_condense,
+            self.checkpoint_allocated_bytes,
+            incoming_rate_heuristic,
+            starting_slab,
+            condensing_duration.as_millis(),
+            condensing_delta,
         );
 
         // Flush any dirty slabs. If any slab is completely empty mark it as free.
         // Keep track of the buckets/SortedSlabs sets that these dirty slabs belong
         // to so later we can update their slab order by freeness.
-        trace!("flushing {} dirty slabs", self.dirty_slabs.len());
+        let ndirty_slabs = self.dirty_slabs.len();
         let mut dirty_buckets = HashSet::new();
         for slab_id in std::mem::take(&mut self.dirty_slabs) {
             let slab = self.slabs.get_mut(slab_id);
@@ -1691,15 +1750,36 @@ impl BlockAllocator {
             slab.flush_to_spacemap(target_spacemap);
             dirty_buckets.insert(slab.max_size());
         }
+        let slab_flushing_duration = begin.elapsed() - condensing_duration;
+        debug!(
+            "flushed {} slabs in {}ms",
+            ndirty_slabs,
+            slab_flushing_duration.as_millis()
+        );
+
+        let spacemap_appended_bytes = self.spacemap.pending_bytes();
+        let spacemap_next_appended_bytes = self.spacemap_next.pending_bytes();
+        let (spacemap, spacemap_next) =
+            futures::future::join(self.spacemap.flush(), self.spacemap_next.flush()).await;
+        let spacemap_flushing_duration =
+            begin.elapsed() - slab_flushing_duration - condensing_duration;
+        debug!(
+            "flushed {} bytes to the spacemaps in {}ms [sm: +{} bytes, now {}/{} allocs/total] [next: +{} bytes, now {}/{} allocs/total]",
+            spacemap_appended_bytes + spacemap_next_appended_bytes,
+            spacemap_flushing_duration.as_millis(),
+            spacemap_appended_bytes,
+            self.spacemap.alloc_entries(), self.spacemap.total_entries(),
+            spacemap_next_appended_bytes,
+            self.spacemap_next.alloc_entries(), self.spacemap_next.total_entries(),
+        );
 
         // So that we'll hit multiple disks.
         self.free_slabs.shuffle(&mut thread_rng());
 
-        trace!("allocation buckets to be resorted: {:?}", dirty_buckets);
-
         // Update any buckets which we've performed any allocations/frees during
         // this checkpoint by recreating their SortedSlabs (which in turn
         // updates their order by freeness and also removes any empty slabs).
+        trace!("allocation buckets to be resorted: {:?}", dirty_buckets);
         for bucket_size in dirty_buckets {
             let bucket = self.slab_buckets.0.get_mut(&bucket_size).unwrap();
             let slabs = &mut self.slabs;
@@ -1715,9 +1795,7 @@ impl BlockAllocator {
         }
         self.available_space += self.freeing_space;
         self.freeing_space = 0;
-
-        let (spacemap, spacemap_next) =
-            futures::future::join(self.spacemap.flush(), self.spacemap_next.flush()).await;
+        self.checkpoint_allocated_bytes = 0;
 
         let phys = BlockAllocatorPhys {
             // BiBTreeMap::iter() is orderd by left value (SlabId), which we rely on here.

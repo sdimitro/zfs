@@ -2811,6 +2811,7 @@ dependencies = [
  "more-asserts",
  "nix",
  "num",
+ "num-traits 0.2.14",
  "rand",
  "roaring",
  "seahash",
