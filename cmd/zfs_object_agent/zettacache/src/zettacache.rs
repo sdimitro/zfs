@@ -731,7 +731,7 @@ impl ZettaCache {
             generation: CheckpointId(0),
             block_allocator: BlockAllocatorPhys::new(data_capacity),
             extent_allocator: ExtentAllocatorPhys::new(metadata_capacity),
-            index: Default::default(),
+            index: ZettaCacheIndexPhys::new(Atime(0), Atime(0)),
             operation_log: Default::default(),
             last_atime: Atime(0),
             size_histogram: SizeHistogramPhys::new(
@@ -984,17 +984,6 @@ impl ZettaCache {
             // it, which also updates the histogram parameters to reflect the
             // new cache size.
             state.clear_hit_data();
-
-            let next_index = checkpoint
-                .merge_progress
-                .as_ref()
-                .map(|phys| phys.index.clone());
-
-            // Write out a new checkpoint (including superblocks on new disks)
-            // now, rather than waiting a minute.  This way we minimize the
-            // window between starting the agent with new disks and having the
-            // on-disk state reflect those new disks being part of the pool.
-            state.flush_checkpoint(&index, next_index).await;
         }
 
         let this = ZettaCache {
@@ -1016,27 +1005,20 @@ impl ZettaCache {
             cache_runtime_id: Uuid::new_v4(),
         };
 
-        let (merge_rx, merge_index) = match checkpoint.merge_progress {
-            Some(progress) => (
-                Some(
-                    this.state
-                        .lock()
-                        .await
-                        .resume_merge_task(
-                            this.index.clone(),
-                            old_pending_changes.unwrap(),
-                            progress.clone(),
-                        )
-                        .await,
-                ),
-                Some(progress.index),
+        let merging = match checkpoint.merge_progress {
+            Some(progress) => Some(
+                this.state
+                    .lock()
+                    .await
+                    .resume_merge_task(this.index.clone(), old_pending_changes.unwrap(), progress)
+                    .await,
             ),
-            None => (None, None),
+            None => None,
         };
 
         let my_cache = this.clone();
         tokio::spawn(async move {
-            my_cache.checkpoint_task(merge_rx, merge_index).await;
+            my_cache.checkpoint_task(merging).await;
         });
 
         let state = this.state.clone();
@@ -1143,27 +1125,22 @@ impl ZettaCache {
     /// task and the index phys for the current progress are passed in.
     async fn checkpoint_task(
         &self,
-        mut merge_rx: Option<tokio::sync::mpsc::Receiver<MergeMessage>>,
-        mut next_index: Option<ZettaCacheIndexPhys>,
+        mut merging: Option<(
+            tokio::sync::mpsc::Receiver<MergeMessage>,
+            ZettaCacheIndexPhys,
+        )>,
     ) {
         let mut next_tick = tokio::time::Instant::now();
         loop {
-            next_tick = std::cmp::max(
-                tokio::time::Instant::now(),
-                next_tick + *CHECKPOINT_INTERVAL,
-            );
             // if there is no current merging state, check to see if a merge should be started
-            if self.state.lock().await.merge.is_none() {
-                assert!(merge_rx.is_none());
-                assert!(next_index.is_none());
-                merge_rx = self
-                    .state
-                    .lock()
-                    .await
-                    .try_start_merge_task(self.index.clone())
-                    .await;
+            {
+                let mut state = self.state.lock().await;
+                if state.merge.is_none() {
+                    assert!(merging.is_none());
+                    merging = state.try_start_merge_task(self.index.clone()).await;
+                }
             }
-            if let Some(rx) = &mut merge_rx {
+            if let Some((rx, new_index)) = &mut merging {
                 let mut msg_count = 0;
                 let mut free_count = 0;
                 // we have a channel to an active merge task, check it for messages
@@ -1171,21 +1148,21 @@ impl ZettaCache {
                     let result = timeout_at(next_tick, rx.recv()).await;
                     match result {
                         // capture merge progress: the current next index phys and eviction requests
-                        Ok(Some(MergeMessage::Progress(merge_checkpoint))) => {
+                        Ok(Some(MergeMessage::Progress(merge_progress))) => {
                             msg_count += 1;
-                            free_count += merge_checkpoint.free_list.len();
+                            free_count += merge_progress.free_list.len();
                             trace!(
                                 "merge checkpoint with {} free requests",
-                                merge_checkpoint.free_list.len()
+                                merge_progress.free_list.len()
                             );
-                            super_trace!("eviction requested for {:?}", merge_checkpoint.free_list);
-                            next_index = Some(merge_checkpoint.new_index);
+                            super_trace!("eviction requested for {:?}", merge_progress.free_list);
+                            *new_index = merge_progress.new_index;
                             // free the extent ranges associated with the evicted blocks
                             // XXX - should check to see if the extent is still in the "coverage" area.
                             // it seems possible that the meta-data area could grow during the merge cycle.
 
                             let mut state = self.state.lock().await;
-                            for extent in merge_checkpoint.free_list {
+                            for extent in merge_progress.free_list {
                                 state.block_allocator.free(extent);
                             }
                         }
@@ -1197,8 +1174,7 @@ impl ZettaCache {
                             state.rotate_index(&mut index, new_index).await;
                             state.block_allocator.rebalance_fini();
 
-                            next_index = None;
-                            merge_rx = None;
+                            merging = None;
                             break;
                         }
                         Ok(None) => panic!("channel closed before Complete message received"),
@@ -1218,9 +1194,13 @@ impl ZettaCache {
                 self.state
                     .lock()
                     .await
-                    .flush_checkpoint(&index, next_index.clone())
+                    .flush_checkpoint(&index, merging.as_mut().map(|(_, phys)| phys.clone()))
                     .await;
             }
+            next_tick = std::cmp::max(
+                tokio::time::Instant::now(),
+                next_tick + *CHECKPOINT_INTERVAL,
+            );
         }
     }
 
@@ -2204,7 +2184,7 @@ impl ZettaCacheState {
     async fn flush_checkpoint(
         &mut self,
         index: &ZettaCacheIndex,
-        next_index: Option<ZettaCacheIndexPhys>,
+        new_index: Option<ZettaCacheIndexPhys>,
     ) {
         debug!(
             "flushing checkpoint {:?}",
@@ -2275,16 +2255,14 @@ impl ZettaCacheState {
             begin.elapsed().as_millis()
         );
 
-        // Note that it is possible to have a merge in progress with no next_index available.
-        // This can happen if we have not yet received any progress messages from the merge task.
-        // In this case we just store an empty "in progress" index in the checkpoint.
+        assert_eq!(self.merge.is_some(), new_index.is_some());
         let merge_progress_phys = self.merge.as_ref().map(|ms| MergeProgressPhys {
             rebalance_log: ms
                 .rebalance
                 .as_ref()
                 .map(|rebalance| rebalance.log_phys.clone()),
             operation_log: ms.old_operation_log_phys.clone(),
-            index: next_index.unwrap_or_default(),
+            index: new_index.unwrap(),
         });
 
         let checkpoint = ZettaCheckpointPhys {
@@ -2428,11 +2406,14 @@ impl ZettaCacheState {
         old_index: Arc<tokio::sync::RwLock<ZettaCacheIndex>>,
         old_pending_changes: BTreeMap<IndexKey, PendingChange>,
         progress: MergeProgressPhys,
-    ) -> tokio::sync::mpsc::Receiver<MergeMessage> {
+    ) -> (
+        tokio::sync::mpsc::Receiver<MergeMessage>,
+        ZettaCacheIndexPhys,
+    ) {
         let next_index = ZettaCacheIndex::open(
             self.block_access.clone(),
             self.extent_allocator.clone(),
-            progress.index,
+            progress.index.clone(),
         )
         .await;
         info!(
@@ -2464,14 +2445,20 @@ impl ZettaCacheState {
         });
         self.merge = Some(merge.clone());
 
-        self.spawn_merge_task(merge, old_index, next_index)
+        (
+            self.spawn_merge_task(merge, old_index, next_index),
+            progress.index,
+        )
     }
 
     /// Start a new merge task if there are enough pending changes
     async fn try_start_merge_task(
         &mut self,
         old_index: Arc<tokio::sync::RwLock<ZettaCacheIndex>>,
-    ) -> Option<tokio::sync::mpsc::Receiver<MergeMessage>> {
+    ) -> Option<(
+        tokio::sync::mpsc::Receiver<MergeMessage>,
+        ZettaCacheIndexPhys,
+    )> {
         if self.pending_changes.len() < *MAX_PENDING_CHANGES
             && self.block_allocator.size() - self.block_allocator.available()
                 < (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
@@ -2522,10 +2509,11 @@ impl ZettaCacheState {
             self.extent_allocator.clone(),
             Default::default(),
         );
+        let next_index_phys = ZettaCacheIndexPhys::new(ghost_atime, eviction_atime);
         let next_index = ZettaCacheIndex::open(
             self.block_access.clone(),
             self.extent_allocator.clone(),
-            ZettaCacheIndexPhys::new(ghost_atime, eviction_atime),
+            next_index_phys.clone(),
         )
         .await;
 
@@ -2561,7 +2549,10 @@ impl ZettaCacheState {
         });
         self.merge = Some(merge.clone());
 
-        Some(self.spawn_merge_task(merge, old_index, next_index))
+        Some((
+            self.spawn_merge_task(merge, old_index, next_index),
+            next_index_phys,
+        ))
     }
 
     /// Switch to the new index returned from the merge task and clear the merging state.

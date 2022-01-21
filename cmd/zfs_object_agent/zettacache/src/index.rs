@@ -47,7 +47,7 @@ pub struct IndexEntry {
 impl OnDisk for IndexEntry {}
 impl BlockBasedLogEntry for IndexEntry {}
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct ZettaCacheIndexPhys {
     last_key: Option<IndexKey>,
     atime_histogram: AtimeHistogramPhys,
