@@ -968,6 +968,10 @@ impl ZettaCache {
         // Now that BlockAllocator is open grab its size stats (these will be updated periodically)
         stats.track_instantaneous(BlockAllocatorSize, state.block_allocator.size());
         stats.track_instantaneous(BlockAllocatorAvailable, state.block_allocator.available());
+        stats.track_instantaneous(
+            BlockAllocatorFreeSlabsSize,
+            state.block_allocator.free_slabs_size(),
+        );
 
         if size_changed {
             // The hit data isn't accurate across cache size changes, so clear
@@ -2161,6 +2165,10 @@ impl ZettaCacheState {
             .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
         self.stats
             .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
+        self.stats.track_instantaneous(
+            BlockAllocatorFreeSlabsSize,
+            self.block_allocator.free_slabs_size(),
+        );
 
         let begin_checkpoint = Instant::now();
 
@@ -2441,6 +2449,10 @@ impl ZettaCacheState {
             .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
         self.stats
             .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
+        self.stats.track_instantaneous(
+            BlockAllocatorFreeSlabsSize,
+            self.block_allocator.free_slabs_size(),
+        );
 
         let eviction_atime = self.atime_histogram.atime_for_target_size(target_size);
         let ghost_atime = self

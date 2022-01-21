@@ -1761,6 +1761,10 @@ impl BlockAllocator {
         self.capacity.iter().map(|(_, extent)| extent.size).sum()
     }
 
+    pub fn free_slabs_size(&self) -> u64 {
+        (self.free_slabs.len() * self.slab_size as usize) as u64
+    }
+
     fn slab_id_from_extent_impl(
         capacity: &BiBTreeMap<SlabId, Extent>,
         slab_size: u64,

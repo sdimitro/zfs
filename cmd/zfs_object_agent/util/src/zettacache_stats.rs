@@ -376,6 +376,7 @@ pub enum CacheStatCounter {
     NonblockingBufferBytesAvailable,
     BlockAllocatorSize,
     BlockAllocatorAvailable,
+    BlockAllocatorFreeSlabsSize,
 }
 
 impl Display for CacheStatCounter {
@@ -441,6 +442,7 @@ impl Sub<&Self> for &CacheStats {
                 | CacheStatCounter::BlockingBufferBytesAvailable
                 | CacheStatCounter::NonblockingBufferBytesAvailable
                 | CacheStatCounter::BlockAllocatorSize
+                | CacheStatCounter::BlockAllocatorFreeSlabsSize
                 | CacheStatCounter::BlockAllocatorAvailable => {
                     *diff_stat = self_stat.clone();
                 }

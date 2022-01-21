@@ -150,21 +150,15 @@ impl StatsDisplay {
     fn display_headers(&self) {
         // Produces header output like below. There can be additional opt-in headers.
         //
-        // TIMESTAMP    CACHE-LOOKUP     CACHE-HIT       CACHE-MISS     CACHE-INSERT
-        // 2022-01-12  count   bytes   count   ratio   count   ratio   count   bytes
-        // ----------  ------  ------  ------  ------  ------  ------  ------  ------
+        // TIMESTAMP    CACHE-LOOKUP     CACHE-MISS     CACHE-INSERT
+        // 2022-01-12  count   bytes   count   ratio   count   bytes
+        // ----------  ------  ------  ------  ------  ------  ------
 
         // Top headers is a vector of tuples: (header-title, column-count)
-        let mut top_header: Vec<(&str, usize)> = vec![
-            ("CACHE-LOOKUP", 2),
-            ("CACHE-HIT", 2),
-            ("CACHE-MISS", 2),
-            ("CACHE-INSERT", 2),
-        ];
+        let mut top_header: Vec<(&str, usize)> =
+            vec![("CACHE-LOOKUP", 2), ("CACHE-MISS", 2), ("CACHE-INSERT", 2)];
         // Bottom headers is a vector of: header-column-name
-        let mut bottom_header = vec![
-            "count", "bytes", "count", "ratio", "count", "ratio", "count", "bytes",
-        ];
+        let mut bottom_header = vec!["count", "bytes", "count", "ratio", "count", "bytes"];
 
         if self.show_lookup_detail {
             // Slot in right after "CACHE-LOOKUP" column
@@ -192,8 +186,8 @@ impl StatsDisplay {
 
         if self.show_block_allocator {
             // Append after all other columns
-            top_header.append(&mut vec![("BLOCK-ALLOCATOR", 3)]);
-            bottom_header.append(&mut vec!["alloc", "avail", "cap"]);
+            top_header.append(&mut vec![("ALLOCATOR", 2), ("ALLOCATOR-FREE", 2)]);
+            bottom_header.append(&mut vec!["alloc", "avail", "space", "slabs"]);
         }
 
         self.display_headers_impl(top_header, bottom_header);
@@ -237,7 +231,7 @@ impl StatsDisplay {
             );
         }
 
-        // HITS & MISSES
+        // MISSES
         let hits = (values.value(CacheHitWithoutIndexRead) + values.value(CacheHitAfterIndexRead))
             as f64
             * scale;
@@ -245,8 +239,6 @@ impl StatsDisplay {
             + values.value(CacheMissForcedEviction)
             + values.value(CacheMissWithoutIndexRead)) as f64
             * scale;
-        self.display_count(hits);
-        self.display_percent(hits, hits + misses);
         self.display_count(misses);
         self.display_percent(misses, hits + misses);
 
@@ -284,15 +276,14 @@ impl StatsDisplay {
         // BLOCK-ALLOCATOR (optional)
         if self.show_block_allocator {
             let block_allocator_size = values.value(BlockAllocatorSize);
+            let free_slabs_size = values.value(BlockAllocatorFreeSlabsSize);
             let block_allocator_free = values.value(BlockAllocatorAvailable);
             let block_allocator_allocated = block_allocator_size - block_allocator_free;
 
             self.display_bytes(block_allocator_allocated as f64);
             self.display_bytes(block_allocator_free as f64);
-            self.display_percent(
-                block_allocator_allocated as f64,
-                block_allocator_size as f64,
-            );
+            self.display_percent(block_allocator_free as f64, block_allocator_size as f64);
+            self.display_percent(free_slabs_size as f64, block_allocator_size as f64);
         }
 
         writeln_stdout!();
@@ -386,12 +377,6 @@ impl ZcacheSubCommand for Stats {
         SubCommand::with_name(NAME)
             .about("Display cache statistics.")
             .arg(
-                Arg::with_name("timestamp")
-                    .long("timestamp")
-                    .short("t")
-                    .help("Display a timestamp on each line of stats"),
-            )
-            .arg(
                 Arg::with_name("insert-detail")
                     .long("insert-detail")
                     .short("i")
@@ -457,7 +442,7 @@ impl ZcacheSubCommand for Stats {
         let all = args.is_present("all");
 
         StatsDisplay {
-            show_time: all || args.is_present("timestamp"),
+            show_time: true,
             show_extended: all || args.is_present("extended"),
             show_insert_detail: all || args.is_present("insert-detail"),
             show_lookup_detail: all || args.is_present("lookup-detail"),
