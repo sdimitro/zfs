@@ -1378,6 +1378,8 @@ impl ZettaCache {
         let fut = match index.log.lookup_by_key(key, |entry| entry.key).await {
             None => {
                 // key not in index
+                // XXX We don't really know if we read the index from disk. We
+                // might have hit in the index chunk cache.  Same below.
                 stat_counter = CacheMissAfterIndexRead;
                 super_trace!("cache miss after reading index for {:?}", key);
                 let mut state = self.state.lock_non_send().await;
