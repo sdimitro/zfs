@@ -1811,6 +1811,15 @@ impl ZCacheDBHandle {
                     println!("{:#?}", chunk);
                 })
                 .await;
+            if let Some(mpp) = &self.checkpoint.merge_progress {
+                println!("\nold operation log from MergeProgressPhys:");
+                mpp.operation_log
+                    .iter_chunks(self.block_access.clone())
+                    .for_each(|chunk| async move {
+                        println!("{:#?}", chunk);
+                    })
+                    .await;
+            }
         }
 
         if opts.dump_index_log_raw {
@@ -1828,7 +1837,23 @@ impl ZCacheDBHandle {
                 .for_each(|chunk| async move {
                     println!("{:#?}", chunk);
                 })
-                .await
+                .await;
+
+            if let Some(mpp) = &self.checkpoint.merge_progress {
+                println!("\nnew index from MergeProgressPhys:");
+                mpp.index
+                    .iter_log_chunks(self.block_access.clone())
+                    .for_each(|chunk| async move {
+                        println!("{:#?}", chunk);
+                    })
+                    .await;
+                mpp.index
+                    .iter_log_summary(self.block_access.clone())
+                    .for_each(|chunk| async move {
+                        println!("{:#?}", chunk);
+                    })
+                    .await;
+            }
         }
 
         if opts.dump_rebalance_log_raw {
