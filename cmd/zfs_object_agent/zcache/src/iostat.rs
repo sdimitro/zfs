@@ -14,6 +14,7 @@ use std::thread::sleep;
 use std::time::Duration;
 use util::zettacache_stats::*;
 use util::{nice_number_time, nice_p2size};
+use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "iostat";
 static REQUEST: &str = "zcache_iostat";
@@ -45,22 +46,22 @@ impl IoStatDisplay {
     }
 
     fn display_dashes(width: usize) {
-        print!("{0:-<1$}  ", "-", width);
+        write_stdout!("{0:-<1$}  ", "-", width);
     }
 
     /// Display centered column group titles, such as 'Lookup: Read-Data'
     fn display_header(&self, titles: Vec<&str>, columns_per_group: usize) {
         if self.show_time {
-            print!("{:^1$}  ", "timestamp", self.time_width());
+            write_stdout!("{:^1$}  ", "timestamp", self.time_width());
         }
         if self.show_devices {
-            print!("{:^1$}  ", "zcache", self.max_name_length);
+            write_stdout!("{:^1$}  ", "zcache", self.max_name_length);
         }
         let column_group_width = (columns_per_group * (IoStatDisplay::VALUE_WIDTH + 2)) - 2;
         for title in titles {
-            print!("{:^1$}    ", title, column_group_width);
+            write_stdout!("{:^1$}    ", title, column_group_width);
         }
-        println!();
+        writeln_stdout!();
     }
 
     /// Print a line comprised of a set of headers repeated `copies` times.
@@ -71,14 +72,14 @@ impl IoStatDisplay {
         // First print column headers
         if self.show_time {
             // Note: we use the date as the header over the timestamp column
-            print!(
+            write_stdout!(
                 "{0:>1$}  ",
                 format!("{}", Local::now().format("%Y-%m-%d")),
                 self.time_width()
             );
         }
         if self.show_devices {
-            print!("{:^1$}  ", "device", self.max_name_length);
+            write_stdout!("{:^1$}  ", "device", self.max_name_length);
         }
         for cg in 0..copies {
             for h in &headers {
@@ -88,13 +89,13 @@ impl IoStatDisplay {
                 } else {
                     2 // default is two spaces
                 };
-                print!("{0:^1$}{2:3$}", h, IoStatDisplay::VALUE_WIDTH, "", spacing);
+                write_stdout!("{0:^1$}{2:3$}", h, IoStatDisplay::VALUE_WIDTH, "", spacing);
             }
             if cg != last_group {
-                print!("  "); // Separate column groups by two additional spaces
+                write_stdout!("  "); // Separate column groups by two additional spaces
             }
         }
-        println!();
+        writeln_stdout!();
 
         // Now print dashes underneath each column
         if self.show_time {
@@ -108,10 +109,10 @@ impl IoStatDisplay {
                 IoStatDisplay::display_dashes(IoStatDisplay::VALUE_WIDTH);
             }
             if cg != last_group {
-                print!("  "); // Separate column groups by 2 additional spaces
+                write_stdout!("  "); // Separate column groups by 2 additional spaces
             }
         }
-        println!();
+        writeln_stdout!();
     }
 
     /// Display 3 rows worth of headers which includes a row of dashes below each column
@@ -180,9 +181,9 @@ impl IoStatDisplay {
             if self.show_active {
                 stat_values.active_count.display_pretty(None);
             }
-            print!("  "); // Note we pad with two additional spaces between groups
+            write_stdout!("  "); // Note we pad with two additional spaces between groups
         }
-        println!();
+        writeln_stdout!();
     }
 
     /// Display the default iostat output.
@@ -210,7 +211,7 @@ impl IoStatDisplay {
                     // Show the time once (above) in 'summary' row, but not with each device row
                     String::from("")
                 };
-                print!("{:>1$}  ", time, self.time_width());
+                write_stdout!("{:>1$}  ", time, self.time_width());
             }
             if self.show_devices {
                 let (width, indent) = if i == 0 {
@@ -218,7 +219,7 @@ impl IoStatDisplay {
                 } else {
                     (self.max_name_length - 2, "  ")
                 };
-                print!("{}{:<2$}  ", indent, disk_stats.name, width);
+                write_stdout!("{}{:<2$}  ", indent, disk_stats.name, width);
             }
 
             self.display_one_row(disk_stats, stat_delta.timestamp);
@@ -227,17 +228,17 @@ impl IoStatDisplay {
             }
         }
         if self.show_devices {
-            println!()
+            writeln_stdout!()
         }
     }
 
     fn display_histogram_headers(&self, name: &str, headers: Vec<&str>) {
-        print!("{:<1$} ", name, self.max_name_length);
+        write_stdout!("{:<1$} ", name, self.max_name_length);
 
         for column in headers {
-            print!("{:^1$}", column, IoStatDisplay::VALUE_WIDTH + 2);
+            write_stdout!("{:^1$}", column, IoStatDisplay::VALUE_WIDTH + 2);
         }
-        println!();
+        writeln_stdout!();
     }
 
     /// Print the histogram iostat output.
@@ -245,12 +246,12 @@ impl IoStatDisplay {
         for disk_stat in stat_delta.disk_stats.iter() {
             if self.show_time {
                 if self.interval_is_subsecond {
-                    println!("{}", Local::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"));
+                    writeln_stdout!("{}", Local::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"));
                 } else {
-                    println!("{}", Local::now().format("%Y-%m-%d %H:%M:%S UTC"));
+                    writeln_stdout!("{}", Local::now().format("%Y-%m-%d %H:%M:%S UTC"));
                 }
             }
-            println!();
+            writeln_stdout!();
             let device_name = if self.show_devices {
                 &disk_stat.name
             } else {
@@ -274,33 +275,33 @@ impl IoStatDisplay {
                     // First display each bucket name
                     // Use ending range of bucket for latency (first bucket is 1us)
                     let nice_value = nice_number_time(Duration::from_nanos((1024 << j) - 1));
-                    print!("{:>1$} ", nice_value, self.max_name_length);
+                    write_stdout!("{:>1$} ", nice_value, self.max_name_length);
 
                     // Then display bucket values for each disk io type (total of 5)
                     for v in disk_stat.stats.values() {
                         let count = &v.latency_histogram.0[j];
                         count.display_pretty(None);
                     }
-                    println!();
+                    writeln_stdout!();
                 }
             } else {
                 for j in 0..RequestHistogram::BUCKETS {
                     // First display each bucket name
                     // Use starting range of bucket for request sizes (first bucket is 512B)
                     let nice_value = nice_p2size(512 << j);
-                    print!("{:>1$} ", nice_value, self.max_name_length);
+                    write_stdout!("{:>1$} ", nice_value, self.max_name_length);
 
                     // Then display bucket values for each disk io type (total of 5)
                     for v in disk_stat.stats.values() {
                         let count = &v.request_histogram.0[j];
                         count.display_pretty(None);
                     }
-                    println!();
+                    writeln_stdout!();
                 }
             }
 
             // Print a line of dashes after each histogram
-            println!(
+            writeln_stdout!(
                 "{:-<1$}",
                 "-",
                 self.max_name_length + ((IoStatDisplay::VALUE_WIDTH + 2) * disk_stat.stats.len())
@@ -314,9 +315,7 @@ impl IoStatDisplay {
     async fn display_io_stats(&mut self) -> Result<()> {
         let mut iteration = 0;
         let mut previous = IoStats::default(); // place holder empty stats
-
         let mut remote = RemoteChannel::new(false).await?;
-        // TODO need to handle an agent restart (currently stops with signal SIGPIPE)
 
         loop {
             let latest = match remote.call(REQUEST, None).await {
@@ -337,25 +336,29 @@ impl IoStatDisplay {
                     latest
                 }
                 Err(RemoteError::ResultError(_)) => {
-                    println!("No cache found?");
+                    info!("No cache found?");
                     continue;
                 }
                 Err(RemoteError::Other(e)) => {
-                    println!("remote call error: {}", e);
-                    // typically something like "Connection reset by peer (os error 104)"
+                    info!("object agent restarted: {}", e);
                     return Err(e);
                 }
             };
 
-            let delta = &latest - &previous;
+            if previous.disk_stats.is_empty()
+                || latest.cache_runtime_id == previous.cache_runtime_id
+            {
+                let delta = &latest - &previous;
 
-            match &self.histogram_name {
-                None => self.display_iostat_default(iteration, &delta),
-                Some(name) => self.display_iostat_histogram(name, &delta),
+                match &self.histogram_name {
+                    None => self.display_iostat_default(iteration, &delta),
+                    Some(name) => self.display_iostat_histogram(name, &delta),
+                }
+                // Flush stdout in case output is redirected to a file
+                io::stdout().flush()?;
+            } else {
+                info!("object agent restarted");
             }
-
-            // Flush stdout in case output is redirected to a file
-            io::stdout().flush()?;
 
             iteration += 1;
             let interval: Duration = match self.interval {

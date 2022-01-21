@@ -8,6 +8,7 @@ use clap::{Arg, SubCommand};
 use std::fs;
 use std::path::{Path, PathBuf};
 use util::{nice_p2size, DeviceEntry, DeviceList};
+use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "list_devices";
 
@@ -52,11 +53,11 @@ impl DeviceDisplay {
         let name_width = self.max_name_length(&devices.devices);
 
         for device in &devices.devices {
-            print!("{:<1$}  ", self.derive_name(&device.name), name_width);
+            write_stdout!("{:<1$}  ", self.derive_name(&device.name), name_width);
             if self.show_size {
-                print!("{:>6}", nice_p2size(device.size));
+                write_stdout!("{:>6}", nice_p2size(device.size));
             }
-            println!();
+            writeln_stdout!();
         }
     }
 
@@ -69,17 +70,17 @@ impl DeviceDisplay {
                 let devices: DeviceList = serde_json::from_str(devices_json.to_str()?)?;
 
                 if self.json_output {
-                    println!("{}", serde_json::to_string_pretty(&devices)?)
+                    writeln_stdout!("{}", serde_json::to_string_pretty(&devices)?)
                 } else {
                     self.display_devices(&devices);
                 }
             }
             Err(RemoteError::ResultError(_)) => {
-                println!("No cache found?");
+                writeln_stdout!("No cache found?");
                 return Ok(());
             }
             Err(RemoteError::Other(e)) => {
-                println!("remote call error: {}", e);
+                writeln_stdout!("remote call error: {}", e);
                 return Err(e);
             }
         }

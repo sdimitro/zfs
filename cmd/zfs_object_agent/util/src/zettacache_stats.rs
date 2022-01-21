@@ -24,6 +24,7 @@ use std::ops::{AddAssign, Sub};
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+use uuid::Uuid;
 
 /// The zettacache disk I/O types that are collected and displayed for each disk.
 #[derive(Debug, Enum, Copy, Clone, Serialize, Deserialize)]
@@ -295,12 +296,14 @@ impl Sub<Self> for &DiskIoStats {
 /// A snapshot of the I/O stats collected from the zettacache.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct IoStats {
+    pub cache_runtime_id: Uuid, // must match before timestamps & disk_stats can be compared
     pub timestamp: Duration,
     pub disk_stats: Vec<DiskIoStats>,
 }
 
-#[derive(Debug, Default, Serialize)]
+#[derive(Debug, Serialize)]
 pub struct IoStatsRef<'a> {
+    pub cache_runtime_id: Uuid,
     pub timestamp: Duration,
     pub disk_stats: Vec<&'a DiskIoStats>,
 }
@@ -313,6 +316,7 @@ impl Sub<Self> for &IoStats {
         if other.disk_stats.is_empty() {
             return self.clone();
         }
+        assert_eq!(self.cache_runtime_id, other.cache_runtime_id);
 
         let mut difference = IoStats {
             timestamp: self.timestamp - other.timestamp,
@@ -383,6 +387,7 @@ impl Display for CacheStatCounter {
 /// A snapshot of the cache stats collected from the zettacache.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CacheStats {
+    pub cache_runtime_id: Uuid, // must match before timestamp & stats can be compared
     pub timestamp: Duration,
     pub stats: EnumMap<CacheStatCounter, StatCount>,
 }
@@ -390,6 +395,7 @@ pub struct CacheStats {
 impl CacheStats {
     pub fn new() -> CacheStats {
         CacheStats {
+            cache_runtime_id: Default::default(),
             timestamp: Duration::default(),
             stats: Default::default(),
         }
@@ -416,6 +422,8 @@ impl Sub<&Self> for &CacheStats {
 
     /// Subtract two CacheStats. Used to create the net values between two samples.
     fn sub(self, other: &Self) -> CacheStats {
+        assert_eq!(self.cache_runtime_id, other.cache_runtime_id);
+
         let mut difference = CacheStats {
             timestamp: self.timestamp - other.timestamp,
             ..Default::default()

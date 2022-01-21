@@ -32,6 +32,7 @@ use util::zettacache_stats::*;
 use util::From64;
 use util::{AlignedBytes, AlignedVec};
 use util::{DeviceEntry, DeviceList};
+use uuid::Uuid;
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
@@ -454,12 +455,10 @@ impl BlockAccess {
     }
 
     /// Return the I/O stats collected as a serialized json string.
-    pub fn io_stats_as_json(&self) -> String {
-        let timestamp = self.timebase.elapsed();
-        // TODO -- should pass the timebase to differentiate previous stats across agent restart
-
+    pub fn io_stats_as_json(&self, agent_id: Uuid) -> String {
         serde_json::to_string(&IoStatsRef {
-            timestamp,
+            cache_runtime_id: agent_id, // used to detect agent restarts across stat snapshots
+            timestamp: self.timebase.elapsed(),
             disk_stats: self.disks.iter().map(|disk| &disk.io_stats).collect(),
         })
         .unwrap()

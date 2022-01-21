@@ -3,6 +3,7 @@ use crate::subcommand::ZcacheSubCommand;
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::SubCommand;
+use util::writeln_stdout;
 
 static NAME: &str = "clear_hit_data";
 pub struct ClearHitData;
@@ -22,10 +23,10 @@ impl ZcacheSubCommand for ClearHitData {
         let response = remote.call(NAME, None).await;
         match response {
             Ok(_) => {
-                println!("Hits-by-size data cleared");
+                writeln_stdout!("Hits-by-size data cleared");
             }
             Err(RemoteError::ResultError(_)) => {
-                println!("No cache found, so no hits-by-size data present");
+                writeln_stdout!("No cache found, so no hits-by-size data present");
             }
             Err(RemoteError::Other(e)) => return Err(e),
         }

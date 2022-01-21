@@ -2,6 +2,8 @@
 #![warn(clippy::cast_possible_truncation)]
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
+#![deny(clippy::print_stdout)]
+#![deny(clippy::print_stderr)]
 mod clear_hit_data;
 mod iostat;
 mod list_devices;
@@ -20,17 +22,9 @@ use log::*;
 use report_hits::ReportHits;
 use stats::Stats;
 use subcommand::ZcacheSubCommand;
+use util::writeln_stdout;
 
 fn main() -> Result<()> {
-    // When zcache is used in a UNIX shell pipeline and its output is not fully
-    // consumed a SIGPIPE (e.g. "broken pipe") signal is sent to us. By default,
-    // we would abort and generate a core dump which is annoying. The unsafe
-    // line below changes that behavior to just terminating as it is expected by
-    // other UNIX utilities.
-    // reference: https://github.com/rust-lang/rust/issues/46016
-    unsafe {
-        libc::signal(libc::SIGPIPE, libc::SIG_DFL);
-    }
     async_main()
 }
 
@@ -91,8 +85,8 @@ async fn async_main() -> Result<()> {
     match sub_commands.into_iter().find(|cmd| cmd.name() == cmd_name) {
         Some(mut subcmd) => subcmd.invoke(cmd_args.unwrap()).await?,
         None => {
-            println!("Unable to invoke {}", cmd_name);
-            println!("{}", matches.usage());
+            writeln_stdout!("Unable to invoke {}", cmd_name);
+            writeln_stdout!("{}", matches.usage());
             std::process::exit(exitcode::USAGE);
         }
     }

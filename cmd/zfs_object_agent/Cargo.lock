@@ -2553,6 +2553,7 @@ dependencies = [
  "rusoto_credential",
  "serde 1.0.133",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -2807,7 +2808,6 @@ dependencies = [
  "log",
  "lru",
  "lz4",
- "metered",
  "more-asserts",
  "nix",
  "num",
@@ -2819,6 +2819,7 @@ dependencies = [
  "sysinfo",
  "tokio",
  "util",
+ "uuid",
 ]
 
 [[package]]

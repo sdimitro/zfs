@@ -1,9 +1,11 @@
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, Result};
 use log::*;
 use nvpair::{NvEncoding, NvList};
-use tokio::io::AsyncReadExt;
-use tokio::io::AsyncWriteExt;
+use std::thread::sleep;
+use std::time::Duration;
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use util::writeln_stderr;
 use util::From64;
 
 #[derive(Debug)]
@@ -11,6 +13,8 @@ pub enum RemoteError {
     ResultError(NvList),
     Other(anyhow::Error),
 }
+
+const ZOA_MAX_RETRIES: usize = 30;
 
 impl std::fmt::Display for RemoteError {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -43,20 +47,53 @@ impl From<std::str::Utf8Error> for RemoteError {
 
 pub struct RemoteChannel {
     stream: UnixStream,
+    socket_path: String,
 }
 
 impl RemoteChannel {
+    async fn open(socket_path: &str) -> Result<UnixStream> {
+        // Retry until a connection is established
+        // TODO for the initial command launch can we shorten this?
+        let mut reconnect_retries = 0;
+        loop {
+            match UnixStream::connect(socket_path).await {
+                Ok(stream) => {
+                    info!("opened socket {}", socket_path);
+                    return Ok(stream);
+                }
+                Err(e) => {
+                    if reconnect_retries > ZOA_MAX_RETRIES {
+                        info!(
+                            "cannot connect after {} attempts to zfs object agent {}",
+                            reconnect_retries,
+                            e.to_string()
+                        );
+                        writeln_stderr!("cannot connect to zfs object agent");
+                        return Err(anyhow!(e));
+                    }
+                    info!("open socket failed {}", e.to_string());
+                    sleep(Duration::from_millis(500));
+                    reconnect_retries += 1;
+                    continue;
+                }
+            }
+        }
+    }
+
+    /// Create a new RemoteChannel and establish a remote connection to the object agent.
     pub async fn new(need_priv: bool) -> Result<Self> {
         let socket_path = if need_priv {
-            "/etc/zfs/zfs_root_socket"
+            "/etc/zfs/zfs_root_socket".to_string()
         } else {
-            "/etc/zfs/zfs_public_socket"
+            "/etc/zfs/zfs_public_socket".to_string()
         };
-        // XXX - do we need retrys here?
-        let stream = UnixStream::connect(socket_path)
-            .await
-            .with_context(|| format!("Could not connect to {}", socket_path))?;
-        Ok(Self { stream })
+
+        let stream = RemoteChannel::open(&socket_path).await?;
+
+        Ok(Self {
+            stream,
+            socket_path,
+        })
     }
 
     async fn send(&mut self, message: NvList) -> Result<()> {
@@ -69,45 +106,69 @@ impl RemoteChannel {
     }
 
     async fn receive(&mut self) -> Result<NvList> {
-        // recieve a packed nvlist and unpack it...
+        // receive a packed nvlist and unpack it...
         let len64 = self.stream.read_u64_le().await?;
         let mut v: Vec<u8> = vec![0; usize::from64(len64)];
         self.stream.read_exact(v.as_mut()).await?;
         Ok(NvList::try_unpack(v.as_ref()).unwrap())
     }
 
+    /// Send a request to the object agent and wait for a response. If the agent is restarted
+    /// before completing this request, it will reconnect and resend the request. Therefore,
+    /// the request must be idempotent (i.e. executing the request more than once has the same
+    /// effect as executing it only once).
     pub async fn call(
         &mut self,
         request: &str,
         args: Option<NvList>,
     ) -> Result<NvList, RemoteError> {
-        // send request
-        let mut nvlist = args.unwrap_or_else(NvList::new_unique_names);
-        nvlist.insert("Type", request).unwrap();
-        self.send(nvlist).await?;
-        debug!("sent {} request, now waiting for response...", request);
-        // receive response
-        let response = self.receive().await?;
-        debug!("received response: {:?}", response);
-        let response_type = response.lookup_string("Type")?;
-        let response_type = response_type.to_str()?;
-        if response_type != request {
-            return Err(RemoteError::Other(anyhow!(
-                "expected response type \"{}\", got \"{}\"",
-                request,
-                response_type
-            )));
-        }
+        loop {
+            // send request, retrying as needed
+            let mut nvlist = args.clone().unwrap_or_else(NvList::new_unique_names);
+            nvlist.insert("Type", request).unwrap();
+            match self.send(nvlist).await {
+                Ok(_) => {}
+                Err(e) => {
+                    // reopen the channel and resend the request
+                    info!("send: object agent restarted: {}", e);
+                    self.stream = RemoteChannel::open(&self.socket_path).await?;
+                    continue;
+                }
+            }
+            debug!("sent {} request, now waiting for response...", request);
 
-        let result = response.lookup_string("result")?;
-        let result = result.to_str()?;
-        match result {
-            "ok" => Ok(response),
-            "err" => Err(RemoteError::ResultError(response)),
-            _ => Err(RemoteError::Other(anyhow!(
-                "expected \"ok\" or \"err\" for result, got \"{}\"",
-                result
-            ))),
+            // receive response, retrying as needed
+            let response: NvList = match self.receive().await {
+                Ok(response) => response,
+                Err(e) => {
+                    // reopen the channel and resend the request
+                    info!("receive: object agent restarted: {}", e);
+                    self.stream = RemoteChannel::open(&self.socket_path).await?;
+                    continue;
+                }
+            };
+            debug!("received response: {:?}", response);
+
+            let response_type = response.lookup_string("Type")?;
+            let response_type = response_type.to_str()?;
+            if response_type != request {
+                return Err(RemoteError::Other(anyhow!(
+                    "expected response type \"{}\", got \"{}\"",
+                    request,
+                    response_type
+                )));
+            }
+
+            let result = response.lookup_string("result")?;
+            let result = result.to_str()?;
+            return match result {
+                "ok" => Ok(response),
+                "err" => Err(RemoteError::ResultError(response)),
+                _ => Err(RemoteError::Other(anyhow!(
+                    "expected \"ok\" or \"err\" for result, got \"{}\"",
+                    result
+                ))),
+            };
         }
     }
 }

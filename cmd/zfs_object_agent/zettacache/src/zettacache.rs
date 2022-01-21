@@ -58,6 +58,7 @@ use util::From64;
 use util::LockSet;
 use util::LockedItem;
 use util::MutexExt;
+use uuid::Uuid;
 
 lazy_static! {
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
@@ -158,6 +159,7 @@ pub struct ZettaCache {
     blocking_buffer_bytes_available: Arc<Semaphore>,
     nonblocking_buffer_bytes_available: Arc<Semaphore>,
     write_slots: Arc<Semaphore>,
+    cache_runtime_id: Uuid,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -1001,6 +1003,7 @@ impl ZettaCache {
             block_access,
             stats,
             timebase: Instant::now(),
+            cache_runtime_id: Uuid::new_v4(),
         };
 
         let (merge_rx, merge_index) = match checkpoint.merge_progress {
@@ -1623,11 +1626,12 @@ impl ZettaCache {
     }
 
     pub fn io_stats_as_json(&self) -> String {
-        self.block_access.io_stats_as_json()
+        self.block_access.io_stats_as_json(self.cache_runtime_id)
     }
 
     pub async fn stats_as_json(&self) -> String {
         let mut stats = CacheStats::clone(&self.stats);
+        stats.cache_runtime_id = self.cache_runtime_id;
         stats.timestamp = self.timebase.elapsed();
         serde_json::to_string(&stats).unwrap()
     }

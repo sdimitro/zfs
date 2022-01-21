@@ -25,3 +25,4 @@ roaring = "0.7.0"
 rusoto_credential = "0.47.0"
 serde = { version = "1.0.125", features = ["derive"] }
 tokio = { version = "1.4", features = ["full"] }
+uuid = {version = "0.8.2", features = ["v4", "serde"]}

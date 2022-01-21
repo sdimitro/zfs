@@ -15,6 +15,7 @@ use std::time::Duration;
 use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::*;
 use util::{nice_number_count, nice_p2size};
+use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "stats";
 static REQUEST: &str = "zcache_stats";
@@ -48,24 +49,24 @@ impl StatsDisplay {
     fn display_bytes(&self, bytes: f64) {
         let value: u64 = bytes.round().to_u64().unwrap();
         if self.show_exact_values {
-            print!("{:0}\t", value);
+            write_stdout!("{:0}\t", value);
         } else if value == 0 {
             // Intentionally avoid displaying "0.00B" when 0
-            print!("{:>6}  ", "0");
+            write_stdout!("{:>6}  ", "0");
         } else {
-            print!("{:>6}  ", nice_p2size(value));
+            write_stdout!("{:>6}  ", nice_p2size(value));
         }
     }
 
     fn display_count(&self, count: f64) {
         if self.show_exact_values {
             let value: u64 = count.round().to_u64().unwrap();
-            print!("{:0}\t", value);
+            write_stdout!("{:0}\t", value);
         } else if count == 0.0 {
             // Intentionally avoid displaying "0.00" when 0
-            print!("{:>6}  ", "0");
+            write_stdout!("{:>6}  ", "0");
         } else {
-            print!("{:>6}  ", nice_number_count(count));
+            write_stdout!("{:>6}  ", nice_number_count(count));
         }
     }
 
@@ -77,18 +78,20 @@ impl StatsDisplay {
         };
 
         if self.show_exact_values {
-            print!("{:0.0}\t", percent.round());
-        } else if percent < 0.5 {
-            print!("{:>6}  ", "-");
+            write_stdout!("{:0.0}\t", percent.round());
+        } else if percent <= 0.0 {
+            write_stdout!("{:>6}  ", "-");
+        } else if percent >= 100.0 {
+            write_stdout!("{:>5.0}%  ", percent.round());
         } else {
-            print!("{:>5.0}%  ", percent.round());
+            write_stdout!("{:>5.1}%  ", percent);
         }
     }
 
     fn display_timestamp(&self) {
         if self.show_exact_values {
             // e.g. "1639893294"
-            print!("{}", Local::now().format("%s%t"));
+            write_stdout!("{}", Local::now().format("%s%t"));
         } else {
             let time = if self.interval_is_subsecond {
                 // e.g. "05:43:54.254"
@@ -97,26 +100,26 @@ impl StatsDisplay {
                 // e.g. "05:43:54"
                 Local::now().format("%H:%M:%S")
             };
-            print!("{0:>1$}  ", time, self.time_width());
+            write_stdout!("{0:>1$}  ", time, self.time_width());
         }
     }
 
     fn display_dashes(width: usize) {
-        print!("{0:-<1$}  ", "-", width);
+        write_stdout!("{0:-<1$}  ", "-", width);
     }
 
     fn display_headers_impl(&self, top: Vec<(&str, usize)>, bottom: Vec<&str>) {
         if self.show_time {
-            print!("{0:^1$}  ", "TIMESTAMP", self.time_width());
+            write_stdout!("{0:^1$}  ", "TIMESTAMP", self.time_width());
         }
         for (header, n) in top.iter() {
             let width = (n * (StatsDisplay::VALUE_WIDTH + 2)) - 2;
-            print!("{0:^1$}  ", header, width);
+            write_stdout!("{0:^1$}  ", header, width);
         }
-        println!();
+        writeln_stdout!();
 
         if self.show_time {
-            print!(
+            write_stdout!(
                 "{0:>1$}  ",
                 format!("{}", Local::now().format("%Y-%m-%d")),
                 self.time_width()
@@ -129,9 +132,9 @@ impl StatsDisplay {
             } else {
                 2 // default is two spaces
             };
-            print!("{0:^1$}{2:3$}", h, StatsDisplay::VALUE_WIDTH, "", spacing);
+            write_stdout!("{0:^1$}{2:3$}", h, StatsDisplay::VALUE_WIDTH, "", spacing);
         }
-        println!();
+        writeln_stdout!();
 
         // Now print dashes underneath each column
         if self.show_time {
@@ -141,7 +144,7 @@ impl StatsDisplay {
         for _h in 0..bottom.len() {
             StatsDisplay::display_dashes(StatsDisplay::VALUE_WIDTH);
         }
-        println!();
+        writeln_stdout!();
     }
 
     fn display_headers(&self) {
@@ -292,7 +295,7 @@ impl StatsDisplay {
             );
         }
 
-        println!();
+        writeln_stdout!();
     }
 
     async fn display_stats(&self) -> Result<()> {
@@ -309,11 +312,11 @@ impl StatsDisplay {
                     latest = serde_json::from_str(stats_json.to_str()?).unwrap();
                 }
                 Err(RemoteError::ResultError(_)) => {
-                    println!("No cache found?");
+                    writeln_stdout!("No cache found?");
                     continue;
                 }
                 Err(RemoteError::Other(e)) => {
-                    println!("remote call error: {}", e);
+                    writeln_stdout!("remote call error: {}", e);
                     // typically something like "Connection reset by peer (os error 104)"
                     return Err(e);
                 }
@@ -324,8 +327,12 @@ impl StatsDisplay {
                 self.display_headers();
             }
 
-            // Display the net values of collected stats
-            self.display_stat_values(&(&latest - &&previous));
+            if latest.cache_runtime_id == previous.cache_runtime_id {
+                // Display the net values of collected stats
+                self.display_stat_values(&(&latest - &&previous));
+            } else {
+                info!("object agent restarted");
+            }
 
             // Flush stdout in case output is redirected to a file
             io::stdout().flush().unwrap_or(());
@@ -382,8 +389,7 @@ impl ZcacheSubCommand for Stats {
                 Arg::with_name("timestamp")
                     .long("timestamp")
                     .short("t")
-                    .help("Display a timestamp on each line of stats")
-                    .conflicts_with("all"),
+                    .help("Display a timestamp on each line of stats"),
             )
             .arg(
                 Arg::with_name("insert-detail")

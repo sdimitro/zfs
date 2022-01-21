@@ -10,6 +10,7 @@ use num_traits::cast::ToPrimitive;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use util::nice_p2size;
 use util::From64;
+use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "report_hits";
 
@@ -75,19 +76,20 @@ impl SizeHistogram {
     /// print out a histogram of hits-by-cache-size
     fn print(&self, quantiles: usize, cumulative: bool, ghost: bool) {
         let start_as_utc: DateTime<Local> = self.start.into();
-        println!("Data collection started: {}", start_as_utc.to_rfc2822());
-        println!("Data collection ended: {}", Local::now().to_rfc2822());
+        writeln_stdout!("Data collection started: {}", start_as_utc.to_rfc2822());
+        writeln_stdout!("Data collection ended: {}", Local::now().to_rfc2822());
         let total = self.sum_live_hits();
-        print!(
+        write_stdout!(
             "Cache Hits by Size ({} lookups with {} hits ",
-            self.lookups, total
+            self.lookups,
+            total
         );
         let hit_percent = if self.lookups == 0 {
             100.0
         } else {
             total as f64 * 100.0 / self.lookups as f64
         };
-        println!(
+        writeln_stdout!(
             "({:.1}%) in {} cache)",
             hit_percent,
             nice_p2size(self.cache_capacity)
@@ -107,7 +109,7 @@ impl SizeHistogram {
                 if !ghost {
                     return;
                 }
-                println!("-------------------ghost hits---------------------");
+                writeln_stdout!("-------------------ghost hits---------------------");
             }
             cache_size += bucket_size;
             // The last bucket may not be the "full" bucket size
@@ -119,9 +121,9 @@ impl SizeHistogram {
                 );
                 cache_size = histogram_capacity;
             }
-            print!("{: >8} : ", nice_p2size(cache_size));
+            write_stdout!("{: >8} : ", nice_p2size(cache_size));
             if total == 0 {
-                println!();
+                writeln_stdout!();
                 continue;
             }
             if cumulative {
@@ -131,16 +133,16 @@ impl SizeHistogram {
             };
             if bucket_total == 0 {
                 // this bucket is empty (if we are accumulating, no hits have been seen yet)
-                println!("  0%");
+                writeln_stdout!("  0%");
                 continue;
             }
             let percent = (bucket_total as f64 * hit_percent) / total as f64;
             if percent < 1.0 {
                 // there are a small number of hits
-                println!(" <1% *");
+                writeln_stdout!(" <1% *");
             } else {
                 let stars = std::cmp::max(percent.to_usize().unwrap() * HISTOGRAM_WIDTH / 100, 1);
-                println!("{: >3.0}% {:*<2$}", percent, "", stars);
+                writeln_stdout!("{: >3.0}% {:*<2$}", percent, "", stars);
             }
         }
     }
@@ -204,7 +206,7 @@ impl ZcacheSubCommand for ReportHits {
                 hits_by_size.print(quantiles, cumulative, ghost);
             }
             Err(RemoteError::ResultError(_)) => {
-                println!("No cache found, so no hits-by-size data is available");
+                writeln_stdout!("No cache found, so no hits-by-size data is available");
             }
             Err(RemoteError::Other(e)) => return Err(e),
         }
