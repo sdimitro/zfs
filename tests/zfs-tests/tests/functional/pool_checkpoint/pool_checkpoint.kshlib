@@ -243,7 +243,7 @@ function test_verify_pre_checkpoint_state
 	# can't really use zdb on it.
 	#
 	if [[ "$1" != "ro-check" ]] ; then
-		log_must zdb $TESTPOOL
+		log_must run_zdb -p "$TESTPOOL"
 	fi
 
 	#
@@ -266,7 +266,7 @@ function nested_verify_pre_checkpoint_state
 	# can't really use zdb on it.
 	#
 	if [[ "$1" != "ro-check" ]] ; then
-		log_must zdb $NESTEDPOOL
+		log_must run_zdb -p "$NESTEDPOOL"
 	fi
 
 	#
@@ -301,7 +301,7 @@ function test_verify_post_checkpoint_state
 	log_must [ "$(<$FS0FILE)" = "$NEWFILECONTENTS0" ]
 	log_must [ "$(<$FS2FILE)" = "$NEWFILECONTENTS2" ]
 
-	log_must zdb $TESTPOOL
+	log_must run_zdb -p "$TESTPOOL"
 
 	#
 	# Ensure pre-checkpointed state that was removed post-checkpoint
@@ -348,8 +348,8 @@ function fragment_after_checkpoint_and_verify
 	# the verification results are consistent.
 	#
 	log_must zpool export $NESTEDPOOL
-	log_must zdb -e -p $FILEDISKDIR $NESTEDPOOL
-	log_must zdb -e -p $FILEDISKDIR -kc $NESTEDPOOL
+	log_must run_zdb -e "-e -p" -p "$FILEDISKDIR $NESTEDPOOL"
+	log_must run_zdb -e "-e -p" -p "$FILEDISKDIR -kc $NESTEDPOOL"
 	log_must zpool import -d $FILEDISKDIR $NESTEDPOOL
 }
 

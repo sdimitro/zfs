@@ -59,7 +59,7 @@ function get_object_list_range
 #
 function get_object_list
 {
-	zdb -P -dd $@ 2>/dev/null |
+	run_zdb -e "-P -dd" -p "$*" 2>/dev/null |
 	egrep "^ +-?([0-9]+ +){7}" |
 	sed 's/^[[:space:]]*//' |
 	sort -n
@@ -75,7 +75,7 @@ for x in $(seq 0 7); do
 	mkdir $TESTDIR/dir$x
 done
 
-log_must zpool sync
+sync_all_pools
 
 # Get list of all objects, but filter out user/group objects which don't
 # appear when using object or object range arguments

@@ -53,6 +53,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::super_trace;
 use util::AlignedBytes;
 use util::TerseVec;
 use uuid::Uuid;
@@ -69,7 +70,7 @@ lazy_static! {
     static ref FREE_LOWWATER_PCT: f64 = get_tunable("free_lowwater_pct", 40.0);
     // don't bother freeing unless there are at least this number of free blocks
     static ref FREE_MIN_BLOCKS: u64 = get_tunable("free_min_blocks", 1000);
-    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 1024 * 1024);
+    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 2 * 1024 * 1024);
 
     // Split a reclaim free log when it exceeds this many entries.  We picked 10 million to
     // keep the memory size for loading pending frees and object sizes logs at about 1/2 GB.
@@ -77,9 +78,9 @@ lazy_static! {
     // If this value is smaller than the number of blocks that could be freed in one object
     // group (1000 objects), then we may end up trying to repeatedly split a log that contains
     // blocks of only a single object group, because we'll send all the records to a single
-    // "side" of the split. Given object size=1MB, group size=1000 objects, and min block
-    // size=512b, the maximum blocks (and thus entries) in one object group is 2 million.
-    // Therefore this setting should be >2M.
+    // "side" of the split. Given object size=2MB, group size=1000 objects, and min block
+    // size=512b, the maximum blocks (and thus entries) in one object group is 4 million.
+    // Therefore this setting should be >4M.
     static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = get_tunable("reclaim_log_entries_limit", 10_000_000);
 
     // When reclaiming free blocks, allow this many concurrent
@@ -352,7 +353,7 @@ impl UberblockPhys {
         &self.features
     }
 
-    async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
+    pub async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
         let buf = object_access
             .get_object(Self::key(guid, txg), ObjectAccessStatType::MetadataGet)
             .await?;
@@ -1565,7 +1566,18 @@ impl Pool {
 
         // write to object store and wake up waiters
         let shared_state = state.shared_state.clone();
+        let guid = state.shared_state.guid;
+        let cache = match *WRITES_INGEST_TO_ZETTACACHE {
+            true => state.zettacache.clone(),
+            false => None,
+        };
         tokio::spawn(async move {
+            if let Some(cache) = cache {
+                cache
+                    .ingest_all(guid, &phys.blocks, InsertSource::Write)
+                    .await;
+            }
+
             phys.put(
                 &shared_state.object_access,
                 ObjectAccessStatType::TxgSyncPut,
@@ -1590,7 +1602,7 @@ impl Pool {
 
         let mut next_block = syncing_state.next_block();
         while let Some((buf, sender)) = syncing_state.pending_unordered_writes.remove(&next_block) {
-            trace!(
+            super_trace!(
                 "found next {:?} in unordered pending writes; transferring to pending object",
                 next_block
             );
@@ -1621,7 +1633,7 @@ impl Pool {
             assert_ge!(block, syncing_state.next_block());
 
             let (sender, receiver) = oneshot::channel();
-            trace!("inserting {:?} to unordered pending writes", block);
+            super_trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
                 .insert(block, (bytes.clone(), sender));
@@ -1634,34 +1646,6 @@ impl Pool {
             );
             receiver
         });
-        let guid = self.state.shared_state.guid;
-        let cache = match *WRITES_INGEST_TO_ZETTACACHE {
-            true => self.state.zettacache.as_ref(),
-            false => None,
-        };
-        if let Some(cache) = cache {
-            match cache.lookup(guid, block, LookupSource::Write).await {
-                LookupResponse::Present(_) => {
-                    // Surprisingly, the BlockId may be in the cache even
-                    // when writing a "new" block, if the system crashed or
-                    // the pool rewound, causing a BlockId that was already
-                    // persisted to the cache to be reused.
-                    //
-                    // XXX Ideally we would force-evict it and then insert
-                    // again.  For now, we ignore the insertion request.
-                    // Subsequent lookups will return the wrong data, and we
-                    // rely on the checksum in the blkptr_t to catch it.
-                    // (Lookups without a preceeding insertion will also
-                    // return the wrong data, so this is no worse.)
-                    trace!(
-                        "writing block already in zettacache: {:?} {:?}",
-                        guid,
-                        block
-                    );
-                }
-                LookupResponse::Absent(key) => cache.insert(key, bytes, InsertSource::Write).await,
-            }
-        }
         receiver.await.unwrap();
     }
 
@@ -1711,41 +1695,36 @@ impl Pool {
                     .lookup(self.state.shared_state.guid, block, LookupSource::Read)
                     .await
                 {
-                    LookupResponse::Present((cached_bytes, _key, _value)) => cached_bytes.into(),
+                    LookupResponse::Present((cached_bytes, _key)) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
                         let mut data_object = self.read_object_for_block(block, heal).await;
                         let bytes = data_object.blocks.remove(&block).unwrap();
 
                         let demand_read = async {
+                            // We explicitly copy to a new buffer so that the
+                            // object buffer, which is much larger than this one
+                            // block, can be freed before the insert write
+                            // completes (assuming that we are not doing the
+                            // speculative ingestion).  By aligning the buffer
+                            // here, we avoid a copy to align it in
+                            // BlockAccess::write_raw(), so there's no
+                            // "additional" copy.
                             cache
-                                .insert(key, bytes.clone().into(), InsertSource::Read)
+                                .insert(
+                                    key,
+                                    AlignedBytes::copy_from_slice(&bytes, cache.sector_size()),
+                                    InsertSource::Read,
+                                )
                                 .await;
                         };
 
                         let speculative_reads = async {
-                            data_object
-                                .blocks
-                                .into_iter()
-                                .map(|(b, bytes)| async move {
-                                    if let LookupResponse::Absent(key) = cache
-                                        .lookup(
-                                            self.state.shared_state.guid,
-                                            b,
-                                            LookupSource::Write,
-                                        )
-                                        .await
-                                    {
-                                        cache
-                                            .insert(
-                                                key,
-                                                bytes.clone().into(),
-                                                InsertSource::SpeculativeRead,
-                                            )
-                                            .await;
-                                    }
-                                })
-                                .collect::<FuturesUnordered<_>>()
-                                .for_each(|_| async move {})
+                            cache
+                                .ingest_all(
+                                    self.state.shared_state.guid,
+                                    &data_object.blocks,
+                                    InsertSource::SpeculativeRead,
+                                )
                                 .await;
                         };
 

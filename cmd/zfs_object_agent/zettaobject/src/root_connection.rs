@@ -14,10 +14,10 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
 use std::sync::Arc;
-use util::get_tunable;
 use util::maybe_die_with;
 use util::AlignedBytes;
 use util::From64;
+use util::{get_tunable, super_trace};
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -309,7 +309,7 @@ impl RootConnectionState {
         let slice = u8_array_value(&nvl, "data")?;
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
-        trace!(
+        super_trace!(
             "got write request id={}: {:?} len={}",
             request_id,
             block,
@@ -334,7 +334,10 @@ impl RootConnectionState {
             response.insert("block", &block.0).unwrap();
             response.insert("request_id", &request_id).unwrap();
             response.insert("token", &token).unwrap();
-            trace!("sending response: {:?}", response);
+            super_trace!("sending response: {:?}", response);
+            if nvl.exists("reissued") {
+                maybe_die_with(|| "after reissued write block request".to_string());
+            }
             Ok(Some(response))
         }))
     }
@@ -351,7 +354,7 @@ impl RootConnectionState {
     }
 
     fn read_block(&mut self, nvl: NvList) -> HandlerReturn {
-        trace!("got request: {:?}", nvl);
+        super_trace!("got request: {:?}", nvl);
         let block = BlockId(nvl.lookup_uint64("block")?);
         let request_id = nvl.lookup_uint64("request_id")?;
         let token = nvl.lookup_uint64("token")?;
@@ -384,7 +387,7 @@ impl RootConnectionState {
             nvl.insert("request_id", &request_id).unwrap();
             nvl.insert("token", &token).unwrap();
             nvl.insert("data", data.as_ref()).unwrap();
-            trace!(
+            super_trace!(
                 "sending read done response: block={} req={} data=[{} bytes]",
                 block,
                 request_id,
@@ -489,7 +492,7 @@ impl RootConnectionState {
             debug!("got request: {:?}", nvl);
 
             let guid = PoolGuid(nvl.lookup_uint64("GUID").unwrap());
-            let object_access = RootConnectionState::get_object_access(&nvl).unwrap();
+            let object_access = Self::get_object_access(&nvl).unwrap();
 
             let mut response = NvList::new_unique_names();
 

@@ -15,6 +15,7 @@ use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::PanicInfo;
 use std::sync::atomic::{AtomicPtr, Ordering};
+use std::sync::RwLock;
 use std::{panic, process, ptr, thread};
 
 static LOG_MESSAGES_PTR: AtomicPtr<std::sync::Mutex<VecDeque<String>>> =
@@ -33,6 +34,17 @@ lazy_static! {
     static ref PANIC_LOG_FOLDER: String =
         get_tunable("panic_log_folder", "/var/log/zoa".to_string());
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
+    pub static ref SUPER_EXPENSIVE_TRACE: RwLock<bool> =
+        RwLock::new(get_tunable("super_expensive_trace", false));
+}
+
+#[macro_export]
+macro_rules! super_trace {
+    ($($arg:tt)+) => ({
+        if $crate::SUPER_EXPENSIVE_TRACE.read().unwrap().to_owned() {
+            log!(log::Level::Trace, $($arg)+)
+        }
+    })
 }
 
 pub fn get_logging_level(verbosity: u64) -> LevelFilter {
@@ -113,7 +125,7 @@ impl BufferAppender {
 }
 
 #[derive(Debug, serde::Deserialize)]
-pub struct BufferAppenderConfig;
+pub struct BufferAppenderConfig {}
 
 pub struct BufferAppenderDeserializer;
 
@@ -131,6 +143,7 @@ impl Deserialize for BufferAppenderDeserializer {
 }
 
 fn setup_console_logging(verbosity: u64) {
+    *SUPER_EXPENSIVE_TRACE.write().unwrap() = verbosity > 3;
     let config = Config::builder()
         .appender(
             Appender::builder()
@@ -195,7 +208,12 @@ fn setup_logfile(verbosity: u64, logfile: &str) {
     log4rs::init_config(config).unwrap();
 }
 
-pub fn setup_logging(verbosity: u64, file_name: Option<&str>, log_config: Option<&str>) {
+pub fn setup_logging(
+    verbosity: u64,
+    file_name: Option<&str>,
+    log_config: Option<&str>,
+    quiet_start: bool,
+) {
     /*
      * Panic hook to dump trace logs to a file, in case of a panic.
      */
@@ -229,31 +247,37 @@ pub fn setup_logging(verbosity: u64, file_name: Option<&str>, log_config: Option
         }
     };
 
-    // error!() should be used when an invalid state is encountered; the related
-    // operation will fail and the program may exit.  E.g. an invalid request
-    // was received from the client (kernel).
-    error!("logging level ERROR enabled");
+    if !quiet_start {
+        // error!() should be used when an invalid state is encountered; the related
+        // operation will fail and the program may exit.  E.g. an invalid request
+        // was received from the client (kernel).
+        error!("logging level ERROR enabled");
 
-    // warn!() should be used when something unexpected has happened, but it can
-    // be recovered from.
-    warn!("logging level WARN enabled");
+        // warn!() should be used when something unexpected has happened, but it can
+        // be recovered from.
+        warn!("logging level WARN enabled");
 
-    // info!() should be used for very high level operations which are expected
-    // to happen infrequently (no more than once per minute in typical
-    // operation).  e.g. opening/closing a pool, long-lived background tasks,
-    // things that might be in `zpool history -i`.
-    info!("logging level INFO enabled");
+        // info!() should be used for very high level operations which are expected
+        // to happen infrequently (no more than once per minute in typical
+        // operation).  e.g. opening/closing a pool, long-lived background tasks,
+        // things that might be in `zpool history -i`.
+        info!("logging level INFO enabled");
 
-    // debug!() can be used for all but the most frequent operations.
-    // e.g. not every single read/write/free operation, but perhaps for every
-    // call to S3.
-    debug!("logging level DEBUG enabled");
+        // debug!() can be used for all but the most frequent operations.
+        // e.g. not every single read/write/free operation, but perhaps for every
+        // call to S3.
+        debug!("logging level DEBUG enabled");
 
-    // trace!() can be used for frequent operation. But note that we evaluate
-    // all the trace! statements in prod and there is some cost involved in
-    // string processing, memory allocation, global lock etc.
-    trace!("logging level TRACE enabled");
+        // trace!() can be used for frequent operation. But note that we evaluate
+        // all the trace! statements in prod and there is some cost involved in
+        // string processing, memory allocation, global lock etc.
+        trace!("logging level TRACE enabled");
 
-    // Log all the tunables.
-    log_tunable_config();
+        // super_trace!() can be used for log statements that are very frequent.
+        // There is a very high performance penalty for enabling these statements.
+        super_trace!("logging super expensive TRACE enabled");
+
+        // Log all the tunables.
+        log_tunable_config();
+    }
 }

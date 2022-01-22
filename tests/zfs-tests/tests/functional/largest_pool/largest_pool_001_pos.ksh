@@ -118,6 +118,9 @@ log_onexit cleanup
 # -----------------------------------------------------------------------
 typeset str
 typeset -i ret
+
+use_object_store && VOLSIZES="2pb 5pb 10pb"
+
 for volsize in $VOLSIZES; do
 	log_note "Create a pool which will contain a volume device"
 	create_pool -p $TESTPOOL2 -d "$DISKS"

@@ -33,7 +33,8 @@
 verify_runnable "global"
 
 function get_txg {
-	typeset -i txg=$(zdb -u $1 | sed -n 's/^[ 	][ 	]*txg = \(.*\)$/\1/p')
+	typeset -i txg=$(run_zdb -e "-u" -p "$1" | grep "Uberblock:" -A3 |\
+		sed -n 's/^[ 	][ 	]*txg = \(.*\)$/\1/p')
 	echo $txg
 }
 

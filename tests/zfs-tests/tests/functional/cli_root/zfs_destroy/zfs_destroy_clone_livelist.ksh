@@ -47,7 +47,7 @@ function cleanup
 function clone_write_file
 {
 	log_must mkfile 1m /$TESTPOOL/$1/$2
-	log_must zpool sync $TESTPOOL
+	sync_pool $TESTPOOL
 }
 
 function test_one_empty
@@ -140,7 +140,7 @@ function test_clone_clone_promote
 
 	# This destroy should not use a livelist
 	log_must zfs destroy $TESTPOOL/clone
-	log_must zdb -bcc $TESTPOOL
+	log_must run_zdb -e "-bcc" -p "$TESTPOOL"
 }
 
 ORIGINAL_MAX=$(get_tunable LIVELIST_MAX_ENTRIES)

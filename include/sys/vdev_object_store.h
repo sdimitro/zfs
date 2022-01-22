@@ -49,6 +49,8 @@
 #define	AGENT_TYPE_CLEAR_DESTROYED_POOLS "clear destroyed pools"
 #define	AGENT_TYPE_RESUME_DESTROY_POOL	"resume destroy pool"
 #define	AGENT_TYPE_RESUME_DESTROY_POOL_DONE "resume destroy pool done"
+#define	AGENT_TYPE_GET_POOL_PHYS	"get pool phys"
+#define	AGENT_TYPE_GET_UBERBLOCK_PHYS	"get uberblock phys"
 
 #define	AGENT_NAME			"name"
 #define	AGENT_SIZE			"size"
@@ -84,6 +86,7 @@
 #define	AGENT_MESSAGE			"message"
 #define	AGENT_CHECKPOINT		"checkpoint"
 #define	AGENT_ROLLBACK			"rollback"
+#define	AGENT_REISSUE			"reissue"
 
 typedef struct vdev_object_store_stats {
 	uint64_t voss_blocks_count;

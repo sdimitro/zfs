@@ -125,6 +125,10 @@ impl SpaceMap {
         self.alloc_entries
     }
 
+    pub fn pending_bytes(&self) -> u64 {
+        self.log.pending_bytes()
+    }
+
     pub fn clear(&mut self) {
         self.log.clear();
         self.alloc_entries = 0;

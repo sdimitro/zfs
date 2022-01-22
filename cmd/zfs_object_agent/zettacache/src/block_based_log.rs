@@ -11,28 +11,37 @@ use futures::StreamExt;
 use futures_core::Stream;
 use lazy_static::lazy_static;
 use log::*;
+use lru::LruCache;
 use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::cmp::max;
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
+use std::mem;
 use std::ops::Add;
 use std::ops::Bound::*;
 use std::ops::Sub;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::time::Instant;
 use util::get_tunable;
+use util::super_trace;
+use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
+use util::From64;
+use util::LockSet;
 
 lazy_static! {
-    // XXX maybe this is wasteful for the smaller logs?
-    pub static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
     static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
     // Note: kernel sends writes to disk in at most 256K chunks (at least with nvme driver)
     static ref WRITE_AGGREGATION_SIZE: usize = get_tunable("write_aggregation_size", 256 * 1024);
+    // We primarily use the chunk cache to ensure that when looking up all the
+    // entries in an object, we need at most one read from the index.  So we
+    // only need as many chunks in the cache as the number of objects that we
+    // might be processing concurrently.
+    static ref CHUNK_CACHE_ENTRIES: usize = get_tunable("chunk_cache_entries", 128);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -96,11 +105,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
                 let truncated_extent =
                     extent.range(0, min(extent.size, (next_chunk_offset - *offset)));
-                let extent_bytes = block_access.read_raw(truncated_extent).await;
+                let extent_bytes = block_access.read_raw(truncated_extent, DiskIoType::MaintenanceRead).await;
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
                     let chunk_location = extent.location.offset + total_consumed as u64;
-                    trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
+                    super_trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
                     // XXX handle checksum error here
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
                         .chunk_from_raw(&extent_bytes[total_consumed..])
@@ -138,8 +147,6 @@ pub struct BlockBasedLogWithSummaryPhys<T: BlockBasedLogEntry> {
     this: BlockBasedLogPhys<T>,
     #[serde(bound(deserialize = "T: DeserializeOwned"))]
     chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
-    #[serde(bound(deserialize = "T: DeserializeOwned"))]
-    last_entry: Option<T>,
 }
 
 impl<T: BlockBasedLogEntry> Default for BlockBasedLogWithSummaryPhys<T> {
@@ -147,7 +154,6 @@ impl<T: BlockBasedLogEntry> Default for BlockBasedLogWithSummaryPhys<T> {
         Self {
             this: Default::default(),
             chunk_summary: Default::default(),
-            last_entry: Default::default(),
         }
     }
 }
@@ -156,6 +162,10 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummaryPhys<T> {
     pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
         self.this.claim(builder);
         self.chunk_summary.claim(builder);
+    }
+
+    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+        self.this.iter_entries(block_access)
     }
 
     pub fn iter_chunks(
@@ -203,7 +213,8 @@ pub struct BlockBasedLogWithSummary<T: BlockBasedLogEntry> {
     this: BlockBasedLog<T>,
     chunk_summary: BlockBasedLog<BlockBasedLogChunkSummaryEntry<T>>,
     chunks: Vec<BlockBasedLogChunkSummaryEntry<T>>,
-    last_entry: Option<T>,
+    chunk_cache: Mutex<LruCache<ChunkId, BlockBasedLogChunk<T>>>,
+    chunk_reads: LockSet<ChunkId>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -258,6 +269,10 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.pending_entries.len() as u64
     }
 
+    pub fn pending_bytes(&self) -> u64 {
+        self.pending_len() * mem::size_of::<T>() as u64
+    }
+
     pub fn append(&mut self, entry: T) {
         self.pending_entries.push(entry);
         // XXX if too many pending, initiate flush?
@@ -282,29 +297,36 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
             let first_entry = *chunk.entries.first().unwrap();
 
-            let mut extent = self.next_write_location();
             // XXX I think we only want to use Bincode for the main index?
             let raw_chunk = self.block_access.chunk_to_raw(EncodeType::Bincode, &chunk);
             let raw_size = raw_chunk.len() as u64;
-            if raw_size > extent.size {
-                // free the unused tail of this extent
-                self.extent_allocator.free(&extent);
-                let capacity = match self.phys.extents.iter_mut().next_back() {
-                    Some((last_offset, last_extent)) => {
+            let extent = match self.next_write_location() {
+                Some(extent) if extent.size >= raw_size => extent,
+                Some(extent) => {
+                    // free the unused tail of this extent
+                    self.extent_allocator.free(&extent);
+                    if let Some((_, last_extent)) = self.phys.extents.iter_mut().next_back() {
+                        assert!(last_extent.contains(&extent));
                         last_extent.size -= extent.size;
-                        LogOffset(last_offset.0 + last_extent.size)
-                    }
-                    None => LogOffset(0),
-                };
+                    };
 
-                extent = self
-                    .extent_allocator
-                    .allocate(raw_size, max(raw_size, *DEFAULT_EXTENT_SIZE));
-                self.phys.extents.insert(capacity, extent);
-                assert_ge!(extent.size, raw_size);
-            }
+                    let extent = self.extent_allocator.allocate(raw_size);
+                    self.phys
+                        .extents
+                        .insert(self.phys.next_chunk_offset, extent);
+                    extent
+                }
+                None => {
+                    let extent = self.extent_allocator.allocate(raw_size);
+                    self.phys
+                        .extents
+                        .insert(self.phys.next_chunk_offset, extent);
+                    extent
+                }
+            };
+            assert_ge!(extent.size, raw_size);
             // XXX add name of this log for debug purposes?
-            trace!(
+            super_trace!(
                 "flushing BlockBasedLog: writing {:?} ({:?}) with {} entries ({} bytes) to {:?}",
                 chunk.id,
                 chunk.offset,
@@ -317,10 +339,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                     if extent.location != pending_location + pending_vec.len()
                         || pending_vec.unused_capacity() < raw_chunk.len() =>
                 {
-                    writes_stream.push(
-                        self.block_access
-                            .write_raw(pending_location, pending_vec.into()),
-                    );
+                    writes_stream.push(self.block_access.write_raw(
+                        pending_location,
+                        pending_vec.into(),
+                        DiskIoType::MaintenanceWrite,
+                    ));
                     pending_write = None;
                 }
                 _ => (),
@@ -339,7 +362,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                     assert_eq!(*pending_location + pending_vec.len(), extent.location);
                     pending_vec.extend_from_slice(&raw_chunk);
                 }
-                None => writes_stream.push(self.block_access.write_raw(extent.location, raw_chunk)),
+                None => writes_stream.push(self.block_access.write_raw(
+                    extent.location,
+                    raw_chunk,
+                    DiskIoType::MaintenanceWrite,
+                )),
             }
 
             new_chunk_fn(chunk.id, chunk.offset, first_entry);
@@ -349,10 +376,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             self.phys.next_chunk_offset.0 += raw_size;
         }
         if let Some((pending_location, pending_vec)) = pending_write {
-            writes_stream.push(
-                self.block_access
-                    .write_raw(pending_location, pending_vec.into()),
-            );
+            writes_stream.push(self.block_access.write_raw(
+                pending_location,
+                pending_vec.into(),
+                DiskIoType::MaintenanceWrite,
+            ));
         }
         writes_stream.for_each(|_| async move {}).await;
         self.pending_entries.truncate(0);
@@ -363,24 +391,19 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.phys.clear(&self.extent_allocator);
     }
 
-    fn next_write_location(&self) -> Extent {
-        match self.phys.extents.iter().next_back() {
-            Some((offset, extent)) => {
+    fn next_write_location(&self) -> Option<Extent> {
+        self.phys
+            .extents
+            .iter()
+            .next_back()
+            .map(|(&offset, extent)| {
                 // There shouldn't be any extents after the last (partially-full) one.
                 assert_ge!(self.phys.next_chunk_offset, offset);
-                let offset_within_extent = self.phys.next_chunk_offset.0 - offset.0;
+                let offset_within_extent = self.phys.next_chunk_offset - offset;
                 // The last extent should go at least to the end of the chunks.
                 assert_le!(offset_within_extent, extent.size);
                 extent.range(offset_within_extent, extent.size - offset_within_extent)
-            }
-            None => Extent {
-                location: DiskLocation {
-                    disk: DiskId(0),
-                    offset: 0,
-                },
-                size: 0,
-            },
-        }
+            })
     }
 
     /// Iterates the on-disk state; panics if there are pending changes.
@@ -416,7 +439,8 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
             this: BlockBasedLog::open(block_access.clone(), extent_allocator.clone(), phys.this),
             chunk_summary,
             chunks,
-            last_entry: phys.last_entry,
+            chunk_cache: Mutex::new(LruCache::new(*CHUNK_CACHE_ENTRIES)),
+            chunk_reads: Default::default(),
         }
     }
 
@@ -444,7 +468,6 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         BlockBasedLogWithSummaryPhys {
             this: new_this,
             chunk_summary: new_chunk_summary,
-            last_entry: self.last_entry,
         }
     }
 
@@ -456,7 +479,6 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
         BlockBasedLogWithSummaryPhys {
             this: self.this.phys.clone(),
             chunk_summary: self.chunk_summary.phys.clone(),
-            last_entry: self.last_entry,
         }
     }
 
@@ -475,12 +497,10 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
     }
 
     pub fn append(&mut self, entry: T) {
-        self.last_entry = Some(entry);
         self.this.append(entry);
     }
 
     pub fn clear(&mut self) {
-        self.last_entry = None;
         self.this.clear();
         self.chunk_summary.clear();
     }
@@ -491,7 +511,8 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
     }
 
     /// Returns the exact location/size of this chunk (not the whole contiguous extent)
-    fn chunk_extent(&self, chunk_id: usize) -> Extent {
+    fn chunk_extent(&self, chunk_id: ChunkId) -> Extent {
+        let chunk_id = usize::from64(chunk_id.0);
         let chunk_summary = self.chunks[chunk_id];
         let chunk_size = if chunk_id == self.chunks.len() - 1 {
             self.this.phys.next_chunk_offset - chunk_summary.offset
@@ -516,57 +537,71 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
     {
         assert_eq!(ChunkId(self.chunks.len() as u64), self.this.phys.next_chunk);
 
-        // Check if the key is after the last entry.
-        // XXX Note that this won't be very useful when there are multiple
-        // pools.  When doing writes to all but the "last" pool, this check will
-        // fail, and we'll have to read from the index for every write.  We
-        // could address this by having one index (BlockBasedLogWithSummary) per
-        // pool, or by replacing the last_entry optimization with a small cache
-        // of BlockBasedLogChunk's.
-        match self.last_entry {
-            Some(last_entry) => {
-                if key > &f(&last_entry) {
-                    assert_gt!(key, &f(&self.chunks.last().unwrap().first_entry));
-                    return None;
-                }
-            }
-            None => {
-                assert!(self.chunks.is_empty());
-                return None;
-            }
-        }
-
         // Find the chunk_id that this key belongs in.
         let chunk_id = match self
             .chunks
             .binary_search_by_key(key, |chunk_summary| f(&chunk_summary.first_entry))
         {
-            Ok(index) => index,
+            Ok(index) => ChunkId(index as u64),
             Err(index) if index == 0 => return None, // key is before the first chunk, therefore not present
-            Err(index) => index - 1,
+            Err(index) => ChunkId(index as u64 - 1),
         };
+
+        if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
+            super_trace!("found {:?} in cache", chunk_id);
+            // found in cache
+            // Search within this chunk.
+            return chunk
+                .entries
+                .binary_search_by_key(key, f)
+                .ok()
+                .map(|index| chunk.entries[index]);
+        }
+
+        // Lock the chunk so that only one thread reads it
+        let _guard = self.chunk_reads.lock(chunk_id).await;
+
+        // Check again in case another thread already read it
+        if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
+            super_trace!("found {:?} in cache after waiting for lock", chunk_id);
+            // found in cache
+            // Search within this chunk.
+            return chunk
+                .entries
+                .binary_search_by_key(key, f)
+                .ok()
+                .map(|index| chunk.entries[index]);
+        }
 
         // Read the chunk from disk.
         let chunk_extent = self.chunk_extent(chunk_id);
-        trace!(
-            "reading log chunk {} at {:?} to lookup {:?}",
+        super_trace!(
+            "reading {:?} at {:?} to lookup {:?}",
             chunk_id,
             chunk_extent,
             key
         );
-        let chunk_bytes = self.this.block_access.read_raw(chunk_extent).await;
+        let chunk_bytes = self
+            .this
+            .block_access
+            .read_raw(chunk_extent, DiskIoType::ReadIndexForLookup)
+            .await;
         let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) =
             self.this.block_access.chunk_from_raw(&chunk_bytes).unwrap();
-        assert_eq!(chunk.id, ChunkId(chunk_id as u64));
-
-        // XXX Can we assert that we are looking in the right chunk?  I think
-        // we'd need the chunk to have the next chunk's first key as well.
+        assert_eq!(chunk.id, chunk_id);
 
         // Search within this chunk.
-        match chunk.entries.binary_search_by_key(key, f) {
-            Ok(index) => Some(chunk.entries[index]),
-            Err(_) => None,
-        }
+        let result = chunk
+            .entries
+            .binary_search_by_key(key, f)
+            .ok()
+            .map(|index| chunk.entries[index]);
+
+        // add to cache
+        super_trace!("inserting {:?} to cache", chunk_id);
+        self.chunk_cache.lock().unwrap().put(chunk_id, chunk);
+
+        result
     }
 
     /// Entries must have been added in sorted order, according to the provided
@@ -619,7 +654,9 @@ impl Sub<LogOffset> for LogOffset {
     }
 }
 
-#[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(
+    Serialize, Deserialize, Default, Debug, Copy, Clone, Hash, PartialEq, Eq, Ord, PartialOrd,
+)]
 pub struct ChunkId(u64);
 impl ChunkId {
     pub fn next(&self) -> ChunkId {

@@ -46,9 +46,9 @@ verify_runnable "global"
 
 default_setup_noexit "$DISKS"
 file_write -o create -w -f $init_data -b $blksize -c $write_count
-log_must zpool sync $TESTPOOL
+sync_pool $TESTPOOL
 
-output=$(zdb -r $TESTPOOL/$TESTFS file1 $tmpfile)
+output=$(run_zdb -e "-r" -p "$TESTPOOL/$TESTFS file1 $tmpfile")
 log_must cmp $init_data $tmpfile
 
 log_pass "zdb -r <dataset> <path> <dest> extracts the correct data."

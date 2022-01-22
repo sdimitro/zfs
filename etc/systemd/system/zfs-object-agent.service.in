@@ -3,6 +3,7 @@ Description=ZFS object agent
 DefaultDependencies=no
 After=local-fs.target
 Before=zfs-import-cache.service
+ConditionVirtualization=!container
 
 [Service]
 Environment="RUST_BACKTRACE=1"

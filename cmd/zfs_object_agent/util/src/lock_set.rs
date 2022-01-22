@@ -7,6 +7,8 @@ use std::{
 };
 use tokio::sync::watch;
 
+use crate::super_trace;
+
 #[derive(Default, Debug, Clone)]
 pub struct LockSet<V: Hash + Eq + Copy + Debug> {
     locks: Arc<Mutex<HashMap<V, watch::Receiver<()>>>>,
@@ -20,7 +22,7 @@ pub struct LockedItem<V: Hash + Eq + Copy + Debug> {
 
 impl<V: Hash + Eq + Copy + Debug> Drop for LockedItem<V> {
     fn drop(&mut self) {
-        trace!("{:?}: removing lock", self.value);
+        super_trace!("{:?}: removing lock", self.value);
         let rx = self.set.locks.lock().unwrap().remove(&self.value);
         assert!(rx.is_some());
         // This unwrap can't fail because there is still a receiver, `rx`.
@@ -53,14 +55,14 @@ impl<V: Hash + Eq + Copy + Debug> LockSet<V> {
                     }
                 }
             };
-            trace!("{:?}: waiting for existing lock", value);
+            super_trace!("{:?}: waiting for existing lock", value);
             // Note: since we don't hold the locks mutex now, the corresponding
             // LockedItem may have been dropped, in which case the sender was
             // dropped.  In this case, the changed() Result will be an Err,
             // which we ignore with ok().
             rx.changed().await.ok();
         };
-        trace!("{:?}: inserted new lock", value);
+        super_trace!("{:?}: inserted new lock", value);
 
         LockedItem {
             value,

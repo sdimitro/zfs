@@ -111,6 +111,7 @@ async fn main() {
         matches.occurrences_of("verbosity"),
         matches.value_of("output-file"),
         matches.value_of("log-config"),
+        false,
     );
 
     // Command line parameters

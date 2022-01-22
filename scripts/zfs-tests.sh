@@ -139,7 +139,6 @@ cleanup() {
 		return 0
 	fi
 
-
 	if [ "$LOOPBACK" = "yes" ]; then
 		if [ "$UNAME" = "FreeBSD" ] ; then
 			cleanup_freebsd_loopback
@@ -153,9 +152,11 @@ cleanup() {
 	done
 
 
-	# Cleanup zfs_object_agent process
+	# Unset ZETTACACHE_DEVICES
 	if [ -n "$ZTS_OBJECT_STORE" ]; then
-		sudo pkill -f -TERM zfs_object_agent
+		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
+		    $ZOA_CONF
+		sudo systemctl restart zfs-object-agent
 	fi
 
 	# Find all the crash files that were created after the start
@@ -189,6 +190,13 @@ cleanup() {
 		# Copy the shared files and its dependencies
 		for dependency in $dependencies; do
 			[ -e "$dependency" ] || continue
+			if [ "$(basename "$dependency")" = "zdb" ]; then
+				# Check & move the zdb test logs to a different
+				# directory. Else it'll raise conflict copying
+				# the crash binary
+				[ -d "$RESULTS_DIR/zdb" ] && \
+					mv "$RESULTS_DIR/zdb" "$RESULTS_DIR/zdb-test-log"
+			fi
 			cp "$dependency" "$RESULTS_DIR"
 
 			[ -d "$RESULTS_DIR/.build-id" ] || \
@@ -501,7 +509,7 @@ configure_zettacache() {
 			cache_parts="${cache_parts},$(get_cache_part "$cache_dev")"
 		fi
 	done
-	sudo -E sed -i 's/ZETTACACHE_DEVICES=.*//g' $ZOA_CONF
+	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' $ZOA_CONF
 	sudo sh -c "echo ZETTACACHE_DEVICES=$cache_parts >>$ZOA_CONF"
 }
 

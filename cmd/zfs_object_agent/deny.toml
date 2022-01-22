@@ -1,0 +1,45 @@
+vulnerability = "deny"
+unmaintained = "warn"
+yanked = "warn"
+notice = "warn"
+
+#
+# We don't want to violate the licenses of anything we depend on, so we forbid
+# any strong copyleft licenses like the GPL that would require the whole
+# project to be GPL.
+#
+[licenses]
+unlicensed = "deny"
+copyleft = "deny"
+allow-osi-fsf-free = "both"
+default = "deny"
+confidence-threshold = 0.95
+allow = [
+	"CC0-1.0",
+	"BSD-2-Clause",
+	"MPL-2.0",
+]
+#
+# XXX This is here because our packages are currently unlicensed; when they
+# are licensed and published, we should remove this line.
+#
+private = { ignore = true }
+
+[sources]
+allow-git = [
+	"https://github.com/ahrens/rust-libzfs",
+]
+
+[sources.allow-org]
+github = ["delphix"]
+
+[advisories]
+ignore = [
+       #
+       # See https://github.com/time-rs/time/issues/293 for more information;
+       # we don't use any of the functions in question, and we don't have
+       # threads setting the time environment variables while we run.
+       #
+       "RUSTSEC-2020-0071",
+       "RUSTSEC-2020-0159",
+]

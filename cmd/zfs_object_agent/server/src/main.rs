@@ -156,6 +156,7 @@ fn main() {
                 matches.occurrences_of("verbosity"),
                 matches.value_of("output-file"),
                 matches.value_of("log-config"),
+                false,
             );
 
             error!(
@@ -164,7 +165,15 @@ fn main() {
                 chrono::Local::now().format("%Z (%:z)")
             );
 
-            zettaobject::init::start(socket_dir, cache_paths);
+            zettaobject::init::start(
+                socket_dir,
+                cache_paths,
+                tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .thread_name("zoa")
+                    .build()
+                    .unwrap(),
+            );
         }
     }
 }

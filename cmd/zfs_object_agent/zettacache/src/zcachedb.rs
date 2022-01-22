@@ -36,6 +36,7 @@ pub enum ZettaCacheDBCommand {
     DumpStructures(DumpStructuresOptions),
     DumpSlabs(DumpSlabsOptions),
     DumpSpaceUsage,
+    VerifyIndex,
 }
 
 #[derive(Debug)]
@@ -44,6 +45,7 @@ pub struct DumpStructuresOptions {
     pub dump_spacemaps: bool,
     pub dump_operation_log_raw: bool,
     pub dump_index_log_raw: bool,
+    pub dump_rebalance_log_raw: bool,
 }
 
 impl Default for DumpStructuresOptions {
@@ -59,6 +61,7 @@ impl DumpStructuresOptions {
             dump_spacemaps: false,
             dump_operation_log_raw: false,
             dump_index_log_raw: false,
+            dump_rebalance_log_raw: false,
         }
     }
 
@@ -79,6 +82,11 @@ impl DumpStructuresOptions {
 
     pub fn index_log_raw(mut self, value: bool) -> Self {
         self.dump_index_log_raw = value;
+        self
+    }
+
+    pub fn rebalance_log_raw(mut self, value: bool) -> Self {
+        self.dump_rebalance_log_raw = value;
         self
     }
 }
@@ -112,6 +120,7 @@ impl ZettaCacheDBCommand {
             ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
             ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
             ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_free_space().await,
+            ZettaCacheDBCommand::VerifyIndex => handle.verify_index().await,
         }
     }
 }

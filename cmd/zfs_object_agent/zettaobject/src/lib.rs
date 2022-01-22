@@ -5,6 +5,7 @@
 
 pub mod base_types;
 mod data_object;
+pub mod debug;
 mod features;
 mod heartbeat;
 pub mod init;
@@ -19,5 +20,5 @@ mod root_connection;
 mod server;
 
 pub use object_access::{OAError, ObjectAccess, ObjectAccessStatType, StatMapValue};
-pub mod test_connectivity;
 pub use pool::Pool;
+pub mod test_connectivity;

@@ -330,6 +330,19 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_user/misc/zpool_online_001_neg': ['SKIP', object_store_skip],
         'cli_user/misc/zpool_remove_001_neg': ['SKIP', object_store_skip],
         'cli_user/misc/zpool_replace_001_neg': ['SKIP', object_store_skip],
+        'cli_root/zpool_export/zpool_export_004_pos':
+            ['SKIP', object_store_skip],
+        'inuse/setup': ['SKIP', object_store_skip],
+        'inuse/inuse_001_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_003_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_004_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_005_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_006_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_007_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_008_pos': ['SKIP', object_store_skip],
+        'inuse/inuse_009_pos': ['SKIP', object_store_skip],
+        'log_spacemap/log_spacemap_import_logs': ['SKIP', object_store_skip],
+
     })
 
 #
@@ -386,12 +399,6 @@ maybe = {
     'removal/removal_condense_export': ['FAIL', known_reason],
     'reservation/reservation_008_pos': ['FAIL', '7741'],
     'reservation/reservation_018_pos': ['FAIL', '5642'],
-    'rsend/rsend_019_pos': ['FAIL', '6086'],
-    'rsend/rsend_020_pos': ['FAIL', '6446'],
-    'rsend/rsend_021_pos': ['FAIL', '6446'],
-    'rsend/rsend_024_pos': ['FAIL', '5665'],
-    'rsend/send-c_volume': ['FAIL', '6087'],
-    'rsend/send_partial_dataset': ['FAIL', known_reason],
     'snapshot/clone_001_pos': ['FAIL', known_reason],
     'snapshot/rollback_003_pos': ['FAIL', '6143'],
     'snapshot/snapshot_009_pos': ['FAIL', '7961'],
@@ -437,11 +444,6 @@ elif sys.platform.startswith('linux'):
         'mmp/mmp_active_import': ['FAIL', known_reason],
         'mmp/mmp_exported_import': ['FAIL', known_reason],
         'mmp/mmp_inactive_import': ['FAIL', known_reason],
-        'refreserv/refreserv_raidz': ['FAIL', known_reason],
-        'rsend/rsend_007_pos': ['FAIL', known_reason],
-        'rsend/rsend_010_pos': ['FAIL', known_reason],
-        'rsend/rsend_011_pos': ['FAIL', known_reason],
-        'snapshot/rollback_003_pos': ['FAIL', known_reason],
         'zvol/zvol_misc/zvol_misc_snapdev': ['FAIL', '12621'],
         'zvol/zvol_misc/zvol_misc_volmode': ['FAIL', known_reason],
     })
@@ -453,6 +455,7 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_root/zdb/zdb_decompress': ['FAIL', 'DOSE-737'],
         'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
         'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
+        'cli_root/zdb/zdb_objset_id': ['FAIL', 'DOSE-915'],
     })
 
 # Not all Github actions runners have scsi_debug module, so we may skip

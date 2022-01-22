@@ -2,7 +2,7 @@ use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
 use crate::pool::CLAIM_DURATION;
 use anyhow::Context;
 use lazy_static::lazy_static;
-use log::{debug, info, trace, warn};
+use log::{debug, error, info, trace, warn};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{hash_map::Entry, HashMap},
@@ -21,6 +21,7 @@ lazy_static! {
         Duration::from_millis(get_tunable("heartbeat_interval_ms", 1_000));
     pub static ref WRITE_TIMEOUT: Duration =
         Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
+    pub static ref HEARTBEAT_PANIC: bool = get_tunable("heartbeat_panic", true);
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -234,28 +235,37 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
                 id,
             };
             let instant = Instant::now();
-            let result = heartbeat.put_timeout(&object_access, None).await;
+            let result = heartbeat
+                .put_timeout(&object_access, Some(*LEASE_DURATION * 2 / 3))
+                .await;
             if lease_timed_out(last_heartbeat) {
-                panic!("Suspending pools due to lease timeout");
-            }
-            if result.is_ok() {
-                if last_heartbeat.is_none() {
-                    if hiccup {
-                        let mut heartbeats = HEARTBEATS.lock().unwrap();
-                        let time = Instant::now() + (*CLAIM_DURATION * 3);
-                        if let Entry::Occupied(mut oe) = heartbeats.entry(key.clone()) {
-                            oe.get_mut().1 = Some(time);
-                        } else {
-                            panic!("key {:?} not in heartbeats", key);
-                        }
-                        assert!(HEARTBEAT_INIT.lock().unwrap().remove(&key).is_some());
-                        tx.send(Some(time)).unwrap();
-                    } else {
-                        assert!(HEARTBEAT_INIT.lock().unwrap().remove(&key).is_some());
-                        tx.send(None).unwrap();
-                    }
+                if *HEARTBEAT_PANIC {
+                    panic!("Suspending pools due to lease timeout");
+                } else {
+                    error!("Lease timed out; ignoring due to tunable");
                 }
-                last_heartbeat = Some(instant);
+            }
+            match result {
+                Ok(_) => {
+                    if last_heartbeat.is_none() {
+                        if hiccup {
+                            let mut heartbeats = HEARTBEATS.lock().unwrap();
+                            let time = Instant::now() + (*CLAIM_DURATION * 3);
+                            if let Entry::Occupied(mut oe) = heartbeats.entry(key.clone()) {
+                                oe.get_mut().1 = Some(time);
+                            } else {
+                                panic!("key {:?} not in heartbeats", key);
+                            }
+                            assert!(HEARTBEAT_INIT.lock().unwrap().remove(&key).is_some());
+                            tx.send(Some(time)).unwrap();
+                        } else {
+                            assert!(HEARTBEAT_INIT.lock().unwrap().remove(&key).is_some());
+                            tx.send(None).unwrap();
+                        }
+                    }
+                    last_heartbeat = Some(instant);
+                }
+                Err(e) => info!("Heartbeat put error: {:?}", e),
             }
         }
     });

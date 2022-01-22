@@ -381,3 +381,16 @@ zoa_clear_destroyed_pools(void *hdl)
 
 	zoa_send_recv_msg(&handle, msg, ZFS_PUBLIC_SOCKET);
 }
+
+nvlist_t *
+zoa_create_connection_nvl(const char *endpoint, const char *region,
+    const char *bucket, const char *creds_profile)
+{
+	nvlist_t *nvl = fnvlist_alloc();
+	fnvlist_add_string(nvl, AGENT_ENDPOINT, endpoint);
+	fnvlist_add_string(nvl, AGENT_REGION, region);
+	fnvlist_add_string(nvl, AGENT_BUCKET, bucket);
+	fnvlist_add_string(nvl, AGENT_CRED_PROFILE, creds_profile);
+
+	return (nvl);
+}

@@ -28,5 +28,6 @@
 function zpool_export_cleanup
 {
 	[[ -d $TESTDIR0 ]] && log_must rm -rf $TESTDIR0
+	import_pool -p $TESTPOOL
 	default_cleanup
 }

@@ -49,3 +49,6 @@ For an optimized build, use `cargo build --release`, `cargo run --release ...`, 
 
 ## IDE
 It's pretty easy to set up [VS Code](https://code.visualstudio.com/download) for Rust development, using the [Official Rust plugin](https://marketplace.visualstudio.com/items?itemName=rust-lang.rust) or the (recommended, more sophisticated but beta quality) [rust-analyzer plugin](https://marketplace.visualstudio.com/items?itemName=matklad.rust-analyzer), and optinally the [Vim plugin](https://marketplace.visualstudio.com/items?itemName=vscodevim.vim).
+
+## BOM
+The BOM was generated with `cargo bundle-licenses -o THIRDPARTYLICENSES`. To update, run `cargo bundle-licenses -o THIRDPARTYLICENSES.new --previous THIRDPARTYLICENSES`, and then inspect the file for correctness and replace the old one with the new one. Note that licenses must be escaped before adding them to the file; see [the tool's github repository](https://github.com/sstadick/cargo-bundle-licenses#usage) for more information.

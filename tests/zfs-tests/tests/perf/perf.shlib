@@ -57,9 +57,9 @@ function get_suffix
 
 function fill_zetta_cache
 {
-	[ -z "$ZETTACACHE_DEVICE" ] && return
+	[ -z "$ZETTACACHE_DEVICES" ] && return
 
-	log_note "Filling ZettaCache: $ZETTACACHE_DEVICE"
+	log_note "Filling ZettaCache"
 
 	export RUNTIME=$1
 	export BLOCKSIZE=1m
