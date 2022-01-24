@@ -34,7 +34,7 @@ pub struct HeartbeatPhys {
 
 impl HeartbeatPhys {
     fn key(id: Uuid) -> String {
-        format!("zfs/agents/{}", id.to_string())
+        format!("zfs/agents/{}", id)
     }
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {

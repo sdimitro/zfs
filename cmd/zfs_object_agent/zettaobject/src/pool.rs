@@ -125,7 +125,7 @@ struct PoolOwnerPhys {
 
 impl PoolOwnerPhys {
     fn key(id: PoolGuid) -> String {
-        format!("zfs/{}/owner", id.to_string())
+        format!("zfs/{}/owner", id)
     }
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
