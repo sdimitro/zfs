@@ -198,7 +198,11 @@ impl BitmapSlab {
         assert_ge!(num_slots, 1);
 
         let first_slot = internal_offset / self.slot_size;
-        assert_le!(first_slot + num_slots, self.total_slots);
+        assert_le!(
+            first_slot + num_slots,
+            self.total_slots,
+            "import range crosses the slab's end boundary"
+        );
         let slot_range = first_slot.into()..u64::from(first_slot + num_slots);
         if is_alloc {
             let removed = self.allocatable.remove_range(slot_range);
@@ -214,11 +218,6 @@ impl BitmapSlab {
                 u64::from(num_slots),
                 "double free detected during import"
             );
-            assert_lt!(
-                self.allocatable.max().unwrap(),
-                self.total_slots,
-                "FREE segment crosses the slab's end boundary"
-            )
         }
     }
 }
