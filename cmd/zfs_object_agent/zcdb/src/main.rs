@@ -35,6 +35,7 @@ async fn main() {
                 .long("cache-device")
                 .value_name("PATH")
                 .help("File/device to use for ZettaCache")
+                .required(true)
                 .takes_value(true)
                 .multiple(true)
                 .number_of_values(1),
