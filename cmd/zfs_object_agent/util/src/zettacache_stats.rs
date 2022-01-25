@@ -372,8 +372,8 @@ pub enum CacheStatCounter {
     HealedBlocks,
     PendingChanges,
     Evictions,
-    BlockingBufferBytesAvailable,
-    NonblockingBufferBytesAvailable,
+    DemandBufferBytesAvailable,
+    SpeculativeBufferBytesAvailable,
     BlockAllocatorSize,
     BlockAllocatorAvailable,
     BlockAllocatorFreeSlabsSize,
@@ -439,8 +439,8 @@ impl Sub<&Self> for &CacheStats {
             match counter_type {
                 // The following are instantaneous values and don't require subtraction
                 CacheStatCounter::PendingChanges
-                | CacheStatCounter::BlockingBufferBytesAvailable
-                | CacheStatCounter::NonblockingBufferBytesAvailable
+                | CacheStatCounter::DemandBufferBytesAvailable
+                | CacheStatCounter::SpeculativeBufferBytesAvailable
                 | CacheStatCounter::BlockAllocatorSize
                 | CacheStatCounter::BlockAllocatorFreeSlabsSize
                 | CacheStatCounter::BlockAllocatorAvailable => {
