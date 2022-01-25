@@ -42,4 +42,4 @@ if [ x"${OUT}" != x ]; then
     echo
 fi
 
-exit $RET
+exit "$RET"

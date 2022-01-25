@@ -1213,6 +1213,9 @@ extern unsigned long zfs_deadman_synctime_ms;
 extern unsigned long zfs_deadman_ziotime_ms;
 extern unsigned long zfs_deadman_checktime_ms;
 
+extern kmem_cache_t *zio_buf_cache[];
+extern kmem_cache_t *zio_data_buf_cache[];
+
 #ifdef	__cplusplus
 }
 #endif

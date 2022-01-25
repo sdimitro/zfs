@@ -133,6 +133,7 @@ cstyle:
 		! -name '*_if*.h' \
 		! -name 'libzoa.h' \
 		! -path './module/zstd/lib/*' \
+		! -path './module/zfs/lz4.c' \
 		$(cstyle_line)
 
 RUSTDIRS = cmd/zfs_object_agent
