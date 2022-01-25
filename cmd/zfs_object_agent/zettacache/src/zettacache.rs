@@ -16,6 +16,7 @@ use crate::index::*;
 use crate::size_histogram::SizeHistogramPhys;
 use crate::superblock::DiskPhys;
 use crate::superblock::PrimaryPhys;
+use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
@@ -1627,6 +1628,14 @@ pub struct ZCacheDBHandle {
 }
 
 impl ZCacheDBHandle {
+    pub async fn dump_superblocks(paths: Vec<&str>) {
+        let block_access = BlockAccess::new(
+            paths.iter().map(|path| Disk::new(path, true)).collect(),
+            true,
+        );
+        SuperblockPhys::dump_all(&block_access).await;
+    }
+
     pub async fn open(paths: Vec<&str>) -> Result<ZCacheDBHandle> {
         let block_access = Arc::new(BlockAccess::new(
             paths.iter().map(|path| Disk::new(path, true)).collect(),

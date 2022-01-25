@@ -250,6 +250,10 @@ impl BlockAccess {
         self.disk(disk).size
     }
 
+    pub fn disk_path(&self, disk: DiskId) -> String {
+        self.disk(disk).device_path.to_string()
+    }
+
     pub fn total_capacity(&self) -> u64 {
         self.disks().map(|disk| self.disk_size(disk)).sum()
     }
