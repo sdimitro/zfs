@@ -28,7 +28,7 @@ pub use lock_set::LockSet;
 pub use lock_set::LockedItem;
 pub use logging::setup_logging;
 pub use logging::SUPER_EXPENSIVE_TRACE;
-pub use mutex_ext::MutexExt;
+pub use mutex_ext::lock_non_send;
 pub use nicenum::{nice_number_count, nice_number_time, nice_p2size};
 pub use range_tree::RangeTree;
 pub use tunable::get_tunable;

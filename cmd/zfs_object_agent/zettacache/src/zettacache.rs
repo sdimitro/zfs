@@ -47,6 +47,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::time::{sleep_until, timeout_at};
 use util::get_tunable;
+use util::lock_non_send;
 use util::maybe_die_with;
 use util::nice_p2size;
 use util::super_trace;
@@ -57,7 +58,6 @@ use util::AlignedBytes;
 use util::From64;
 use util::LockSet;
 use util::LockedItem;
-use util::MutexExt;
 use uuid::Uuid;
 
 lazy_static! {
@@ -1283,7 +1283,7 @@ impl ZettaCache {
         let fut_or_f = {
             // We don't want to hold the state lock while reading from disk so we
             // use lock_non_send() to ensure that we can't hold it across .await.
-            let mut state = self.state.lock_non_send().await;
+            let mut state = lock_non_send(&self.state).await;
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
@@ -1369,13 +1369,13 @@ impl ZettaCache {
                 // might have hit in the index chunk cache.  Same below.
                 stat_counter = CacheMissAfterIndexRead;
                 super_trace!("cache miss after reading index for {:?}", key);
-                let mut state = self.state.lock_non_send().await;
+                let mut state = lock_non_send(&self.state).await;
                 f(&mut state, None)
             }
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
-                let mut state = self.state.lock_non_send().await;
+                let mut state = lock_non_send(&self.state).await;
                 let value = match &state.merge {
                     Some(ms) if entry.value.atime < ms.eviction_cutoff => {
                         // Block is being evicted, abort the read attempt
@@ -1483,7 +1483,7 @@ impl ZettaCache {
             // Now that we are ready to issue the write to disk, insert to the
             // cache in the current checkpoint (allocate a block, add to
             // pending_changes and outstanding_writes).
-            let fut = state.lock_non_send().await.insert(locked_key, bytes);
+            let fut = lock_non_send(&state).await.insert(locked_key, bytes);
             fut.await;
             // We want to hold onto the insert_permit until the write completes
             // because it represents the memory that's required to buffer this
@@ -1553,9 +1553,7 @@ impl ZettaCache {
                     // Now that we are ready to issue the write to disk, insert to the
                     // cache in the current checkpoint (allocate a block, add to
                     // pending_changes and outstanding_writes).
-                    let fut = cache
-                        .state
-                        .lock_non_send()
+                    let fut = lock_non_send(&cache.state)
                         .await
                         .insert(locked_key, aligned_bytes);
                     fut.await;
