@@ -1668,6 +1668,7 @@ impl ZCacheDBHandle {
         println!("Superblock");
         println!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
         println!();
+
         println!("Checkpoint Region");
         println!("  {:?}", self.primary.checkpoint_capacity);
         println!(
@@ -1678,6 +1679,17 @@ impl ZCacheDBHandle {
                 / self.primary.checkpoint_capacity.size as f64
         );
         println!();
+
+        println!("Old Checkpoint Regions");
+        let mut unused_checkpoint_space = 0;
+        for region in self.primary.old_checkpoint_capacity.iter() {
+            unused_checkpoint_space += region.size;
+            println!("  {:?}", region);
+        }
+        println!("  ----------------------");
+        println!("  total: {}", nice_p2size(unused_checkpoint_space));
+        println!();
+
         println!("Metadata Region");
         let mut total_used_bytes = 0;
         let mut total_allocated_bytes = 0;
@@ -1759,6 +1771,15 @@ impl ZCacheDBHandle {
             total_allocated_bytes as f64 * 100.0 / metadata_region_size as f64,
             nice_p2size(metadata_region_size)
         );
+        println!("  ----------------------");
+        for (disk, (used, total)) in self.extent_allocator.zcachedb_metadata_per_disk() {
+            println!(
+                "  {:?} - {:>6} allocated out of {:>6} total",
+                disk,
+                nice_p2size(used),
+                nice_p2size(total)
+            );
+        }
         println!();
 
         let balloc_size = self

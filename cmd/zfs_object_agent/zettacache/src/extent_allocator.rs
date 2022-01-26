@@ -1,3 +1,4 @@
+use crate::base_types::DiskId;
 use crate::base_types::Extent;
 use lazy_static::lazy_static;
 use log::*;
@@ -202,6 +203,18 @@ impl ExtentAllocator {
         get_containing_extent(&mut inner.sections, extent)
             .freeing
             .add(extent.location.offset, extent.size);
+    }
+
+    // Returns a <disk id> -> <(used bytes, total bytes)> map
+    pub fn zcachedb_metadata_per_disk(&self) -> BTreeMap<DiskId, (u64, u64)> {
+        let mut map: BTreeMap<DiskId, (u64, u64)> = BTreeMap::new();
+        for (extent, section) in &self.inner.lock().unwrap().sections {
+            let section_total = extent.size;
+            let section_used = section_total - section.allocatable.space();
+            let entry = map.entry(extent.location.disk).or_default();
+            *entry = (entry.0 + section_used, entry.1 + section_total);
+        }
+        map
     }
 }
 
