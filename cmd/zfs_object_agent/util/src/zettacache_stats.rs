@@ -13,7 +13,10 @@
 // having to maintain two sets of structs and the minor inconvenience of having to
 // dereference the Atomic values to access them.
 //
+#![deny(clippy::print_stdout)]
+#![deny(clippy::print_stderr)]
 
+use crate::write_stdout;
 use crate::{nice_number_count, nice_number_time, nice_p2size};
 use arr_macro::arr;
 use enum_map::{Enum, EnumMap};
@@ -67,7 +70,7 @@ impl StatCount {
         };
 
         // right aligned for a width of 6, padded with 2 spaces
-        print!("{:>6}  ", nice_value);
+        write_stdout!("{:>6}  ", nice_value);
     }
 }
 
@@ -113,7 +116,7 @@ impl StatBytes {
             nice_p2size(value.round().to_u64().unwrap())
         };
         // right aligned for a width of 6, padded with 2 spaces
-        print!("{:>6}  ", nice_value);
+        write_stdout!("{:>6}  ", nice_value);
     }
 }
 
@@ -143,7 +146,7 @@ pub struct StatLatency(pub Duration);
 impl StatLatency {
     pub fn display_pretty(&self) {
         // right aligned for a width of 6, padded with 2 spaces
-        print!("{:>6}  ", nice_number_time(self.0));
+        write_stdout!("{:>6}  ", nice_number_time(self.0));
     }
 }
 
