@@ -462,7 +462,6 @@ impl MergeState {
                     if pc_key == entry.key {
                         // This key must have been removed (evicted) and then re-inserted.
                         // Add the pending change to the next generation instead of the current index's entry
-                        assert_eq!(pc_value.size, entry.value.size);
                         self.add_to_index_or_evict(
                             IndexEntry {
                                 key: pc_key,
