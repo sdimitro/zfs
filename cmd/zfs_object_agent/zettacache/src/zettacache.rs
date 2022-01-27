@@ -16,6 +16,7 @@ use crate::index::*;
 use crate::size_histogram::SizeHistogramPhys;
 use crate::superblock::DiskPhys;
 use crate::superblock::PrimaryPhys;
+use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
@@ -71,8 +72,8 @@ lazy_static! {
     static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
     static ref GHOST_CACHE_SIZE_PCT: u64 = get_tunable("ghost_cache_size_pct", 100);
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
-    static ref CACHE_INSERT_BLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_blocking_buffer_bytes", 256 * 1024 * 1024);
-    static ref CACHE_INSERT_NONBLOCKING_BUFFER_BYTES: usize = get_tunable("cache_insert_nonblocking_buffer_bytes", 256 * 1024 * 1024);
+    static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
+    static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
     static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
     static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
 
@@ -156,8 +157,8 @@ pub struct ZettaCache {
     outstanding_lookups: LockSet<IndexKey>,
     stats: Arc<CacheStats>,
     timebase: Instant, // used when collecting stats
-    blocking_buffer_bytes_available: Arc<Semaphore>,
-    nonblocking_buffer_bytes_available: Arc<Semaphore>,
+    demand_buffer_bytes_available: Arc<Semaphore>,
+    speculative_buffer_bytes_available: Arc<Semaphore>,
     write_slots: Arc<Semaphore>,
     cache_runtime_id: Uuid,
 }
@@ -990,11 +991,11 @@ impl ZettaCache {
             index: Arc::new(tokio::sync::RwLock::new(index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
             outstanding_lookups: LockSet::new(),
-            blocking_buffer_bytes_available: Arc::new(Semaphore::new(
-                *CACHE_INSERT_BLOCKING_BUFFER_BYTES,
+            demand_buffer_bytes_available: Arc::new(Semaphore::new(
+                *CACHE_INSERT_DEMAND_BUFFER_BYTES,
             )),
-            nonblocking_buffer_bytes_available: Arc::new(Semaphore::new(
-                *CACHE_INSERT_NONBLOCKING_BUFFER_BYTES,
+            speculative_buffer_bytes_available: Arc::new(Semaphore::new(
+                *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
             )),
             write_slots: Arc::new(Semaphore::new(
                 block_access.disks().count() * *DISK_WRITE_MAX_QUEUE_DEPTH,
@@ -1406,43 +1407,32 @@ impl ZettaCache {
         bytes: usize,
         source: InsertSource,
     ) -> Option<OwnedSemaphorePermit> {
-        // The permit should be dropped when the write to disk completes.  It
-        // serves to limit the number of insert()'s that we can buffer before
-        // dropping (ignoring) insertion requests.
-        let bytes32 = u32::try_from(bytes).unwrap();
-        match source {
-            InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => match self
-                .nonblocking_buffer_bytes_available
-                .clone()
-                .try_acquire_many_owned(bytes32)
-            {
-                Ok(permit) => {
-                    self.stats.track_instantaneous(
-                        NonblockingBufferBytesAvailable,
-                        (*CACHE_INSERT_NONBLOCKING_BUFFER_BYTES
-                            - self.nonblocking_buffer_bytes_available.available_permits())
-                            as u64,
-                    );
-                    Some(permit)
-                }
-                Err(tokio::sync::TryAcquireError::NoPermits) => None,
-                Err(e) => panic!("unexpected error from try_acquire_many_owned: {:?}", e),
-            },
-            InsertSource::Read => {
-                let permit = self
-                    .blocking_buffer_bytes_available
-                    .clone()
-                    .acquire_many_owned(bytes32)
-                    .await
-                    .expect("error from acquire_many_owned");
-                self.stats.track_instantaneous(
-                    BlockingBufferBytesAvailable,
-                    (*CACHE_INSERT_BLOCKING_BUFFER_BYTES
-                        - self.blocking_buffer_bytes_available.available_permits())
-                        as u64,
-                );
+        let (buffer, size, stat) = match source {
+            InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => (
+                &self.speculative_buffer_bytes_available,
+                *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
+                SpeculativeBufferBytesAvailable,
+            ),
+            InsertSource::Read => (
+                &self.demand_buffer_bytes_available,
+                *CACHE_INSERT_DEMAND_BUFFER_BYTES,
+                DemandBufferBytesAvailable,
+            ),
+        };
+
+        // The permit should be dropped when the write to disk completes. It serves to limit the number
+        // of insert()'s that we can buffer before dropping (ignoring) insertion requests.
+        match buffer
+            .clone()
+            .try_acquire_many_owned(u32::try_from(bytes).unwrap())
+        {
+            Ok(permit) => {
+                self.stats
+                    .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
                 Some(permit)
             }
+            Err(tokio::sync::TryAcquireError::NoPermits) => None,
+            Err(e) => panic!("unexpected error from try_acquire_many_owned: {:?}", e),
         }
     }
 
@@ -1638,6 +1628,14 @@ pub struct ZCacheDBHandle {
 }
 
 impl ZCacheDBHandle {
+    pub async fn dump_superblocks(paths: Vec<&str>) {
+        let block_access = BlockAccess::new(
+            paths.iter().map(|path| Disk::new(path, true)).collect(),
+            true,
+        );
+        SuperblockPhys::dump_all(&block_access).await;
+    }
+
     pub async fn open(paths: Vec<&str>) -> Result<ZCacheDBHandle> {
         let block_access = Arc::new(BlockAccess::new(
             paths.iter().map(|path| Disk::new(path, true)).collect(),
@@ -1670,6 +1668,7 @@ impl ZCacheDBHandle {
         println!("Superblock");
         println!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
         println!();
+
         println!("Checkpoint Region");
         println!("  {:?}", self.primary.checkpoint_capacity);
         println!(
@@ -1680,6 +1679,17 @@ impl ZCacheDBHandle {
                 / self.primary.checkpoint_capacity.size as f64
         );
         println!();
+
+        println!("Old Checkpoint Regions");
+        let mut unused_checkpoint_space = 0;
+        for region in self.primary.old_checkpoint_capacity.iter() {
+            unused_checkpoint_space += region.size;
+            println!("  {:?}", region);
+        }
+        println!("  ----------------------");
+        println!("  total: {}", nice_p2size(unused_checkpoint_space));
+        println!();
+
         println!("Metadata Region");
         let mut total_used_bytes = 0;
         let mut total_allocated_bytes = 0;
@@ -1761,6 +1771,15 @@ impl ZCacheDBHandle {
             total_allocated_bytes as f64 * 100.0 / metadata_region_size as f64,
             nice_p2size(metadata_region_size)
         );
+        println!("  ----------------------");
+        for (disk, (used, total)) in self.extent_allocator.zcachedb_metadata_per_disk() {
+            println!(
+                "  {:?} - {:>6} allocated out of {:>6} total",
+                disk,
+                nice_p2size(used),
+                nice_p2size(total)
+            );
+        }
         println!();
 
         let balloc_size = self

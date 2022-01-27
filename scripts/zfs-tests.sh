@@ -153,11 +153,16 @@ cleanup() {
 	done
 
 
-	# Unset ZETTACACHE_DEVICES
+	# Unset ZETTACACHE_DEVICES and invalidate zcache devices
 	if [ -n "$ZTS_OBJECT_STORE" ]; then
+		sudo systemctl stop zfs-object-agent
+		for cache_dev in ${ZETTACACHE_DEVICES}; do
+			invalidate_zcache_dev "$cache_dev"
+		done
+
 		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
 		    "$ZOA_CONF"
-		sudo systemctl restart zfs-object-agent
+		sudo systemctl start zfs-object-agent
 	fi
 
 	# Find all the crash files that were created after the start
@@ -482,28 +487,48 @@ EOF
 # Take a Zettacache device as either an absolute or relative path and
 # return the /dev/disk/by-id name for the cache partition.
 get_cache_part() {
-	devname="$(basename "$1")"
+	devname="$1"
+	cache_part=""
 
 	[ -z "$devname" ] && fail "Missing argument"
 
-	devname="${devname}p2"
-	udevadm settle -E "/dev/disk/by-id/$devname"
-	# shellcheck disable=SC2012
-	cache_part=$(ls -l /dev/disk/by-id 2>/dev/null | \
-	    awk "/$devname/ {print \$9; exit}" 2>/dev/null)
+	if echo "$devname" | grep -q "^/dev/disk/by-id/"; then
+		cache_part="${devname}-part2"
+	elif echo "$devname" | grep -q "nvme"; then
+		devname="$(basename "$devname")"
+		cache_part="/dev/${devname}p2"
+	else
+		devname="$(basename "$devname")"
+		cache_part="/dev/${devname}2"
+	fi
 
-	[ -z "$cache_part" ] && fail "Could not find cache partition for $devname"
+	udevadm settle -E "$cache_part"
+	echo "$cache_part"
+}
 
-	echo "/dev/disk/by-id/$cache_part"
+invalidate_zcache_dev() {
+	cache_dev="$1"
+	cache_part="$(get_cache_part "$cache_dev")"
+	sudo dd if=/dev/zero of="${cache_part}" bs=1M count=1 >/dev/null 2>&1
 }
 
 configure_zettacache() {
 	cache_parts=""
 	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		#
 		# Dedicate 8G at the start of the zettacache disk for a slog.
-		printf "size=16777216, bootable\n," | \
-		    sudo sfdisk --wipe always \
-		    "/dev/$(basename "$cache_dev")"
+		# Devices are specified by /dev/ or /dev/disk/by-id/ names.
+		#
+		if echo "$cache_dev" | grep -q "^/dev/disk/by-id/"; then
+			printf "size=16777216, bootable\n," | \
+			    sudo sfdisk -q -X gpt --wipe always "$cache_dev"
+		else
+			printf "size=16777216, bootable\n," | \
+			    sudo sfdisk -q -X gpt --wipe always \
+			    "/dev/$(basename "$cache_dev")"
+		fi
+
+		invalidate_zcache_dev "$cache_dev"
 		if [ -z "$cache_parts" ]; then
 			cache_parts="$(get_cache_part "$cache_dev")"
 		else

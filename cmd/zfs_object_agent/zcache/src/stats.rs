@@ -265,8 +265,8 @@ impl StatsDisplay {
 
         // EXTENDED (optional)
         if self.show_extended {
-            self.display_bytes(values.value(BlockingBufferBytesAvailable) as f64);
-            self.display_bytes(values.value(NonblockingBufferBytesAvailable) as f64);
+            self.display_bytes(values.value(DemandBufferBytesAvailable) as f64);
+            self.display_bytes(values.value(SpeculativeBufferBytesAvailable) as f64);
             self.display_count(values.value(Evictions) as f64 * scale);
             // Note - PendingChanges stat is instantaneous so no need to scale
             self.display_count(values.value(PendingChanges) as f64);

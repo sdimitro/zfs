@@ -72,6 +72,10 @@ async fn main() {
                 ),
         )
         .subcommand(
+            SubCommand::with_name("dump-superblocks")
+                .about("dump the superblock contents of the specified disks"),
+        )
+        .subcommand(
             SubCommand::with_name("slabs").about("dump slab info").arg(
                 Arg::with_name("v")
                     .short("v")
@@ -98,6 +102,10 @@ async fn main() {
                 cache_paths,
             )
             .await;
+        }
+        ("dump-superblocks", Some(_)) => {
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, cache_paths)
+                .await
         }
         ("slabs", Some(subcommand_matches)) => {
             ZettaCacheDBCommand::issue_command(

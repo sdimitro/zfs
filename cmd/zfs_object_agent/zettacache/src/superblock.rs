@@ -9,13 +9,14 @@ use futures::stream::*;
 use log::*;
 use serde::{Deserialize, Serialize};
 use util::maybe_die_with;
+use util::nice_p2size;
 use util::zettacache_stats::DiskIoType;
 
 pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
 
 /// State stored at the beginning of every disk
 #[derive(Serialize, Deserialize, Debug, Clone)]
-struct SuperblockPhys {
+pub struct SuperblockPhys {
     primary: Option<PrimaryPhys>,
     disk: DiskId,
     guid: u64,
@@ -141,7 +142,7 @@ impl PrimaryPhys {
 }
 
 impl SuperblockPhys {
-    async fn read(block_access: &BlockAccess, disk: DiskId) -> Result<Self> {
+    async fn read_impl(block_access: &BlockAccess, disk: DiskId) -> Result<Self> {
         let raw = block_access
             .read_raw(
                 Extent::new(disk, 0, SUPERBLOCK_SIZE),
@@ -149,6 +150,11 @@ impl SuperblockPhys {
             )
             .await;
         let (this, _): (Self, usize) = block_access.chunk_from_raw(&raw)?;
+        Ok(this)
+    }
+
+    async fn read(block_access: &BlockAccess, disk: DiskId) -> Result<Self> {
+        let this = Self::read_impl(block_access, disk).await?;
         debug!("got {:#?}", this);
         assert_eq!(this.disk, disk);
         Ok(this)
@@ -175,6 +181,32 @@ impl SuperblockPhys {
                 DiskIoType::MaintenanceWrite,
             )
             .await;
+    }
+
+    pub async fn dump_all(block_access: &BlockAccess) {
+        // For this to work correctly when we don't specify all the cache disks
+        // in zcachedb in order, we differentiate between the DiskId used in
+        // BlockAccess (e.g. zcachedb's disk argument order) and what we read
+        // from the actual disk's state (e.g. its Superblock).
+        for block_access_disk_id in block_access.disks() {
+            match Self::read_impl(block_access, block_access_disk_id).await {
+                Ok(superblock) => println!(
+                    "{:?} - Path: {} Size: {} GUID: {} Primary?: {}",
+                    superblock.disk,
+                    block_access.disk_path(block_access_disk_id),
+                    nice_p2size(block_access.disk_size(block_access_disk_id)),
+                    superblock.guid,
+                    match &superblock.primary {
+                        Some(primary) => format!("{:#?}", primary),
+                        None => "No".to_string(),
+                    }
+                ),
+                Err(_) => eprintln!(
+                    "error: {}: not a valid zettacache disk",
+                    block_access.disk_path(block_access_disk_id)
+                ),
+            }
+        }
     }
 }
 
