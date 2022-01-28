@@ -31,6 +31,7 @@ use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
 use more_asserts::*;
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use std::collections::btree_map;
 use std::collections::BTreeMap;
@@ -38,7 +39,6 @@ use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::mem;
 use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -81,9 +81,8 @@ lazy_static! {
     // and each closure this limit applies to, performs 2 operations (one read, and one write). Additionally, this is half the limit of outstanding writes.
     static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = get_tunable("cache_rebalance_concurrency_limit", 8);
 
-    // Debug tunable to exercise the explicit eviction code path (normally only used by heal()). A value of 0 means, never evict on cache lookup;
-    // a value of 1 means, evict every other lookup; a value of 2 means, evict every third lookup; etc.
-    static ref CACHE_EVICT_EACH_N_LOOKUPS: usize = get_tunable("cache_evict_each_n_lookups", 0);
+    // If non-zero, the lookup() function will fail randomly every specified number of requests
+    static ref LOOKUP_FAIL_RANDOM: u32 = get_tunable("lookup_fail_random", 0);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -130,20 +129,13 @@ impl ZettaCheckpointPhys {
 }
 
 /// A PendingChange is the in-core data structure for tracking changes to the index between merges.
-/// Four types of events are tracked: insertions, removals, lookup hits (atime update), and removals
-/// followed by insertions. The last change type is necessary because, otherwise, the change would
-/// look like an insertion on top of an existing index entry. Note that removal does not need to store
-/// a value (disk location) and atime updates store an extra item: the original atime of the entry in
-/// the index. This atime is necessary when recording a removal operation in the persistent operation
-/// log. The operation log does not track atime updates so, when a log entry for a remove is logged,
-/// the "original" atime for a remove from cache entry needs to be recorded to maintain consistency
-/// on log replay when the cache is reopened.
+/// Two types of events are tracked: insertions and lookup hits (atime update). Note that there is
+/// no removal event here because we do not allow removes in general. Cache content is only removed
+/// during the merge/eviction task.
 #[derive(Debug, Clone, Copy)]
 enum PendingChange {
     Insert(IndexValue),
     UpdateAtime(IndexValue, Atime),
-    Remove(),
-    RemoveThenInsert(IndexValue),
 }
 
 #[derive(Clone)]
@@ -174,7 +166,6 @@ impl BlockBasedLogEntry for ChunkSummaryEntry {}
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 enum OperationLogEntry {
     Insert(IndexKey, IndexValue),
-    Remove(IndexKey, IndexValue),
 }
 impl OnDisk for OperationLogEntry {}
 impl BlockBasedLogEntry for OperationLogEntry {}
@@ -384,9 +375,8 @@ impl MergeState {
                 }
             }
             // First, process any pending changes which are before this
-            // index entry, which must be all Inserts (Removes,
-            // RemoveThenInserts, and AtimeUpdates refer to existing Index
-            // entries).
+            // index entry, which must be all Inserts (AtimeUpdates refer
+            // to existing Index entries).
             while let Some((&pc_key, &PendingChange::Insert(pc_value))) =
                 pending_changes_iter.peek()
             {
@@ -407,42 +397,16 @@ impl MergeState {
 
             let next_pc_opt = pending_changes_iter.peek();
             match next_pc_opt {
-                Some((&pc_key, &PendingChange::Remove())) => {
-                    if pc_key == entry.key {
-                        // Don't write this entry to the new generation.
-                        // this pending change is consumed
-                        pending_changes_iter.next();
-
-                        // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
-                        if let Some(entry) = self.map_index_entry_to_rebalanced_location(entry) {
-                            free_list.push(
-                                entry
-                                    .value
-                                    .extent()
-                                    .expect("PendingChange::Remove of ghost entry"),
-                            );
-                        }
-                    } else {
-                        // There shouldn't be a pending removal of an entry that doesn't exist in the index.
-                        assert_gt!(pc_key, entry.key);
-                        self.add_to_index_or_evict(entry, next_index, &mut free_list);
-                    }
-                }
                 Some((&pc_key, &PendingChange::Insert(pc_value))) => {
-                    // Most insertions are processed above.  There can't be an index
-                    // entry with the same key unless we are replacing a ghost entry.
-                    // Otherwise, it has to be removed first, resulting in a
-                    // PendingChange::RemoveThenInsert.
+                    // Most insertions are processed above. However, if there is an index
+                    // entry with the same key then we are replacing an entry. This may
+                    // be a ghost entry being recached or perhaps a heal() of a bad entry.
                     if pc_key == entry.key {
-                        // This key was re-inserted after falling out of the index.
-                        // Replace the ghost index entry with the newly inserted entry.
-                        assert!(
-                            entry.value.location.is_none(),
-                            "Insert of {:?} {:?} but {:?} is not ghost",
-                            pc_key,
-                            pc_value,
-                            entry
-                        );
+                        // Replace the index entry with the newly inserted entry.
+                        if let Some(extent) = entry.value.extent() {
+                            debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                            free_list.push(extent);
+                        }
                         self.add_to_index_or_evict(
                             IndexEntry {
                                 key: pc_key,
@@ -454,27 +418,6 @@ impl MergeState {
                         // this pending change is consumed
                         pending_changes_iter.next();
                     } else {
-                        assert_gt!(pc_key, entry.key);
-                        self.add_to_index_or_evict(entry, next_index, &mut free_list);
-                    }
-                }
-                Some((&pc_key, &PendingChange::RemoveThenInsert(pc_value))) => {
-                    if pc_key == entry.key {
-                        // This key must have been removed (evicted) and then re-inserted.
-                        // Add the pending change to the next generation instead of the current index's entry
-                        self.add_to_index_or_evict(
-                            IndexEntry {
-                                key: pc_key,
-                                value: pc_value,
-                            },
-                            next_index,
-                            &mut free_list,
-                        );
-
-                        // this pending change is consumed
-                        pending_changes_iter.next();
-                    } else {
-                        // We shouldn't have skipped any, because there has to be a corresponding Index entry
                         assert_gt!(pc_key, entry.key);
                         self.add_to_index_or_evict(entry, next_index, &mut free_list);
                     }
@@ -927,8 +870,6 @@ impl ZettaCache {
         // that our state's pending_changes & atime_histogram match it
         let mut atime_histogram = index.atime_histogram.clone();
 
-        // We must be load the "old" operation log contained in the merge's progress, before we load the "current" operation
-        // log. This is because the operations need to be loaded in the order in which they originally occurred.
         let old_pending_changes = match checkpoint.merge_progress.as_ref() {
             Some(progress) => {
                 let old_operation_log = BlockBasedLog::open(
@@ -1046,71 +987,29 @@ impl ZettaCache {
     ) -> BTreeMap<IndexKey, PendingChange> {
         let begin = Instant::now();
         let mut num_insert_entries: u64 = 0;
-        let mut num_remove_entries: u64 = 0;
         let mut pending_changes = BTreeMap::new();
         operation_log
             .iter()
             .for_each(|entry| {
                 match entry {
                     OperationLogEntry::Insert(key, value) => {
-                        match pending_changes.entry(key) {
-                            btree_map::Entry::Occupied(mut oe) => match oe.get() {
-                                PendingChange::Remove() => {
-                                    super_trace!("insert with existing removal; changing to RemoveThenInsert: {:?} {:?}", key, value);
-                                    oe.insert(PendingChange::RemoveThenInsert(value));
-                                }
-                                pc  => {
-                                    panic!(
-                                        "Inserting {:?} {:?} into already existing entry {:?}",
-                                        key,
-                                        value,
-                                        pc,
-                                    );
-                                }
-                            },
-                            btree_map::Entry::Vacant(ve) => {
-                                super_trace!("insert {:?} {:?}", key, value);
-                                ve.insert(PendingChange::Insert(value));
-                            }
+                        if let Some(PendingChange::Insert(old_value)) =
+                            pending_changes.insert(key, PendingChange::Insert(value))
+                        {
+                            // We are replacing an old value, adjust the histogram to reflect the change
+                            atime_histogram.remove(old_value);
                         }
+                        super_trace!("insert {:?} {:?}", key, value);
                         num_insert_entries += 1;
                         atime_histogram.insert(value);
-                    }
-                    OperationLogEntry::Remove(key, value) => {
-                        match pending_changes.entry(key) {
-                            btree_map::Entry::Occupied(mut oe) => match oe.get() {
-                                PendingChange::Insert(value) => {
-                                    super_trace!("remove with existing insert; clearing {:?} {:?}", key, value);
-                                    oe.remove();
-                                }
-                                PendingChange::RemoveThenInsert(value) => {
-                                    super_trace!("remove with existing removetheninsert; changing to remove: {:?} {:?}", key, value);
-                                    oe.insert(PendingChange::Remove());
-                                }
-                                pc  => {
-                                    panic!(
-                                        "Removing {:?} from already existing entry {:?}",
-                                        key,
-                                        pc,
-                                    );
-                                }
-                            },
-                            btree_map::Entry::Vacant(ve) => {
-                                super_trace!("remove {:?} {:?}", key, value);
-                                ve.insert(PendingChange::Remove());
-                            }
-                        }
-                        num_remove_entries += 1;
-                        atime_histogram.remove(value);
                     }
                 };
                 future::ready(())
             })
             .await;
         info!(
-            "loaded operation_log from {} inserts and {} removes into {} pending_changes in {}ms",
+            "loaded operation_log from {} inserts into {} pending_changes in {}ms",
             num_insert_entries,
-            num_remove_entries,
             pending_changes.len(),
             begin.elapsed().as_millis()
         );
@@ -1210,42 +1109,33 @@ impl ZettaCache {
         block: BlockId,
         source: LookupSource,
     ) -> LookupResponse {
-        static COUNTER: AtomicUsize = AtomicUsize::new(0);
-
         let key = IndexKey { guid, block };
         let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
 
-        let response = if *CACHE_EVICT_EACH_N_LOOKUPS != 0
-            && COUNTER.fetch_add(1, Ordering::Relaxed) == *CACHE_EVICT_EACH_N_LOOKUPS
-        {
-            COUNTER.store(0, Ordering::Relaxed);
-            let evict_response = self.evict(locked_key).await;
-            // bump stat after waiting so that it coincides with the lookup count stat
-            self.stats.track_count(CacheMissForcedEviction);
-            evict_response
-        } else {
-            let bytes = self
-                .lookup_impl(&locked_key, source, |state, value| {
-                    if matches!(source, LookupSource::Read) {
-                        state.size_histogram.lookup();
-                    }
-                    match value {
-                        Some(value) => {
-                            future::Either::Left(state.lookup(&locked_key, value, source))
-                        }
-                        None => future::Either::Right(future::ready(None)),
-                    }
-                })
-                .await;
+        // In debug mode, return failure randomly every specified number of requests
+        if *LOOKUP_FAIL_RANDOM != 0 && rand::thread_rng().gen_ratio(1, *LOOKUP_FAIL_RANDOM) {
+            return LookupResponse::Absent(locked_key);
+        }
 
-            match bytes {
-                Some(bytes) => {
-                    self.stats.track_bytes(LookupBytes, bytes.len() as u64);
-                    super_trace!("cache hit for {:?}", key);
-                    LookupResponse::Present((bytes, locked_key))
+        let bytes = self
+            .lookup_impl(&locked_key, source, |state, value| {
+                if matches!(source, LookupSource::Read) {
+                    state.size_histogram.lookup();
                 }
-                None => LookupResponse::Absent(locked_key),
+                match value {
+                    Some(value) => future::Either::Left(state.lookup(&locked_key, value, source)),
+                    None => future::Either::Right(future::ready(None)),
+                }
+            })
+            .await;
+
+        let response = match bytes {
+            Some(bytes) => {
+                self.stats.track_bytes(LookupBytes, bytes.len() as u64);
+                super_trace!("cache hit for {:?}", key);
+                LookupResponse::Present((bytes, locked_key))
             }
+            None => LookupResponse::Absent(locked_key),
         };
 
         match source {
@@ -1255,19 +1145,6 @@ impl ZettaCache {
         }
 
         response
-    }
-
-    pub async fn evict(&self, locked_key: LockedKey) -> LookupResponse {
-        self.lookup_impl(&locked_key, LookupSource::Write, |state, value| {
-            if let Some(value) = value {
-                state.evict(locked_key.key(), value);
-            }
-            future::ready(())
-        })
-        .await;
-
-        self.stats.track_count(Evictions);
-        LookupResponse::Absent(locked_key)
     }
 
     async fn lookup_impl<F, R, Fut>(&self, locked_key: &LockedKey, source: LookupSource, f: F) -> R
@@ -1287,17 +1164,11 @@ impl ZettaCache {
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
-                        PendingChange::Insert(value)
-                        | PendingChange::RemoveThenInsert(value)
-                        | PendingChange::UpdateAtime(value, _) => {
+                        PendingChange::Insert(value) | PendingChange::UpdateAtime(value, _) => {
                             let validated = state.validate(value);
                             // All entries in the pending changes should be valid
                             assert!(validated.is_some());
                             Either::Left(f(&mut state, validated))
-                        }
-                        PendingChange::Remove() => {
-                            // Pending change says this has been removed
-                            Either::Left(f(&mut state, None))
                         }
                     }
                 }
@@ -1306,15 +1177,10 @@ impl ZettaCache {
                         if let Some(pc) = ms.old_pending_changes.get(&key).copied() {
                             match pc {
                                 PendingChange::Insert(value)
-                                | PendingChange::RemoveThenInsert(value)
                                 | PendingChange::UpdateAtime(value, _) => {
                                     state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
                                     Either::Left(f(&mut state, validated))
-                                }
-                                PendingChange::Remove() => {
-                                    // Pending change says this has been removed
-                                    Either::Left(f(&mut state, None))
                                 }
                             }
                         } else {
@@ -1355,41 +1221,38 @@ impl ZettaCache {
             Either::Right(f) => f,
         };
 
+        // TODO -- is CacheMissWithoutIndexRead possible anymore? See DOSE-939
+        // XXX - No, it is not possible (except with index chunk cache)
         super_trace!(
-            "lookup has no pending_change and is absent from the index-cache; checking index for {:?}",
+            "lookup has no pending_change for {:?} and it's absent from the index-cache; checking index",
             key
         );
 
-        // TODO -- is CacheMissWithoutIndexRead possible anymore? See DOSE-939
         let stat_counter;
         let fut = match index.log.lookup_by_key(&key, |entry| entry.key).await {
-            None => {
-                // key not in index
-                // XXX We don't really know if we read the index from disk. We
-                // might have hit in the index chunk cache.  Same below.
-                stat_counter = CacheMissAfterIndexRead;
-                super_trace!("cache miss after reading index for {:?}", key);
-                let mut state = lock_non_send(&self.state).await;
-                f(&mut state, None)
-            }
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
                 let mut state = lock_non_send(&self.state).await;
-                let value = match &state.merge {
-                    Some(ms) if entry.value.atime < ms.eviction_cutoff => {
-                        // Block is being evicted, abort the read attempt
-                        stat_counter = CacheMissAfterIndexRead;
-                        super_trace!("cache miss after reading index, eviction cutoff {:?}", key);
-                        None
-                    }
-                    Some(_) | None => {
-                        stat_counter = CacheHitAfterIndexRead;
-                        state.lookup_with_value_from_index(&key, entry.value, source)
+                let value = state.lookup_with_value_from_index(&key, entry.value, source);
+                stat_counter = match value {
+                    Some(_) => CacheHitAfterIndexRead,
+                    None => {
+                        super_trace!(
+                            "cache miss after reading index for {:?}, invalid entry",
+                            key
+                        );
+                        CacheMissAfterIndexRead
                     }
                 };
-
                 f(&mut state, value)
+            }
+            None => {
+                // key not in index
+                stat_counter = CacheMissAfterIndexRead;
+                super_trace!("cache miss after reading index for {:?}", key);
+                let mut state = lock_non_send(&self.state).await;
+                f(&mut state, None)
             }
         };
         let result = fut.await;
@@ -1570,21 +1433,16 @@ impl ZettaCache {
         if let LookupResponse::Present((cache_bytes, locked_key)) =
             self.lookup(guid, block, LookupSource::Write).await
         {
-            // For (hopefully) obvious reasons, we only need to do the eviction when the bytes contained in the cache differ
+            // For (hopefully) obvious reasons, we only need to do the heal when the bytes contained in the cache differ
             // from the bytes contained in the object store. The bytes contained in the object store are always preferred
             // over the bytes contained in the cache; we assume the bytes passed were retrieved from the object store.
             if *cache_bytes != *object_bytes {
                 self.stats.track_count(HealedBlocks);
                 debug!("Healing cache: {:?}", locked_key.key());
-                match self.evict(locked_key).await {
-                    LookupResponse::Present((_, locked_key)) => {
-                        panic!("evicted key is present! {:?}", locked_key.key());
-                    }
-                    LookupResponse::Absent(locked_key) => {
-                        self.insert(locked_key, object_bytes, InsertSource::Heal)
-                            .await
-                    }
-                }
+                // Note: this will result in a second insert for the same key in the index. This will be resolved either
+                // in the insert code (if the first insert is in pending_changes) or later during the next merge.
+                self.insert(locked_key, object_bytes, InsertSource::Heal)
+                    .await;
             }
         }
     }
@@ -1957,18 +1815,11 @@ impl ZettaCacheState {
         // (outstanding_lookups lock)?
         let value = match self.pending_changes.get(key) {
             Some(PendingChange::Insert(value_ref))
-            | Some(PendingChange::RemoveThenInsert(value_ref))
             | Some(PendingChange::UpdateAtime(value_ref, _)) => *value_ref,
-            Some(PendingChange::Remove()) => return None,
             None => value_from_index,
         };
         self.ghost_hit_check(value, source);
         self.validate(value)
-    }
-
-    fn evict(&mut self, key: IndexKey, value: ValidIndexValue) {
-        let value = value.0;
-        self.remove_from_index(key, value);
     }
 
     fn lookup(
@@ -1980,50 +1831,44 @@ impl ZettaCacheState {
         let mut value = valid_value.0;
         let key = locked_key.key();
         trace!("cache hit: reading {:?} from {:?}", key, value);
+
+        if matches!(source, LookupSource::Read) {
+            // Add an entry to the hit-by-size histogram
+            let size = self.atime_histogram.size_at(value.atime);
+            super_trace!("cache size {} at {:?}", size, value.atime);
+            self.size_histogram.hit(size);
+        }
         let original_atime = value.atime;
         if value.atime != self.atime {
+            // Update the atime histogram
             self.atime_histogram.remove(value);
             value.atime = self.atime;
             self.atime_histogram.insert(value);
         }
 
         // XXX looking up again.  But can't pass in both &mut self and &mut PendingChange
-        let pc = self.pending_changes.get_mut(&key);
-        match pc {
-            Some(PendingChange::Insert(value_ref))
-            | Some(PendingChange::RemoveThenInsert(value_ref))
-            | Some(PendingChange::UpdateAtime(value_ref, _)) => {
-                *value_ref = value;
-            }
-            Some(PendingChange::Remove()) => {
-                panic!("invalid state")
-            }
-            None => {
-                // only in Index, not pending_changes
+        match self.pending_changes.entry(key) {
+            btree_map::Entry::Vacant(ve) => {
+                // only in Index, not pending_changes. Perserve the original atime (from the Index)
+                // in case we "replace" this block and need to reset the histogram for the orignal block
+                // (i.e. when we find the old block during the merge, we can decrement the atime histogram)
                 trace!(
-                    "adding UpdateAtime to pending_changes {:?} {:?}, original atime {:?}",
-                    key,
+                    "adding PendingChanges::UpdateAtime({:?}) for {:?}",
                     value,
-                    original_atime
+                    key
                 );
                 // XXX would be nice to have saved the btreemap::Entry so we
                 // don't have to traverse the tree again.
-                self.pending_changes
-                    .insert(key, PendingChange::UpdateAtime(value, original_atime));
+                ve.insert(PendingChange::UpdateAtime(value, original_atime));
                 self.update_pending_stats();
             }
+            btree_map::Entry::Occupied(mut oe) => match oe.get_mut() {
+                PendingChange::Insert(value_ref) | PendingChange::UpdateAtime(value_ref, _) => {
+                    *value_ref = value;
+                }
+            },
         }
-        if matches!(source, LookupSource::Read) {
-            // Add an entry to the hit-by-size histogram
-            let size = self.atime_histogram.size_at(original_atime);
-            trace!(
-                "cache size {} at atime {:?}, current atime_histogram size: {:?}",
-                size,
-                original_atime,
-                self.atime_histogram.size_at(self.atime_histogram.first())
-            );
-            self.size_histogram.hit(size);
-        }
+
         // If there's a write to this location in progress, we will need to wait for it to complete before reading.
         // Since we won't be able to remove the entry from outstanding_writes after we wait, we just get the semaphore.
         let write_sem_opt = self
@@ -2061,64 +1906,6 @@ impl ZettaCacheState {
         );
     }
 
-    fn remove_from_index(&mut self, key: IndexKey, value: IndexValue) {
-        let mut oplog_value = value;
-        match self.pending_changes.get_mut(&key) {
-            Some(PendingChange::Insert(value_ref)) => {
-                // The operation_log has an Insert for this key, and the key
-                // is not in the Index.  We don't need a
-                // PendingChange::Removal since there's nothing to remove
-                // from the index.
-                assert_eq!(*value_ref, value);
-                trace!("removing Insert from pending_changes {:?} {:?}", key, value);
-                self.pending_changes.remove(&key);
-            }
-            Some(PendingChange::RemoveThenInsert(value_ref)) => {
-                // The operation_log has a Remove, and then an Insert for
-                // this key, so the key is in the Index.  We need a
-                // PendingChange::Remove so that the Index entry won't be
-                // found.
-                assert_eq!(*value_ref, value);
-                trace!(
-                    "changing RemoveThenInsert to Remove in pending_changes {:?} {:?}",
-                    key,
-                    value,
-                );
-                self.pending_changes.insert(key, PendingChange::Remove());
-            }
-            Some(PendingChange::UpdateAtime(value_ref, index_atime)) => {
-                // The atime for this block has been updated (in pending changes), but that
-                // update is not preserved in the operation log (we don't log atime updates).
-                // So we need to associate the "original" atime from the index with this remove.
-                oplog_value.atime = *index_atime;
-
-                // It's just an atime update, so the operation_log doesn't
-                // have an Insert for this key, but the key is in the
-                // Index.
-                assert_eq!(*value_ref, value);
-                trace!(
-                    "changing UpdateAtime to Remove in pending_changes {:?} {:?}",
-                    key,
-                    value,
-                );
-                self.pending_changes.insert(key, PendingChange::Remove());
-            }
-            Some(PendingChange::Remove()) => {
-                panic!("invalid state");
-            }
-            None => {
-                // only in Index, not pending_changes
-                trace!("adding Remove to pending_changes {:?}", key);
-                self.pending_changes.insert(key, PendingChange::Remove());
-            }
-        }
-        trace!("adding Remove to operation_log {:?}", key);
-        self.atime_histogram.remove(value);
-        self.operation_log
-            .append(OperationLogEntry::Remove(key, oplog_value));
-        self.update_pending_stats();
-    }
-
     /// Insert this block to the cache, if space and performance parameters
     /// allow.  It may be a recent cache miss, or a recently-written block.
     /// Returns a Future to be executed after the state lock has been dropped.
@@ -2139,35 +1926,37 @@ impl ZettaCacheState {
             size: u32::try_from(buf_size).unwrap(),
         };
 
-        // XXX we'd like to assert that this is not already in the index
-        // (otherwise we would need to use a PendingChange::RemoveThenInsert).
-        // However, this is not an async fn so we can't do the read here.  We
-        // could spawn a new task, but currently reading the index requires the
-        // big lock.
-
-        let entry = self.pending_changes.entry(key);
-        match entry {
-            btree_map::Entry::Occupied(mut oe) => match oe.get() {
-                PendingChange::Remove() => {
-                    trace!(
-                        "adding RemoveThenInsert to pending_changes {:?} {:?}",
-                        key,
-                        value
-                    );
-                    oe.insert(PendingChange::RemoveThenInsert(value));
+        if let Some(pc) = self
+            .pending_changes
+            .insert(key, PendingChange::Insert(value))
+        {
+            debug!(
+                "Inserting {:?} over existing entry {:?}, should be heal",
+                value, pc
+            );
+            let old_value = match pc {
+                PendingChange::Insert(old_value) => {
+                    // Free the old extent for the previous insert. This is safe because the
+                    // previous insert happened after any merge (and rebalance) may have started
+                    // so is not going to be impacted by slab eviction.
+                    self.block_allocator.free(old_value.extent().unwrap());
+                    old_value
                 }
-                pc => {
-                    // Already in cache; ignore this insertion request?  Or panic?
-                    todo!("key: {:#?}, value: {:#?}, pc: {:#?}", key, value, pc);
+                // Undo the atime histogram change made with this UpdateAtime entry
+                PendingChange::UpdateAtime(old_value, index_atime) => {
+                    self.atime_histogram.insert(IndexValue {
+                        location: old_value.location,
+                        size: old_value.size,
+                        atime: index_atime,
+                    });
+                    old_value
                 }
-            },
-            btree_map::Entry::Vacant(ve) => {
-                super_trace!("adding Insert to pending_changes {:?} {:?}", key, value);
-                ve.insert(PendingChange::Insert(value));
-                self.update_pending_stats();
-            }
+            };
+            assert_ne!(value, old_value);
+            self.atime_histogram.remove(old_value);
         }
         self.atime_histogram.insert(value);
+        self.update_pending_stats();
 
         super_trace!("adding Insert to operation_log {:?} {:?}", key, value);
         self.operation_log
@@ -2586,6 +2375,11 @@ impl ZettaCacheState {
             let mut evicted_keys = Vec::new();
             for (key, pc) in self.pending_changes.iter_mut() {
                 match pc {
+                    PendingChange::Insert(value) => {
+                        // Inserts in the "pending changes" list will never be moved as part of a rebalance.
+                        let extent = value.extent().unwrap();
+                        assert_eq!(rebalance.remap(extent).unwrap(), extent.location);
+                    }
                     PendingChange::UpdateAtime(value, _) => {
                         // If a lookup occurs on a block that is being moved as part of rebalancing, the lookup will
                         // return the "old" location of the block (which is valid while we are merging) and will be
@@ -2597,14 +2391,6 @@ impl ZettaCacheState {
                             Some(location) => value.location = Some(location),
                             None => evicted_keys.push(*key),
                         }
-                    }
-                    PendingChange::Insert(value) | PendingChange::RemoveThenInsert(value) => {
-                        // Inserts in the "pending changes" list will never be moved as part of a rebalance.
-                        let extent = value.extent().unwrap();
-                        assert_eq!(rebalance.remap(extent).unwrap(), extent.location);
-                    }
-                    PendingChange::Remove() => {
-                        // Nothing to do for removes.
                     }
                 }
             }
@@ -2656,9 +2442,7 @@ impl ZettaCacheState {
         // Populate index_cache with old_pending_changes
         for (key, pc) in &merge.old_pending_changes {
             match pc {
-                PendingChange::Insert(mut value)
-                | PendingChange::UpdateAtime(mut value, _)
-                | PendingChange::RemoveThenInsert(mut value) => {
+                PendingChange::Insert(mut value) | PendingChange::UpdateAtime(mut value, _) => {
                     // For the "old pending changes" list, we need to not only do the remap for atime updates, but also
                     // for inserts. This is because an insert could have occurred just prior to the merge starting, and
                     // then the location for that new insert may have been rebalanced via the merge. In this case, we need
@@ -2686,12 +2470,6 @@ impl ZettaCacheState {
                         }
                         None => continue,
                     }
-                }
-                PendingChange::Remove() => {
-                    // LruCache.pop() doesn't blow up if the key is not part of
-                    // the cache - it just returns None. Thus it is safe to use
-                    // here unconditionally.
-                    self.index_cache.pop(key);
                 }
             }
         }

@@ -20,11 +20,15 @@ pub struct Feature {
 }
 
 lazy_static! {
-    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> =
-        [ORIGIN.clone(), EXPAND.clone()]
-            .map(|feature| (feature.name, feature.info))
-            .into_iter()
-            .collect();
+    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = [
+        ORIGIN.clone(),
+        EXPAND.clone(),
+        GHOSTS.clone(),
+        NOREMOVE.clone()
+    ]
+    .map(|feature| (feature.name, feature.info))
+    .into_iter()
+    .collect();
     pub static ref ORIGIN: Feature = Feature {
         name: FeatureName("com.delphix:origin".to_string()),
         info: FeatureType::Upgradeable
@@ -35,6 +39,10 @@ lazy_static! {
     };
     pub static ref GHOSTS: Feature = Feature {
         name: FeatureName("com.delphix:ghosts".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref NOREMOVE: Feature = Feature {
+        name: FeatureName("com.delphix:noremove".to_string()),
         info: FeatureType::NonUpgradeable
     };
 }
