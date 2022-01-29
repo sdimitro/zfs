@@ -15,6 +15,7 @@ use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::mem::size_of;
+use std::num::NonZeroU64;
 use std::sync::Arc;
 use util::message::slice_to_struct;
 use util::message::struct_to_slice;
@@ -78,20 +79,13 @@ pub struct IndexEntry {
 impl BlockBasedLogEntry for IndexEntry {}
 impl From<&IndexEntryPhys> for IndexEntry {
     fn from(phys: &IndexEntryPhys) -> Self {
-        let location = if phys.offset == 0 {
-            let disk = phys.disk;
-            assert_eq!(disk, 0);
-            None
-        } else {
-            Some(DiskLocation::new(DiskId(phys.disk), phys.offset - 1))
-        };
         IndexEntry {
             key: IndexKey {
                 id: PoolId(phys.pool_id),
                 block: BlockId(phys.block),
             },
             value: IndexValue {
-                location,
+                location: NonZeroU64::new(phys.location).map(DiskLocation::from_raw),
                 sectors: phys.sectors,
                 atime: Atime(phys.atime),
             },
@@ -150,24 +144,21 @@ impl<'de> Visitor<'de> for IndexEntryVisitor {
 struct IndexEntryPhys {
     pool_id: u8,
     block: u64,
-    disk: u16,
-    offset: u64, // stored with bias of 1; if zero then None
+    location: u64, // if zero then None
     sectors: u16,
     atime: u32,
 }
 impl From<&IndexEntry> for IndexEntryPhys {
     fn from(entry: &IndexEntry) -> Self {
-        let (disk, offset) = entry
-            .value
-            .location
-            .as_ref()
-            .map(|l| (l.disk().0, l.offset() + 1))
-            .unwrap_or_default();
         IndexEntryPhys {
             pool_id: entry.key.id.0,
             block: entry.key.block.0,
-            disk,
-            offset,
+            location: entry
+                .value
+                .location
+                .as_ref()
+                .map(|l| l.to_raw().get())
+                .unwrap_or_default(),
             sectors: entry.value.sectors,
             atime: entry.value.atime.0,
         }

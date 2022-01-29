@@ -857,7 +857,7 @@ impl ZettaCache {
                 })
                 .collect(),
         }
-        .write_all(DiskId(0), guid, block_access)
+        .write_all(DiskId::new(0), guid, block_access)
         .await;
     }
 
