@@ -54,6 +54,7 @@ use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
 use util::super_trace;
+use util::with_alloctag;
 use util::AlignedBytes;
 use util::TerseVec;
 use uuid::Uuid;
@@ -2174,8 +2175,8 @@ async fn reclaim_frees_object(
             phys
         })
     });
-    let mut new_phys = stream::iter(futures)
-        .buffered(*RECLAIM_ONE_BUFFERED)
+    let mut new_phys = with_alloctag("reclaim_frees_object() buffered()", || stream::iter(futures)
+        .buffered(*RECLAIM_ONE_BUFFERED))
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.header.guid, b.header.guid);
             trace!(

@@ -28,6 +28,7 @@ use std::sync::Mutex;
 use std::time::Instant;
 use util::get_tunable;
 use util::super_trace;
+use util::with_alloctag;
 use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
 use util::From64;
@@ -111,10 +112,13 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                     let chunk_location = extent.location.offset + total_consumed as u64;
                     super_trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
                     // XXX handle checksum error here
-                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
-                        .chunk_from_raw(&extent_bytes[total_consumed..])
-                        .with_context(|| format!("{:?} at {:?}", chunk_id, chunk_location))
-                        .unwrap();
+                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) =
+                        with_alloctag("BlockBasedLogPhys::iter_chunks()", || {
+                            block_access
+                                .chunk_from_raw(&extent_bytes[total_consumed..])
+                                .with_context(|| format!("{:?} at {:?}", chunk_id, chunk_location))
+                                .unwrap()
+                        });
                     assert_eq!(chunk.id, chunk_id);
                     yield chunk;
                     chunk_id = chunk_id.next();
@@ -274,7 +278,9 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     }
 
     pub fn append(&mut self, entry: T) {
-        self.pending_entries.push(entry);
+        with_alloctag("BlockBasedLog.pending_entries", || {
+            self.pending_entries.push(entry)
+        });
         // XXX if too many pending, initiate flush?
     }
 
@@ -351,10 +357,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             if pending_write.is_none() && raw_chunk.len() < 2 * *WRITE_AGGREGATION_SIZE {
                 pending_write = Some((
                     extent.location,
-                    AlignedVec::with_capacity(
-                        *WRITE_AGGREGATION_SIZE,
-                        self.block_access.round_up_to_sector(1),
-                    ),
+                    with_alloctag("BlockBasedLog::flush_impl()", || {
+                        AlignedVec::with_capacity(
+                            *WRITE_AGGREGATION_SIZE,
+                            self.block_access.round_up_to_sector(1),
+                        )
+                    }),
                 ));
             }
             match &mut pending_write {
@@ -427,6 +435,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
 
         // load in summary from disk
         let begin = Instant::now();
+        // XXX how to measure memory usage, since it's gathered async?  Copy it later?  Or just rely on the log statement below?
         let chunks = chunk_summary.iter().collect::<Vec<_>>().await;
         info!(
             "loaded summary of {} chunks ({}KB) in {}ms",
@@ -454,7 +463,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogWithSummary<T> {
                     offset,
                     first_entry,
                 };
-                chunks.push(entry);
+                with_alloctag("BlockBasedLogWithSummary.chunks", || chunks.push(entry));
                 chunk_summary.append(entry);
             })
             .await;

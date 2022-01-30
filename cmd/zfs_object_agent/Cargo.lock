@@ -2873,6 +2873,7 @@ dependencies = [
  "chrono",
  "clap",
  "git-version",
+ "lazy_static",
  "log",
  "tokio",
  "util",

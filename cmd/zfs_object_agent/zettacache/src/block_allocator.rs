@@ -21,7 +21,7 @@ use std::{fmt, iter, mem};
 use util::RangeTree;
 use util::{get_tunable, TerseVec};
 use util::{nice_p2size, From64};
-use util::{super_trace, BitmapRangeIterator};
+use util::{super_trace, with_alloctag, BitmapRangeIterator};
 
 lazy_static! {
     static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
@@ -152,6 +152,8 @@ struct BitmapSlab {
 }
 
 impl BitmapSlab {
+    const ALLOCATABLE_TAG: &'static str = "BitmapSlab.allocatable";
+
     fn new_slab(id: SlabId, generation: SlabGeneration, extent: Extent, block_size: u32) -> Slab {
         let slab_size: u32 = extent.size.try_into().unwrap();
         let free_slots = slab_size / block_size;
@@ -205,14 +207,18 @@ impl BitmapSlab {
         );
         let slot_range = first_slot.into()..u64::from(first_slot + num_slots);
         if is_alloc {
-            let removed = self.allocatable.remove_range(slot_range);
+            let removed = with_alloctag(Self::ALLOCATABLE_TAG, || {
+                self.allocatable.remove_range(slot_range)
+            });
             assert_eq!(
                 removed,
                 u64::from(num_slots),
                 "double alloc detected during import"
             );
         } else {
-            let inserted = self.allocatable.insert_range(slot_range);
+            let inserted = with_alloctag(Self::ALLOCATABLE_TAG, || {
+                self.allocatable.insert_range(slot_range)
+            });
             assert_eq!(
                 inserted,
                 u64::from(num_slots),
@@ -240,7 +246,7 @@ impl SlabTrait for BitmapSlab {
         let slot = self.allocatable.min().unwrap();
         let inserted = self.allocating.insert(slot);
         assert!(inserted);
-        self.allocatable.remove(slot);
+        with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.remove(slot));
 
         // Cannot be allocating a block that's currently in the
         // middle of being freed.
@@ -300,7 +306,7 @@ impl SlabTrait for BitmapSlab {
         }
         // Space freed during this checkpoint is now available for reallocation.
         for slot in self.freeing.iter() {
-            let inserted = self.allocatable.insert(slot);
+            let inserted = with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.insert(slot));
             assert!(inserted);
         }
         self.freeing.clear();
@@ -426,6 +432,8 @@ struct ExtentSlab {
 }
 
 impl ExtentSlab {
+    const ALLOCATABLE_TAG: &'static str = "ExtentSlab.allocatable";
+
     fn new_slab(
         id: SlabId,
         generation: SlabGeneration,
@@ -433,7 +441,9 @@ impl ExtentSlab {
         max_allowed_alloc_size: u32,
     ) -> Slab {
         let mut allocatable: RangeTree = Default::default();
-        allocatable.add(extent.location.offset, extent.size);
+        with_alloctag(Self::ALLOCATABLE_TAG, || {
+            allocatable.add(extent.location.offset, extent.size)
+        });
         Slab::new(
             id,
             generation,
@@ -463,7 +473,9 @@ impl ExtentSlab {
         {
             if allocatable_size >= size {
                 self.freeing.verify_absent(allocatable_offset, size);
-                self.allocatable.remove(allocatable_offset, size);
+                with_alloctag(Self::ALLOCATABLE_TAG, || {
+                    self.allocatable.remove(allocatable_offset, size)
+                });
                 self.allocating.add(allocatable_offset, size);
                 self.last_location = allocatable_offset + size;
                 return Some(Extent::new(self.location.disk, allocatable_offset, size));
@@ -480,12 +492,16 @@ impl ExtentSlab {
 impl SlabTrait for ExtentSlab {
     fn import_alloc(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
-        self.allocatable.remove(extent.location.offset, extent.size);
+        with_alloctag(Self::ALLOCATABLE_TAG, || {
+            self.allocatable.remove(extent.location.offset, extent.size)
+        });
     }
 
     fn import_free(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
-        self.allocatable.add(extent.location.offset, extent.size);
+        with_alloctag(Self::ALLOCATABLE_TAG, || {
+            self.allocatable.add(extent.location.offset, extent.size)
+        });
     }
 
     fn allocate(&mut self, size: u32) -> Option<Extent> {
@@ -543,7 +559,7 @@ impl SlabTrait for ExtentSlab {
         for (&start, &size) in self.freeing.iter() {
             self.allocating.verify_absent(start, size);
             spacemap.free(Extent::new(disk, start, size));
-            self.allocatable.add(start, size);
+            with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.add(start, size));
         }
         self.freeing.clear();
     }
@@ -1074,39 +1090,33 @@ impl Slabs {
         let mut extent_iter = capacity.iter().map(|(_, &extent)| extent);
         let mut current_extent = extent_iter.next().unwrap();
 
-        let mut slabs = Slabs(
-            slabs_phys
-                .0
-                .iter()
-                .enumerate()
-                .map(|(slab_id, phys_slab)| {
-                    let sid = SlabId(slab_id as u64);
+        let slab_iter = slabs_phys.0.iter().enumerate().map(|(slab_id, phys_slab)| {
+            let sid = SlabId(slab_id as u64);
 
-                    if current_extent.size < slab_size.into() {
-                        current_extent = extent_iter.next().unwrap();
-                    }
+            if current_extent.size < slab_size.into() {
+                current_extent = extent_iter.next().unwrap();
+            }
 
-                    let slab_extent = current_extent.range(0, slab_size.into());
-                    current_extent = current_extent
-                        .range(slab_size.into(), current_extent.size - u64::from(slab_size));
+            let slab_extent = current_extent.range(0, slab_size.into());
+            current_extent =
+                current_extent.range(slab_size.into(), current_extent.size - u64::from(slab_size));
 
-                    match phys_slab.slab_type {
-                        SlabPhysType::BitmapBased { block_size } => {
-                            BitmapSlab::new_slab(sid, phys_slab.generation, slab_extent, block_size)
-                        }
-                        SlabPhysType::ExtentBased { max_size } => {
-                            ExtentSlab::new_slab(sid, phys_slab.generation, slab_extent, max_size)
-                        }
-                        SlabPhysType::Free => {
-                            FreeSlab::new_slab(sid, phys_slab.generation, slab_extent)
-                        }
-                        SlabPhysType::Evacuating => {
-                            EvacuatingSlab::new_slab(sid, phys_slab.generation, slab_extent)
-                        }
-                    }
-                })
-                .collect(),
-        );
+            match phys_slab.slab_type {
+                SlabPhysType::BitmapBased { block_size } => {
+                    BitmapSlab::new_slab(sid, phys_slab.generation, slab_extent, block_size)
+                }
+                SlabPhysType::ExtentBased { max_size } => {
+                    ExtentSlab::new_slab(sid, phys_slab.generation, slab_extent, max_size)
+                }
+                SlabPhysType::Free => FreeSlab::new_slab(sid, phys_slab.generation, slab_extent),
+                SlabPhysType::Evacuating => {
+                    EvacuatingSlab::new_slab(sid, phys_slab.generation, slab_extent)
+                }
+            }
+        });
+        let mut slabs = Slabs(with_alloctag("BlockAllocator.slabs", || {
+            slab_iter.collect()
+        }));
 
         // There should be no leftover capacity; it should have all been consumed by the slabs_phys.
         assert_lt!(current_extent.size, slab_size.into());

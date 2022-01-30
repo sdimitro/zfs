@@ -52,8 +52,9 @@ use util::lock_non_send;
 use util::maybe_die_with;
 use util::nice_p2size;
 use util::super_trace;
+use util::with_alloctag;
+use util::with_alloctag_hf;
 use util::zettacache_stats::CacheStatCounter::*;
-use util::zettacache_stats::DiskIoType;
 use util::zettacache_stats::*;
 use util::AlignedBytes;
 use util::From64;
@@ -892,7 +893,9 @@ impl ZettaCache {
             block_access: block_access.clone(),
             pending_changes,
             merge: None,
-            index_cache: LruCache::new(index_cache_cap),
+            index_cache: with_alloctag("ZettaCacheState::index_cache hashtable", || {
+                LruCache::new(index_cache_cap)
+            }),
             atime_histogram,
             size_histogram: checkpoint.size_histogram,
             operation_log,
@@ -1374,7 +1377,7 @@ impl ZettaCache {
             let cache = self.clone();
             let block = *block;
             let aligned_bytes = AlignedBytes::from((*bytes).clone());
-            futures.push(async move {
+            let fut = async move {
                 let key = IndexKey { guid, block };
                 let locked_key = LockedKey(cache.outstanding_lookups.lock(key).await);
 
@@ -1418,6 +1421,9 @@ impl ZettaCache {
                         InsertSource::Write => InsertForWrite,
                     });
                 }
+            };
+            with_alloctag_hf("ZettaCache::ingest_all FuturesUnordered.push()", || {
+                futures.push(fut)
             });
         }
         tokio::spawn(async move {
@@ -1767,6 +1773,7 @@ impl ValidIndexValue {
 }
 
 impl ZettaCacheState {
+    const PENDING_CHANGES_TAG: &'static str = "ZettaCacheState.pending_changes";
     /// Validates the passed in index value; returns the value back if it's still valid, or None.
     fn validate(&self, value: IndexValue) -> Option<ValidIndexValue> {
         let live_cutoff = match &self.merge {
@@ -1859,7 +1866,9 @@ impl ZettaCacheState {
                 );
                 // XXX would be nice to have saved the btreemap::Entry so we
                 // don't have to traverse the tree again.
-                ve.insert(PendingChange::UpdateAtime(value, original_atime));
+                with_alloctag(Self::PENDING_CHANGES_TAG, || {
+                    ve.insert(PendingChange::UpdateAtime(value, original_atime));
+                });
                 self.update_pending_stats();
             }
             btree_map::Entry::Occupied(mut oe) => match oe.get_mut() {
@@ -1926,10 +1935,10 @@ impl ZettaCacheState {
             size: u32::try_from(buf_size).unwrap(),
         };
 
-        if let Some(pc) = self
-            .pending_changes
-            .insert(key, PendingChange::Insert(value))
-        {
+        if let Some(pc) = with_alloctag(Self::PENDING_CHANGES_TAG, || {
+            self.pending_changes
+                .insert(key, PendingChange::Insert(value))
+        }) {
             debug!(
                 "Inserting {:?} over existing entry {:?}, should be heal",
                 value, pc
@@ -1963,7 +1972,9 @@ impl ZettaCacheState {
             .append(OperationLogEntry::Insert(key, value));
 
         let sem = Arc::new(Semaphore::new(0));
-        self.outstanding_writes.insert(value, sem.clone());
+        with_alloctag("ZettaCacheState.outstanding_writes", || {
+            self.outstanding_writes.insert(value, sem.clone())
+        });
 
         let block_access = self.block_access.clone();
         // Note: locked_key can be dropped before the i/o completes, since the
@@ -2460,9 +2471,9 @@ impl ZettaCacheState {
                             };
 
                             match remapped {
-                                Some(value) => {
+                                Some(value) => with_alloctag("ZettaCacheState.index_cache", || {
                                     self.index_cache.put(*key, value);
-                                }
+                                }),
                                 None => {
                                     self.index_cache.pop(key);
                                 }

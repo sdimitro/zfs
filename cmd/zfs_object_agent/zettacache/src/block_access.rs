@@ -28,6 +28,7 @@ use tokio::fs::File;
 use tokio::sync::Semaphore;
 use util::get_tunable;
 use util::super_trace;
+use util::with_alloctag;
 use util::zettacache_stats::*;
 use util::From64;
 use util::{AlignedBytes, AlignedVec};
@@ -269,7 +270,9 @@ impl BlockAccess {
         let _permit = disk.outstanding_reads.acquire().await.unwrap();
         let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
         let bytes: AlignedBytes = tokio::task::spawn_blocking(move || {
-            let mut v = AlignedVec::with_capacity(usize::from64(extent.size), sector_size);
+            let mut v = with_alloctag("BlockAccess::raw_read()", || {
+                AlignedVec::with_capacity(usize::from64(extent.size), sector_size)
+            });
             // By using the unsafe libc::pread() instead of
             // nix::sys::uio::pread(), we avoid the cost of zeroing out the
             // vec's buffer.
@@ -371,7 +374,10 @@ impl BlockAccess {
                 (payload, CompressType::Lz4)
             }
             EncodeType::Bincode => {
-                let payload = Self::bincode_options().serialize(struct_obj).unwrap();
+                let payload =
+                    with_alloctag("BlockAccess::chunk_to_raw() Bincode::serialize()", || {
+                        Self::bincode_options().serialize(struct_obj).unwrap()
+                    });
                 // XXX It's faster to not lz4 compress this, even though
                 // compression would get us around 2x (27B -> 14B for index
                 // entries).  But if we were to use multiple CPU's, or be able
@@ -394,7 +400,9 @@ impl BlockAccess {
 
         let unrounded_len = header_bytes.len() + 1 + payload.len();
         let len = self.round_up_to_sector(unrounded_len);
-        let mut buf = AlignedVec::with_capacity(len, self.round_up_to_sector(1));
+        let mut buf = with_alloctag("BlockAccess::chunk_to_raw() AlignedVec", || {
+            AlignedVec::with_capacity(len, self.round_up_to_sector(1))
+        });
         buf.extend_from_slice(&header_bytes);
         // Encode a NUL byte after the header, so that we know where it ends.
         buf.extend_from_slice(&[0]);
