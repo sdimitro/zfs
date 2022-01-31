@@ -2311,9 +2311,18 @@ impl ZettaCacheState {
         let eviction_atime = self
             .atime_histogram
             .atime_for_eviction_target(target_reduction);
-        let ghost_atime = self
-            .atime_histogram
-            .atime_for_ghost_target(target_reduction / 100 * *GHOST_CACHE_SIZE_PCT);
+
+        let ghost_size = self.atime_histogram.sum_ghost() + target_reduction;
+        let ghost_target = (self.block_allocator.size() / 100) * *GHOST_CACHE_SIZE_PCT;
+        let ghost_reduction = ghost_size.checked_sub(ghost_target).unwrap_or_default();
+        let ghost_atime = self.atime_histogram.atime_for_ghost_target(ghost_reduction);
+        debug!(
+            "ghost history size: {} (including {} transfering from live), target size: {}, removing {}",
+            nice_p2size(ghost_size),
+            nice_p2size(target_reduction),
+            nice_p2size(ghost_target),
+            nice_p2size(ghost_reduction),
+        );
 
         let old_operation_log_phys = self.operation_log.flush().await;
 

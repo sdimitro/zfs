@@ -121,6 +121,11 @@ impl AtimeHistogramPhys {
         self.size_at(self.first_live)
     }
 
+    pub fn sum_ghost(&self) -> u64 {
+        let index = self.first_live - self.first_ghost;
+        self.histogram[..index].iter().sum()
+    }
+
     /// Add up all the atime histogram buckets from key atime
     /// to the current atime. This will be the minimum cache size
     /// that would contain this key.
