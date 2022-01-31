@@ -12,7 +12,7 @@
 #
 
 #
-# Copyright (c) 2015, 2021 by Delphix. All rights reserved.
+# Copyright (c) 2015, 2022 by Delphix. All rights reserved.
 #
 
 #
@@ -68,28 +68,8 @@ log_must fio $FIO_SCRIPTS/random_writes_fill.fio
 log_must zpool sync $PERFPOOL
 log_must zinject -a
 
-# Set up the scripts and output files that will log performance data.
-lun_list=$(pool_to_lun_list $PERFPOOL)
-log_note "Collecting backend IO stats with lun list $lun_list"
-
 # Run log collection for only 10 seconds which should be sufficient.
 export PERF_RUNTIME=10
-if is_linux; then
-	export collect_scripts=(
-	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
-	    "iostat -tdxyz 1" "iostat"
-	    "arcstat 1" "arcstat"
-	    "dstat -at --nocolor 1" "dstat"
-	    "$PERF_RECORD_CMD" "perf"
-	)
-else
-	export collect_scripts=(
-	    "$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
-	    "vmstat -T d 1" "vmstat"
-	    "mpstat -T d 1" "mpstat"
-	    "iostat -T d -xcnz 1" "iostat"
-	)
-fi
 do_collect_scripts delete
 
 log_note "Removing file"

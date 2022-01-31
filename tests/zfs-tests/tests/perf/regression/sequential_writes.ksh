@@ -12,7 +12,7 @@
 #
 
 #
-# Copyright (c) 2015, 2021 by Delphix. All rights reserved.
+# Copyright (c) 2015, 2022 by Delphix. All rights reserved.
 #
 
 #
@@ -63,28 +63,6 @@ export PERF_NTHREADS=${PERF_NTHREADS:-'16 32'}
 export PERF_NTHREADS_PER_FS=${PERF_NTHREADS_PER_FS:-'0'}
 export PERF_IOSIZES=${PERF_IOSIZES:-'8k 1m'}
 export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'0 1'}
-
-# Set up the scripts and output files that will log performance data.
-lun_list=$(pool_to_lun_list $PERFPOOL)
-log_note "Collecting backend IO stats with lun list $lun_list"
-if is_linux; then
-	export collect_scripts=(
-	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
-	    "vmstat -t 1" "vmstat"
-	    "mpstat -P ALL 1" "mpstat"
-	    "iostat -tdxyz 1" "iostat"
-	    "arcstat 1" "arcstat"
-	    "dstat -at --nocolor 1" "dstat"
-	    "$PERF_RECORD_CMD" "perf"
-	)
-else
-	export collect_scripts=(
-	    "$PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
-	    "vmstat -T d 1" "vmstat"
-	    "mpstat -T d 1" "mpstat"
-	    "iostat -T d -xcnz 1" "iostat"
-	)
-fi
 
 log_note "Sequential writes with settings: $(print_perf_settings)"
 do_fio_run sequential_writes.fio true false
