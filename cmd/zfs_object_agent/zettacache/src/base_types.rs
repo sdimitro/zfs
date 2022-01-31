@@ -5,7 +5,6 @@ use std::borrow::Borrow;
 use std::fmt::*;
 use std::ops::Add;
 use std::ops::Sub;
-use util::From64;
 
 /*
  * Things that are stored on disk.
@@ -127,7 +126,7 @@ impl CheckpointId {
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
-pub struct Atime(pub u64);
+pub struct Atime(pub u32);
 impl Atime {
     pub fn next(&self) -> Atime {
         Atime(self.0 + 1)
@@ -137,14 +136,14 @@ impl Atime {
 impl Sub<Atime> for Atime {
     type Output = usize;
     fn sub(self, rhs: Atime) -> usize {
-        usize::from64(self.0 - rhs.0)
+        (self.0 - rhs.0) as usize
     }
 }
 
 impl Add<usize> for Atime {
     type Output = Atime;
     fn add(self, rhs: usize) -> Atime {
-        Atime(self.0 + rhs as u64)
+        Atime(self.0 + u32::try_from(rhs).unwrap())
     }
 }
 
