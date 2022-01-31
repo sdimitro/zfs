@@ -24,7 +24,8 @@ lazy_static! {
         ORIGIN.clone(),
         EXPAND.clone(),
         GHOSTS.clone(),
-        NOREMOVE.clone()
+        NOREMOVE.clone(),
+        FIXINT.clone(),
     ]
     .map(|feature| (feature.name, feature.info))
     .into_iter()
@@ -44,6 +45,10 @@ lazy_static! {
     pub static ref NOREMOVE: Feature = Feature {
         name: FeatureName("com.delphix:noremove".to_string()),
         info: FeatureType::NonUpgradeable
+    };
+    pub static ref FIXINT: Feature = Feature {
+        name: FeatureName("com.delphix:fixint".to_string()),
+        info: FeatureType::Upgradeable
     };
 }
 

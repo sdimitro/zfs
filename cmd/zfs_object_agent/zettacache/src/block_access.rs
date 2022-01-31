@@ -129,6 +129,7 @@ pub enum CompressType {
 pub enum EncodeType {
     Json,
     Bincode,
+    BincodeFixint,
 }
 
 // Generate ioctl function
@@ -378,6 +379,15 @@ impl BlockAccess {
                     with_alloctag("BlockAccess::chunk_to_raw() Bincode::serialize()", || {
                         Self::bincode_options().serialize(struct_obj).unwrap()
                     });
+                (payload, CompressType::None)
+            }
+            EncodeType::BincodeFixint => {
+                let payload =
+                    with_alloctag("BlockAccess::chunk_to_raw() Bincode::serialize()", || {
+                        Self::bincode_fixint_options()
+                            .serialize(struct_obj)
+                            .unwrap()
+                    });
                 // XXX It's faster to not lz4 compress this, even though
                 // compression would get us around 2x (27B -> 14B for index
                 // entries).  But if we were to use multiple CPU's, or be able
@@ -416,6 +426,10 @@ impl BlockAccess {
     fn bincode_options() -> impl bincode::Options {
         // Note: DefaultOptions uses varint encoding (unlike bincode::serialize())
         bincode::DefaultOptions::new()
+    }
+
+    fn bincode_fixint_options() -> impl bincode::Options {
+        bincode::DefaultOptions::new().with_fixint_encoding()
     }
 
     /// returns deserialized struct and amount of the buf that was consumed
@@ -459,6 +473,7 @@ impl BlockAccess {
         let struct_obj: T = match header.encoding {
             EncodeType::Json => serde_json::from_slice(serde_slice)?,
             EncodeType::Bincode => Self::bincode_options().deserialize(serde_slice)?,
+            EncodeType::BincodeFixint => Self::bincode_fixint_options().deserialize(serde_slice)?,
         };
         Ok((
             struct_obj,
