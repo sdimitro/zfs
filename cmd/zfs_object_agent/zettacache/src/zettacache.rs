@@ -721,6 +721,44 @@ impl ZettaCache {
         .await;
     }
 
+    fn index_cache_estimate_capacity() -> usize {
+        let mut sysinfo = System::new();
+        sysinfo.refresh_system();
+        let system_memory = usize::from64(sysinfo.total_memory() * 1024);
+        let target_index_cache_bytes = (*INDEX_CACHE_ENTRIES_MEM_PCT * system_memory) / 100;
+
+        // Looking at the source of LruCache at the time of this writing we see that LruEntry<K,V>
+        // is composed of the following elements: K, V, and 2 pointers. Thus, we use the following
+        // formula to approximate the size of each entry in the index cache which empirically seem
+        // to be fairly accurate:
+        let index_cache_entry_size =
+            mem::size_of::<IndexKey>() + mem::size_of::<IndexValue>() + 2 * mem::size_of::<usize>();
+
+        // Even when the cache is empty LruCache pre-allocates buckets inducing an overhead that is
+        // separate from the actual per entry overhead yet tied to the number of entries that it can
+        // hold.  The cache overhead consists of a tiny constant overhead for some of its metadata
+        // tracking (e.g. capacity, hasher fields, etc..) and per-entry overhead. At the time of this
+        // writing the LruCache uses a KeyRef<K> (8 bytes) for the key, and a Box<LruEntry> (8 bytes)
+        // as the value. Additionally assuming that HashBrown is used as the underlying HashMap we
+        // expect 8 + 1 bytes of overhead per entry. That would imply that the overhead be close to
+        // 3 * sizeof(usize) per entry but empirically we've found that it is closer to 5 * sizeof(usize).
+        let index_cache_overhead_bytes = 5 * mem::size_of::<usize>();
+
+        let index_cache_cap =
+            target_index_cache_bytes / (index_cache_entry_size + index_cache_overhead_bytes);
+
+        info!(
+            "index-cache target_size: {}/{} breakdown: [{} for {} entries of {}] + [{} of cache state overhead]",
+            nice_p2size(target_index_cache_bytes as u64),
+            nice_p2size(system_memory as u64),
+            nice_p2size((index_cache_cap * index_cache_entry_size) as u64),
+            index_cache_cap,
+            nice_p2size(index_cache_entry_size as u64),
+            nice_p2size((index_cache_overhead_bytes * index_cache_cap) as u64)
+        );
+        index_cache_cap
+    }
+
     pub async fn open(paths: Vec<&str>) -> ZettaCache {
         let block_access = Arc::new(BlockAccess::new(
             paths.iter().map(|path| Disk::new(path, false)).collect(),
@@ -851,22 +889,6 @@ impl ZettaCache {
         )
         .await;
 
-        let mut sysinfo = System::new();
-        sysinfo.refresh_system();
-        let system_memory = usize::from64(sysinfo.total_memory() * 1024);
-        let index_cache_entries_bytes = (*INDEX_CACHE_ENTRIES_MEM_PCT * system_memory) / 100;
-        let index_cache_entry_size = mem::size_of::<IndexKey>() + mem::size_of::<IndexValue>();
-        let index_cache_cap =
-            (((*INDEX_CACHE_ENTRIES_MEM_PCT) * system_memory) / 100) / index_cache_entry_size;
-        info!(
-            "index-cache capacity set to {} entries [{}% of {} - {} with entry size {}]",
-            index_cache_cap,
-            *INDEX_CACHE_ENTRIES_MEM_PCT,
-            nice_p2size(system_memory as u64),
-            nice_p2size(index_cache_entries_bytes as u64),
-            nice_p2size(index_cache_entry_size as u64)
-        );
-
         // XXX would be nice to periodically load the operation_log and verify
         // that our state's pending_changes & atime_histogram match it
         let mut atime_histogram = index.atime_histogram.clone();
@@ -894,7 +916,7 @@ impl ZettaCache {
             pending_changes,
             merge: None,
             index_cache: with_alloctag("ZettaCacheState::index_cache hashtable", || {
-                LruCache::new(index_cache_cap)
+                LruCache::new(ZettaCache::index_cache_estimate_capacity())
             }),
             atime_histogram,
             size_histogram: checkpoint.size_histogram,
