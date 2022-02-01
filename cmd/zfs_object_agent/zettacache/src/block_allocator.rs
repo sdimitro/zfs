@@ -13,7 +13,7 @@ use rand::thread_rng;
 use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, max, min};
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::ops::{Add, Bound::*, Sub};
 use std::sync::Arc;
 use std::time::Instant;
@@ -139,6 +139,7 @@ trait SlabTrait {
     fn num_segments(&self) -> u64;
     fn allocated_extents(&self) -> Vec<Extent>;
     fn dump_info(&self);
+    fn location(&self) -> DiskLocation;
 }
 
 struct BitmapSlab {
@@ -418,6 +419,10 @@ impl SlabTrait for BitmapSlab {
             })
             .collect()
     }
+
+    fn location(&self) -> DiskLocation {
+        self.location
+    }
 }
 
 struct ExtentSlab {
@@ -655,6 +660,10 @@ impl SlabTrait for ExtentSlab {
             .map(|(&offset, &size)| Extent::new(self.location.disk(), offset, size))
             .collect()
     }
+
+    fn location(&self) -> DiskLocation {
+        self.location
+    }
 }
 
 struct FreeSlab {
@@ -726,6 +735,10 @@ impl SlabTrait for FreeSlab {
 
     fn allocated_extents(&self) -> Vec<Extent> {
         vec![]
+    }
+
+    fn location(&self) -> DiskLocation {
+        self.extent.location
     }
 }
 
@@ -805,6 +818,10 @@ impl SlabTrait for EvacuatingSlab {
 
     fn allocated_extents(&self) -> Vec<Extent> {
         panic!("evacuating slab doesn't track allocated extents");
+    }
+
+    fn location(&self) -> DiskLocation {
+        self.extent.location
     }
 }
 
@@ -930,6 +947,10 @@ impl Slab {
     fn dump_info(&self) {
         println!("{:?} {:?}", self.id, self.generation);
         self.info.with_trait(|t| t.dump_info());
+    }
+
+    fn location(&self) -> DiskLocation {
+        self.info.with_trait(|t| t.location())
     }
 }
 
@@ -2315,6 +2336,7 @@ impl SlabBucketsReport {
 }
 
 fn zcachedb_dump_slabs_print_legend() {
+    println!("============================================================");
     println!("E: Extent-based");
     println!("MAX_SIZE: largest allocation that can be made to these slabs");
     println!("NSLAB: number of slabs");
@@ -2323,6 +2345,7 @@ fn zcachedb_dump_slabs_print_legend() {
     println!("FREE: free (available) bytes in slabs");
     println!("CAP: percent allocated (ALLOC / SIZE)");
     println!("SEG/S: average number of disjoint free segments per slab");
+    println!("============================================================");
     println!();
 }
 
@@ -2333,8 +2356,45 @@ pub async fn zcachedb_dump_slabs(
     opts: DumpSlabsOptions,
 ) {
     let slab_size = u64::from(phys.slab_size);
+    let buckets = phys.slab_buckets.buckets.clone();
+    let mut cache_slabs = vec![];
+    let mut slabs_per_device = HashMap::new();
+    for disk in block_access.disks() {
+        slabs_per_device.insert(disk, vec![]);
+    }
+    let slabs = zcachedb_load_slab_state(block_access.clone(), extent_allocator, phys).await;
 
-    let mut buckets_by_max_size = SlabBucketsReport::new(&phys.slab_buckets.buckets, slab_size);
+    for slab in slabs.0.iter() {
+        if opts.verbosity > 1 {
+            slab.dump_info();
+        }
+        cache_slabs.push(slab);
+        slabs_per_device
+            .get_mut(&slab.location().disk)
+            .unwrap()
+            .push(slab);
+    }
+
+    zcachedb_dump_slabs_print_legend();
+    for (disk, device_slabs) in slabs_per_device {
+        println!("============================================================");
+        println!("=                        {}", block_access.disk_path(disk));
+        println!("============================================================");
+        zcachedb_dump_slabs_report(&device_slabs, slab_size, &buckets, &opts)
+    }
+    println!("============================================================");
+    println!("=                        whole cache");
+    println!("============================================================");
+    zcachedb_dump_slabs_report(&cache_slabs, slab_size, &buckets, &opts);
+}
+
+fn zcachedb_dump_slabs_report(
+    slabs: &[&Slab],
+    slab_size: u64,
+    buckets: &[(u32, bool)],
+    opts: &DumpSlabsOptions,
+) {
+    let mut buckets_by_max_size = SlabBucketsReport::new(buckets, slab_size);
     let bitmap_summary_dist: Vec<(u32, bool)> = [1, 2, 4, 8, 16]
         .iter()
         .map(|kbytes| (kbytes * 1024u32, false))
@@ -2348,12 +2408,7 @@ pub async fn zcachedb_dump_slabs(
     let mut empty_total = AllocationBucketStatistics::new(slab_size);
     let mut evacuating_total = AllocationBucketStatistics::new(slab_size);
 
-    let slabs = zcachedb_load_slab_state(block_access, extent_allocator, phys).await;
-
-    for slab in slabs.0.iter() {
-        if opts.verbosity > 1 {
-            slab.dump_info();
-        }
+    for slab in slabs {
         buckets_by_max_size.add_slab(slab);
 
         match &slab.info {
@@ -2371,14 +2426,9 @@ pub async fn zcachedb_dump_slabs(
     extent_based_summary.reset_hist_scaling_factor(max_scaling_factor);
     buckets_by_max_size.reset_hist_scaling_factor(max_scaling_factor);
 
-    println!("============================================================");
-    zcachedb_dump_slabs_print_legend();
     buckets_by_max_size.dump_report(opts.verbosity);
     println!();
-    println!("============================================================");
-    println!("========================  SUMMARY  =========================");
-    println!("============================================================");
-    println!();
+    println!("~~~~~~~~~~~~~~~~~~~~~~~~  SUMMARY  ~~~~~~~~~~~~~~~~~~~~~~~~~");
     bitmap_based_summary.dump_report(opts.verbosity);
     println!("------------------------------------------------------------");
     println!("    BITMAP: {}", bitmap_based_summary.total);
