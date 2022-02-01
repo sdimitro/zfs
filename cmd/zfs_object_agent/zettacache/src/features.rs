@@ -27,6 +27,7 @@ lazy_static! {
         NOREMOVE.clone(),
         FIXINT.clone(),
         SPLIT_INDEX.clone(),
+        INDEXVALUE16.clone(),
     ]
     .map(|feature| (feature.name, feature.info))
     .into_iter()
@@ -53,6 +54,10 @@ lazy_static! {
     };
     pub static ref SPLIT_INDEX: Feature = Feature {
         name: FeatureName("com.delphix:split_index".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref INDEXVALUE16: Feature = Feature {
+        name: FeatureName("com.delphix:indexvalue16".to_string()),
         info: FeatureType::NonUpgradeable
     };
 }

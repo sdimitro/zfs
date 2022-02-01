@@ -22,30 +22,28 @@ pub struct IndexKey {
 #[repr(packed)]
 pub struct IndexValue {
     location: Option<DiskLocation>,
-    // XXX remove this and figure out based on which slab it's in?  However,
-    // currently we need to return the right buffer size to the kernel, and it
-    // isn't passing us the expected read size.  So we need to change some
-    // interfaces to make that work right.
-    size: u32,
+    sectors: u16,
     atime: Atime,
 }
 
 impl IndexValue {
+    const SECTOR_SHIFT: usize = 9;
     pub fn new(location: Option<DiskLocation>, size: u32, atime: Atime) -> Self {
+        assert_eq!(size % (1 << Self::SECTOR_SHIFT), 0);
         Self {
             location,
-            size,
+            sectors: (size >> Self::SECTOR_SHIFT).try_into().unwrap(),
             atime,
         }
     }
     pub fn extent(&self) -> Option<Extent> {
         self.location.map(|location| Extent {
             location,
-            size: u64::from(self.size),
+            size: u64::from(self.size()),
         })
     }
     pub fn size(&self) -> u32 {
-        self.size
+        u32::from(self.sectors) << Self::SECTOR_SHIFT
     }
     pub fn atime(&self) -> Atime {
         self.atime
