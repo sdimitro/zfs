@@ -1108,6 +1108,8 @@ impl Slabs {
         slab_size: u32,
         slabs_phys: &TerseVec<SlabPhys>,
     ) -> Self {
+        let begin = Instant::now();
+
         // Note, BiBTreeMap::iter() is sorted by the left value (SlabId's), which we rely on here.
         let mut extent_iter = capacity.iter().map(|(_, &extent)| extent);
         let mut current_extent = extent_iter.next().unwrap();
@@ -1170,6 +1172,13 @@ impl Slabs {
         };
         spacemap.load(&mut import_cb).await;
         spacemap_next.load(&mut import_cb).await;
+
+        info!(
+            "read {} of spacemaps and processed {} entries in {}ms",
+            nice_p2size(spacemap.bytes() + spacemap_next.bytes()),
+            spacemap.total_entries() + spacemap_next.total_entries(),
+            begin.elapsed().as_millis(),
+        );
 
         slabs
     }
@@ -1250,7 +1259,6 @@ impl BlockAllocator {
         extent_allocator: Arc<ExtentAllocator>,
         phys: BlockAllocatorPhys,
     ) -> BlockAllocator {
-        let begin = Instant::now();
         let spacemap = SpaceMap::open(
             block_access.clone(),
             extent_allocator.clone(),
@@ -1301,12 +1309,6 @@ impl BlockAllocator {
         free_slabs.shuffle(&mut thread_rng());
 
         let slab_buckets = SlabAllocationBuckets::new(phys.slab_buckets, slabs_by_bucket);
-
-        info!(
-            "loaded BlockAllocator metadata in {}ms",
-            begin.elapsed().as_millis()
-        );
-
         BlockAllocator {
             capacity,
             slab_size,
@@ -2070,6 +2072,11 @@ async fn zcachedb_load_slab_state(
     extent_allocator: Arc<ExtentAllocator>,
     phys: BlockAllocatorPhys,
 ) -> Slabs {
+    println!(
+        "reading {} of spacemaps...",
+        nice_p2size(phys.spacemap.bytes() + phys.spacemap_next.bytes())
+    );
+    let begin = Instant::now();
     let spacemap = SpaceMap::open(
         block_access.clone(),
         extent_allocator.clone(),
@@ -2092,7 +2099,13 @@ async fn zcachedb_load_slab_state(
             })
             .collect()
     };
-    Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await
+    let slabs = Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await;
+    println!(
+        "processed {} spacemap entries in {:.2} seconds",
+        spacemap.total_entries() + spacemap_next.total_entries(),
+        begin.elapsed().as_secs_f32()
+    );
+    slabs
 }
 
 struct AllocationBucketStatistics {
