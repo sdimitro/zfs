@@ -2370,7 +2370,7 @@ pub async fn zcachedb_dump_slabs(
         }
         cache_slabs.push(slab);
         slabs_per_device
-            .get_mut(&slab.location().disk)
+            .get_mut(&slab.location().disk())
             .unwrap()
             .push(slab);
     }
