@@ -10,6 +10,7 @@ use std::collections::BTreeSet;
 use std::ops::Bound::*;
 use std::sync::RwLock;
 use std::time::Instant;
+use util::with_alloctag;
 use zettacache::base_types::*;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -33,6 +34,8 @@ struct ObjectBlockMapState {
 }
 
 impl ObjectBlockMap {
+    const MAP_TAG: &'static str = "ObjectBlockMap.state.map";
+
     pub async fn load(
         storage_object_log: &ObjectBasedLog<StorageObjectLogEntry>,
         next_block: BlockId,
@@ -46,7 +49,7 @@ impl ObjectBlockMap {
             .for_each(|ent| {
                 match ent {
                     StorageObjectLogEntry::Alloc { object } => {
-                        let inserted = map.insert(object);
+                        let inserted = with_alloctag(Self::MAP_TAG, || map.insert(object));
                         assert!(inserted);
                         num_alloc_entries += 1;
                     }
@@ -82,7 +85,7 @@ impl ObjectBlockMap {
             assert_gt!(object, last_object);
         }
 
-        let inserted = state.map.insert(object);
+        let inserted = with_alloctag(Self::MAP_TAG, || state.map.insert(object));
         assert!(inserted, "{:?} is already in the ObjectBlockMap", object);
         state.next_block = next_block;
     }

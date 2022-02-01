@@ -20,11 +20,18 @@ pub struct Feature {
 }
 
 lazy_static! {
-    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> =
-        [ORIGIN.clone(), EXPAND.clone()]
-            .map(|feature| (feature.name, feature.info))
-            .into_iter()
-            .collect();
+    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = [
+        ORIGIN.clone(),
+        EXPAND.clone(),
+        GHOSTS.clone(),
+        NOREMOVE.clone(),
+        FIXINT.clone(),
+        SPLIT_INDEX.clone(),
+        INDEXVALUE16.clone(),
+    ]
+    .map(|feature| (feature.name, feature.info))
+    .into_iter()
+    .collect();
     pub static ref ORIGIN: Feature = Feature {
         name: FeatureName("com.delphix:origin".to_string()),
         info: FeatureType::Upgradeable
@@ -35,6 +42,22 @@ lazy_static! {
     };
     pub static ref GHOSTS: Feature = Feature {
         name: FeatureName("com.delphix:ghosts".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref NOREMOVE: Feature = Feature {
+        name: FeatureName("com.delphix:noremove".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref FIXINT: Feature = Feature {
+        name: FeatureName("com.delphix:fixint".to_string()),
+        info: FeatureType::Upgradeable
+    };
+    pub static ref SPLIT_INDEX: Feature = Feature {
+        name: FeatureName("com.delphix:split_index".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref INDEXVALUE16: Feature = Feature {
+        name: FeatureName("com.delphix:indexvalue16".to_string()),
         info: FeatureType::NonUpgradeable
     };
 }

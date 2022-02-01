@@ -1763,23 +1763,74 @@ function verify_runnable # zone limit
 }
 
 # Take a Zettacache device as either an absolute or relative path and
-# return the /dev/disk/by-id name for the slog partition.
-get_slog_part() {
-	typeset devname="$(basename "$1")"
+# return the corresponding slog partition.
+function get_slog_part
+{
+	typeset devname="$1"
 	typeset slog_part=""
 
 	[[ -z "$devname" ]] && fail "Missing argument"
 
-	devname="${devname}p1"
-	udevadm settle -E "/dev/disk/by-id/$devname"
-	# shellcheck disable=SC2012
-	slog_part=$(ls -l /dev/disk/by-id 2>/dev/null | \
-	    awk "/$devname/ {print \$9; exit}" 2>/dev/null)
+	#
+	# Devices are specified by /dev/ or /dev/disk/by-id/ names. The
+	# partition suffix varies with names.
+	#
+	if [[ "$devname" =~ "^/dev/disk/by-id/" ]]; then
+		slog_part="${devname}-part1"
+	elif [[ "$devname" =~ "nvme" ]]; then
+		devname="$(basename "$devname")"
+		slog_part="/dev/${devname}p1"
+	else
+		devname="$(basename "$devname")"
+		slog_part="/dev/${devname}1"
+	fi
 
-	[[ -z "$slog_part" ]] && \
-	    fail "Could not find log partition for $devname"
+	udevadm settle -E "$slog_part"
+	echo "$slog_part"
+}
 
-	echo "/dev/disk/by-id/$slog_part"
+# Take a Zettacache device as either an absolute or relative path and
+# return the corresponding cache partition.
+function get_cache_part
+{
+	typeset devname="$1"
+	typeset cache_part=""
+
+	[ -z "$devname" ] && fail "Missing argument"
+
+	#
+	# Devices are specified by /dev/ or /dev/disk/by-id/ names. The
+	# partition suffix varies with names.
+	#
+	if [[ "$devname" =~ "^/dev/disk/by-id/" ]]; then
+		cache_part="${devname}-part2"
+	elif [[ "$devname" =~ "nvme" ]]; then
+		devname="$(basename "$devname")"
+		cache_part="/dev/${devname}p2"
+	else
+		devname="$(basename "$devname")"
+		cache_part="/dev/${devname}2"
+	fi
+
+	udevadm settle -E "$cache_part"
+	echo "$cache_part"
+}
+
+function invalidate_zcache_dev
+{
+	typeset cache_dev="$1"
+	cache_part="$(get_cache_part "$cache_dev")"
+	sudo dd if=/dev/zero of=${cache_part} bs=1M count=1 >/dev/null 2>&1
+}
+
+function invalidate_zcache
+{
+	log_note "Invalidate Zettacache device(s)"
+	sudo systemctl stop zfs-object-agent
+	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		invalidate_zcache_dev $cache_dev
+	done
+	sudo systemctl start zfs-object-agent
 }
 
 # Return 0 if create successfully or the pool exists; $? otherwise

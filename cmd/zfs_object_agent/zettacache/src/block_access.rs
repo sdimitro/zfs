@@ -28,6 +28,7 @@ use tokio::fs::File;
 use tokio::sync::Semaphore;
 use util::get_tunable;
 use util::super_trace;
+use util::with_alloctag;
 use util::zettacache_stats::*;
 use util::From64;
 use util::{AlignedBytes, AlignedVec};
@@ -37,7 +38,7 @@ use uuid::Uuid;
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
     pub static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize =
-        get_tunable("disk_write_max_queue_depth", 32);
+        get_tunable("disk_write_max_queue_depth", 128);
     static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
 }
 
@@ -128,6 +129,7 @@ pub enum CompressType {
 pub enum EncodeType {
     Json,
     Bincode,
+    BincodeFixint,
 }
 
 // Generate ioctl function
@@ -140,19 +142,17 @@ const CUSTOM_OFLAGS: i32 = libc::O_DIRECT;
 const CUSTOM_OFLAGS: i32 = 0;
 
 impl Disk {
-    pub fn new(disk_path: &str, readonly: bool) -> Disk {
+    pub fn new(disk_path: &str, readonly: bool) -> Result<Disk> {
         // Note: using std file open so that this func can be non-async.
         // Although this is blocking from a tokio thread, it's used
         // infrequently, and we're already blocking from the ioctls below.
-        let file = tokio::fs::File::from_std(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(!readonly)
-                .custom_flags(CUSTOM_OFLAGS)
-                .open(disk_path)
-                .with_context(|| format!("opening disk '{}'", disk_path))
-                .unwrap(),
-        );
+        let std_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(!readonly)
+            .custom_flags(CUSTOM_OFLAGS)
+            .open(disk_path)
+            .with_context(|| format!("opening disk '{}'", disk_path))?;
+        let file = tokio::fs::File::from_std(std_file);
         let stat = nix::sys::stat::fstat(file.as_raw_fd()).unwrap();
         trace!("stat: {:?}", stat);
         let mode = SFlag::from_bits_truncate(stat.st_mode);
@@ -196,7 +196,7 @@ impl Disk {
         };
         info!("opening cache file {}: {:?}", disk_path, this);
 
-        this
+        Ok(this)
     }
 }
 
@@ -250,22 +250,28 @@ impl BlockAccess {
         self.disk(disk).size
     }
 
+    pub fn disk_path(&self, disk: DiskId) -> String {
+        self.disk(disk).device_path.to_string()
+    }
+
     pub fn total_capacity(&self) -> u64 {
         self.disks().map(|disk| self.disk_size(disk)).sum()
     }
 
     // offset and length must be sector-aligned
     pub async fn read_raw(&self, extent: Extent, io_type: DiskIoType) -> AlignedBytes {
-        self.verify_aligned(extent.location.offset);
+        self.verify_aligned(extent.location.offset());
         self.verify_aligned(extent.size);
-        let disk = self.disk(extent.location.disk);
+        let disk = self.disk(extent.location.disk());
         let fd = disk.file.as_raw_fd();
         let sector_size = self.sector_size;
         let begin = Instant::now();
         let _permit = disk.outstanding_reads.acquire().await.unwrap();
         let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
         let bytes: AlignedBytes = tokio::task::spawn_blocking(move || {
-            let mut v = AlignedVec::with_capacity(usize::from64(extent.size), sector_size);
+            let mut v = with_alloctag("BlockAccess::raw_read()", || {
+                AlignedVec::with_capacity(usize::from64(extent.size), sector_size)
+            });
             // By using the unsafe libc::pread() instead of
             // nix::sys::uio::pread(), we avoid the cost of zeroing out the
             // vec's buffer.
@@ -274,7 +280,7 @@ impl BlockAccess {
                     fd,
                     v.as_mut_ptr() as *mut c_void,
                     extent.size.try_into().unwrap(),
-                    extent.location.offset.try_into().unwrap(),
+                    extent.location.offset().try_into().unwrap(),
                 );
                 let num_bytes_read = usize::try_from(Errno::result(res).unwrap()).unwrap();
                 v.set_len(num_bytes_read);
@@ -305,10 +311,10 @@ impl BlockAccess {
             !self.readonly,
             "attempting zettacache write in readonly mode"
         );
-        let disk = self.disk(location.disk);
+        let disk = self.disk(location.disk());
         let fd = disk.file.as_raw_fd();
         let length = bytes.len();
-        let offset = location.offset;
+        let offset = location.offset();
         let alignment = bytes.alignment();
         self.verify_aligned(offset);
         self.verify_aligned(length);
@@ -367,7 +373,19 @@ impl BlockAccess {
                 (payload, CompressType::Lz4)
             }
             EncodeType::Bincode => {
-                let payload = Self::bincode_options().serialize(struct_obj).unwrap();
+                let payload =
+                    with_alloctag("BlockAccess::chunk_to_raw() Bincode::serialize()", || {
+                        Self::bincode_options().serialize(struct_obj).unwrap()
+                    });
+                (payload, CompressType::None)
+            }
+            EncodeType::BincodeFixint => {
+                let payload =
+                    with_alloctag("BlockAccess::chunk_to_raw() Bincode::serialize()", || {
+                        Self::bincode_fixint_options()
+                            .serialize(struct_obj)
+                            .unwrap()
+                    });
                 // XXX It's faster to not lz4 compress this, even though
                 // compression would get us around 2x (27B -> 14B for index
                 // entries).  But if we were to use multiple CPU's, or be able
@@ -390,7 +408,9 @@ impl BlockAccess {
 
         let unrounded_len = header_bytes.len() + 1 + payload.len();
         let len = self.round_up_to_sector(unrounded_len);
-        let mut buf = AlignedVec::with_capacity(len, self.round_up_to_sector(1));
+        let mut buf = with_alloctag("BlockAccess::chunk_to_raw() AlignedVec", || {
+            AlignedVec::with_capacity(len, self.round_up_to_sector(1))
+        });
         buf.extend_from_slice(&header_bytes);
         // Encode a NUL byte after the header, so that we know where it ends.
         buf.extend_from_slice(&[0]);
@@ -404,6 +424,10 @@ impl BlockAccess {
     fn bincode_options() -> impl bincode::Options {
         // Note: DefaultOptions uses varint encoding (unlike bincode::serialize())
         bincode::DefaultOptions::new()
+    }
+
+    fn bincode_fixint_options() -> impl bincode::Options {
+        bincode::DefaultOptions::new().with_fixint_encoding()
     }
 
     /// returns deserialized struct and amount of the buf that was consumed
@@ -447,6 +471,7 @@ impl BlockAccess {
         let struct_obj: T = match header.encoding {
             EncodeType::Json => serde_json::from_slice(serde_slice)?,
             EncodeType::Bincode => Self::bincode_options().deserialize(serde_slice)?,
+            EncodeType::BincodeFixint => Self::bincode_fixint_options().deserialize(serde_slice)?,
         };
         Ok((
             struct_obj,

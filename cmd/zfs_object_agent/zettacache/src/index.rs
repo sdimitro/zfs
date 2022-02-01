@@ -7,11 +7,10 @@ use crate::extent_allocator::ExtentAllocatorBuilder;
 use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
-use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
+use std::cmp::max;
 use std::sync::Arc;
-use std::time::Instant;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct IndexKey {
@@ -20,22 +19,40 @@ pub struct IndexKey {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[repr(packed)]
 pub struct IndexValue {
-    pub location: Option<DiskLocation>,
-    // XXX remove this and figure out based on which slab it's in?  However,
-    // currently we need to return the right buffer size to the kernel, and it
-    // isn't passing us the expected read size.  So we need to change some
-    // interfaces to make that work right.
-    pub size: u32,
-    pub atime: Atime,
+    location: Option<DiskLocation>,
+    sectors: u16,
+    atime: Atime,
 }
 
 impl IndexValue {
+    const SECTOR_SHIFT: usize = 9;
+    pub fn new(location: Option<DiskLocation>, size: u32, atime: Atime) -> Self {
+        assert_eq!(size % (1 << Self::SECTOR_SHIFT), 0);
+        Self {
+            location,
+            sectors: (size >> Self::SECTOR_SHIFT).try_into().unwrap(),
+            atime,
+        }
+    }
     pub fn extent(&self) -> Option<Extent> {
         self.location.map(|location| Extent {
             location,
-            size: u64::from(self.size),
+            size: u64::from(self.size()),
         })
+    }
+    pub fn size(&self) -> u32 {
+        u32::from(self.sectors) << Self::SECTOR_SHIFT
+    }
+    pub fn atime(&self) -> Atime {
+        self.atime
+    }
+    pub fn location(&self) -> Option<DiskLocation> {
+        self.location
+    }
+    pub fn set_location(&mut self, location: Option<DiskLocation>) {
+        self.location = location;
     }
 }
 
@@ -44,19 +61,24 @@ pub struct IndexEntry {
     pub key: IndexKey,
     pub value: IndexValue,
 }
-impl OnDisk for IndexEntry {}
 impl BlockBasedLogEntry for IndexEntry {}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct ZettaCacheIndexPhys {
+pub struct IndexRunPhys {
+    // Note, entries at and before trim_key may exist on disk but are not considered
+    // part of this index.  Notably, the atime_histogram does not include their
+    // space.
+    trim_key: Option<IndexKey>,
+
     last_key: Option<IndexKey>,
     atime_histogram: AtimeHistogramPhys,
-    log: BlockBasedLogWithSummaryPhys<IndexEntry>,
+    log: SummarizedBlockBasedLogPhys<IndexEntry>,
 }
 
-impl ZettaCacheIndexPhys {
+impl IndexRunPhys {
     pub fn new(first_ghost_atime: Atime, first_live_atime: Atime) -> Self {
         Self {
+            trim_key: None,
             last_key: None,
             atime_histogram: AtimeHistogramPhys::new(first_ghost_atime, first_live_atime),
             log: Default::default(),
@@ -93,9 +115,17 @@ impl ZettaCacheIndexPhys {
         self.log.capacity_bytes()
     }
 
+    pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
+        &self.atime_histogram
+    }
+
+    pub fn last_key(&self) -> Option<IndexKey> {
+        self.last_key
+    }
+
     pub async fn verify_histogram(&self, block_access: Arc<BlockAccess>) {
         let mut histogram = AtimeHistogramPhys::new(
-            self.atime_histogram.first(),
+            self.atime_histogram.first_ghost(),
             self.atime_histogram.first_live(),
         );
         self.iter_entries(block_access)
@@ -109,13 +139,14 @@ impl ZettaCacheIndexPhys {
     }
 }
 
-pub struct ZettaCacheIndex {
-    pub last_key: Option<IndexKey>,
-    pub atime_histogram: AtimeHistogramPhys,
-    pub log: BlockBasedLogWithSummary<IndexEntry>,
+pub struct IndexRun {
+    trim_key: Option<IndexKey>, // The key and all before it are logically removed from the index.
+    last_key: Option<IndexKey>,
+    atime_histogram: AtimeHistogramPhys,
+    log: SummarizedBlockBasedLog<IndexEntry>,
 }
 
-impl std::fmt::Debug for ZettaCacheIndex {
+impl std::fmt::Debug for IndexRun {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ZettaCacheIndex")
             .field("last_key", &self.last_key)
@@ -123,42 +154,55 @@ impl std::fmt::Debug for ZettaCacheIndex {
     }
 }
 
-impl ZettaCacheIndex {
+#[derive(Debug)]
+pub struct IndexFlushDelta(SummarizedBlockBasedLogFlushDelta<IndexEntry>);
+
+impl IndexRun {
     pub async fn open(
         block_access: Arc<BlockAccess>,
         extent_allocator: Arc<ExtentAllocator>,
-        phys: ZettaCacheIndexPhys,
+        phys: IndexRunPhys,
     ) -> Self {
-        let begin = Instant::now();
-        let index = ZettaCacheIndex {
+        let index = Self {
+            trim_key: phys.trim_key,
             last_key: phys.last_key,
             atime_histogram: phys.atime_histogram,
-            log: BlockBasedLogWithSummary::open(block_access, extent_allocator, phys.log).await,
+            log: SummarizedBlockBasedLog::open(block_access, extent_allocator, phys.log).await,
         };
-        info!("loaded Index summary in {}ms", begin.elapsed().as_millis());
         index
     }
 
-    pub async fn flush(&mut self) -> ZettaCacheIndexPhys {
-        ZettaCacheIndexPhys {
-            last_key: self.last_key,
-            atime_histogram: self.atime_histogram.clone(),
-            log: self.log.flush().await,
-        }
+    /// Returns new Phys and a Vec which can be passed to ReadOnlyIndexRun::update()
+    pub async fn flush(&mut self) -> (IndexRunPhys, IndexFlushDelta) {
+        let (log, new_chunks) = self.log.flush().await;
+        (
+            IndexRunPhys {
+                trim_key: self.trim_key,
+                last_key: self.last_key,
+                atime_histogram: self.atime_histogram.clone(),
+                log,
+            },
+            IndexFlushDelta(new_chunks),
+        )
     }
 
     /// Retrieve the index phys. This only works if there are no pending log entries.
     /// Use flush() to retrieve the phys when there are pending entries.
-    pub fn get_phys(&self) -> ZettaCacheIndexPhys {
-        ZettaCacheIndexPhys {
+    pub fn get_phys(&self) -> IndexRunPhys {
+        IndexRunPhys {
+            trim_key: self.trim_key,
             last_key: self.last_key,
             atime_histogram: self.atime_histogram.clone(),
             log: self.log.get_phys(),
         }
     }
 
-    pub fn first_atime(&self) -> Atime {
-        self.atime_histogram.first()
+    pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
+        &self.atime_histogram
+    }
+
+    pub fn first_ghost_atime(&self) -> Atime {
+        self.atime_histogram.first_ghost()
     }
 
     pub fn first_live_atime(&self) -> Atime {
@@ -182,5 +226,84 @@ impl ZettaCacheIndex {
         self.last_key = None;
         self.atime_histogram.clear();
         self.log.clear();
+    }
+
+    // Logically remove entries at and before `first`, which must be >= the current
+    // `trim_key`.  The newly-obsoleted entries must have the provided
+    // histogram.
+    pub fn trim(&mut self, trim_key: IndexKey, obsoleted: &AtimeHistogramPhys) {
+        if let Some(old_trim_key) = self.trim_key {
+            assert_ge!(trim_key, old_trim_key);
+        }
+
+        self.last_key = Some(
+            self.last_key
+                .map(|last_key| max(trim_key, last_key))
+                .unwrap_or(trim_key),
+        );
+        self.trim_key = Some(trim_key);
+        self.atime_histogram -= obsoleted;
+    }
+
+    pub fn len(&self) -> u64 {
+        self.log.len()
+    }
+
+    pub fn num_bytes(&self) -> u64 {
+        self.log.num_bytes()
+    }
+
+    pub fn iter(&self) -> impl Stream<Item = IndexEntry> {
+        self.log.iter()
+    }
+
+    pub fn trim_key(&self) -> Option<IndexKey> {
+        self.trim_key
+    }
+
+    pub fn last_key(&self) -> Option<IndexKey> {
+        self.last_key
+    }
+
+    pub async fn lookup(&self, key: IndexKey) -> Option<BlockBasedLogValueGuard<'_, IndexEntry>> {
+        if let Some(trim_key) = self.trim_key {
+            assert_gt!(key, trim_key);
+        }
+        self.log.lookup_by_key(&key, |entry| entry.key).await
+    }
+}
+
+pub struct ReadOnlyIndexRun {
+    trim_key: Option<IndexKey>,
+    last_key: Option<IndexKey>,
+    log: ReadOnlySummarizedBlockBasedLog<IndexEntry>,
+}
+
+impl ReadOnlyIndexRun {
+    pub async fn open(block_access: Arc<BlockAccess>, phys: IndexRunPhys) -> Self {
+        let index = Self {
+            trim_key: phys.trim_key,
+            last_key: phys.last_key,
+            log: ReadOnlySummarizedBlockBasedLog::open(block_access, phys.log).await,
+        };
+        index
+    }
+
+    pub fn last_key(&self) -> Option<IndexKey> {
+        self.last_key
+    }
+
+    pub async fn lookup(&self, key: IndexKey) -> Option<BlockBasedLogValueGuard<'_, IndexEntry>> {
+        if let Some(trim_key) = self.trim_key {
+            assert_gt!(key, trim_key);
+        }
+        self.log.lookup_by_key(&key, |entry| entry.key).await
+    }
+
+    /// Update this readonly view to reflect newly-appended chunks.
+    pub fn update(&mut self, phys: IndexRunPhys, new_chunks: &IndexFlushDelta) {
+        self.trim_key = phys.trim_key;
+        self.last_key = phys.last_key;
+        self.log.update(phys.log, &new_chunks.0);
     }
 }

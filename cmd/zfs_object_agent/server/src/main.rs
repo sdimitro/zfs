@@ -1,7 +1,14 @@
 use clap::{Arg, SubCommand};
 use git_version::git_version;
+use lazy_static::lazy_static;
 use log::*;
+use std::time::Duration;
+use util::get_tunable;
+use util::TrackingAllocator;
 use zettaobject::test_connectivity;
+
+#[global_allocator]
+static GLOBAL: TrackingAllocator = TrackingAllocator;
 
 static GIT_VERSION: &str = git_version!(
     fallback = match option_env!("CARGO_ZOA_GITREV") {
@@ -9,6 +16,15 @@ static GIT_VERSION: &str = git_version!(
         None => "unknown",
     }
 );
+
+lazy_static! {
+    static ref ALLOCATOR_PRINT_DURATION: Duration =
+        Duration::from_secs(get_tunable("allocator_print_secs", 60));
+    static ref ALLOCATOR_PRINT_MIN_BYTES: u64 =
+        get_tunable("allocator_print_min_bytes", 1024 * 1024);
+    static ref ALLOCATOR_PRINT_MIN_ALLOCS: u64 =
+        get_tunable("allocator_print_min_allocs", 1_000_000);
+}
 
 fn main() {
     let matches = clap::App::new("ZFS Object Agent")
@@ -159,21 +175,41 @@ fn main() {
                 false,
             );
 
+            // This has to be called after setting up tunables.  Allocations
+            // that happen before this call will use the defaults hard-coded in
+            // alloc.rs
+            TrackingAllocator::setup();
+
             error!(
                 "Starting ZFS Object Agent ({}).  Local timezone is {}",
                 GIT_VERSION,
                 chrono::Local::now().format("%Z (%:z)")
             );
 
-            zettaobject::init::start(
-                socket_dir,
-                cache_paths,
-                tokio::runtime::Builder::new_multi_thread()
-                    .enable_all()
-                    .thread_name("zoa")
-                    .build()
-                    .unwrap(),
-            );
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .thread_name("zoa")
+                .build()
+                .unwrap();
+
+            runtime.spawn(async {
+                let mut interval = tokio::time::interval(*ALLOCATOR_PRINT_DURATION);
+                loop {
+                    interval.tick().await;
+                    debug!(
+                        "allocation tracking:\n{}",
+                        TrackingAllocator::format(
+                            *ALLOCATOR_PRINT_MIN_ALLOCS,
+                            *ALLOCATOR_PRINT_MIN_BYTES
+                        )
+                    );
+                }
+            });
+
+            match zettaobject::init::start(socket_dir, cache_paths, runtime) {
+                Ok(()) => panic!("unreachable statement"),
+                Err(err) => eprintln!("error: couldn't start server: {}", err),
+            }
         }
     }
 }

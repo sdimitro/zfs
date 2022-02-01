@@ -5,7 +5,6 @@ use std::borrow::Borrow;
 use std::fmt::*;
 use std::ops::Add;
 use std::ops::Sub;
-use util::From64;
 
 /*
  * Things that are stored on disk.
@@ -35,21 +34,30 @@ impl BlockId {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct DiskId(pub u16);
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[repr(packed)]
 pub struct DiskLocation {
-    pub disk: DiskId,
-    pub offset: u64,
+    disk: DiskId,
+    offset: u64,
+}
+impl DiskLocation {
+    pub fn new(disk: DiskId, offset: u64) -> Self {
+        Self { disk, offset }
+    }
+    pub fn disk(&self) -> DiskId {
+        self.disk
+    }
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
 }
 impl Add<u64> for DiskLocation {
     type Output = DiskLocation;
     fn add(self, rhs: u64) -> Self::Output {
-        DiskLocation {
-            disk: self.disk,
-            offset: self.offset + rhs,
-        }
+        DiskLocation::new(self.disk(), self.offset() + rhs)
     }
 }
 impl Add<usize> for DiskLocation {
@@ -62,8 +70,8 @@ impl Sub<DiskLocation> for DiskLocation {
     type Output = u64;
 
     fn sub(self, rhs: DiskLocation) -> Self::Output {
-        assert_eq!(self.disk, rhs.disk);
-        self.offset - rhs.offset
+        assert_eq!(self.disk(), rhs.disk());
+        self.offset() - rhs.offset()
     }
 }
 
@@ -78,7 +86,7 @@ impl Extent {
         assert_eq!(offset % 512, 0, "offset {} is not 512-aligned", offset);
         assert_eq!(size % 512, 0, "size {} is not 512-aligned", size);
         Extent {
-            location: DiskLocation { disk, offset },
+            location: DiskLocation::new(disk, offset),
             size,
         }
     }
@@ -93,18 +101,18 @@ impl Extent {
 
     /// returns true if `sub` is entirely contained within this extent
     pub fn contains(&self, sub: &Extent) -> bool {
-        sub.location.disk == self.location.disk
-            && sub.location.offset >= self.location.offset
-            && sub.location.offset + sub.size <= self.location.offset + self.size
+        sub.location.disk() == self.location.disk()
+            && sub.location.offset() >= self.location.offset()
+            && sub.location.offset() + sub.size <= self.location.offset() + self.size
     }
 
     /// returns the sub-range of self that is after `sub`, or None if self does not contain sub
     pub fn after(&self, sub: &Extent) -> Option<Extent> {
         match self.contains(sub) {
             true => Some(Extent::new(
-                self.location.disk,
-                sub.location.offset + sub.size,
-                self.location.offset + self.size - (sub.location.offset + sub.size),
+                self.location.disk(),
+                sub.location.offset() + sub.size,
+                self.location.offset() + self.size - (sub.location.offset() + sub.size),
             )),
             false => None,
         }
@@ -127,24 +135,27 @@ impl CheckpointId {
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
-pub struct Atime(pub u64);
+pub struct Atime(pub u32);
 impl Atime {
     pub fn next(&self) -> Atime {
         Atime(self.0 + 1)
+    }
+    pub fn checked_sub(&self, rhs: Self) -> Option<usize> {
+        self.0.checked_sub(rhs.0).map(|value| value as usize)
     }
 }
 
 impl Sub<Atime> for Atime {
     type Output = usize;
     fn sub(self, rhs: Atime) -> usize {
-        usize::from64(self.0 - rhs.0)
+        (self.0 - rhs.0) as usize
     }
 }
 
 impl Add<usize> for Atime {
     type Output = Atime;
     fn add(self, rhs: usize) -> Atime {
-        Atime(self.0 + rhs as u64)
+        Atime(self.0 + u32::try_from(rhs).unwrap())
     }
 }
 

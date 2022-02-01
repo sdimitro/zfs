@@ -54,6 +54,7 @@ use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
 use util::super_trace;
+use util::with_alloctag;
 use util::AlignedBytes;
 use util::TerseVec;
 use uuid::Uuid;
@@ -125,7 +126,7 @@ struct PoolOwnerPhys {
 
 impl PoolOwnerPhys {
     fn key(id: PoolGuid) -> String {
-        format!("zfs/{}/owner", id.to_string())
+        format!("zfs/{}/owner", id)
     }
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
@@ -2174,8 +2175,8 @@ async fn reclaim_frees_object(
             phys
         })
     });
-    let mut new_phys = stream::iter(futures)
-        .buffered(*RECLAIM_ONE_BUFFERED)
+    let mut new_phys = with_alloctag("reclaim_frees_object() buffered()", || stream::iter(futures)
+        .buffered(*RECLAIM_ONE_BUFFERED))
         .reduce(|mut a, mut b| async move {
             assert_eq!(a.header.guid, b.header.guid);
             trace!(

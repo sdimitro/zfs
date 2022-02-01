@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2154
 #
 # CDDL HEADER START
 #
@@ -152,11 +153,16 @@ cleanup() {
 	done
 
 
-	# Unset ZETTACACHE_DEVICES
+	# Unset ZETTACACHE_DEVICES and invalidate zcache devices
 	if [ -n "$ZTS_OBJECT_STORE" ]; then
+		sudo systemctl stop zfs-object-agent
+		for cache_dev in ${ZETTACACHE_DEVICES}; do
+			invalidate_zcache_dev "$cache_dev"
+		done
+
 		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
-		    $ZOA_CONF
-		sudo systemctl restart zfs-object-agent
+		    "$ZOA_CONF"
+		sudo systemctl start zfs-object-agent
 	fi
 
 	# Find all the crash files that were created after the start
@@ -481,35 +487,55 @@ EOF
 # Take a Zettacache device as either an absolute or relative path and
 # return the /dev/disk/by-id name for the cache partition.
 get_cache_part() {
-	devname="$(basename "$1")"
+	devname="$1"
+	cache_part=""
 
 	[ -z "$devname" ] && fail "Missing argument"
 
-	devname="${devname}p2"
-	udevadm settle -E "/dev/disk/by-id/$devname"
-	# shellcheck disable=SC2012
-	cache_part=$(ls -l /dev/disk/by-id 2>/dev/null | \
-	    awk "/$devname/ {print \$9; exit}" 2>/dev/null)
+	if echo "$devname" | grep -q "^/dev/disk/by-id/"; then
+		cache_part="${devname}-part2"
+	elif echo "$devname" | grep -q "nvme"; then
+		devname="$(basename "$devname")"
+		cache_part="/dev/${devname}p2"
+	else
+		devname="$(basename "$devname")"
+		cache_part="/dev/${devname}2"
+	fi
 
-	[ -z "$cache_part" ] && fail "Could not find cache partition for $devname"
+	udevadm settle -E "$cache_part"
+	echo "$cache_part"
+}
 
-	echo "/dev/disk/by-id/$cache_part"
+invalidate_zcache_dev() {
+	cache_dev="$1"
+	cache_part="$(get_cache_part "$cache_dev")"
+	sudo dd if=/dev/zero of="${cache_part}" bs=1M count=1 >/dev/null 2>&1
 }
 
 configure_zettacache() {
 	cache_parts=""
 	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		#
 		# Dedicate 8G at the start of the zettacache disk for a slog.
-		printf "size=16777216, bootable\n," | \
-		    sudo sfdisk --wipe always \
-		    "/dev/$(basename "$cache_dev")"
+		# Devices are specified by /dev/ or /dev/disk/by-id/ names.
+		#
+		if echo "$cache_dev" | grep -q "^/dev/disk/by-id/"; then
+			printf "size=16777216, bootable\n," | \
+			    sudo sfdisk -q -X gpt --wipe always "$cache_dev"
+		else
+			printf "size=16777216, bootable\n," | \
+			    sudo sfdisk -q -X gpt --wipe always \
+			    "/dev/$(basename "$cache_dev")"
+		fi
+
+		invalidate_zcache_dev "$cache_dev"
 		if [ -z "$cache_parts" ]; then
 			cache_parts="$(get_cache_part "$cache_dev")"
 		else
 			cache_parts="${cache_parts},$(get_cache_part "$cache_dev")"
 		fi
 	done
-	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' $ZOA_CONF
+	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
 	sudo sh -c "echo ZETTACACHE_DEVICES=$cache_parts >>$ZOA_CONF"
 }
 
@@ -518,13 +544,13 @@ configure_zettacache() {
 add_tunable() {
     name="$1"
     value="$2"
-    echo "$name=$value" | sudo tee -a $ZOA_CONFIG > /dev/null
+    echo "$name=$value" | sudo tee -a "$ZOA_CONFIG" > /dev/null
 }
 
 # Returns if a tunable is already configured
 # in the zoa configuration file
 is_tunable_configured() {
-    grep "$1" $ZOA_CONFIG 1>/dev/null 2>&1
+    grep "$1" "$ZOA_CONFIG" 1>/dev/null 2>&1
     return $?
 }
 
@@ -543,7 +569,7 @@ add_or_update_tunable() {
         # followed by 0 or more white spaces
         # followed by group that captures anything
         sudo -E \
-            sed -E -i "s/\s*${name}\s*=\s*(.*)/${name}=${value}/" $ZOA_CONFIG
+            sed -E -i "s/\s*${name}\s*=\s*(.*)/${name}=${value}/" "$ZOA_CONFIG"
     else
         add_tunable "$name" "$value"
     fi
@@ -599,7 +625,7 @@ check_and_set_zoa_tunables() {
     # set in the environment variable then add a default
     # one to the config
     if ! is_tunable_configured "die_mtbf_secs"; then
-        add_tunable "die_mtbf_secs" $ZOA_DIE_MTBF_SECS_DEFAULT_VALUE
+        add_tunable "die_mtbf_secs" "$ZOA_DIE_MTBF_SECS_DEFAULT_VALUE"
     fi
 }
 
@@ -721,6 +747,8 @@ while getopts 'hvqxkfScRn:d:s:r:?t:T:u:I:' OPTION; do
 		usage
 		exit
 		;;
+	*)
+		;;
 	esac
 done
 
@@ -741,7 +769,7 @@ if [ -n "$SINGLETEST" ]; then
 		SINGLEQUIET="True"
 	fi
 
-	cat >$RUNFILE_DIR/$RUNFILES << EOF
+	cat >"${RUNFILE_DIR}/${RUNFILES}" << EOF
 [DEFAULT]
 pre =
 quiet = $SINGLEQUIET
@@ -765,7 +793,7 @@ EOF
 		CLEANUPSCRIPT="cleanup"
 	fi
 
-	cat >>$RUNFILE_DIR/$RUNFILES << EOF
+	cat >>"${RUNFILE_DIR}/${RUNFILES}" << EOF
 
 [$SINGLETESTDIR]
 tests = ['$SINGLETESTFILE']
@@ -911,7 +939,7 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 		configure_zettacache
 	else
 		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
-		    $ZOA_CONF
+		    "$ZOA_CONF"
 	fi
 
 	# Enable zfs-object-agent to automatically
@@ -927,9 +955,9 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	if $HAS_ZOA_SERVICE; then
 		sudo systemctl restart zfs-object-agent
 	else
-		sudo -E /sbin/zfs_object_agent -vv -t $ZOA_CONFIG \
-		    --output-file=$ZOA_LOG 2>&1 | \
-		    sudo tee $ZOA_OUTPUT > /dev/null &
+		sudo -E /sbin/zfs_object_agent -vv -t "$ZOA_CONFIG" \
+		    --output-file="$ZOA_LOG" 2>&1 | \
+		    sudo tee "$ZOA_OUTPUT" > /dev/null &
 	fi
 
 	#
@@ -1126,4 +1154,4 @@ if [ -n "$SINGLETEST" ]; then
 	rm -f "$RUNFILES" >/dev/null 2>&1
 fi
 
-exit ${RESULT}
+exit "${RESULT}"

@@ -4,6 +4,10 @@ use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use std::iter;
+use std::mem;
+use std::ops::AddAssign;
+use std::ops::SubAssign;
 use util::nice_p2size;
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone)]
@@ -27,12 +31,18 @@ impl AtimeHistogramPhys {
         }
     }
 
-    pub fn first(&self) -> Atime {
+    pub fn first_ghost(&self) -> Atime {
         self.first_ghost
     }
 
     pub fn first_live(&self) -> Atime {
         self.first_live
+    }
+
+    /// Replace self with an empty version, returning the previous value.  The
+    /// first_ghost/live are preserved.
+    pub fn take(&mut self) -> Self {
+        mem::replace(self, Self::new(self.first_ghost, self.first_live))
     }
 
     /// Reset the start to a later atime, discarding older entries.
@@ -99,18 +109,16 @@ impl AtimeHistogramPhys {
     }
 
     pub fn insert(&mut self, value: IndexValue) {
-        assert_ge!(value.atime, self.first_ghost);
-        let index = value.atime - self.first_ghost;
+        let index = value.atime() - self.first_ghost;
         if index >= self.histogram.len() {
             self.histogram.resize(index + 1, 0);
         }
-        self.histogram[index] += u64::from(value.size);
+        self.histogram[index] += u64::from(value.size());
     }
 
     pub fn remove(&mut self, value: IndexValue) {
-        assert_ge!(value.atime, self.first_ghost);
-        let index = value.atime - self.first_ghost;
-        self.histogram[index] -= u64::from(value.size);
+        let index = value.atime() - self.first_ghost;
+        self.histogram[index] -= u64::from(value.size());
     }
 
     pub fn clear(&mut self) {
@@ -119,6 +127,15 @@ impl AtimeHistogramPhys {
 
     pub fn sum_live(&self) -> u64 {
         self.size_at(self.first_live)
+    }
+
+    pub fn sum_ghost(&self) -> u64 {
+        let index = self.first_live - self.first_ghost;
+        self.histogram[..index].iter().sum()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.size_at(self.first_ghost) == 0
     }
 
     /// Add up all the atime histogram buckets from key atime
@@ -149,6 +166,52 @@ impl AtimeHistogramPhys {
                 index,
                 self.first_ghost + index
             );
+        }
+    }
+}
+
+impl SubAssign<&Self> for AtimeHistogramPhys {
+    fn sub_assign(&mut self, rhs: &Self) {
+        // rhs must cover a subset of our Atimes
+        assert_le!(self.first_ghost, rhs.first_ghost);
+        assert_ge!(
+            self.first_ghost + self.histogram.len(),
+            rhs.first_ghost + self.histogram.len()
+        );
+        for (self_value, rhs_value) in self.histogram[rhs.first_ghost - self.first_ghost..]
+            .iter_mut()
+            .zip(rhs.histogram.iter())
+        {
+            *self_value -= *rhs_value;
+        }
+    }
+}
+
+/// Add the contents of two histograms, possibly extending the start or end.
+impl AddAssign<&Self> for AtimeHistogramPhys {
+    fn add_assign(&mut self, rhs: &Self) {
+        if let Some(prepend) = self.first_ghost.checked_sub(rhs.first_ghost) {
+            let mut new_histogram: Vec<u64> = vec![0; prepend];
+            new_histogram.extend_from_slice(&self.histogram);
+            self.histogram = new_histogram;
+            self.first_ghost = rhs.first_ghost;
+        }
+        if let Some(append) = (rhs.first_ghost + rhs.histogram.len())
+            .checked_sub(self.first_ghost + self.histogram.len())
+        {
+            self.histogram.extend(iter::repeat(0).take(append));
+        }
+        // rhs must now cover a subset of our Atimes
+        assert_le!(self.first_ghost, rhs.first_ghost);
+        assert_ge!(
+            self.first_ghost + self.histogram.len(),
+            rhs.first_ghost + rhs.histogram.len()
+        );
+        for (self_value, rhs_value) in self.histogram[rhs.first_ghost - self.first_ghost..]
+            .iter_mut()
+            .zip(rhs.histogram.iter())
+        {
+            *self_value += *rhs_value;
         }
     }
 }

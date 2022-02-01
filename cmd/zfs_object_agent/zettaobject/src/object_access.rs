@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
 use tokio::{sync::watch, time::error::Elapsed};
-use util::{get_tunable, super_trace};
+use util::{get_tunable, super_trace, with_alloctag};
 
 struct ObjectCache {
     // XXX cache key should include Bucket
@@ -495,9 +495,11 @@ impl ObjectAccess {
             };
             let output = self.client.get_object(req).await?;
             let begin = Instant::now();
-            let mut v = BytesMut::with_capacity(
-                usize::try_from(output.content_length.unwrap_or(0)).unwrap(),
-            );
+            let mut v = with_alloctag("ObjectAccess::get_object_impl()", || {
+                BytesMut::with_capacity(
+                    usize::try_from(output.content_length.unwrap_or(0)).unwrap(),
+                )
+            });
             let mut count = 0;
             match output
                 .body
@@ -721,7 +723,10 @@ impl ObjectAccess {
 
         let result = retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
             let my_bytes = bytes.clone();
-            let stream = ByteStream::new_with_size(stream::iter(iter::once(Ok(my_bytes))), len);
+            let stream = with_alloctag(
+                "ObjectAccess::put_object_impl() ByteStream::new_with_size() Box::pin(stream)",
+                || ByteStream::new_with_size(stream::iter(iter::once(Ok(my_bytes))), len),
+            );
 
             let req = PutObjectRequest {
                 bucket: self.bucket_str.clone(),

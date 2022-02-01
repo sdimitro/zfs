@@ -1,5 +1,5 @@
-use crate::get_tunable;
 use crate::tunable::log_tunable_config;
+use crate::{get_tunable, with_alloctag_hf};
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
@@ -62,13 +62,15 @@ pub struct BufferAppender {}
 
 impl Append for BufferAppender {
     fn append(&self, record: &Record) -> anyhow::Result<()> {
-        let str = format!(
-            "[{}][{}][{}] {}",
-            chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
-            record.target(),
-            record.level(),
-            record.args()
-        );
+        let str = with_alloctag_hf("logging BufferAppender", || {
+            format!(
+                "[{}][{}][{}] {}",
+                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                record.target(),
+                record.level(),
+                record.args()
+            )
+        });
 
         if let Ok(mut messages) = LOG_MESSAGES.lock() {
             while messages.len() >= *MAX_LOG_MESSAGES {

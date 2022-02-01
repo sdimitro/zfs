@@ -24,6 +24,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::{mpsc, Mutex};
 use util::get_tunable;
 use util::super_trace;
+use util::with_alloctag_hf;
 use util::From64;
 
 lazy_static! {
@@ -159,14 +160,16 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
 
         let mut v = Vec::new();
         // XXX Would be nice if we didn't have to zero it out.
-        v.resize(usize::from64(len64), 0);
+        with_alloctag_hf("get_next_request()", || v.resize(usize::from64(len64), 0));
         input.read_exact(v.as_mut()).await?;
         let nvl = NvList::try_unpack(v.as_ref()).unwrap();
         Ok(nvl)
     }
 
     async fn send_response(output: &Mutex<OwnedWriteHalf>, nvl: NvList) {
-        let buf = nvl.pack(NvEncoding::Native).unwrap();
+        let buf = with_alloctag_hf("Server::send_response() NvList.pack()", || {
+            nvl.pack(NvEncoding::Native).unwrap()
+        });
         drop(nvl);
         let len64 = buf.len() as u64;
         let mut w = output.lock().await;
@@ -192,7 +195,10 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
             }
             let nvl = Self::get_next_request(&mut input).await?;
 
-            let request_type_cstr = nvl.lookup_string("Type")?;
+            let request_type_cstr =
+                with_alloctag_hf("Server::start_connection() NvList::lookup_string()", || {
+                    nvl.lookup_string("Type")
+                })?;
             let request_type = request_type_cstr.to_str()?;
             match server.handlers.get(request_type) {
                 Some(HandlerEnum::Serial(handler)) => {

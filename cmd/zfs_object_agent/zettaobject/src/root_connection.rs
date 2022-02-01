@@ -13,11 +13,12 @@ use cstr_argument::CStrArgument;
 use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
+use std::ffi::CString;
 use std::sync::Arc;
-use util::maybe_die_with;
 use util::AlignedBytes;
 use util::From64;
-use util::{get_tunable, super_trace};
+use util::{get_tunable, super_trace, with_alloctag};
+use util::{maybe_die_with, with_alloctag_hf};
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -305,10 +306,20 @@ impl RootConnectionState {
     /// queue write, sends response when completed (persistent).
     /// completion may not happen until flush_pool() is called
     fn write_block(&mut self, nvl: NvList) -> HandlerReturn {
-        let block = BlockId(nvl.lookup_uint64("block")?);
-        let slice = u8_array_value(&nvl, "data")?;
-        let request_id = nvl.lookup_uint64("request_id")?;
-        let token = nvl.lookup_uint64("token")?;
+        // It would be simpler to pass the &str literal to
+        // NvListRef::lookup_uint64(), but that would require doing an
+        // allocation for each one.  This does the allocation of the CString
+        // once.
+        lazy_static! {
+            static ref BLOCK: CString = CString::new("block").unwrap();
+            static ref DATA: CString = CString::new("data").unwrap();
+            static ref REQUEST_ID: CString = CString::new("request_id").unwrap();
+            static ref TOKEN: CString = CString::new("token").unwrap();
+        }
+        let block = BlockId(nvl.lookup_uint64(&*BLOCK)?);
+        let slice = u8_array_value(&nvl, &*DATA)?;
+        let request_id = nvl.lookup_uint64(&*REQUEST_ID)?;
+        let token = nvl.lookup_uint64(&*TOKEN)?;
         super_trace!(
             "got write request id={}: {:?} len={}",
             request_id,
@@ -326,20 +337,27 @@ impl RootConnectionState {
             None => 1,
         };
         // XXX copying data
-        let bytes = AlignedBytes::copy_from_slice(slice, alignment);
-        Ok(Box::pin(async move {
-            pool.write_block(block, bytes).await;
-            let mut response = NvList::new_unique_names();
-            response.insert("Type", "write done").unwrap();
-            response.insert("block", &block.0).unwrap();
-            response.insert("request_id", &request_id).unwrap();
-            response.insert("token", &token).unwrap();
-            super_trace!("sending response: {:?}", response);
-            if nvl.exists("reissued") {
-                maybe_die_with(|| "after reissued write block request".to_string());
-            }
-            Ok(Some(response))
-        }))
+        let bytes = with_alloctag("write_block()", || {
+            AlignedBytes::copy_from_slice(slice, alignment)
+        });
+        Ok(with_alloctag_hf(
+            "write_block() Box::pin({closure})",
+            || {
+                Box::pin(async move {
+                    pool.write_block(block, bytes).await;
+                    let mut response = NvList::new_unique_names();
+                    response.insert("Type", "write done").unwrap();
+                    response.insert("block", &block.0).unwrap();
+                    response.insert("request_id", &request_id).unwrap();
+                    response.insert("token", &token).unwrap();
+                    super_trace!("sending response: {:?}", response);
+                    if nvl.exists("reissued") {
+                        maybe_die_with(|| "after reissued write block request".to_string());
+                    }
+                    Ok(Some(response))
+                })
+            },
+        ))
     }
 
     fn free_blocks(&mut self, nvl: NvList) -> HandlerReturn {

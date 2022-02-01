@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::Display;
 use std::time::Instant;
+use util::with_alloctag;
 use zettacache::base_types::*;
 
 pub const NUM_DATA_PREFIXES: u64 = 64;
@@ -81,14 +82,18 @@ impl DataObject {
             false => object_access.get_object(key, stat_type).await?,
         };
         let begin = Instant::now();
-        let borrowed: DataObjectPhys = bincode::deserialize(&bytes).with_context(context)?;
+        let borrowed: DataObjectPhys = with_alloctag("DataObjectPhys deserialize", || {
+            bincode::deserialize(&bytes).with_context(context)
+        })?;
         let data_object = DataObject {
             header: borrowed.header,
-            blocks: borrowed
-                .blocks
-                .into_iter()
-                .map(|(block, slice)| (BlockId(block), bytes.slice_ref(slice)))
-                .collect(),
+            blocks: with_alloctag("DataObject.blocks (HashMap, not actual data)", || {
+                borrowed
+                    .blocks
+                    .into_iter()
+                    .map(|(block, slice)| (BlockId(block), bytes.slice_ref(slice)))
+                    .collect()
+            }),
         };
 
         trace!(
@@ -148,7 +153,9 @@ impl DataObject {
             blocks,
         };
 
-        let contents = bincode::serialize(&borrowed).unwrap();
+        let contents = with_alloctag("DataObject::put() bincode::serialize()", || {
+            bincode::serialize(&borrowed).unwrap()
+        });
         trace!(
             "{:?}: serialized {} blocks in {} bytes in {}ms",
             self.header.object,
