@@ -176,7 +176,7 @@ impl SuperblockPhys {
         // XXX pad it out to SUPERBLOCK_SIZE?
         block_access
             .write_raw(
-                DiskLocation { offset: 0, disk },
+                DiskLocation::new(disk, 0),
                 raw,
                 DiskIoType::MaintenanceWrite,
             )

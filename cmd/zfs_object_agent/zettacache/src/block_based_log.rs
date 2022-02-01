@@ -105,11 +105,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                 // parallel?
 
                 let truncated_extent =
-                    extent.range(0, min(extent.size, (next_chunk_offset - *offset)));
+                    extent.range(0, min(extent.size, next_chunk_offset - *offset));
                 let extent_bytes = block_access.read_raw(truncated_extent, DiskIoType::MaintenanceRead).await;
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
-                    let chunk_location = extent.location.offset + total_consumed as u64;
+                    let chunk_location = extent.location.offset() + total_consumed as u64;
                     super_trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
                     // XXX handle checksum error here
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) =

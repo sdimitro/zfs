@@ -136,8 +136,12 @@ impl ZettaCheckpointPhys {
 #[derive(Debug, Clone, Copy)]
 enum PendingChange {
     Insert(IndexValue),
-    UpdateAtime(IndexValue, Atime),
+    UpdateAtime(UpdateAtime),
 }
+
+#[derive(Debug, Clone, Copy)]
+#[repr(packed)]
+struct UpdateAtime(IndexValue, Atime);
 
 #[derive(Clone)]
 pub struct ZettaCache {
@@ -231,10 +235,10 @@ impl RebalanceState {
                         // disk, we need this offset (this offset is maintained when the blocks are copied).
                         let offset = extent.location - old.location;
 
-                        return Some(DiskLocation {
-                            disk: new_location.disk,
-                            offset: new_location.offset + offset,
-                        });
+                        return Some(DiskLocation::new(
+                            new_location.disk(),
+                            new_location.offset() + offset,
+                        ));
                     }
                     None => {
                         // This means the extent was part of a rebalance operation, but when attempting to remap
@@ -272,7 +276,7 @@ impl MergeState {
             Some(rebalance) => rebalance
                 .remap(entry.value.extent().unwrap())
                 .map(|location| {
-                    entry.value.location = Some(location);
+                    entry.value.set_location(Some(location));
                     entry
                 }),
             None => Some(entry),
@@ -286,23 +290,23 @@ impl MergeState {
         index: &mut ZettaCacheIndex,
         free_list: &mut Vec<Extent>,
     ) {
-        if entry.value.atime >= self.eviction_cutoff {
+        if entry.value.atime() >= self.eviction_cutoff {
             // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
             if let Some(entry) = self.map_index_entry_to_rebalanced_location(entry) {
                 index.append(entry);
             }
         } else {
             let mut ghost_entry = entry;
-            if ghost_entry.value.location.is_some() {
+            if ghost_entry.value.location().is_some() {
                 // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
                 if let Some(entry) = self.map_index_entry_to_rebalanced_location(ghost_entry) {
                     // This is a new ghost entry, free and strip old location infomation
                     free_list.push(entry.value.extent().unwrap());
                 }
-                ghost_entry.value.location = None;
+                ghost_entry.value.set_location(None);
                 self.stats.track_count(Evictions);
             }
-            if ghost_entry.value.atime >= self.ghost_cutoff {
+            if ghost_entry.value.atime() >= self.ghost_cutoff {
                 // Preserve ghost entry to our ghost history
                 index.append(ghost_entry);
             } else {
@@ -423,11 +427,10 @@ impl MergeState {
                         self.add_to_index_or_evict(entry, next_index, &mut free_list);
                     }
                 }
-                Some((&pc_key, &PendingChange::UpdateAtime(pc_value, _))) => {
+                Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
                     if pc_key == entry.key {
                         // Add the pending entry to the next generation instead of the current index's entry
-                        assert_eq!(pc_value.location, entry.value.location);
-                        assert_eq!(pc_value.size, entry.value.size);
+                        assert_eq!(pc_value.extent(), entry.value.extent());
                         self.add_to_index_or_evict(
                             IndexEntry {
                                 key: pc_key,
@@ -1189,7 +1192,8 @@ impl ZettaCache {
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
-                        PendingChange::Insert(value) | PendingChange::UpdateAtime(value, _) => {
+                        PendingChange::Insert(value)
+                        | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
                             let validated = state.validate(value);
                             // All entries in the pending changes should be valid
                             assert!(validated.is_some());
@@ -1202,7 +1206,7 @@ impl ZettaCache {
                         if let Some(pc) = ms.old_pending_changes.get(&key).copied() {
                             match pc {
                                 PendingChange::Insert(value)
-                                | PendingChange::UpdateAtime(value, _) => {
+                                | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
                                     state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
                                     Either::Left(f(&mut state, validated))
@@ -1787,10 +1791,7 @@ pub struct ValidIndexValue(IndexValue);
 
 impl ValidIndexValue {
     pub fn extent(&self) -> Extent {
-        Extent {
-            location: self.0.location.unwrap(),
-            size: u64::from(self.0.size),
-        }
+        self.0.extent().unwrap()
     }
 }
 
@@ -1803,10 +1804,10 @@ impl ZettaCacheState {
             None => self.atime_histogram.first_live(),
         };
 
-        if value.atime < live_cutoff {
+        if value.atime() < live_cutoff {
             None
         } else {
-            assert!(value.location.is_some());
+            assert!(value.location().is_some());
             Some(ValidIndexValue(value))
         }
     }
@@ -1820,12 +1821,12 @@ impl ZettaCacheState {
             ),
         };
 
-        if value.atime >= ghost_cutoff
-            && value.atime < live_cutoff
+        if value.atime() >= ghost_cutoff
+            && value.atime() < live_cutoff
             && matches!(source, LookupSource::Read)
         {
             // This is a hit in the ghost range of the hit-by-size histogram
-            let size = self.atime_histogram.size_at(value.atime);
+            let size = self.atime_histogram.size_at(value.atime());
             self.size_histogram.hit(size);
         }
     }
@@ -1844,7 +1845,7 @@ impl ZettaCacheState {
         // (outstanding_lookups lock)?
         let value = match self.pending_changes.get(key) {
             Some(PendingChange::Insert(value_ref))
-            | Some(PendingChange::UpdateAtime(value_ref, _)) => *value_ref,
+            | Some(PendingChange::UpdateAtime(UpdateAtime(value_ref, _))) => *value_ref,
             None => value_from_index,
         };
         self.ghost_hit_check(value, source);
@@ -1863,15 +1864,15 @@ impl ZettaCacheState {
 
         if matches!(source, LookupSource::Read) {
             // Add an entry to the hit-by-size histogram
-            let size = self.atime_histogram.size_at(value.atime);
-            super_trace!("cache size {} at {:?}", size, value.atime);
+            let size = self.atime_histogram.size_at(value.atime());
+            super_trace!("cache size {} at {:?}", size, value.atime());
             self.size_histogram.hit(size);
         }
-        let original_atime = value.atime;
-        if value.atime != self.atime {
+        let original_atime = value.atime();
+        if original_atime != self.atime {
             // Update the atime histogram
             self.atime_histogram.remove(value);
-            value.atime = self.atime;
+            value = IndexValue::new(value.location(), value.size(), self.atime);
             self.atime_histogram.insert(value);
         }
 
@@ -1889,12 +1890,16 @@ impl ZettaCacheState {
                 // XXX would be nice to have saved the btreemap::Entry so we
                 // don't have to traverse the tree again.
                 with_alloctag(Self::PENDING_CHANGES_TAG, || {
-                    ve.insert(PendingChange::UpdateAtime(value, original_atime));
+                    ve.insert(PendingChange::UpdateAtime(UpdateAtime(
+                        value,
+                        original_atime,
+                    )))
                 });
                 self.update_pending_stats();
             }
             btree_map::Entry::Occupied(mut oe) => match oe.get_mut() {
-                PendingChange::Insert(value_ref) | PendingChange::UpdateAtime(value_ref, _) => {
+                PendingChange::Insert(value_ref)
+                | PendingChange::UpdateAtime(UpdateAtime(value_ref, _)) => {
                     *value_ref = value;
                 }
             },
@@ -1951,11 +1956,7 @@ impl ZettaCacheState {
         // there (and location_dirty:false) instead of logging it
 
         let key = locked_key.key();
-        let value = IndexValue {
-            atime: self.atime,
-            location: Some(location),
-            size: u32::try_from(buf_size).unwrap(),
-        };
+        let value = IndexValue::new(Some(location), u32::try_from(buf_size).unwrap(), self.atime);
 
         if let Some(pc) = with_alloctag(Self::PENDING_CHANGES_TAG, || {
             self.pending_changes
@@ -1974,12 +1975,12 @@ impl ZettaCacheState {
                     old_value
                 }
                 // Undo the atime histogram change made with this UpdateAtime entry
-                PendingChange::UpdateAtime(old_value, index_atime) => {
-                    self.atime_histogram.insert(IndexValue {
-                        location: old_value.location,
-                        size: old_value.size,
-                        atime: index_atime,
-                    });
+                PendingChange::UpdateAtime(UpdateAtime(old_value, index_atime)) => {
+                    self.atime_histogram.insert(IndexValue::new(
+                        old_value.location(),
+                        old_value.size(),
+                        index_atime,
+                    ));
                     old_value
                 }
             };
@@ -2012,7 +2013,7 @@ impl ZettaCacheState {
     /// returns offset, or None if there's no space
     fn allocate_block(&mut self, size: u32) -> Option<DiskLocation> {
         self.block_allocator.allocate(size).map(|extent| {
-            self.block_access.verify_aligned(extent.location.offset);
+            self.block_access.verify_aligned(extent.location.offset());
             extent.location
         })
     }
@@ -2143,8 +2144,8 @@ impl ZettaCacheState {
         {
             // Try placing checkpoint after current checkpoint.
             Extent::new(
-                self.primary.checkpoint.location.disk,
-                self.primary.checkpoint.location.offset + self.primary.checkpoint.size,
+                self.primary.checkpoint.location.disk(),
+                self.primary.checkpoint.location.offset() + self.primary.checkpoint.size,
                 raw.len() as u64,
             )
         } else {
@@ -2158,14 +2159,14 @@ impl ZettaCacheState {
             .contains(&checkpoint_extent)
         {
             // Out of space; go back to the beginning of the checkpoint space.
-            checkpoint_extent.location.offset = self.primary.checkpoint_capacity.location.offset;
+            checkpoint_extent.location = self.primary.checkpoint_capacity.location;
             assert!(self
                 .primary
                 .checkpoint_capacity
                 .contains(&checkpoint_extent));
             assert_le!(
-                checkpoint_extent.location.offset + checkpoint_extent.size,
-                self.primary.checkpoint.location.offset
+                checkpoint_extent.location.offset() + checkpoint_extent.size,
+                self.primary.checkpoint.location.offset()
             );
             // XXX The above assertion could fail if there isn't enough
             // checkpoint space for 3 checkpoints (the existing one that
@@ -2422,7 +2423,7 @@ impl ZettaCacheState {
                         let extent = value.extent().unwrap();
                         assert_eq!(rebalance.remap(extent).unwrap(), extent.location);
                     }
-                    PendingChange::UpdateAtime(value, _) => {
+                    PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
                         // If a lookup occurs on a block that is being moved as part of rebalancing, the lookup will
                         // return the "old" location of the block (which is valid while we are merging) and will be
                         // stored in an UpdateAtime record in pending_changes. Now that the merge is complete, we need
@@ -2430,7 +2431,9 @@ impl ZettaCacheState {
                         // the UpdateAtime due to rebalancing having had to evict the entry from the cache (i.e. due
                         // to an allocation failure when attempting to allocate the new disk location).
                         match rebalance.remap(value.extent().unwrap()) {
-                            Some(location) => value.location = Some(location),
+                            Some(location) => {
+                                value.set_location(Some(location));
+                            }
                             None => evicted_keys.push(*key),
                         }
                     }
@@ -2455,7 +2458,7 @@ impl ZettaCacheState {
             let mut evicted_keys = Vec::new();
             for (key, value) in self.index_cache.iter_mut() {
                 match rebalance.remap(value.extent().unwrap()) {
-                    Some(location) => value.location = Some(location),
+                    Some(location) => value.set_location(Some(location)),
                     None => evicted_keys.push(*key),
                 }
             }
@@ -2484,21 +2487,21 @@ impl ZettaCacheState {
         // Populate index_cache with old_pending_changes
         for (key, pc) in &merge.old_pending_changes {
             match pc {
-                PendingChange::Insert(mut value) | PendingChange::UpdateAtime(mut value, _) => {
+                PendingChange::Insert(value)
+                | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
                     // For the "old pending changes" list, we need to not only do the remap for atime updates, but also
                     // for inserts. This is because an insert could have occurred just prior to the merge starting, and
                     // then the location for that new insert may have been rebalanced via the merge. In this case, we need
                     // to ensure index cache is populated correctly with the new location(s).
-                    match self.validate(value) {
+                    match self.validate(*value) {
                         Some(_) => {
                             let remapped = match merge.rebalance.as_ref() {
                                 Some(rebalance) => {
                                     rebalance.remap(value.extent().unwrap()).map(|location| {
-                                        value.location = Some(location);
-                                        value
+                                        IndexValue::new(Some(location), value.size(), value.atime())
                                     })
                                 }
-                                None => Some(value),
+                                None => Some(*value),
                             };
 
                             match remapped {

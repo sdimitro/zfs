@@ -262,9 +262,9 @@ impl BlockAccess {
 
     // offset and length must be sector-aligned
     pub async fn read_raw(&self, extent: Extent, io_type: DiskIoType) -> AlignedBytes {
-        self.verify_aligned(extent.location.offset);
+        self.verify_aligned(extent.location.offset());
         self.verify_aligned(extent.size);
-        let disk = self.disk(extent.location.disk);
+        let disk = self.disk(extent.location.disk());
         let fd = disk.file.as_raw_fd();
         let sector_size = self.sector_size;
         let begin = Instant::now();
@@ -282,7 +282,7 @@ impl BlockAccess {
                     fd,
                     v.as_mut_ptr() as *mut c_void,
                     extent.size.try_into().unwrap(),
-                    extent.location.offset.try_into().unwrap(),
+                    extent.location.offset().try_into().unwrap(),
                 );
                 let num_bytes_read = usize::try_from(Errno::result(res).unwrap()).unwrap();
                 v.set_len(num_bytes_read);
@@ -313,10 +313,10 @@ impl BlockAccess {
             !self.readonly,
             "attempting zettacache write in readonly mode"
         );
-        let disk = self.disk(location.disk);
+        let disk = self.disk(location.disk());
         let fd = disk.file.as_raw_fd();
         let length = bytes.len();
-        let offset = location.offset;
+        let offset = location.offset();
         let alignment = bytes.alignment();
         self.verify_aligned(offset);
         self.verify_aligned(length);

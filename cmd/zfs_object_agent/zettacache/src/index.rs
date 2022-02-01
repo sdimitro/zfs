@@ -20,22 +20,42 @@ pub struct IndexKey {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[repr(packed)]
 pub struct IndexValue {
-    pub location: Option<DiskLocation>,
+    location: Option<DiskLocation>,
     // XXX remove this and figure out based on which slab it's in?  However,
     // currently we need to return the right buffer size to the kernel, and it
     // isn't passing us the expected read size.  So we need to change some
     // interfaces to make that work right.
-    pub size: u32,
-    pub atime: Atime,
+    size: u32,
+    atime: Atime,
 }
 
 impl IndexValue {
+    pub fn new(location: Option<DiskLocation>, size: u32, atime: Atime) -> Self {
+        Self {
+            location,
+            size,
+            atime,
+        }
+    }
     pub fn extent(&self) -> Option<Extent> {
         self.location.map(|location| Extent {
             location,
             size: u64::from(self.size),
         })
+    }
+    pub fn size(&self) -> u32 {
+        self.size
+    }
+    pub fn atime(&self) -> Atime {
+        self.atime
+    }
+    pub fn location(&self) -> Option<DiskLocation> {
+        self.location
+    }
+    pub fn set_location(&mut self, location: Option<DiskLocation>) {
+        self.location = location;
     }
 }
 

@@ -38,17 +38,26 @@ impl BlockId {
 pub struct DiskId(pub u16);
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[repr(packed)]
 pub struct DiskLocation {
-    pub disk: DiskId,
-    pub offset: u64,
+    disk: DiskId,
+    offset: u64,
+}
+impl DiskLocation {
+    pub fn new(disk: DiskId, offset: u64) -> Self {
+        Self { disk, offset }
+    }
+    pub fn disk(&self) -> DiskId {
+        self.disk
+    }
+    pub fn offset(&self) -> u64 {
+        self.offset
+    }
 }
 impl Add<u64> for DiskLocation {
     type Output = DiskLocation;
     fn add(self, rhs: u64) -> Self::Output {
-        DiskLocation {
-            disk: self.disk,
-            offset: self.offset + rhs,
-        }
+        DiskLocation::new(self.disk(), self.offset() + rhs)
     }
 }
 impl Add<usize> for DiskLocation {
@@ -61,8 +70,8 @@ impl Sub<DiskLocation> for DiskLocation {
     type Output = u64;
 
     fn sub(self, rhs: DiskLocation) -> Self::Output {
-        assert_eq!(self.disk, rhs.disk);
-        self.offset - rhs.offset
+        assert_eq!(self.disk(), rhs.disk());
+        self.offset() - rhs.offset()
     }
 }
 
@@ -77,7 +86,7 @@ impl Extent {
         assert_eq!(offset % 512, 0, "offset {} is not 512-aligned", offset);
         assert_eq!(size % 512, 0, "size {} is not 512-aligned", size);
         Extent {
-            location: DiskLocation { disk, offset },
+            location: DiskLocation::new(disk, offset),
             size,
         }
     }
@@ -92,18 +101,18 @@ impl Extent {
 
     /// returns true if `sub` is entirely contained within this extent
     pub fn contains(&self, sub: &Extent) -> bool {
-        sub.location.disk == self.location.disk
-            && sub.location.offset >= self.location.offset
-            && sub.location.offset + sub.size <= self.location.offset + self.size
+        sub.location.disk() == self.location.disk()
+            && sub.location.offset() >= self.location.offset()
+            && sub.location.offset() + sub.size <= self.location.offset() + self.size
     }
 
     /// returns the sub-range of self that is after `sub`, or None if self does not contain sub
     pub fn after(&self, sub: &Extent) -> Option<Extent> {
         match self.contains(sub) {
             true => Some(Extent::new(
-                self.location.disk,
-                sub.location.offset + sub.size,
-                self.location.offset + self.size - (sub.location.offset + sub.size),
+                self.location.disk(),
+                sub.location.offset() + sub.size,
+                self.location.offset() + self.size - (sub.location.offset() + sub.size),
             )),
             false => None,
         }

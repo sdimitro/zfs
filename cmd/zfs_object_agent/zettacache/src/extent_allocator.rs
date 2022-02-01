@@ -59,10 +59,10 @@ impl ExtentAllocatorBuilder {
     pub fn new(phys: &ExtentAllocatorPhys) -> ExtentAllocatorBuilder {
         let mut allocatable = BTreeMap::new();
         for extent in &phys.capacity {
-            assert_eq!(extent.location.offset % 512, 0);
+            assert_eq!(extent.location.offset() % 512, 0);
             assert_eq!(extent.size % 512, 0);
             let mut rt = RangeTree::new();
-            rt.add(extent.location.offset, extent.size);
+            rt.add(extent.location.offset(), extent.size);
             let existing = allocatable.insert(*extent, rt);
             // extents should not overlap
             assert!(existing.is_none());
@@ -72,7 +72,7 @@ impl ExtentAllocatorBuilder {
 
     pub fn claim(&mut self, extent: &Extent) {
         get_containing_extent(&mut self.allocatable, extent)
-            .remove(extent.location.offset, extent.size);
+            .remove(extent.location.offset(), extent.size);
     }
 
     pub fn allocatable_bytes(&self) -> u64 {
@@ -166,7 +166,7 @@ impl ExtentAllocator {
                         min(*DEFAULT_EXTENT_SIZE, (extent.size / 128) & !(4095)),
                     );
                     best_extent = Some(Extent::new(
-                        extent.location.disk,
+                        extent.location.disk(),
                         offset,
                         min(size, max_size),
                     ));
@@ -191,7 +191,7 @@ impl ExtentAllocator {
         // remove segment from allocatable
         get_containing_extent(&mut inner.sections, &extent)
             .allocatable
-            .remove(extent.location.offset, extent.size);
+            .remove(extent.location.offset(), extent.size);
 
         debug!("allocated {:?} for min={}", extent, min_size);
         extent
@@ -202,7 +202,7 @@ impl ExtentAllocator {
         let mut inner = self.inner.lock().unwrap();
         get_containing_extent(&mut inner.sections, extent)
             .freeing
-            .add(extent.location.offset, extent.size);
+            .add(extent.location.offset(), extent.size);
     }
 
     // Returns a <disk id> -> <(used bytes, total bytes)> map
@@ -211,7 +211,7 @@ impl ExtentAllocator {
         for (extent, section) in &self.inner.lock().unwrap().sections {
             let section_total = extent.size;
             let section_used = section_total - section.allocatable.space();
-            let entry = map.entry(extent.location.disk).or_default();
+            let entry = map.entry(extent.location.disk()).or_default();
             *entry = (entry.0 + section_used, entry.1 + section_total);
         }
         map

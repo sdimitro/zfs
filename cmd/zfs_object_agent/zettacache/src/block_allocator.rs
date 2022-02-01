@@ -185,7 +185,7 @@ impl BitmapSlab {
     }
 
     fn verify_contains(&self, extent: Extent) {
-        assert_eq!(extent.location.disk, self.location.disk);
+        assert_eq!(extent.location.disk(), self.location.disk());
         assert_eq!(extent.size % u64::from(self.max_size()), 0);
         assert_ge!(extent.location, self.location);
         assert_le!(extent.location + extent.size, self.slab_end());
@@ -194,7 +194,7 @@ impl BitmapSlab {
     fn import_extent_impl(&mut self, extent: Extent, is_alloc: bool) {
         self.verify_contains(extent);
 
-        let internal_offset = u32::try_from(extent.location.offset - self.location.offset).unwrap();
+        let internal_offset = u32::try_from(extent.location - self.location).unwrap();
         assert_eq!(internal_offset % self.slot_size, 0);
         let num_slots = u32::try_from(extent.size).unwrap() / self.slot_size;
         assert_ge!(num_slots, 1);
@@ -261,7 +261,7 @@ impl SlabTrait for BitmapSlab {
     fn free(&mut self, extent: Extent) {
         self.verify_contains(extent);
 
-        let internal_offset = u32::try_from(extent.location.offset - self.location.offset).unwrap();
+        let internal_offset = u32::try_from(extent.location - self.location).unwrap();
         assert_eq!(internal_offset % self.slot_size, 0);
 
         let slot = internal_offset / self.slot_size;
@@ -370,21 +370,21 @@ impl SlabTrait for BitmapSlab {
         let used_slots = self.total_slots - u32::try_from(self.allocatable.len()).unwrap();
         println!(
             "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {}%",
-            self.location.offset,
+            self.location.offset(),
             nice_p2size(u64::from(self.slot_size)),
             used_slots,
             self.total_slots,
             (used_slots * 100) / self.total_slots
         );
         for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
-            let first_offset = self.slot_to_location(first);
-            let last_offset = self.slot_to_location(last + 1);
+            let first_location = self.slot_to_location(first);
+            let last_location = self.slot_to_location(last + 1);
             println!(
                 "\tALLOC {:?} offset: [{}, {}) length: {} - slots: [{}, {}) count: {}",
-                first_offset.disk,
-                first_offset.offset,
-                last_offset.offset,
-                nice_p2size(last_offset - first_offset),
+                first_location.disk(),
+                first_location.offset(),
+                last_location.offset(),
+                nice_p2size(last_location - first_location),
                 first,
                 last + 1,
                 last - first + 1
@@ -442,7 +442,7 @@ impl ExtentSlab {
     ) -> Slab {
         let mut allocatable: RangeTree = Default::default();
         with_alloctag(Self::ALLOCATABLE_TAG, || {
-            allocatable.add(extent.location.offset, extent.size)
+            allocatable.add(extent.location.offset(), extent.size)
         });
         Slab::new(
             id,
@@ -478,7 +478,7 @@ impl ExtentSlab {
                 });
                 self.allocating.add(allocatable_offset, size);
                 self.last_location = allocatable_offset + size;
-                return Some(Extent::new(self.location.disk, allocatable_offset, size));
+                return Some(Extent::new(self.location.disk(), allocatable_offset, size));
             }
         }
         None
@@ -493,14 +493,15 @@ impl SlabTrait for ExtentSlab {
     fn import_alloc(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
         with_alloctag(Self::ALLOCATABLE_TAG, || {
-            self.allocatable.remove(extent.location.offset, extent.size)
+            self.allocatable
+                .remove(extent.location.offset(), extent.size)
         });
     }
 
     fn import_free(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
         with_alloctag(Self::ALLOCATABLE_TAG, || {
-            self.allocatable.add(extent.location.offset, extent.size)
+            self.allocatable.add(extent.location.offset(), extent.size)
         });
     }
 
@@ -519,7 +520,7 @@ impl SlabTrait for ExtentSlab {
     fn free(&mut self, extent: Extent) {
         self.verify_slab_extent(extent);
 
-        let offset = extent.location.offset;
+        let offset = extent.location.offset();
         let size = extent.size;
 
         self.allocatable.verify_absent(offset, size);
@@ -541,7 +542,7 @@ impl SlabTrait for ExtentSlab {
         self.allocating.verify_space();
         self.allocatable.verify_space();
 
-        let disk = self.location.disk;
+        let disk = self.location.disk();
 
         // It could happen that a segment was allocated and then freed within
         // the same checkpoint period at which point it would be part of both
@@ -565,11 +566,11 @@ impl SlabTrait for ExtentSlab {
     }
 
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap) {
-        let disk = self.location.disk;
+        let disk = self.location.disk();
 
         for (offset, size) in self
             .allocatable
-            .iter_inverse(self.location.offset, self.slab_end().offset)
+            .iter_inverse(self.location.offset(), self.slab_end().offset())
         {
             spacemap.alloc(Extent::new(disk, offset, size));
         }
@@ -609,14 +610,14 @@ impl SlabTrait for ExtentSlab {
     fn dump_info(&self) {
         println!(
             "slab_offset: {} max_allowed_alloc_size: {} allocated_bytes: {} utilization: {}%",
-            self.location.offset,
+            self.location.offset(),
             nice_p2size(u64::from(self.max_allowed_alloc_size)),
             nice_p2size(self.total_space - self.allocatable.space()),
             ((self.total_space - self.allocatable.space()) * 100) / self.total_space
         );
         for (offset, size) in self
             .allocatable
-            .iter_inverse(self.location.offset, self.slab_end().offset)
+            .iter_inverse(self.location.offset(), self.slab_end().offset())
         {
             println!(
                 "\tALLOC offset: [{}  {}) length: {}",
@@ -630,7 +631,7 @@ impl SlabTrait for ExtentSlab {
 
     fn num_segments(&self) -> u64 {
         self.allocatable
-            .iter_inverse(self.location.offset, self.slab_end().offset)
+            .iter_inverse(self.location.offset(), self.slab_end().offset())
             .count() as u64
     }
 
@@ -638,7 +639,7 @@ impl SlabTrait for ExtentSlab {
         let mut allocated: RangeTree = Default::default();
 
         self.allocatable
-            .iter_inverse(self.location.offset, self.slab_end().offset)
+            .iter_inverse(self.location.offset(), self.slab_end().offset())
             .for_each(|(offset, size)| {
                 allocated.add(offset, size);
             });
@@ -651,7 +652,7 @@ impl SlabTrait for ExtentSlab {
 
         allocated
             .iter()
-            .map(|(&offset, &size)| Extent::new(self.location.disk, offset, size))
+            .map(|(&offset, &size)| Extent::new(self.location.disk(), offset, size))
             .collect()
     }
 }
@@ -1440,7 +1441,7 @@ impl BlockAllocator {
     }
 
     pub fn free(&mut self, extent: Extent) {
-        self.block_access.verify_aligned(extent.location.offset);
+        self.block_access.verify_aligned(extent.location.offset());
         self.block_access.verify_aligned(extent.size);
         super_trace!("free request: {:?}", extent);
 

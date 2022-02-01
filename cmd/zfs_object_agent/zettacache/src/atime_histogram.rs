@@ -1,7 +1,6 @@
 use crate::base_types::Atime;
 use crate::index::IndexValue;
 use log::*;
-use more_asserts::*;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use util::nice_p2size;
@@ -99,18 +98,16 @@ impl AtimeHistogramPhys {
     }
 
     pub fn insert(&mut self, value: IndexValue) {
-        assert_ge!(value.atime, self.first_ghost);
-        let index = value.atime - self.first_ghost;
+        let index = value.atime() - self.first_ghost;
         if index >= self.histogram.len() {
             self.histogram.resize(index + 1, 0);
         }
-        self.histogram[index] += u64::from(value.size);
+        self.histogram[index] += u64::from(value.size());
     }
 
     pub fn remove(&mut self, value: IndexValue) {
-        assert_ge!(value.atime, self.first_ghost);
-        let index = value.atime - self.first_ghost;
-        self.histogram[index] -= u64::from(value.size);
+        let index = value.atime() - self.first_ghost;
+        self.histogram[index] -= u64::from(value.size());
     }
 
     pub fn clear(&mut self) {
