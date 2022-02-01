@@ -791,11 +791,12 @@ impl ZettaCache {
         index_cache_cap
     }
 
-    pub async fn open(paths: Vec<&str>) -> ZettaCache {
-        let block_access = Arc::new(BlockAccess::new(
-            paths.iter().map(|path| Disk::new(path, false)).collect(),
-            false,
-        ));
+    pub async fn open(paths: Vec<&str>) -> Result<ZettaCache> {
+        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
+        for path in paths {
+            disks.push(Disk::new(path, false)?);
+        }
+        let block_access = Arc::new(BlockAccess::new(disks, false));
 
         let feature_flags = match PrimaryPhys::read_features(&block_access).await {
             Ok(feature_flags) => feature_flags,
@@ -1050,7 +1051,7 @@ impl ZettaCache {
             }
         });
 
-        this
+        Ok(this)
     }
 
     /// Load the provided operation log to produce a new pending changes map.
@@ -1604,22 +1605,30 @@ pub struct ZCacheDBHandle {
 }
 
 impl ZCacheDBHandle {
-    pub async fn dump_superblocks(paths: Vec<&str>) {
-        let block_access = BlockAccess::new(
-            paths.iter().map(|path| Disk::new(path, true)).collect(),
-            true,
-        );
+    pub async fn dump_superblocks(paths: Vec<&str>) -> Result<()> {
+        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
+        for path in paths {
+            match Disk::new(path, true) {
+                Ok(disk) => disks.push(disk),
+                Err(err) => eprintln!("error: {}", err),
+            }
+        }
+        if disks.is_empty() {
+            return Ok(());
+        }
+        let block_access = BlockAccess::new(disks, true);
         SuperblockPhys::dump_all(&block_access).await;
+        Ok(())
     }
 
     pub async fn open(paths: Vec<&str>) -> Result<ZCacheDBHandle> {
-        let block_access = Arc::new(BlockAccess::new(
-            paths.iter().map(|path| Disk::new(path, true)).collect(),
-            true,
-        ));
+        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
+        for path in paths {
+            disks.push(Disk::new(path, true)?);
+        }
+        let block_access = Arc::new(BlockAccess::new(disks, true));
 
         let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
-
         let checkpoint =
             Arc::new(ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await);
 

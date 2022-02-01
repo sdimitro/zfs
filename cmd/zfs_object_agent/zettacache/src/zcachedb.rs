@@ -115,15 +115,21 @@ impl DumpSlabsOptions {
 }
 
 impl ZettaCacheDBCommand {
-    pub async fn issue_command(command: ZettaCacheDBCommand, paths: Vec<&str>) {
+    pub async fn issue_command(
+        command: ZettaCacheDBCommand,
+        paths: Vec<&str>,
+    ) -> Result<(), anyhow::Error> {
         match command {
             ZettaCacheDBCommand::DumpSuperblocks => ZCacheDBHandle::dump_superblocks(paths).await,
             _ => ZettaCacheDBCommand::issue_pool_state_command(command, paths).await,
         }
     }
 
-    async fn issue_pool_state_command(command: ZettaCacheDBCommand, paths: Vec<&str>) {
-        let handle = ZCacheDBHandle::open(paths).await.unwrap();
+    async fn issue_pool_state_command(
+        command: ZettaCacheDBCommand,
+        paths: Vec<&str>,
+    ) -> Result<(), anyhow::Error> {
+        let handle = ZCacheDBHandle::open(paths).await?;
         match command {
             ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
             ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
@@ -133,5 +139,6 @@ impl ZettaCacheDBCommand {
                 panic!("non-applicable command after opening whole pool state")
             }
         }
+        Ok(())
     }
 }

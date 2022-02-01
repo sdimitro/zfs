@@ -63,7 +63,11 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
     Ok(Uuid::parse_str(std::str::from_utf8(&bytes)?)?)
 }
 
-pub fn start(socket_dir: &str, cache_paths: Vec<&str>, runtime: Runtime) {
+pub fn start(
+    socket_dir: &str,
+    cache_paths: Vec<&str>,
+    runtime: Runtime,
+) -> Result<(), anyhow::Error> {
     /*
      * Take an exclusive lock on a lock file. This prevents multiple agent
      * processes from operating out of the same socket_dir.
@@ -75,7 +79,7 @@ pub fn start(socket_dir: &str, cache_paths: Vec<&str>, runtime: Runtime) {
         pool_destroy::init_pool_destroyer(socket_dir).await;
 
         let cache = match cache_paths.is_empty() {
-            false => Some(ZettaCache::open(cache_paths).await),
+            false => Some(ZettaCache::open(cache_paths).await?),
             true => None,
         };
 
@@ -97,5 +101,6 @@ pub fn start(socket_dir: &str, cache_paths: Vec<&str>, runtime: Runtime) {
 
         // keep the process from exiting
         let () = futures::future::pending().await;
-    });
+        Ok(())
+    })
 }

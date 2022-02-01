@@ -2,6 +2,7 @@ use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
 use git_version::git_version;
+use util::writeln_stdout;
 use zettacache::DumpSlabsOptions;
 use zettacache::DumpStructuresOptions;
 use zettacache::ZettaCacheDBCommand;
@@ -14,7 +15,7 @@ static GIT_VERSION: &str = git_version!(
 );
 
 #[tokio::main]
-async fn main() {
+async fn main() -> Result<(), anyhow::Error> {
     // When zcachedb is used in UNIX shell pipeline and its output is not fully
     // consumed a SIGPIPE (e.g. "broken pipe") signal is sent to us. By default,
     // we would abort and generate a core dump which is annoying. The unsafe
@@ -101,7 +102,7 @@ async fn main() {
                 ),
                 cache_paths,
             )
-            .await;
+            .await
         }
         ("dump-superblocks", Some(_)) => {
             ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, cache_paths)
@@ -114,17 +115,18 @@ async fn main() {
                 ),
                 cache_paths,
             )
-            .await;
+            .await
         }
         ("space-usage", Some(_)) => {
             ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, cache_paths)
-                .await;
+                .await
         }
         ("verify-index", Some(_)) => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, cache_paths).await;
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, cache_paths).await
         }
         _ => {
-            matches.usage();
+            writeln_stdout!("{}", matches.usage());
+            std::process::exit(exitcode::USAGE);
         }
-    };
+    }
 }

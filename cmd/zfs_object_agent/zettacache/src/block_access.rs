@@ -142,19 +142,17 @@ const CUSTOM_OFLAGS: i32 = libc::O_DIRECT;
 const CUSTOM_OFLAGS: i32 = 0;
 
 impl Disk {
-    pub fn new(disk_path: &str, readonly: bool) -> Disk {
+    pub fn new(disk_path: &str, readonly: bool) -> Result<Disk> {
         // Note: using std file open so that this func can be non-async.
         // Although this is blocking from a tokio thread, it's used
         // infrequently, and we're already blocking from the ioctls below.
-        let file = tokio::fs::File::from_std(
-            std::fs::OpenOptions::new()
-                .read(true)
-                .write(!readonly)
-                .custom_flags(CUSTOM_OFLAGS)
-                .open(disk_path)
-                .with_context(|| format!("opening disk '{}'", disk_path))
-                .unwrap(),
-        );
+        let std_file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(!readonly)
+            .custom_flags(CUSTOM_OFLAGS)
+            .open(disk_path)
+            .with_context(|| format!("opening disk '{}'", disk_path))?;
+        let file = tokio::fs::File::from_std(std_file);
         let stat = nix::sys::stat::fstat(file.as_raw_fd()).unwrap();
         trace!("stat: {:?}", stat);
         let mode = SFlag::from_bits_truncate(stat.st_mode);
@@ -198,7 +196,7 @@ impl Disk {
         };
         info!("opening cache file {}: {:?}", disk_path, this);
 
-        this
+        Ok(this)
     }
 }
 

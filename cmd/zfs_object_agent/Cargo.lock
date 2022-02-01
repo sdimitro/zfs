@@ -2775,11 +2775,14 @@ dependencies = [
 name = "zcachedb"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "clap",
+ "exitcode",
  "git-version",
  "libc",
  "log",
  "tokio",
+ "util",
  "zettacache",
 ]
 

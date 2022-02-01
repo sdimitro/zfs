@@ -96,7 +96,7 @@ static void
 zoa_thread(void *arg)
 {
 	set_object_agent_sock_dir(zoa_sock_dir);
-	libzoa_init(zoa_sock_dir, zoa_log_file, NULL, (void **)arg);
+	VERIFY0(libzoa_init(zoa_sock_dir, zoa_log_file, NULL, (void **)arg));
 }
 #endif
 

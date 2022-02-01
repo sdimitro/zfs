@@ -206,7 +206,10 @@ fn main() {
                 }
             });
 
-            zettaobject::init::start(socket_dir, cache_paths, runtime);
+            match zettaobject::init::start(socket_dir, cache_paths, runtime) {
+                Ok(()) => panic!("unreachable statement"),
+                Err(err) => eprintln!("error: couldn't start server: {}", err),
+            }
         }
     }
 }

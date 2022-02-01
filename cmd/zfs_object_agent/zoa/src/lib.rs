@@ -20,7 +20,7 @@ pub unsafe extern "C" fn libzoa_init(
     log_file_ptr: *const c_char,
     cache_path_ptr: *const c_char, // XXX change to take a list of paths
     handle: *mut *mut zoa_handle_t,
-) {
+) -> i32 {
     let socket_dir = CStr::from_ptr(socket_dir_ptr)
         .to_string_lossy()
         .into_owned();
@@ -40,13 +40,18 @@ pub unsafe extern "C" fn libzoa_init(
     }
 
     if cache_path_ptr.is_null() {
-        zettaobject::init::start(&socket_dir, Vec::new(), runtime);
+        if zettaobject::init::start(&socket_dir, Vec::new(), runtime).is_err() {
+            return -1;
+        }
     } else {
         let cache = CStr::from_ptr(cache_path_ptr)
             .to_string_lossy()
             .into_owned();
-        zettaobject::init::start(&socket_dir, vec![cache.as_str()], runtime);
+        if zettaobject::init::start(&socket_dir, vec![cache.as_str()], runtime).is_err() {
+            return -1;
+        }
     }
+    0
 }
 
 unsafe fn set_out_nvl(out: *mut *mut nvpair_sys::nvlist_t, result: Result<NvList, Errno>) -> i32 {
