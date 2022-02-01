@@ -140,6 +140,9 @@ impl Atime {
     pub fn next(&self) -> Atime {
         Atime(self.0 + 1)
     }
+    pub fn checked_sub(&self, rhs: Self) -> Option<usize> {
+        self.0.checked_sub(rhs.0).map(|value| value as usize)
+    }
 }
 
 impl Sub<Atime> for Atime {

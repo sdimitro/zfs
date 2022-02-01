@@ -26,6 +26,7 @@ lazy_static! {
         GHOSTS.clone(),
         NOREMOVE.clone(),
         FIXINT.clone(),
+        SPLIT_INDEX.clone(),
     ]
     .map(|feature| (feature.name, feature.info))
     .into_iter()
@@ -49,6 +50,10 @@ lazy_static! {
     pub static ref FIXINT: Feature = Feature {
         name: FeatureName("com.delphix:fixint".to_string()),
         info: FeatureType::Upgradeable
+    };
+    pub static ref SPLIT_INDEX: Feature = Feature {
+        name: FeatureName("com.delphix:split_index".to_string()),
+        info: FeatureType::NonUpgradeable
     };
 }
 
