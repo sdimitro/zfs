@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 lazy_static! {
     pub static ref LEASE_DURATION: Duration =
-        Duration::from_millis(get_tunable("lease_duration_ms", 10_000));
+        Duration::from_millis(get_tunable("lease_duration_ms", 50_000));
     pub static ref HEARTBEAT_INTERVAL: Duration =
         Duration::from_millis(get_tunable("heartbeat_interval_ms", 1_000));
     pub static ref WRITE_TIMEOUT: Duration =
