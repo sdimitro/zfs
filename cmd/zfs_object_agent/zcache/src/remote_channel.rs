@@ -178,16 +178,10 @@ impl RemoteChannel {
                 )));
             }
 
-            let result = response.lookup_string("result")?;
-            let result = result.to_str()?;
-            return match result {
-                "ok" => Ok(response),
-                "err" => Err(RemoteError::ResultError(response)),
-                _ => Err(RemoteError::Other(anyhow!(
-                    "expected \"ok\" or \"err\" for result, got \"{}\"",
-                    result
-                ))),
-            };
+            if response.exists("err") {
+                return Err(RemoteError::ResultError(response));
+            }
+            return Ok(response);
         }
     }
 }

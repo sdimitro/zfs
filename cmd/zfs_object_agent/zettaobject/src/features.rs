@@ -77,7 +77,7 @@ pub fn get_feature(name: &str) -> Option<FeatureFlag> {
 #[derive(Debug)]
 pub struct FeatureError {
     pub features: Vec<FeatureFlag>,
-    pub readonly: bool,
+    pub can_readonly: bool,
 }
 
 impl Display for FeatureError {
@@ -85,7 +85,7 @@ impl Display for FeatureError {
         f.write_fmt(format_args!(
             "Missing features: {:?}{}",
             self.features,
-            if self.readonly {
+            if self.can_readonly {
                 " (readonly compatible)"
             } else {
                 ""
@@ -107,14 +107,14 @@ where
     I: Iterator<Item = &'a FeatureFlag>,
 {
     let mut incompatible_features = vec![];
-    let mut readonly_pass = true;
+    let mut can_readonly = true;
     for feature in feature_list {
         if SUPPORTED_FEATURES.get(feature).is_none() {
             match feature.required {
                 RequiredLevel::Optional => {}
                 RequiredLevel::RequiredForRead => {
                     incompatible_features.push(feature.clone());
-                    readonly_pass = false;
+                    can_readonly = false;
                 }
                 RequiredLevel::RequiredForWrite => {
                     if !readonly {
@@ -127,7 +127,7 @@ where
     if !incompatible_features.is_empty() {
         Err(FeatureError {
             features: incompatible_features,
-            readonly: readonly_pass,
+            can_readonly,
         })
     } else {
         Ok(())

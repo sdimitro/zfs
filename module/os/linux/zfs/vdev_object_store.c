@@ -1467,15 +1467,16 @@ update_features(spa_t *spa, nvlist_t *nv)
 static void
 agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 {
-	char *cause = NULL;
 	const char *type = fnvlist_lookup_string(nv, AGENT_TYPE);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("got response from agent type=%s", type);
 	}
 	vos->vos_result = 0;
 	if (strcmp(type, AGENT_TYPE_CREATE_POOL_DONE) == 0) {
-		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
-			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
+		char *error = NULL;
+		if (nvlist_lookup_string(nv, AGENT_ERR, &error) == 0) {
+			zfs_dbgmsg("got %s err=%s msg=%s", type, error,
+			    fnvlist_lookup_string(nv, AGENT_MESSAGE));
 			vos->vos_result = SET_ERROR(EACCES);
 		}
 		agent_serial_done(vos, VOS_SERIAL_CREATE_POOL);
@@ -1505,39 +1506,41 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 
 		agent_serial_done(vos, VOS_SERIAL_END_TXG);
 	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_DONE) == 0) {
-		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
+		char *error = NULL;
+		if (nvlist_lookup_string(nv, AGENT_ERR, &error) == 0) {
 			spa_t *spa = vos->vos_vdev->vdev_spa;
-			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
-			if (strcmp(cause, "MMP") == 0) {
+			zfs_dbgmsg("got %s err=%s", type, error);
+			if (strcmp(error, "Mmp") == 0) {
 				fnvlist_add_string(spa->spa_load_info,
 				    ZPOOL_CONFIG_MMP_HOSTNAME,
-				    fnvlist_lookup_string(nv, AGENT_HOSTNAME));
+				    fnvlist_lookup_string(nv, "hostname"));
 				fnvlist_add_uint64(spa->spa_load_info,
 				    ZPOOL_CONFIG_MMP_STATE, MMP_STATE_ACTIVE);
 				fnvlist_add_uint64(spa->spa_load_info,
 				    ZPOOL_CONFIG_MMP_TXG, 0);
 				vos->vos_result = SET_ERROR(EREMOTEIO);
-			} else if (strcmp(cause, "IO") == 0) {
+			} else if (strcmp(error, "Io") == 0) {
 				char *message = fnvlist_lookup_string(nv,
-				    AGENT_MESSAGE);
+				    "message");
 				zfs_dbgmsg("message=\"%s\"", message);
 				if (strstr(message, "does not exist") != NULL) {
 					vos->vos_result = SET_ERROR(ENOENT);
 				} else {
 					vos->vos_result = SET_ERROR(EIO);
 				}
-			} else if (strcmp(cause, "checkpoint") == 0) {
+			} else if (strcmp(error, "Checkpoint") == 0) {
 				zfs_dbgmsg("Failed to find checkpoint when "
 				    "attempting to rewind pool");
 				vos->vos_result =
 				    SET_ERROR(ZFS_ERR_NO_CHECKPOINT);
 			} else {
-				ASSERT0(strcmp(cause, "feature"));
+				ASSERT0(strcmp(error, "Feature"));
 				fnvlist_add_nvlist(spa->spa_load_info,
 				    ZPOOL_CONFIG_UNSUP_FEAT,
-				    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
+				    fnvlist_lookup_nvlist(nv,
+				    "invalid_features"));
 				if (fnvlist_lookup_boolean_value(nv,
-				    AGENT_CAN_READONLY)) {
+				    "can_readonly")) {
 					fnvlist_add_boolean(spa->spa_load_info,
 					    ZPOOL_CONFIG_CAN_RDONLY);
 				}

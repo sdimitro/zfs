@@ -17,6 +17,7 @@ use nvpair::{NvEncoding, NvList};
 use safer_ffi::prelude::*;
 use semver::Version;
 use semver::VersionReq;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
@@ -30,6 +31,7 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use util::get_tunable;
+use util::maybe_die_with;
 use util::message::struct_to_slice;
 use util::message::MessageHeader;
 use util::message::MessageType;
@@ -439,4 +441,92 @@ impl Responder {
 /// that does not need to do any async work.
 pub fn handler_return_ok(response: Option<NvList>) -> HandlerReturn {
     Ok(Box::pin(future::ready(Ok(response))))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "err")]
+pub enum FailureMessage {
+    Other { message: String },
+}
+impl FailureMessage {
+    pub fn new<T: ToString>(message: T) -> Self {
+        FailureMessage::Other {
+            message: message.to_string(),
+        }
+    }
+}
+
+/// Create and return an NvList appropriate to use as a response to the client.
+///
+/// For extensibility and consistency, E should be an enum with `#[serde(tag =
+/// "err")]`.  This way all failure responses will have a pair "err" ->
+/// "EnumVariantName".  All variants of E should be struct-like or unit-like
+/// (not tuple-like).  FailureMessage is an example.
+///
+/// The response nvlist will have the following nvpairs:
+/// * "Type" -> response_type (string)
+/// * fields from R
+/// * if result.is_ok(), fields from O
+/// * if result.is_err(), "err" -> EnumVariantName (string)
+/// * if result.is_err(), fields from the varant of E
+pub fn return_result<R, O, E>(
+    response_type: &str,
+    request_id: R,
+    result: Result<O, E>,
+    debug: bool,
+) -> Result<Option<NvList>>
+where
+    R: Debug + Serialize,
+    O: Debug + Serialize,
+    E: Debug + Serialize,
+{
+    #[derive(Debug, Serialize)]
+    struct Response<'a, R, O, E> {
+        #[serde(rename = "Type")]
+        response_type: &'a str,
+        #[serde(flatten)]
+        request: R,
+        #[serde(flatten)]
+        ok: Option<O>,
+        #[serde(flatten)]
+        err: Option<E>,
+    }
+
+    if let Err(e) = &result {
+        error!("sending failure: {:?}", e);
+    }
+
+    let (ok, err) = match result {
+        Ok(o) => (Some(o), None),
+        Err(e) => (None, Some(e)),
+    };
+
+    let response = Response {
+        response_type,
+        request: request_id,
+        ok,
+        err,
+    };
+
+    if debug {
+        trace!("sending response: {:?}", response);
+    } else {
+        super_trace!("sending response: {:?}", response);
+    }
+
+    let nvl = nvpair::to_nvlist(&response)?;
+
+    // The type E should be an enum with `#[serde(tag = "err")]`.
+    // This ensures that all failures have the "err" nvpair present.
+    if response.err.is_some() {
+        assert!(nvl.exists("err"));
+    }
+
+    if debug {
+        maybe_die_with(|| format!("before sending response: {:?}", nvl));
+        debug!("sending response nvl: {:?}", nvl);
+    } else {
+        super_trace!("sending response nvl: {:?}", nvl);
+    }
+    Ok(Some(nvl))
 }

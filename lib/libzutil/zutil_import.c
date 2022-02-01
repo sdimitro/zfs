@@ -2203,10 +2203,13 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 	if (resp == NULL)
 		return (-1);
 
-	const char *type = fnvlist_lookup_string(resp, AGENT_TYPE);
-	if (strcmp(type, AGENT_TYPE_RESUME_DESTROY_POOL_DONE) == 0) {
-		return (0);
+	if (strcmp(fnvlist_lookup_string(resp, AGENT_TYPE),
+	    AGENT_TYPE_RESUME_DESTROY_POOL_DONE) != 0) {
+		return (-1);
+	}
+	if (nvlist_exists(resp, AGENT_ERR)) {
+		return (-1);
 	}
 
-	return (-1);
+	return (0);
 }

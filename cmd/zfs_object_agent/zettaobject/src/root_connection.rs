@@ -3,12 +3,13 @@ use crate::features::FeatureError;
 use crate::object_access::{ObjectAccess, StatMapValue};
 use crate::pool::*;
 use crate::pool_destroy;
-use crate::server::handler_return_ok;
+use crate::server::return_result;
 use crate::server::ConnectionState;
 use crate::server::HandlerReturn;
 use crate::server::Responder;
 use crate::server::SerialHandlerReturn;
 use crate::server::Server;
+use crate::server::{handler_return_ok, FailureMessage};
 use anyhow::anyhow;
 use anyhow::Result;
 use bytes::Bytes;
@@ -114,6 +115,7 @@ impl RootConnectionState {
         server.register_handler("exit agent", Box::new(Self::exit_agent));
         server.register_handler("enable feature", Box::new(Self::enable_feature));
         server.register_handler("resume destroy pool", Box::new(Self::resume_destroy_pool));
+        // XXX use space separated request type like the others
         server.register_handler("clear_hit_data", Box::new(Self::clear_hit_data));
         server.register_struct_handler(MessageType::ReadBlock, Box::new(Self::read_block));
         server.register_struct_handler(MessageType::WriteBlock, Box::new(Self::write_block));
@@ -121,53 +123,51 @@ impl RootConnectionState {
 
     fn create_pool(&mut self, nvl: NvList) -> SerialHandlerReturn {
         Box::pin(async move {
-            #[derive(Deserialize, Debug)]
+            #[derive(Debug, Deserialize)]
             struct CreatePoolRequest {
                 #[serde(flatten)]
+                id: RequestId,
+                #[serde(flatten)]
                 object_access: ObjectAccessRequest,
-                #[serde(rename = "GUID")]
-                guid: PoolGuid,
                 name: String,
             }
+            #[derive(Debug, Serialize, Deserialize)]
+            struct RequestId {
+                #[serde(rename = "GUID")]
+                guid: PoolGuid,
+            }
+
             let request: CreatePoolRequest = nvpair::from_nvlist(&nvl)?;
             info!("got {:?}", request);
 
-            let mut error = None;
-            if let Err(err) = Pool::create(
+            let result = match Pool::create(
                 &request.object_access.object_access(),
                 &request.name,
-                request.guid,
+                request.id.guid,
             )
             .await
             {
-                error!("pool create failed: {:?}", &err);
-                error = Some(err.to_string().replace('\n', ""));
-            }
-            #[derive(Debug, Serialize)]
-            struct CreatePoolResponse {
-                #[serde(rename = "Type")]
-                response_type: &'static str,
-                #[serde(rename = "GUID")]
-                guid: PoolGuid,
-                cause: Option<String>,
-            }
-            let response = CreatePoolResponse {
-                response_type: "pool create done",
-                guid: request.guid,
-                cause: error,
+                Ok(_) => Ok(()),
+                Err(e) => Err(FailureMessage::new(e)),
             };
-            return_struct(response, true)
+
+            return_result("pool create done", request.id, result, true)
         })
     }
 
     fn open_pool(&mut self, nvl: NvList) -> SerialHandlerReturn {
         Box::pin(async move {
-            #[derive(Deserialize, Debug)]
+            #[derive(Debug, Serialize, Deserialize)]
+            struct RequestId {
+                #[serde(rename = "GUID")]
+                guid: PoolGuid,
+            }
+            #[derive(Debug, Deserialize)]
             struct OpenPoolRequest {
                 #[serde(flatten)]
                 object_access: ObjectAccessRequest,
-                #[serde(rename = "GUID")]
-                guid: PoolGuid,
+                #[serde(flatten)]
+                id: RequestId,
                 #[serde(default)]
                 rollback: bool,
                 #[serde(rename = "TXG")]
@@ -177,14 +177,25 @@ impl RootConnectionState {
             let request: OpenPoolRequest = nvpair::from_nvlist(&nvl)?;
             info!("got {:?}", request);
 
-            // XXX convert response to use serde nvlist
-            let mut response = NvList::new_unique_names();
-            response.insert("Type", "pool open done").unwrap();
-            response.insert("GUID", &request.guid.0).unwrap();
+            #[derive(Debug, Serialize)]
+            #[serde(tag = "err")]
+            enum Failure {
+                Mmp {
+                    hostname: String,
+                },
+                Feature {
+                    invalid_features: Vec<String>,
+                    can_readonly: bool,
+                },
+                Io {
+                    message: String,
+                },
+                Checkpoint,
+            }
 
-            let (pool, phys_opt, next_block) = match Pool::open(
+            let result = match Pool::open(
                 request.object_access.object_access(),
-                request.guid,
+                request.id.guid,
                 request.txg,
                 self.cache.as_ref().cloned(),
                 self.id,
@@ -193,23 +204,14 @@ impl RootConnectionState {
             )
             .await
             {
-                Err(PoolOpenError::Mmp(hostname)) => {
-                    response.insert("cause", "MMP").unwrap();
-                    response.insert("hostname", hostname.as_str()).unwrap();
-                    debug!("sending response: {:?}", response);
-                    return Ok(Some(response));
-                }
-                Err(PoolOpenError::Feature(FeatureError { features, readonly })) => {
-                    response.insert("cause", "feature").unwrap();
-                    let mut feature_nvl = NvList::new_unique_names();
-                    for feature in features {
-                        feature_nvl.insert(feature.name, "").unwrap();
-                    }
-                    response.insert("features", feature_nvl.as_ref()).unwrap();
-                    response.insert("can_readonly", &readonly).unwrap();
-                    debug!("sending response: {:?}", response);
-                    return Ok(Some(response));
-                }
+                Err(PoolOpenError::Mmp(hostname)) => Err(Failure::Mmp { hostname }),
+                Err(PoolOpenError::Feature(FeatureError {
+                    features,
+                    can_readonly,
+                })) => Err(Failure::Feature {
+                    invalid_features: features.into_iter().map(|feature| feature.name).collect(),
+                    can_readonly,
+                }),
                 Err(PoolOpenError::Get(e)) => {
                     /*
                      * It would be really nice to bring up the exact error type from the
@@ -225,37 +227,47 @@ impl RootConnectionState {
                      * then, we just pass the root cause error message back to the kernel, and
                      * hope that it can present a usable error to the user.
                      */
-                    response.insert("cause", "IO").unwrap();
-                    response
-                        .insert("message", e.root_cause().to_string().as_str())
-                        .unwrap();
-                    debug!("sending response: {:?}", response);
-                    return Ok(Some(response));
+                    Err(Failure::Io {
+                        message: e.root_cause().to_string(),
+                    })
                 }
-                Err(PoolOpenError::NoCheckpoint) => {
-                    response.insert("cause", "checkpoint").unwrap();
-                    debug!("sending response: {:?}", response);
-                    return Ok(Some(response));
+                Err(PoolOpenError::NoCheckpoint) => Err(Failure::Checkpoint),
+                Ok((pool, uber, next_block)) => {
+                    self.pool = Some(Arc::new(pool));
+
+                    #[derive(Debug, Serialize)]
+                    struct Success {
+                        #[serde(flatten)]
+                        existing: Option<Existing>,
+                        next_block: BlockId,
+                    }
+                    #[derive(Serialize, Derivative)]
+                    #[derivative(Debug)]
+                    struct Existing {
+                        #[serde(with = "serde_bytes")]
+                        #[derivative(Debug = "ignore")]
+                        uberblock: Vec<u8>,
+                        #[serde(with = "serde_bytes")]
+                        #[derivative(Debug = "ignore")]
+                        config: Vec<u8>,
+                        features: HashMap<String, u64>,
+                    }
+
+                    Ok(Success {
+                        next_block,
+                        existing: uber.map(|uber| Existing {
+                            uberblock: uber.zfs_uberblock().to_owned(),
+                            config: uber.zfs_config().to_owned(),
+                            features: uber
+                                .features()
+                                .iter()
+                                .map(|(feature, refcount)| (feature.name.clone(), *refcount))
+                                .collect(),
+                        }),
+                    })
                 }
-                Ok(x) => x,
             };
-
-            if let Some(phys) = phys_opt {
-                response.insert("uberblock", phys.zfs_uberblock()).unwrap();
-                response.insert("config", phys.zfs_config()).unwrap();
-                let mut feature_nvl = NvList::new_unique_names();
-                for (feature, refcount) in phys.features() {
-                    feature_nvl.insert(&feature.name, refcount).unwrap();
-                }
-                response.insert("features", feature_nvl.as_ref()).unwrap();
-            }
-
-            response.insert("next_block", &next_block.0).unwrap();
-
-            self.pool = Some(Arc::new(pool));
-            maybe_die_with(|| format!("before sending response: {:?}", response));
-            debug!("sending response: {:?}", response);
-            Ok(Some(response))
+            return_result("pool open done", request.id, result, true)
         })
     }
 
@@ -558,59 +570,38 @@ impl RootConnectionState {
             let request: ResumeDestroyPoolRequest = nvpair::from_nvlist(&nvl)?;
             debug!("got {:?}", request);
 
-            #[derive(Debug, Serialize)]
-            struct ResumeDestroyPoolResponse {
-                #[serde(rename = "Type")]
-                response_type: &'static str,
-            }
-            let response = match pool_destroy::resume_destroy(
-                request.object_access.object_access(),
-                request.guid,
-            )
-            .await
-            {
-                Ok(_) => ResumeDestroyPoolResponse {
-                    response_type: "resume destroy pool done",
-                },
-                Err(error) => {
-                    error!("resume destroy pool failed, {:?}", error);
-                    ResumeDestroyPoolResponse {
-                        response_type: "resume destroy pool failed",
-                    }
-                }
-            };
-
-            return_struct(response, true)
+            let result =
+                pool_destroy::resume_destroy(request.object_access.object_access(), request.guid)
+                    .await
+                    .map_err(FailureMessage::new);
+            return_result("resume destroy pool done", (), result, true)
         }))
     }
 
     fn clear_hit_data(&mut self, _nvl: NvList) -> HandlerReturn {
-        #[derive(Debug, Serialize)]
-        struct ClearHitDataResponse {
-            #[serde(rename = "Type")]
-            response_type: &'static str,
-            result: &'static str,
-        }
-        if let Some(cache) = self.cache.as_ref() {
-            let cache = cache.clone();
-            Ok(Box::pin(async move {
-                debug!("got ClearHitDataRequest");
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            #[derive(Debug, Serialize)]
+            struct ClearHitDataResponse {
+                #[serde(rename = "Type")]
+                response_type: &'static str,
+                result: &'static str,
+            }
 
-                cache.clear_hit_data().await;
-                let response = ClearHitDataResponse {
-                    response_type: "clear_hit_data",
-                    result: "ok",
-                };
-                return_struct(response, true)
-            }))
-        } else {
-            debug!("got ClearHitDataRequest, no zettacache present");
-            let response = ClearHitDataResponse {
-                response_type: "clear_hit_data",
-                result: "err",
+            let result = match cache {
+                Some(cache) => {
+                    debug!("got ClearHitDataRequest");
+                    cache.clear_hit_data().await;
+                    Ok(())
+                }
+                None => {
+                    debug!("got ClearHitDataRequest, no zettacache present");
+                    Err(FailureMessage::new("zettacache not present"))
+                }
             };
-            handler_return_struct(response, true)
-        }
+            // XXX standardize on if response has the same type as request, or with "done" appended
+            return_result("clear_hit_data", (), result, true)
+        }))
     }
 }
 
