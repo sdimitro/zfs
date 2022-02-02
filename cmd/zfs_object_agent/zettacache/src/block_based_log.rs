@@ -4,7 +4,6 @@ use crate::block_access::EncodeType;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 use anyhow::Context;
-use async_stream::stream;
 use futures::future::join;
 use futures::stream;
 use futures::stream::FuturesUnordered;
@@ -27,6 +26,7 @@ use std::ops::Sub;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
+use tokio_stream::wrappers::ReceiverStream;
 use util::get_tunable;
 use util::nice_p2size;
 use util::super_trace;
@@ -45,6 +45,13 @@ lazy_static! {
     // only need as many chunks in the cache as the number of objects that we
     // might be processing concurrently.
     static ref CHUNK_CACHE_ENTRIES: usize = get_tunable("chunk_cache_entries", 128);
+    // This can be increased if we need to have multiple (128MB) extents being
+    // read at once.  Each one would typically be read from a different disk, so
+    // this may be needed if we the throughput of multiple disks.
+    static ref ITER_CONCURRENT_READS: usize = get_tunable("iter_concurrent_reads", 1);
+    // Number of chunks to buffer in the channel; experimentally determinded
+    // that >100 gives good performance.
+    static ref ITER_CHUNK_BUFFER: usize = get_tunable("iter_chunk_buffer", 1000);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -97,36 +104,48 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         &self,
         block_access: Arc<BlockAccess>,
     ) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        // XXX is it possible to do this without copying self.phys.extents?  Not
-        // a huge deal I guess since it should be small.
         let extents = self.extents.clone();
         let next_chunk = self.next_chunk;
         let next_chunk_offset = self.next_chunk_offset;
 
-        stream! {
-            let mut chunk_id = ChunkId(0);
-            for (offset, extent) in extents.iter() {
-                // XXX Probably want to do smaller i/os than the entire extent
-                // (which is up to 128MB).  Also want to issue a few in
-                // parallel?
+        // Just buffer a single (128MB) extent between the two tasks.
+        let (extent_tx, mut extent_rx) = tokio::sync::mpsc::channel(1);
 
-                let truncated_extent =
-                    extent.range(0, min(extent.size, next_chunk_offset - *offset));
-                let extent_bytes = block_access.read_raw(truncated_extent, DiskIoType::MaintenanceRead).await;
+        {
+            let block_access = block_access.clone();
+            tokio::spawn(async move {
+                let block_access = &*block_access;
+                stream::iter(extents.into_iter().map(|(offset, extent)| async move {
+                    let truncated_extent =
+                        extent.range(0, min(extent.size, next_chunk_offset - offset));
+                    block_access
+                        .read_raw(truncated_extent, DiskIoType::MaintenanceRead)
+                        .await
+                }))
+                .buffered(*ITER_CONCURRENT_READS)
+                .for_each(|extent_bytes| async {
+                    extent_tx.send(extent_bytes).await.ok();
+                })
+                .await;
+            });
+        }
+
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(*ITER_CHUNK_BUFFER);
+
+        tokio::spawn(async move {
+            let mut chunk_id = ChunkId(0);
+            while let Some(extent_bytes) = extent_rx.recv().await {
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
-                    let chunk_location = extent.location.offset() + total_consumed as u64;
-                    super_trace!("decoding {:?} from {:?}", chunk_id, chunk_location);
                     // XXX handle checksum error here
-                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) =
-                        with_alloctag("BlockBasedLogPhys::iter_chunks()", || {
-                            block_access
-                                .chunk_from_raw(&extent_bytes[total_consumed..])
-                                .with_context(|| format!("{:?} at {:?}", chunk_id, chunk_location))
-                                .unwrap()
-                        });
+                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
+                        .chunk_from_raw(&extent_bytes[total_consumed..])
+                        .with_context(|| format!("{:?}", chunk_id))
+                        .unwrap();
                     assert_eq!(chunk.id, chunk_id);
-                    yield chunk;
+                    if chunk_tx.send(chunk).await.is_err() {
+                        break;
+                    }
                     chunk_id = chunk_id.next();
                     total_consumed += consumed;
                     if chunk_id == next_chunk {
@@ -134,7 +153,9 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                     }
                 }
             }
-        }
+        });
+
+        ReceiverStream::new(chunk_rx)
     }
 
     pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {

@@ -361,7 +361,7 @@ impl MergeState {
                 self.ghost_cutoff,
             );
 
-            index_stream = Box::pin(old_index.iter());
+            index_stream = old_index.iter();
 
             // histogram to accumulate blocks that have been obsoleted between merge messages
             obsoleted = AtimeHistogramPhys::new(
