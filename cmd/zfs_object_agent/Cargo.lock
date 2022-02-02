@@ -2859,6 +2859,7 @@ dependencies = [
  "rusoto_core",
  "rusoto_credential",
  "rusoto_s3",
+ "semver",
  "serde 1.0.133",
  "serde_bytes",
  "serde_json",
