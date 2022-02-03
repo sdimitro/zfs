@@ -294,7 +294,13 @@ impl RootConnectionState {
     }
 
     fn end_txg(&mut self, nvl: NvList) -> HandlerReturn {
-        debug!("got request: {:?}", nvl);
+        // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid filling the log unnecessarily.
+        debug!(
+            "got request: Type={:?}, TXG={:?}, checkpoint={:?}",
+            nvl.lookup_string("Type").ok(),
+            nvl.lookup_uint64("TXG").ok(),
+            nvl.lookup_uint64("checkpoint")
+        );
 
         let pool = self
             .pool

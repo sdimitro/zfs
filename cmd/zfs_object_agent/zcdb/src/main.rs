@@ -70,6 +70,11 @@ async fn main() -> Result<(), anyhow::Error> {
                     Arg::with_name("rebalance-log-raw")
                         .long("rebalance-log-raw")
                         .help("dump rebalance log"),
+                )
+                .arg(
+                    Arg::with_name("atime-histogram")
+                        .long("atime-histogram")
+                        .help("dump atime histogram of index"),
                 ),
         )
         .subcommand(
@@ -98,7 +103,8 @@ async fn main() -> Result<(), anyhow::Error> {
                         .spacemaps(subcommand_matches.is_present("spacemaps"))
                         .operation_log_raw(subcommand_matches.is_present("operation-log-raw"))
                         .index_log_raw(subcommand_matches.is_present("index-log-raw"))
-                        .rebalance_log_raw(subcommand_matches.is_present("rebalance-log-raw")),
+                        .rebalance_log_raw(subcommand_matches.is_present("rebalance-log-raw"))
+                        .atime_histogram(subcommand_matches.is_present("atime-histogram")),
                 ),
                 cache_paths,
             )

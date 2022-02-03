@@ -1783,6 +1783,16 @@ impl ZCacheDBHandle {
             println!("{:#?}", self.checkpoint);
         }
 
+        if opts.dump_atime_histogram {
+            println!("DUMP INDEX ATIME HISTOGRAM");
+            println!("{}", self.checkpoint.old_index.atime_histogram());
+
+            if let Some(progress) = &self.checkpoint.merge_progress {
+                println!("DUMP MERGE INDEX ATIME HISTOGRAM");
+                println!("{}", progress.new_index.atime_histogram());
+            }
+        }
+
         if opts.dump_spacemaps {
             zcachedb_dump_spacemaps(
                 self.checkpoint.block_allocator.clone(),

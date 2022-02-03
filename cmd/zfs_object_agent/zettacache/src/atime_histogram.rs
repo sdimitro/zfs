@@ -1,5 +1,6 @@
 use crate::base_types::Atime;
 use crate::index::IndexValue;
+use derivative::Derivative;
 use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
@@ -10,13 +11,15 @@ use std::ops::AddAssign;
 use std::ops::SubAssign;
 use util::nice_p2size;
 
-#[derive(Serialize, Deserialize, Debug, Default, Clone)]
+#[derive(Serialize, Deserialize, Default, Clone, Derivative)]
+#[derivative(Debug)]
 /// This data structure records the number of bytes cached
 /// quantized by the atime they were inserted or last referenced.
 /// History of evicted cache content is retained as "ghost" data:
 /// buckets prior to "first_live" represent this data. "first ghost"
 /// is the oldest (first) bucket in the histogram.
 pub struct AtimeHistogramPhys {
+    #[derivative(Debug = "ignore")]
     histogram: Vec<u64>,
     first_ghost: Atime,
     first_live: Atime,
