@@ -1,6 +1,7 @@
 use crate::base_types::Atime;
 use crate::index::IndexValue;
 use derivative::Derivative;
+use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use serde::{Deserialize, Serialize};
@@ -9,9 +10,16 @@ use std::iter;
 use std::mem;
 use std::ops::AddAssign;
 use std::ops::SubAssign;
+use util::get_tunable;
 use util::nice_p2size;
+use util::BinaryIndexTree;
 
-#[derive(Serialize, Deserialize, Default, Clone, Derivative)]
+lazy_static! {
+    // How many extra nodes to add to the binary index tree each time we grow it.
+    pub static ref ATIME_BIT_EXPANSION_NODES: usize = get_tunable("atime_bit_expansion_nodes", 10);
+}
+
+#[derive(Serialize, Deserialize, Clone, Derivative)]
 #[derivative(Debug)]
 /// This data structure records the number of bytes cached
 /// quantized by the atime they were inserted or last referenced.
@@ -34,6 +42,10 @@ impl AtimeHistogramPhys {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.histogram.len()
+    }
+
     pub fn first_ghost(&self) -> Atime {
         self.first_ghost
     }
@@ -46,28 +58,6 @@ impl AtimeHistogramPhys {
     /// first_ghost/live are preserved.
     pub fn take(&mut self) -> Self {
         mem::replace(self, Self::new(self.first_ghost, self.first_live))
-    }
-
-    /// Reset the start to a later atime, discarding older entries.
-    /// Requests to reset to an earlier atime are ignored.
-    pub fn reset_first(&mut self, new_first: Atime) {
-        if new_first <= self.first_ghost {
-            return;
-        }
-        let delta = new_first - self.first_ghost;
-        // XXX - if this becomes a bottleneck we should change the histogram to a VecDeque
-        // so that we don't have to copy when deleting the head of the histogram
-        self.histogram.drain(0..delta);
-        self.first_ghost = new_first;
-    }
-
-    /// Reset the live start to a later atime.
-    /// Requests to reset to an earlier atime are ignored.
-    pub fn reset_first_live(&mut self, new_first: Atime) {
-        if new_first <= self.first_live {
-            return;
-        }
-        self.first_live = new_first;
     }
 
     /// Given an atime "starting point", calculate the "end" atime such that
@@ -90,27 +80,6 @@ impl AtimeHistogramPhys {
         end
     }
 
-    pub fn atime_for_eviction_target(&self, eviction_size: u64) -> Atime {
-        debug!(
-            "histogram live start at {:?} with {} entries, evicting {}MB",
-            self.first_live,
-            self.histogram.len(),
-            eviction_size / 1024 / 1024,
-        );
-        self.atime_for_target(self.first_live, eviction_size)
-    }
-
-    pub fn atime_for_ghost_target(&self, ghost_reduction: u64) -> Atime {
-        let atime = self.atime_for_target(self.first_ghost, ghost_reduction);
-        debug!(
-            "ghost size reduction of {}MB moves start from {:?} to {:?}",
-            ghost_reduction / 1024 / 1024,
-            self.first_ghost,
-            atime
-        );
-        std::cmp::min(atime, self.first_live)
-    }
-
     pub fn insert(&mut self, value: IndexValue) {
         let index = value.atime() - self.first_ghost;
         if index >= self.histogram.len() {
@@ -128,28 +97,9 @@ impl AtimeHistogramPhys {
         self.histogram.clear();
     }
 
-    pub fn sum_live(&self) -> u64 {
-        self.size_at(self.first_live)
-    }
-
-    pub fn sum_ghost(&self) -> u64 {
-        let index = self.first_live - self.first_ghost;
-        self.histogram[..index].iter().sum()
-    }
-
     pub fn is_empty(&self) -> bool {
-        self.size_at(self.first_ghost) == 0
-    }
-
-    /// Add up all the atime histogram buckets from key atime
-    /// to the current atime. This will be the minimum cache size
-    /// that would contain this key.
-    pub fn size_at(&self, atime: Atime) -> u64 {
-        // XXX - Note this interface is called for every cache hit. It is, currently, an O(N) algorithm
-        // (adding all of the elements of the array). This may be an issue for very large atime histograms.
-        // This could be improved to O(log(N)) with something like a segment tree.
-        let index = atime - self.first_ghost;
-        self.histogram[index..].iter().sum()
+        let total_size: u64 = self.histogram[0..].iter().sum();
+        total_size == 0
     }
 
     pub fn assert_eq(&self, other: &AtimeHistogramPhys) {
@@ -236,5 +186,142 @@ impl Display for AtimeHistogramPhys {
             )?;
         }
         Ok(())
+    }
+}
+
+/// `AtimeHistogram` records the number of bytes cached quantized by the atime
+/// they were inserted or last referenced. History of evicted cache content is
+/// retained as "ghost" data: buckets prior to "first_live" represent this data.
+/// "first ghost" is the oldest (first) bucket in the histogram.
+pub struct AtimeHistogram {
+    phys: AtimeHistogramPhys,
+    tree: BinaryIndexTree,
+}
+
+impl AtimeHistogram {
+    pub fn new(phys: AtimeHistogramPhys) -> AtimeHistogram {
+        AtimeHistogram {
+            tree: BinaryIndexTree::new(&phys.histogram, Some(*ATIME_BIT_EXPANSION_NODES)),
+            phys,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn to_phys(&self) -> AtimeHistogramPhys {
+        self.phys.clone()
+    }
+
+    pub fn first_ghost(&self) -> Atime {
+        self.phys.first_ghost
+    }
+
+    pub fn first_live(&self) -> Atime {
+        self.phys.first_live
+    }
+
+    /// Reset the start to a later atime, discarding older entries.
+    /// Requests to reset to an earlier atime are ignored.
+    pub fn reset_first(&mut self, new_first: Atime) {
+        if new_first <= self.phys.first_ghost {
+            return;
+        }
+        debug!(
+            "reset_first: new_first {:?} first_ghost {:?} in {:?}, {} histogram entries",
+            new_first,
+            self.phys.first_ghost,
+            self,
+            self.phys.histogram.len()
+        );
+        let delta = new_first - self.phys.first_ghost;
+        // XXX - if this becomes a bottleneck we should change the histogram to a VecDeque
+        // so that we don't have to copy when deleting the head of the histogram
+        self.phys.histogram.drain(0..delta);
+        self.phys.first_ghost = new_first;
+        self.tree = BinaryIndexTree::new(&self.phys.histogram, Some(*ATIME_BIT_EXPANSION_NODES));
+    }
+
+    /// Reset the live start to a later atime.
+    /// Requests to reset to an earlier atime are ignored.
+    pub fn reset_first_live(&mut self, new_first: Atime) {
+        if new_first <= self.phys.first_live {
+            return;
+        }
+        self.phys.first_live = new_first;
+    }
+
+    pub fn atime_for_eviction_target(&self, eviction_size: u64) -> Atime {
+        let result = self
+            .phys
+            .atime_for_target(self.phys.first_live, eviction_size);
+        debug!(
+            "histogram live start at {:?} with {} entries, evicting {} has {:?}",
+            self.phys.first_live,
+            self.phys.histogram.len(),
+            nice_p2size(eviction_size),
+            result,
+        );
+        result
+    }
+
+    pub fn atime_for_ghost_target(&self, ghost_reduction: u64) -> Atime {
+        let atime = self
+            .phys
+            .atime_for_target(self.phys.first_ghost, ghost_reduction);
+        debug!(
+            "ghost size reduction of {} moves start from {:?} to {:?}",
+            nice_p2size(ghost_reduction),
+            self.phys.first_ghost,
+            atime
+        );
+        std::cmp::min(atime, self.phys.first_live)
+    }
+
+    pub fn insert(&mut self, value: IndexValue) {
+        self.phys.insert(value);
+        let index = value.atime() - self.phys.first_ghost;
+        if index >= self.tree.len() {
+            // Note -- BinaryIndexTree::new() is O(n log n), this is mitigated
+            // by growing the index in increments > 1
+            self.tree =
+                BinaryIndexTree::new(&self.phys.histogram, Some(*ATIME_BIT_EXPANSION_NODES));
+            debug!("AtimeHistogram expanding BIT {:?}", self);
+        } else {
+            self.tree.insert_at(index, u64::from(value.size()));
+        }
+    }
+
+    pub fn remove(&mut self, value: IndexValue) {
+        self.phys.remove(value);
+        let index = value.atime() - self.phys.first_ghost;
+        self.tree.remove_at(index, u64::from(value.size()));
+    }
+
+    pub fn sum_live(&self) -> u64 {
+        self.size_at(self.phys.first_live)
+    }
+
+    pub fn sum_ghost(&self) -> u64 {
+        // Note we want a prefix sum here.  This is_O_(2 log n)
+        self.size_at(self.phys.first_ghost) - self.size_at(self.phys.first_live)
+    }
+
+    /// Add up all the atime histogram buckets from key atime up to the current
+    /// atime. This will be the minimum cache size that would contain this key.
+    pub fn size_at(&self, atime: Atime) -> u64 {
+        // Note this interface is called for every cache hit. A BinaryIndexTree
+        // (aka Fenwick tree) is used to obtain the sum in O(log(N)).
+        let index = atime - self.phys.first_ghost;
+        self.tree.suffix_sum(index)
+    }
+}
+
+impl std::fmt::Debug for AtimeHistogram {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("AtimeHistogram")
+            .field("histogram_buckets", &self.phys.histogram.len())
+            .field("binary_insert_tree_len", &self.tree.len())
+            .field("first_ghost", &self.phys.first_ghost.0)
+            .field("first_live", &self.phys.first_live.0)
+            .finish()
     }
 }

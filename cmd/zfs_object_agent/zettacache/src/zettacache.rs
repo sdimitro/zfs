@@ -1,4 +1,4 @@
-use crate::atime_histogram::AtimeHistogramPhys;
+use crate::atime_histogram::{AtimeHistogram, AtimeHistogramPhys};
 use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_allocator::zcachedb_dump_slabs;
@@ -525,7 +525,11 @@ impl MergeState {
             .await
             .unwrap_or_else(|e| panic!("couldn't send: {}", e));
 
-        super_trace!("new histogram: {:#?}", next_index.atime_histogram());
+        super_trace!(
+            "new histogram: {:#?}, {} entries",
+            next_index.atime_histogram(),
+            next_index.atime_histogram().len()
+        );
         info!(
             "wrote next index with {} entries ({}) in {:.1}s ({:.1}MB/s)",
             next_index.len(),
@@ -591,7 +595,7 @@ struct ZettaCacheState {
     // need the lock inside it.  But hopefully we split up the big State lock
     // and then this is useful.  Same goes for block_access.
     extent_allocator: Arc<ExtentAllocator>,
-    atime_histogram: AtimeHistogramPhys, // includes pending_changes, including AtimeUpdate which is not logged
+    atime_histogram: AtimeHistogram, // includes pending_changes, including AtimeUpdate which is not logged
     size_histogram: SizeHistogramPhys,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
@@ -923,10 +927,10 @@ impl ZettaCache {
         .await;
 
         // Note, the old_index histogram covers only the part that doesn't overlap with the new_index.
-        let mut atime_histogram = old_index.atime_histogram().clone();
+        let mut atime_histogram_phys = old_index.atime_histogram().clone();
         if let Some(merge_progress) = &checkpoint.merge_progress {
             assert_eq!(old_index.trim_key(), merge_progress.new_index.last_key());
-            atime_histogram += merge_progress.new_index.atime_histogram();
+            atime_histogram_phys += merge_progress.new_index.atime_histogram();
         }
 
         let (old_pending_changes, new_index) = match &checkpoint.merge_progress {
@@ -938,7 +942,10 @@ impl ZettaCache {
                 );
 
                 (
-                    Some(Self::load_operation_log(&old_operation_log, &mut atime_histogram).await),
+                    Some(
+                        Self::load_operation_log(&old_operation_log, &mut atime_histogram_phys)
+                            .await,
+                    ),
                     Some(
                         ReadOnlyIndexRun::open(
                             block_access.clone(),
@@ -977,8 +984,13 @@ impl ZettaCache {
             nice_p2size(pending_changes_entry_size as u64)
         );
 
-        let pending_changes = Self::load_operation_log(&operation_log, &mut atime_histogram).await;
-        debug!("atime_histogram: {:#?}", atime_histogram);
+        let pending_changes =
+            Self::load_operation_log(&operation_log, &mut atime_histogram_phys).await;
+        debug!(
+            "atime_histogram: {:#?}, {} entries",
+            atime_histogram_phys,
+            atime_histogram_phys.len()
+        );
 
         let stats = Arc::new(CacheStats::default());
 
@@ -991,7 +1003,7 @@ impl ZettaCache {
             index_cache: with_alloctag("ZettaCacheState::index_cache hashtable", || {
                 LruCache::new(ZettaCache::index_cache_estimate_capacity(system_memory))
             }),
-            atime_histogram,
+            atime_histogram: AtimeHistogram::new(atime_histogram_phys),
             size_histogram: checkpoint.size_histogram,
             operation_log,
             primary,
