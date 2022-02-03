@@ -543,40 +543,15 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
 {
 	(void) tag;
 	int wlocks_held = 0;
+
 	ASSERT3U(SCL_LOCKS, <, sizeof (wlocks_held) * NBBY);
 
-	/*
-	 * If we're using an object-base pool, we may need
-	 * to flush out any pending writes. We do this only
-	 * when we are trying to grab the SCL_ZIO lock.
-	 */
-	boolean_t flush_needed = (rw == RW_WRITER) &&
-	    spa_is_object_based(spa) && (locks & SCL_ZIO);
-
-	/*
-	 * If this is an object-based pool and a flush is required, then
-	 * we may have to also acquire the SCL_ALLOC lock. We need to add
-	 * this to the list of locks that are going to be acquired but we
-	 * release it before returning to the caller. This allows us to lock
-	 * out allocations so that we can enable the object store passthru
-	 * logic while still grabbing the locks in the correct order.
-	 */
-	boolean_t lock_needed = flush_needed &&
-	    spa_config_held(spa, SCL_ALLOC, RW_WRITER) == 0 &&
-	    !(locks & SCL_ALLOC);
-
-	if (lock_needed) {
-		locks |= SCL_ALLOC;
-	}
-
 	for (int i = 0; i < SCL_LOCKS; i++) {
-		vdev_t *rvd = spa->spa_root_vdev;
 		spa_config_lock_t *scl = &spa->spa_config_lock[i];
 		if (scl->scl_writer == curthread)
 			wlocks_held |= (1 << i);
 		if (!(locks & (1 << i)))
 			continue;
-
 		mutex_enter(&scl->scl_lock);
 		if (rw == RW_READER) {
 			while (scl->scl_writer || scl->scl_write_wanted) {
@@ -586,20 +561,6 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
 			ASSERT(scl->scl_writer != curthread);
 			while (scl->scl_count != 0) {
 				scl->scl_write_wanted++;
-
-				/*
-				 * If we're on object based pool and
-				 * we're trying to lock the SCL_LOCK,
-				 * then we need to notify the object
-				 * store agent to flush out any active
-				 * I/Os that are currently inflight.
-				 * Set the flush offset so that we can
-				 * flush any I/Os quickly that might
-				 * be holding the SCL_ZIO lock as reader.
-				 */
-				if (flush_needed && (1 << i) == SCL_ZIO) {
-					vdev_object_store_enable_passthru(rvd);
-				}
 				cv_wait(&scl->scl_cv, &scl->scl_lock);
 				scl->scl_write_wanted--;
 			}
@@ -609,10 +570,6 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
 		mutex_exit(&scl->scl_lock);
 	}
 	ASSERT3U(wlocks_held, <=, locks);
-
-	if (lock_needed) {
-		spa_config_exit(spa, SCL_ALLOC, tag);
-	}
 }
 
 void

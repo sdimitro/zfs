@@ -1,4 +1,4 @@
-use crate::atime_histogram::AtimeHistogramPhys;
+use crate::atime_histogram::{AtimeHistogram, AtimeHistogramPhys};
 use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_allocator::zcachedb_dump_slabs;
@@ -66,7 +66,7 @@ use uuid::Uuid;
 lazy_static! {
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
     static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 15.0); // Can lower this to test forced eviction.
-    static ref MAX_PENDING_CHANGES: usize = get_tunable("max_pending_changes", 50_000); // XXX should be based on RAM usage, ~tens of millions at least
+    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 2.0);
     static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
     static ref MERGE_PROGRESS_MESSAGE_INTERVAL: Duration = Duration::from_millis(get_tunable("merge_progress_message_interval_ms", 1000));
     static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
@@ -361,7 +361,7 @@ impl MergeState {
                 self.ghost_cutoff,
             );
 
-            index_stream = Box::pin(old_index.iter());
+            index_stream = old_index.iter();
 
             // histogram to accumulate blocks that have been obsoleted between merge messages
             obsoleted = AtimeHistogramPhys::new(
@@ -525,7 +525,11 @@ impl MergeState {
             .await
             .unwrap_or_else(|e| panic!("couldn't send: {}", e));
 
-        super_trace!("new histogram: {:#?}", next_index.atime_histogram());
+        super_trace!(
+            "new histogram: {:#?}, {} entries",
+            next_index.atime_histogram(),
+            next_index.atime_histogram().len()
+        );
         info!(
             "wrote next index with {} entries ({}) in {:.1}s ({:.1}MB/s)",
             next_index.len(),
@@ -581,6 +585,8 @@ struct ZettaCacheState {
     primary_disk: DiskId,
     block_allocator: BlockAllocator,
     pending_changes: PendingChanges,
+    pending_changes_trigger: usize,
+    pending_changes_cap: usize,
     // Keep state associated with any on-going merge here
     merge: Option<Arc<MergeState>>,
     index_cache: LruCache<IndexKey, IndexValue>,
@@ -589,7 +595,7 @@ struct ZettaCacheState {
     // need the lock inside it.  But hopefully we split up the big State lock
     // and then this is useful.  Same goes for block_access.
     extent_allocator: Arc<ExtentAllocator>,
-    atime_histogram: AtimeHistogramPhys, // includes pending_changes, including AtimeUpdate which is not logged
+    atime_histogram: AtimeHistogram, // includes pending_changes, including AtimeUpdate which is not logged
     size_histogram: SizeHistogramPhys,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
@@ -753,10 +759,8 @@ impl ZettaCache {
         .await;
     }
 
-    fn index_cache_estimate_capacity() -> usize {
-        let mut sysinfo = System::new();
-        sysinfo.refresh_system();
-        let system_memory = usize::from64(sysinfo.total_memory() * 1024);
+    fn index_cache_estimate_capacity(system_memory: usize) -> usize {
+        // Calculate the maximum size for the index cache as a percentage of system memory
         let target_index_cache_bytes = (*INDEX_CACHE_ENTRIES_MEM_PCT * system_memory) / 100;
 
         // Looking at the source of LruCache at the time of this writing we see that LruEntry<K,V>
@@ -923,10 +927,10 @@ impl ZettaCache {
         .await;
 
         // Note, the old_index histogram covers only the part that doesn't overlap with the new_index.
-        let mut atime_histogram = old_index.atime_histogram().clone();
+        let mut atime_histogram_phys = old_index.atime_histogram().clone();
         if let Some(merge_progress) = &checkpoint.merge_progress {
             assert_eq!(old_index.trim_key(), merge_progress.new_index.last_key());
-            atime_histogram += merge_progress.new_index.atime_histogram();
+            atime_histogram_phys += merge_progress.new_index.atime_histogram();
         }
 
         let (old_pending_changes, new_index) = match &checkpoint.merge_progress {
@@ -938,7 +942,10 @@ impl ZettaCache {
                 );
 
                 (
-                    Some(Self::load_operation_log(&old_operation_log, &mut atime_histogram).await),
+                    Some(
+                        Self::load_operation_log(&old_operation_log, &mut atime_histogram_phys)
+                            .await,
+                    ),
                     Some(
                         ReadOnlyIndexRun::open(
                             block_access.clone(),
@@ -951,19 +958,52 @@ impl ZettaCache {
             None => (None, None),
         };
 
-        let pending_changes = Self::load_operation_log(&operation_log, &mut atime_histogram).await;
-        debug!("atime_histogram: {:#?}", atime_histogram);
+        let mut sysinfo = System::new();
+        sysinfo.refresh_system();
+        let system_memory = usize::from64(sysinfo.total_memory() * 1024);
+
+        // Calculate a maximum size for the pending_changes as a percentage of system memory
+        // Note that we could actually consume twice this space during a merge (old_pending_changes + pending_changes)
+        let pending_changes_max_bytes = (*PENDING_CHANGES_MEM_PCT * system_memory as f64)
+            .approx_as::<usize>()
+            .unwrap()
+            / 100;
+        // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data entries
+        let pending_changes_entries_bytes = pending_changes_max_bytes * 65 / 100;
+        let pending_changes_entry_size = mem::size_of::<PendingChange>();
+        let pending_changes_cap = pending_changes_entries_bytes / pending_changes_entry_size;
+        // In order to stay inside this desired cap, we need to be triggering a new merge before we are more
+        // than half way to the cap. Let's trigger at about 1/3 just to be safe
+        let pending_changes_trigger = pending_changes_cap / 3;
+        info!(
+            "pending changes max length set to {} entries [{}% of {} = {} and entry size {}]",
+            pending_changes_cap,
+            *PENDING_CHANGES_MEM_PCT,
+            nice_p2size(system_memory as u64),
+            nice_p2size(pending_changes_entries_bytes as u64),
+            nice_p2size(pending_changes_entry_size as u64)
+        );
+
+        let pending_changes =
+            Self::load_operation_log(&operation_log, &mut atime_histogram_phys).await;
+        debug!(
+            "atime_histogram: {:#?}, {} entries",
+            atime_histogram_phys,
+            atime_histogram_phys.len()
+        );
 
         let stats = Arc::new(CacheStats::default());
 
         let mut state = ZettaCacheState {
             block_access: block_access.clone(),
             pending_changes,
+            pending_changes_cap,
+            pending_changes_trigger,
             merge: None,
             index_cache: with_alloctag("ZettaCacheState::index_cache hashtable", || {
-                LruCache::new(ZettaCache::index_cache_estimate_capacity())
+                LruCache::new(ZettaCache::index_cache_estimate_capacity(system_memory))
             }),
-            atime_histogram,
+            atime_histogram: AtimeHistogram::new(atime_histogram_phys),
             size_histogram: checkpoint.size_histogram,
             operation_log,
             primary,
@@ -1783,6 +1823,16 @@ impl ZCacheDBHandle {
             println!("{:#?}", self.checkpoint);
         }
 
+        if opts.dump_atime_histogram {
+            println!("DUMP INDEX ATIME HISTOGRAM");
+            println!("{}", self.checkpoint.old_index.atime_histogram());
+
+            if let Some(progress) = &self.checkpoint.merge_progress {
+                println!("DUMP MERGE INDEX ATIME HISTOGRAM");
+                println!("{}", progress.new_index.atime_histogram());
+            }
+        }
+
         if opts.dump_spacemaps {
             zcachedb_dump_spacemaps(
                 self.checkpoint.block_allocator.clone(),
@@ -1974,26 +2024,33 @@ impl ZettaCacheState {
             self.atime_histogram.insert(value);
         }
 
+        let pending_len = self.pending_changes.len()
+            + self
+                .merge
+                .as_ref()
+                .map(|ms| ms.old_pending_changes.len())
+                .unwrap_or_default();
         // XXX looking up again.  But can't pass in both &mut self and &mut PendingChange
         match self.pending_changes.entry(key) {
             btree_map::Entry::Vacant(ve) => {
-                // only in Index, not pending_changes. Perserve the original atime (from the Index)
-                // in case we "replace" this block and need to reset the histogram for the orignal block
-                // (i.e. when we find the old block during the merge, we can decrement the atime histogram)
-                trace!(
-                    "adding PendingChanges::UpdateAtime({:?}) for {:?}",
-                    value,
-                    key
-                );
-                // XXX would be nice to have saved the btreemap::Entry so we
-                // don't have to traverse the tree again.
-                with_alloctag(Self::PENDING_CHANGES_TAG, || {
-                    ve.insert(PendingChange::UpdateAtime(UpdateAtime(
+                // Only in Index, not pending_changes.
+                if pending_len < self.pending_changes_cap {
+                    // Perserve the original atime (from the Index) in case we "replace" this block and
+                    // need to reset the histogram for the orignal block (i.e. when we find the old block
+                    // during the merge, we can decrement the atime histogram)
+                    trace!(
+                        "adding PendingChanges::UpdateAtime({:?}) for {:?}",
                         value,
-                        original_atime,
-                    )))
-                });
-                self.update_pending_stats();
+                        key
+                    );
+                    with_alloctag(Self::PENDING_CHANGES_TAG, || {
+                        ve.insert(PendingChange::UpdateAtime(UpdateAtime(
+                            value,
+                            original_atime,
+                        )))
+                    });
+                    self.update_pending_stats();
+                }
             }
             btree_map::Entry::Occupied(mut oe) => match oe.get_mut() {
                 PendingChange::Insert(value_ref)
@@ -2044,10 +2101,26 @@ impl ZettaCacheState {
     /// allow.  It may be a recent cache miss, or a recently-written block.
     /// Returns a Future to be executed after the state lock has been dropped.
     fn insert(&mut self, locked_key: LockedKey, bytes: AlignedBytes) -> impl Future {
+        let noop = future::Either::Left(async {});
+        let pending_len = self.pending_changes.len()
+            + self
+                .merge
+                .as_ref()
+                .map(|ms| ms.old_pending_changes.len())
+                .unwrap_or_default();
+        if pending_len >= self.pending_changes_cap {
+            trace!(
+                "pending changes limit reached (now {}), refusing insert of {:?}",
+                pending_len,
+                locked_key.key()
+            );
+            return noop;
+        }
+
         let buf_size = bytes.len();
-        let location = match self.allocate_block(u32::try_from(bytes.len()).unwrap()) {
+        let location = match self.allocate_block(u32::try_from(buf_size).unwrap()) {
             Some(location) => location,
-            None => return future::Either::Left(async {}),
+            None => return noop,
         };
 
         // XXX if this is past the last block of the main index, we can write it
@@ -2389,7 +2462,7 @@ impl ZettaCacheState {
         &mut self,
         old_index: Arc<tokio::sync::RwLock<IndexRun>>,
     ) -> Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)> {
-        if self.pending_changes.len() < *MAX_PENDING_CHANGES
+        if self.pending_changes.len() < self.pending_changes_trigger
             && self.block_allocator.size() - self.block_allocator.available()
                 < (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
             && !self.block_allocator.rebalance_needed()

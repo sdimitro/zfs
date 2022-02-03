@@ -2803,6 +2803,7 @@ dependencies = [
  "bytes",
  "chrono",
  "conv",
+ "derivative",
  "either",
  "futures",
  "futures-core",
@@ -2822,6 +2823,7 @@ dependencies = [
  "serde_json",
  "sysinfo",
  "tokio",
+ "tokio-stream",
  "util",
  "uuid",
 ]

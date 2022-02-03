@@ -4,6 +4,7 @@
 #![warn(clippy::cast_sign_loss)]
 
 mod alloc;
+mod binaryindextree;
 mod bitmap_range_iterator;
 mod btreemap_ext;
 mod credentials;
@@ -23,6 +24,7 @@ pub mod zettacache_stats;
 pub use alloc::with_alloctag;
 pub use alloc::with_alloctag_hf;
 pub use alloc::TrackingAllocator;
+pub use binaryindextree::BinaryIndexTree;
 pub use bitmap_range_iterator::BitmapRangeIterator;
 pub use btreemap_ext::iter_wrapping;
 pub use credentials::ResilientCredentialsProvider;

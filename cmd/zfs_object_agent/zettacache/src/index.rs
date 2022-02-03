@@ -4,6 +4,7 @@ use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
+use derivative::Derivative;
 use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
@@ -71,7 +72,7 @@ pub struct IndexRunPhys {
     trim_key: Option<IndexKey>,
 
     last_key: Option<IndexKey>,
-    atime_histogram: AtimeHistogramPhys,
+    atime_histogram_phys: AtimeHistogramPhys,
     log: SummarizedBlockBasedLogPhys<IndexEntry>,
 }
 
@@ -80,7 +81,7 @@ impl IndexRunPhys {
         Self {
             trim_key: None,
             last_key: None,
-            atime_histogram: AtimeHistogramPhys::new(first_ghost_atime, first_live_atime),
+            atime_histogram_phys: AtimeHistogramPhys::new(first_ghost_atime, first_live_atime),
             log: Default::default(),
         }
     }
@@ -116,7 +117,7 @@ impl IndexRunPhys {
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
-        &self.atime_histogram
+        &self.atime_histogram_phys
     }
 
     pub fn last_key(&self) -> Option<IndexKey> {
@@ -125,8 +126,8 @@ impl IndexRunPhys {
 
     pub async fn verify_histogram(&self, block_access: Arc<BlockAccess>) {
         let mut histogram = AtimeHistogramPhys::new(
-            self.atime_histogram.first_ghost(),
-            self.atime_histogram.first_live(),
+            self.atime_histogram_phys.first_ghost(),
+            self.atime_histogram_phys.first_live(),
         );
         self.iter_entries(block_access)
             .for_each(|entry| {
@@ -134,24 +135,20 @@ impl IndexRunPhys {
                 future::ready(())
             })
             .await;
-        histogram.assert_eq(&self.atime_histogram);
+        histogram.assert_eq(&self.atime_histogram_phys);
         println!("Verified index histogram: {}", histogram);
     }
 }
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct IndexRun {
     trim_key: Option<IndexKey>, // The key and all before it are logically removed from the index.
     last_key: Option<IndexKey>,
-    atime_histogram: AtimeHistogramPhys,
+    #[derivative(Debug = "ignore")]
+    atime_histogram_phys: AtimeHistogramPhys,
+    #[derivative(Debug = "ignore")]
     log: SummarizedBlockBasedLog<IndexEntry>,
-}
-
-impl std::fmt::Debug for IndexRun {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ZettaCacheIndex")
-            .field("last_key", &self.last_key)
-            .finish()
-    }
 }
 
 #[derive(Debug)]
@@ -166,7 +163,7 @@ impl IndexRun {
         let index = Self {
             trim_key: phys.trim_key,
             last_key: phys.last_key,
-            atime_histogram: phys.atime_histogram,
+            atime_histogram_phys: phys.atime_histogram_phys,
             log: SummarizedBlockBasedLog::open(block_access, extent_allocator, phys.log).await,
         };
         index
@@ -179,7 +176,7 @@ impl IndexRun {
             IndexRunPhys {
                 trim_key: self.trim_key,
                 last_key: self.last_key,
-                atime_histogram: self.atime_histogram.clone(),
+                atime_histogram_phys: self.atime_histogram_phys.clone(),
                 log,
             },
             IndexFlushDelta(new_chunks),
@@ -192,21 +189,21 @@ impl IndexRun {
         IndexRunPhys {
             trim_key: self.trim_key,
             last_key: self.last_key,
-            atime_histogram: self.atime_histogram.clone(),
+            atime_histogram_phys: self.atime_histogram_phys.clone(),
             log: self.log.get_phys(),
         }
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
-        &self.atime_histogram
+        &self.atime_histogram_phys
     }
 
     pub fn first_ghost_atime(&self) -> Atime {
-        self.atime_histogram.first_ghost()
+        self.atime_histogram_phys.first_ghost()
     }
 
     pub fn first_live_atime(&self) -> Atime {
-        self.atime_histogram.first_live()
+        self.atime_histogram_phys.first_live()
     }
 
     pub fn update_last_key(&mut self, key: IndexKey) {
@@ -218,13 +215,13 @@ impl IndexRun {
 
     pub fn append(&mut self, entry: IndexEntry) {
         self.update_last_key(entry.key);
-        self.atime_histogram.insert(entry.value);
+        self.atime_histogram_phys.insert(entry.value);
         self.log.append(entry);
     }
 
     pub fn clear(&mut self) {
         self.last_key = None;
-        self.atime_histogram.clear();
+        self.atime_histogram_phys.clear();
         self.log.clear();
     }
 
@@ -242,7 +239,7 @@ impl IndexRun {
                 .unwrap_or(trim_key),
         );
         self.trim_key = Some(trim_key);
-        self.atime_histogram -= obsoleted;
+        self.atime_histogram_phys -= obsoleted;
     }
 
     pub fn len(&self) -> u64 {

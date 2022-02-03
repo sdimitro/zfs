@@ -47,6 +47,7 @@ pub struct DumpStructuresOptions {
     pub dump_operation_log_raw: bool,
     pub dump_index_log_raw: bool,
     pub dump_rebalance_log_raw: bool,
+    pub dump_atime_histogram: bool,
 }
 
 impl Default for DumpStructuresOptions {
@@ -63,6 +64,7 @@ impl DumpStructuresOptions {
             dump_operation_log_raw: false,
             dump_index_log_raw: false,
             dump_rebalance_log_raw: false,
+            dump_atime_histogram: false,
         }
     }
 
@@ -88,6 +90,11 @@ impl DumpStructuresOptions {
 
     pub fn rebalance_log_raw(mut self, value: bool) -> Self {
         self.dump_rebalance_log_raw = value;
+        self
+    }
+
+    pub fn atime_histogram(mut self, value: bool) -> Self {
+        self.dump_atime_histogram = value;
         self
     }
 }
