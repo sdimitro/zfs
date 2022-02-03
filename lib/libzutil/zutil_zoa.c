@@ -39,13 +39,6 @@
  */
 #define	ZOA_MAX_RETRIES	15
 
-/*
- * This specifies that this code supports all 1.X.Y versions of the agent
- * communication protocol. This should be updated as new capabilities are
- * added and supported or required.
- */
-#define	AGENT_PROTOCOL_VERSION "^1"
-
 struct sockaddr_un zfs_public_socket = {
 	AF_UNIX, "/etc/zfs/zfs_public_socket"
 };
@@ -104,8 +97,57 @@ get_zfs_socket(zoa_socket_t zoa_sock)
 	}
 }
 
+int
+zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock)
+{
+	int sock;
+	int retries = 0;
+
+	for (;;) {
+		sock = socket(AF_UNIX, SOCK_STREAM, 0);
+		if (sock < 0) {
+			zutil_error_aux(hdl, "%s", strerror(errno));
+			zutil_error(hdl, EZFS_SOCKETFAILURE,
+			    dgettext(TEXT_DOMAIN, "failed to create socket"));
+			return (-1);
+		}
+
+		if (connect(sock, get_zfs_socket(zoa_sock),
+		    sizeof (struct sockaddr_un)) == 0) {
+			break;
+		}
+
+		/*
+		 * If the object agent is running or has run in the past, the
+		 * zoa socket file should be present. If this file is missing,
+		 * it indicates that either the agent has never run or the
+		 * superuser removed the file. Fail silently in this case.
+		 */
+		if (errno == ENOENT) {
+			close(sock);
+			return (-1);
+		} else if (errno == ECONNREFUSED && retries < ZOA_MAX_RETRIES) {
+			zutil_error(hdl, EZFS_CONNECT_RETRY,
+			    dgettext(TEXT_DOMAIN,
+			    "failed to connect to object agent process:"));
+			retries++;
+			sleep(1);
+		} else {
+			zutil_error_aux(hdl, "%s", strerror(errno));
+			zutil_error(hdl, EZFS_CONNECT_REFUSED,
+			    dgettext(TEXT_DOMAIN,
+			    "connection to object agent process failed"));
+			close(sock);
+			return (-1);
+		}
+		close(sock);
+	}
+	return (sock);
+}
+
 static nvlist_t *
-zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock, int *err)
+zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock,
+    int *err)
 {
 	size_t len;
 	char *buf = fnvlist_pack(msg, &len);
@@ -153,85 +195,13 @@ zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock, int *err)
 	return (resp);
 }
 
-int
-zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock,
-    const char *version_req_str, nvlist_t **version)
-{
-	int sock;
-	int retries = 0;
-
-	for (;;) {
-		sock = socket(AF_UNIX, SOCK_STREAM, 0);
-		if (sock < 0) {
-			zutil_error_aux(hdl, "%s", strerror(errno));
-			zutil_error(hdl, EZFS_SOCKETFAILURE,
-			    dgettext(TEXT_DOMAIN, "failed to create socket"));
-			return (-1);
-		}
-
-		if (connect(sock, get_zfs_socket(zoa_sock),
-		    sizeof (struct sockaddr_un)) == 0) {
-			break;
-		}
-
-		/*
-		 * If the object agent is running or has run in the past, the
-		 * zoa socket file should be present. If this file is missing,
-		 * it indicates that either the agent has never run or the
-		 * superuser removed the file. Fail silently in this case.
-		 */
-		if (errno == ENOENT) {
-			close(sock);
-			return (-1);
-		} else if (errno == ECONNREFUSED && retries < ZOA_MAX_RETRIES) {
-			zutil_error(hdl, EZFS_CONNECT_RETRY,
-			    dgettext(TEXT_DOMAIN,
-			    "failed to connect to object agent process:"));
-			retries++;
-			sleep(1);
-		} else {
-			zutil_error_aux(hdl, "%s", strerror(errno));
-			zutil_error(hdl, EZFS_CONNECT_REFUSED,
-			    dgettext(TEXT_DOMAIN,
-			    "connection to object agent process failed"));
-			close(sock);
-			return (-1);
-		}
-		close(sock);
-	}
-	nvlist_t *version_nvl = fnvlist_alloc();
-	fnvlist_add_string(version_nvl, AGENT_TYPE, AGENT_TYPE_VERSION);
-	fnvlist_add_string(version_nvl, AGENT_VERSION, version_req_str);
-	int err;
-	nvlist_t *resp = zoa_send_recv_msg_impl(sock, version_nvl, zoa_sock,
-	    &err);
-	fnvlist_free(version_nvl);
-	if (resp == NULL) {
-		zutil_error_aux(hdl, "%s", strerror(err));
-		zutil_error(hdl, EZFS_CONNECT_REFUSED, dgettext(TEXT_DOMAIN,
-		    "could not negotiate version with object agent process"));
-		close(sock);
-		return (-1);
-	}
-	if (version != NULL) {
-		ASSERT0(strcmp(fnvlist_lookup_string(resp, AGENT_TYPE),
-		    AGENT_TYPE_VERSION));
-		*version = fnvlist_dup(fnvlist_lookup_nvlist(resp,
-		    AGENT_VERSION));
-	}
-	fnvlist_free(resp);
-	return (sock);
-}
-
 nvlist_t *
-zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
-    const char *version_req_str, zoa_socket_t zoa_sock)
+zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
 {
 	nvlist_t *resp = NULL;
 	int retries = 0;
 	for (; retries < ZOA_MAX_RETRIES; retries++) {
-		int sock = zoa_connect_agent(hdl, zoa_sock, version_req_str,
-		    NULL);
+		int sock = zoa_connect_agent(hdl, zoa_sock);
 		if (sock == -1) {
 			break;
 		}
@@ -323,8 +293,7 @@ zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_DESTROYING_POOLS);
 
-	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET);
+	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, ZFS_PUBLIC_SOCKET);
 	if (resp == NULL)
 		return;
 
@@ -410,8 +379,7 @@ zoa_clear_destroyed_pools(void *hdl)
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_CLEAR_DESTROYED_POOLS);
 
-	zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET);
+	zoa_send_recv_msg(&handle, msg, ZFS_PUBLIC_SOCKET);
 }
 
 nvlist_t *

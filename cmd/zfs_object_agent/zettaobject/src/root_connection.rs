@@ -3,17 +3,16 @@ use crate::features::FeatureError;
 use crate::object_access::{ObjectAccess, StatMapValue};
 use crate::pool::*;
 use crate::pool_destroy;
+use crate::server::handler_return_ok;
 use crate::server::HandlerReturn;
 use crate::server::SerialHandlerReturn;
 use crate::server::Server;
-use crate::server::{handler_return_ok, ConnectionState};
 use anyhow::anyhow;
 use anyhow::Result;
 use cstr_argument::CStrArgument;
 use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvData, NvList, NvListRef};
-use semver::Version;
 use std::ffi::CString;
 use std::sync::Arc;
 use util::AlignedBytes;
@@ -34,27 +33,19 @@ pub struct RootServerState {
     id: Uuid,
 }
 
+#[derive(Default)]
 struct RootConnectionState {
     pool: Option<Arc<Pool>>,
     cache: Option<ZettaCache>,
     id: Uuid,
-    version: Option<Version>,
-}
-
-impl ConnectionState for RootConnectionState {
-    fn set_version(&mut self, version: Version) {
-        assert!(self.version.is_none());
-        self.version = Some(version);
-    }
 }
 
 impl RootServerState {
     fn connection_handler(&self) -> RootConnectionState {
         RootConnectionState {
-            pool: None,
             cache: self.cache.as_ref().cloned(),
             id: self.id,
-            version: None,
+            ..Default::default()
         }
     }
 
@@ -65,7 +56,6 @@ impl RootServerState {
             0o600,
             RootServerState { cache, id },
             Box::new(Self::connection_handler),
-            vec![Version::new(1, 0, 0)],
         );
 
         RootConnectionState::register(&mut server);
