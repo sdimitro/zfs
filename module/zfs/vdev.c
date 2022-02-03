@@ -5247,22 +5247,23 @@ vdev_is_concrete(vdev_t *vd)
 	}
 }
 
-static boolean_t
-vdev_is_object_based_impl(vdev_t *vd)
+vdev_t *
+vdev_find_leaf(vdev_t *vd, vdev_ops_t *ops)
 {
-	vdev_ops_t *ops = vd->vdev_ops;
-	if (vd->vdev_ops->vdev_op_leaf && ops == &vdev_object_store_ops)
-		return (B_TRUE);
+	if (vd->vdev_ops->vdev_op_leaf && vd->vdev_ops == ops)
+		return (vd);
 
 	for (int c = 0; c < vd->vdev_children; c++) {
 		vdev_t *cvd = vd->vdev_child[c];
+		vdev_t *lvd;
+
 		if (cvd->vdev_islog || cvd->vdev_aux != NULL)
 			continue;
 
-		if (vdev_is_object_based(cvd))
-			return (B_TRUE);
+		if ((lvd = vdev_find_leaf(cvd, ops)) != NULL)
+			return (lvd);
 	}
-	return (B_FALSE);
+	return (NULL);
 }
 
 boolean_t
@@ -5279,7 +5280,8 @@ vdev_is_object_based(vdev_t *vd)
 	if (!lock_held)
 		spa_config_enter(vd->vdev_spa, SCL_VDEV, FTAG, RW_READER);
 
-	boolean_t object_based = vdev_is_object_based_impl(vd);
+	boolean_t object_based =
+	    vdev_find_leaf(vd, &vdev_object_store_ops) != NULL;
 
 	if (!lock_held)
 		spa_config_exit(vd->vdev_spa, SCL_VDEV, FTAG);
