@@ -158,7 +158,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         ReceiverStream::new(chunk_rx)
     }
 
-    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
         self.iter_chunks(block_access)
             .flat_map(|chunk| stream::iter(chunk.entries.into_iter()))
     }
@@ -195,8 +195,8 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLogPhys<T> {
         self.chunk_summary.claim(builder);
     }
 
-    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
-        self.this.iter_entries(block_access)
+    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+        self.this.iter(block_access)
     }
 
     pub fn iter_chunks(
@@ -264,6 +264,12 @@ pub struct BlockBasedLogChunk<T: BlockBasedLogEntry> {
     offset: LogOffset,
     #[serde(bound(deserialize = "Vec<T>: DeserializeOwned"))]
     entries: Vec<T>,
+}
+
+impl<T: BlockBasedLogEntry> BlockBasedLogChunk<T> {
+    pub fn entries(&self) -> &[T] {
+        &self.entries
+    }
 }
 
 #[derive(Serialize, Debug)]
@@ -456,7 +462,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         assert!(self.pending_entries.is_empty());
-        self.phys.iter_entries(self.block_access.clone())
+        self.phys.iter(self.block_access.clone())
     }
 }
 impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
@@ -469,7 +475,7 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         // XXX how to measure memory usage, since it's gathered async?  Copy it later?  Or just rely on the log statement below?
         let chunks = phys
             .chunk_summary
-            .iter_entries(block_access.clone())
+            .iter(block_access.clone())
             .collect::<Vec<_>>()
             .await;
         info!(
@@ -512,7 +518,11 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
 
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
-        self.this.iter_entries(self.block_access.clone())
+        self.this.iter(self.block_access.clone())
+    }
+
+    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        self.this.iter_chunks(self.block_access.clone())
     }
 
     /// Returns the exact location/size of this chunk (not the whole contiguous extent)
@@ -736,6 +746,10 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         self.readonly.iter()
+    }
+
+    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        self.readonly.iter_chunks()
     }
 
     /// See ReadOnlySummarizedBlockBasedLog::lookup_by_key()

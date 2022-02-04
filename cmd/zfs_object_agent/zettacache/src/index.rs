@@ -90,18 +90,18 @@ impl IndexRunPhys {
         self.log.claim(builder);
     }
 
-    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = IndexEntry> {
-        self.log.iter_entries(block_access)
+    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = IndexEntry> {
+        self.log.iter(block_access)
     }
 
-    pub fn iter_log_chunks(
+    pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
     ) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
         self.log.iter_chunks(block_access)
     }
 
-    pub fn iter_log_summary(
+    pub fn iter_summary_chunks(
         &self,
         block_access: Arc<BlockAccess>,
     ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<IndexEntry>>> {
@@ -129,7 +129,7 @@ impl IndexRunPhys {
             self.atime_histogram_phys.first_ghost(),
             self.atime_histogram_phys.first_live(),
         );
-        self.iter_entries(block_access)
+        self.iter(block_access)
             .for_each(|entry| {
                 histogram.insert(entry.value);
                 future::ready(())
@@ -250,8 +250,13 @@ impl IndexRun {
         self.log.num_bytes()
     }
 
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Stream<Item = IndexEntry> {
         self.log.iter()
+    }
+
+    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
+        self.log.iter_chunks()
     }
 
     pub fn trim_key(&self) -> Option<IndexKey> {

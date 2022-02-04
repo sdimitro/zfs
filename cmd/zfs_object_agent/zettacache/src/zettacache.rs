@@ -361,7 +361,7 @@ impl MergeState {
                 self.ghost_cutoff,
             );
 
-            index_stream = old_index.iter();
+            index_stream = old_index.iter_chunks();
 
             // histogram to accumulate blocks that have been obsoleted between merge messages
             obsoleted = AtimeHistogramPhys::new(
@@ -376,7 +376,7 @@ impl MergeState {
 
         let mut index_skips = 0;
         let mut count = 0;
-        while let Some(entry) = index_stream.next().await {
+        while let Some(chunk) = index_stream.next().await {
             // This can be a tight loop, so only check the elapsed time every
             // 100 times through, so that .elapsed() doesn't take significant
             // CPU time.
@@ -394,91 +394,93 @@ impl MergeState {
                     timer = Instant::now();
                 }
             }
-            // If the next index is already "started", advance the old index to the start point
-            // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
-            if let Some(start_key) = start_key {
-                if entry.key <= start_key {
-                    super_trace!("skipping index entry: {:?}", entry.key);
-                    index_skips += 1;
-                    continue;
+            for &entry in chunk.entries() {
+                // If the next index is already "started", advance the old index to the start point
+                // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
+                if let Some(start_key) = start_key {
+                    if entry.key <= start_key {
+                        super_trace!("skipping index entry: {:?}", entry.key);
+                        index_skips += 1;
+                        continue;
+                    }
                 }
-            }
 
-            // This entry is no longer relevant to the old index
-            obsoleted.insert(entry.value);
+                // This entry is no longer relevant to the old index
+                obsoleted.insert(entry.value);
 
-            // First, process any pending changes which are before this
-            // index entry, which must be all Inserts (AtimeUpdates refer
-            // to existing Index entries).
-            while let Some((&pc_key, &PendingChange::Insert(pc_value))) =
-                pending_changes_iter.peek()
-            {
-                if pc_key >= entry.key {
-                    break;
+                // First, process any pending changes which are before this
+                // index entry, which must be all Inserts (AtimeUpdates refer
+                // to existing Index entries).
+                while let Some((&pc_key, &PendingChange::Insert(pc_value))) =
+                    pending_changes_iter.peek()
+                {
+                    if pc_key >= entry.key {
+                        break;
+                    }
+                    // Add this new entry to the index
+                    self.add_to_index_or_evict(
+                        IndexEntry {
+                            key: pc_key,
+                            value: pc_value,
+                        },
+                        next_index,
+                        &mut free_list,
+                    );
+                    pending_changes_iter.next();
                 }
-                // Add this new entry to the index
-                self.add_to_index_or_evict(
-                    IndexEntry {
-                        key: pc_key,
-                        value: pc_value,
-                    },
-                    next_index,
-                    &mut free_list,
-                );
-                pending_changes_iter.next();
-            }
 
-            let next_pc_opt = pending_changes_iter.peek();
-            match next_pc_opt {
-                Some((&pc_key, &PendingChange::Insert(pc_value))) => {
-                    // Most insertions are processed above. However, if there is an index
-                    // entry with the same key then we are replacing an entry. This may
-                    // be a ghost entry being recached or perhaps a heal() of a bad entry.
-                    if pc_key == entry.key {
-                        // Replace the index entry with the newly inserted entry.
-                        if let Some(extent) = entry.value.extent() {
-                            debug!("Insert of {:?} replaces {:?}", pc_value, entry);
-                            free_list.push(extent);
+                let next_pc_opt = pending_changes_iter.peek();
+                match next_pc_opt {
+                    Some((&pc_key, &PendingChange::Insert(pc_value))) => {
+                        // Most insertions are processed above. However, if there is an index
+                        // entry with the same key then we are replacing an entry. This may
+                        // be a ghost entry being recached or perhaps a heal() of a bad entry.
+                        if pc_key == entry.key {
+                            // Replace the index entry with the newly inserted entry.
+                            if let Some(extent) = entry.value.extent() {
+                                debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                                free_list.push(extent);
+                            }
+                            self.add_to_index_or_evict(
+                                IndexEntry {
+                                    key: pc_key,
+                                    value: pc_value,
+                                },
+                                next_index,
+                                &mut free_list,
+                            );
+                            // this pending change is consumed
+                            pending_changes_iter.next();
+                        } else {
+                            assert_gt!(pc_key, entry.key);
+                            self.add_to_index_or_evict(entry, next_index, &mut free_list);
                         }
-                        self.add_to_index_or_evict(
-                            IndexEntry {
-                                key: pc_key,
-                                value: pc_value,
-                            },
-                            next_index,
-                            &mut free_list,
-                        );
-                        // this pending change is consumed
-                        pending_changes_iter.next();
-                    } else {
-                        assert_gt!(pc_key, entry.key);
-                        self.add_to_index_or_evict(entry, next_index, &mut free_list);
                     }
-                }
-                Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
-                    if pc_key == entry.key {
-                        // Add the pending entry to the next generation instead of the current index's entry
-                        assert_eq!(pc_value.extent(), entry.value.extent());
-                        self.add_to_index_or_evict(
-                            IndexEntry {
-                                key: pc_key,
-                                value: pc_value,
-                            },
-                            next_index,
-                            &mut free_list,
-                        );
+                    Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
+                        if pc_key == entry.key {
+                            // Add the pending entry to the next generation instead of the current index's entry
+                            assert_eq!(pc_value.extent(), entry.value.extent());
+                            self.add_to_index_or_evict(
+                                IndexEntry {
+                                    key: pc_key,
+                                    value: pc_value,
+                                },
+                                next_index,
+                                &mut free_list,
+                            );
 
-                        // this pending change is consumed
-                        pending_changes_iter.next();
-                    } else {
-                        // We shouldn't have skipped any, because there has to be a corresponding Index entry
-                        assert_gt!(pc_key, entry.key);
+                            // this pending change is consumed
+                            pending_changes_iter.next();
+                        } else {
+                            // We shouldn't have skipped any, because there has to be a corresponding Index entry
+                            assert_gt!(pc_key, entry.key);
+                            self.add_to_index_or_evict(entry, next_index, &mut free_list);
+                        }
+                    }
+                    None => {
+                        // no more pending changes
                         self.add_to_index_or_evict(entry, next_index, &mut free_list);
                     }
-                }
-                None => {
-                    // no more pending changes
-                    self.add_to_index_or_evict(entry, next_index, &mut free_list);
                 }
             }
         }
@@ -1864,7 +1866,7 @@ impl ZCacheDBHandle {
         if opts.dump_index_log_raw {
             self.checkpoint
                 .old_index
-                .iter_log_chunks(self.block_access.clone())
+                .iter_chunks(self.block_access.clone())
                 .for_each(|chunk| async move {
                     println!("{:#?}", chunk);
                 })
@@ -1872,7 +1874,7 @@ impl ZCacheDBHandle {
 
             self.checkpoint
                 .old_index
-                .iter_log_summary(self.block_access.clone())
+                .iter_summary_chunks(self.block_access.clone())
                 .for_each(|chunk| async move {
                     println!("{:#?}", chunk);
                 })
@@ -1881,13 +1883,13 @@ impl ZCacheDBHandle {
             if let Some(mpp) = &self.checkpoint.merge_progress {
                 println!("\nnew index from MergeProgressPhys:");
                 mpp.new_index
-                    .iter_log_chunks(self.block_access.clone())
+                    .iter_chunks(self.block_access.clone())
                     .for_each(|chunk| async move {
                         println!("{:#?}", chunk);
                     })
                     .await;
                 mpp.new_index
-                    .iter_log_summary(self.block_access.clone())
+                    .iter_summary_chunks(self.block_access.clone())
                     .for_each(|chunk| async move {
                         println!("{:#?}", chunk);
                     })
@@ -2432,7 +2434,7 @@ impl ZettaCacheState {
             None => None,
             Some(log_phys) => {
                 let map: BTreeMap<Extent, Option<DiskLocation>> = log_phys
-                    .iter_entries(self.block_access.clone())
+                    .iter(self.block_access.clone())
                     .map(|entry| (entry.old, entry.new))
                     .collect()
                     .await;
