@@ -1,5 +1,5 @@
 #!/bin/sh
-# shellcheck disable=SC2154
+# shellcheck disable=SC2154,SC2155
 #
 # CDDL HEADER START
 #
@@ -54,11 +54,14 @@ ZFS_DBGMSG="$STF_SUITE/callbacks/zfs_dbgmsg.ksh"
 ZFS_DMESG="$STF_SUITE/callbacks/zfs_dmesg.ksh"
 UNAME=$(uname -s)
 RERUN=""
-ZOA_LOG="/var/tmp/zoa.log"
-ZOA_OUTPUT="/var/tmp/zoa.stdout"
-ZOA_CONF="/etc/zfs/zoa.conf"
-ZOA_CONFIG="/etc/zfs/zoa_config.toml"
-HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
+#
+# Export zfs_object_agent variables to be used in tests
+#
+export ZOA_LOG="/var/tmp/zoa.log"
+export ZOA_OUTPUT="/var/tmp/zoa.stdout"
+export ZOA_CONF="/etc/zfs/zoa.conf"
+export ZOA_CONFIG="/etc/zfs/zoa_config.toml"
+export HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
     awk '/^zfs-object-agent/ {found=1}
     END{if(found) print "true"; else print "false"}')"
 

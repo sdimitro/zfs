@@ -1,0 +1,177 @@
+#
+# CDDL HEADER START
+#
+# The contents of this file are subject to the terms of the
+# Common Development and Distribution License (the "License").
+# You may not use this file except in compliance with the License.
+#
+# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+# or http://www.opensolaris.org/os/licensing.
+# See the License for the specific language governing permissions
+# and limitations under the License.
+#
+# When distributing Covered Code, include this CDDL HEADER in each
+# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+# If applicable, add the following below this CDDL HEADER, with the
+# fields enclosed by brackets "[]" replaced with your own identifying
+# information: Portions Copyright [yyyy] [name of copyright owner]
+#
+# CDDL HEADER END
+#
+
+#
+# Copyright (c) 2022 by Delphix. All rights reserved.
+#
+
+#
+# Get guid of object store pool
+# $1 pool name
+#
+function get_object_store_pool_guid
+{
+	typeset pool=$1
+
+	typeset guid=$(get_config $pool pool_guid)
+
+	#
+	# Return 0 padded 20 width wide guid.
+	# Since guid is a 64bit long integer, the format
+	# specifiers '%020d' and '%020u' results in overflow
+	# and wrong guid.
+	#
+	printf "%020s" $guid | tr ' ' 0
+}
+
+#
+# Returns if a pool exists in the s3 bucket.
+#
+function pool_exists_s3
+{
+	typeset guid=$1
+
+	# Max num of retries (default 5)
+	typeset num_retries=${2:-5}
+
+	# Constant backoff duration (default 2s)
+	typeset retry_backoff_duration=${3:-2}
+
+	typeset retry_count=0
+
+	# Check if the pool exists in the s3 bucket.
+	# If the exit code is 0, return immediately
+	# else retry for the given duration (default 10s)
+	while [ $retry_count -le $num_retries ]; do
+		aws --endpoint-url $ZTS_OBJECT_ENDPOINT s3 ls \
+			$ZTS_BUCKET_NAME/zfs/$guid/
+		rc=$?
+		[ $rc -eq 0 ] && return 0
+		retry_count=$((retry_count + 1))
+		sleep $retry_backoff_duration
+	done
+	return 1
+}
+
+#
+# Verify if the object store pool is online. Verify the allocated space.
+# Also verify that the pool exists in the object store bucket.
+#
+function verify_active_object_store_pool # pool guid exp_allocated
+{
+	typeset pool=$1
+	typeset guid=$2
+	typeset exp_allocated=$3
+
+	# Verify that the pool is online
+	log_must check_state $pool "" "ONLINE"
+
+	# Verify allocated space
+	typeset is_allocated=0
+	typeset ctr=1
+	while [ $ctr -le 60 ]; do
+		typeset allocated=$(zpool get allocated -Hp $pool | awk '{print $3}')
+		if [ $allocated -ge $exp_allocated ]; then
+			is_allocated=1
+			break
+		fi
+		sleep 2
+		ctr=$((ctr+1))
+	done
+	log_must [ $is_allocated -eq 1 ]
+
+	# Verify that the pool exists in the bucket
+	log_must pool_exists_s3 $guid
+}
+
+#
+# Check the output of 'zpool status --list-destroyed' for the specified pool
+# GUID, and to see if the content of <token> contain the <keyword> specified.
+#
+# Return 0 if contain, 1 otherwise
+#
+function check_destroyed_pool_status # pool_guid token keyword
+{
+	typeset pool_guid=$1
+	typeset token=$2
+	typeset keyword=$3
+
+	# Maximum no of retries (default 5)
+	typeset max_retries=${4:-5}
+
+	# Fixed wait time in seconds (default 1s)
+	typeset wait_fixed=${5:-1}
+
+	typeset retry_count=0
+
+	# Remove leading zeros if any
+	pool_guid=$(bc <<< $pool_guid)
+
+	# Try listing the destroyed pools with a retry logic
+	while [ $retry_count -le $max_retries ]; do
+		scan=$(zpool status --list-destroyed 2>/dev/null \
+			| grep -B 1 -A 7 $pool_guid \
+			| awk -v token="$token:" '($1==token) {print $0}')
+		if [ -z "$scan" ]; then
+			sleep $wait_fixed
+			retry_count=$((retry_count+1))
+			continue
+		fi
+		log_note $scan
+		echo $scan | grep -i "$keyword" > /dev/null 2>&1
+		return $?
+	done
+	return 1
+}
+
+#
+# Verify that the pool doesn't exist. Verify the pool's DESTROYED state.
+# Verify that the pool GUID should be part of zpool_destroy.cache.
+# Verify that the pool no longer exists in the bucket
+#
+function verify_destroyed_object_store_pool # pool guid
+{
+	typeset pool=$1
+	typeset guid=$2
+
+	# Verify that the pool doesn't exist
+	log_mustnot poolexists $pool
+
+	# Wait for the pool to be completely destroyed. Then verify the DESTROYED
+	# state
+	typeset ctr=1
+	while check_destroyed_pool_status $guid "state" "DESTROYING"; do
+		if [ $ctr -ge 30 ]; then
+		    log_fail "The pool couldn't be destroyed in 1 minute"
+		fi
+		sleep 2
+		ctr=$((ctr+1))
+	done
+	log_must check_destroyed_pool_status $guid "state" "DESTROYED"
+
+	# Verify that the pool GUID should be part of zpool_destroy.cache
+	log_must cat /etc/zfs/zpool_destroy.cache | grep $guid
+
+	# Verify that the pool no longer exists in the bucket
+	log_mustnot pool_exists_s3 $guid
+}
+
+
