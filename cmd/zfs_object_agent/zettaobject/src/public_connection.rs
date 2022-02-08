@@ -2,6 +2,7 @@ use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
+use crate::server::ConnectionState;
 use crate::server::{HandlerReturn, Server};
 use anyhow::Result;
 use futures::stream::StreamExt;
@@ -9,6 +10,7 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
+use semver::Version;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use util::get_tunable;
@@ -26,12 +28,21 @@ pub struct PublicServerState {
 
 struct PublicConnectionState {
     cache: Option<ZettaCache>,
+    version: Option<Version>,
+}
+
+impl ConnectionState for PublicConnectionState {
+    fn set_version(&mut self, version: Version) {
+        assert!(self.version.is_none());
+        self.version = Some(version);
+    }
 }
 
 impl PublicServerState {
     fn connection_handler(&self) -> PublicConnectionState {
         PublicConnectionState {
             cache: self.cache.as_ref().cloned(),
+            version: None,
         }
     }
 
@@ -43,6 +54,7 @@ impl PublicServerState {
             0o666, // world writable
             PublicServerState { cache },
             Box::new(Self::connection_handler),
+            vec![Version::new(1, 0, 0)],
         );
 
         PublicConnectionState::register(&mut server);

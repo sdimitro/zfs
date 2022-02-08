@@ -13,6 +13,8 @@ use futures::{future, Future, FutureExt};
 use lazy_static::lazy_static;
 use log::*;
 use nvpair::{NvEncoding, NvList};
+use semver::Version;
+use semver::VersionReq;
 use std::collections::HashMap;
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
@@ -41,6 +43,7 @@ pub struct Server<Ss, Cs> {
     state: Ss,
     connection_handler: Box<ConnectionHandler<Ss, Cs>>,
     handlers: HashMap<String, HandlerEnum<Cs>>,
+    version_list: Vec<Version>,
 }
 
 enum HandlerEnum<Cs> {
@@ -58,7 +61,11 @@ pub type SerialHandlerReturn<'a> =
     Pin<Box<dyn Future<Output = Result<Option<NvList>>> + Send + 'a>>;
 type SerialHandler<Cs> = dyn Fn(&mut Cs, NvList) -> SerialHandlerReturn + Send + Sync;
 
-impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
+pub trait ConnectionState: Send + Sync {
+    fn set_version(&mut self, version: Version);
+}
+
+impl<Ss: Send + Sync + 'static, Cs: ConnectionState + 'static> Server<Ss, Cs> {
     /// The connection_handler will be called when a new connection is
     /// established.  It is passed the server_state (Ss) and returns a
     /// connection_state (Cs), which is passed to each of the Handlers.
@@ -67,6 +74,7 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
         socket_permission: u32,
         server_state: Ss,
         connection_handler: Box<ConnectionHandler<Ss, Cs>>,
+        version_list: Vec<Version>,
     ) -> Server<Ss, Cs> {
         Server {
             socket_path: socket_path.to_owned(),
@@ -74,6 +82,7 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
             state: server_state,
             connection_handler,
             handlers: Default::default(),
+            version_list,
         }
     }
 
@@ -179,6 +188,39 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
         w.write_all(buf.as_slice()).await.unwrap();
     }
 
+    fn version_to_nvlist(version: &Version) -> NvList {
+        let mut version_nvl = NvList::new_unique_names();
+        version_nvl.insert("major", &version.major).unwrap();
+        version_nvl.insert("minor", &version.minor).unwrap();
+        version_nvl.insert("patch", &version.patch).unwrap();
+        version_nvl
+    }
+
+    async fn negotiate_version(
+        versions: &[Version],
+        output: &Mutex<OwnedWriteHalf>,
+        input: &mut OwnedReadHalf,
+    ) -> Result<Version> {
+        let request = Self::get_next_request(input).await?;
+        let request_type_cstr = request.lookup_string("Type")?;
+        let request_type = request_type_cstr.to_str()?;
+        if request_type != "version" {
+            return Err(anyhow!("Negotiation failed, no version request received"));
+        }
+        let version_req_string = request.lookup_string("version")?.into_string()?;
+        let version_req = VersionReq::parse(&version_req_string)?;
+        for version in versions.iter().rev() {
+            if version_req.matches(version) {
+                let mut response = NvList::new_unique_names();
+                response.insert("Type", "version")?;
+                response.insert("version", Self::version_to_nvlist(version).as_ref())?;
+                Self::send_response(output, response).await;
+                return Ok(version.clone());
+            }
+        }
+        Err(anyhow!("No compatible versions detected: {}", version_req))
+    }
+
     async fn start_connection(
         server: Arc<Server<Ss, Cs>>,
         stream: UnixStream,
@@ -188,6 +230,10 @@ impl<Ss: Send + Sync + 'static, Cs: Send + Sync + 'static> Server<Ss, Cs> {
         let output = Arc::new(Mutex::new(output_raw));
 
         let (error_tx, mut error_rx) = mpsc::channel(1);
+
+        let version = Self::negotiate_version(&server.version_list, &output, &mut input).await?;
+        info!("Version selected for connection: {:?}", version);
+        state.set_version(version);
         loop {
             if let Some(e) = error_rx.recv().now_or_never() {
                 // an async (spawned) task produced an error

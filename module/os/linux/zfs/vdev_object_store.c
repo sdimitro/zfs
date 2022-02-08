@@ -155,6 +155,10 @@ typedef struct vdev_object_store {
 
 	list_t vos_free_list;
 	uint64_t vos_free_list_len;
+
+	uint64_t vos_version_major;
+	uint64_t vos_version_minor;
+	uint64_t vos_version_patch;
 } vdev_object_store_t;
 
 /*
@@ -214,42 +218,6 @@ zfs_object_store_wait(vdev_object_store_t *vos, socket_state_t state)
 	}
 }
 
-static int
-zfs_object_store_open(vdev_object_store_t *vos)
-{
-	ksocket_t s = INVALID_SOCKET;
-
-	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
-	vos->vos_sock_state = VOS_SOCK_OPENING;
-	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open unable to create "
-		    "socket: %d", rc);
-		return (rc);
-	}
-
-	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
-	    sizeof (zfs_root_socket));
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open failed to "
-		    "connect: %d", rc);
-		ksock_close(s);
-		s = INVALID_SOCKET;
-	} else {
-		zfs_dbgmsg("zfs_object_store_open, socket connection "
-		    "ready, " SOCK_FMT, s);
-	}
-
-	VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
-	vos->vos_sock = s;
-	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
-	if (vos->vos_sock != INVALID_SOCKET) {
-		vos->vos_sock_state = VOS_SOCK_OPEN;
-		cv_broadcast(&vos->vos_sock_cv);
-	}
-	return (0);
-}
-
 static void
 zfs_object_store_shutdown(vdev_object_store_t *vos)
 {
@@ -280,13 +248,99 @@ zfs_object_store_close(vdev_object_store_t *vos)
 }
 
 static int
-agent_write_all(vdev_object_store_t *vos, void *buf, size_t len)
+agent_read_all(vdev_object_store_t *vos, void *buf,
+    size_t len)
+{
+	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
+	size_t recvd_total = 0;
+	while (recvd_total < len) {
+		struct msghdr msg = {};
+		kvec_t iov = {};
+
+		iov.iov_base = buf + recvd_total;
+		iov.iov_len = len - recvd_total;
+
+		if (!locked)
+			mutex_enter(&vos->vos_lock);
+		if (vos->vos_agent_thread_exit ||
+		    vos->vos_sock == INVALID_SOCKET) {
+			zfs_dbgmsg("(%px) agent_read_all shutting down",
+			    curthread);
+			if (!locked)
+				mutex_exit(&vos->vos_lock);
+			return (SET_ERROR(ENOTCONN));
+		}
+
+		if (!locked)
+			mutex_exit(&vos->vos_lock);
+
+		size_t recvd = ksock_receive(vos->vos_sock,
+		    &msg, &iov, 1, len - recvd_total, 0);
+		if (recvd > 0) {
+			recvd_total += recvd;
+			if (recvd_total < len &&
+			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
+				zfs_dbgmsg("incomplete recvmsg but trying for "
+				    "more len=%d recvd=%d recvd_total=%d",
+				    (int)len,
+				    (int)recvd,
+				    (int)recvd_total);
+			}
+		} else {
+			zfs_dbgmsg("got wrong length from agent socket: "
+			    "for total size %d, already received %d, "
+			    "expected up to %d got %d",
+			    (int)len,
+			    (int)recvd_total,
+			    (int)(len - recvd_total),
+			    (int)recvd);
+			/* XXX - Do we need to check for errors too? */
+			if (recvd == 0)
+				return (SET_ERROR(EAGAIN));
+		}
+	}
+	return (0);
+}
+
+static int
+agent_read_nvlist(vdev_object_store_t *vos, nvlist_t **out)
+{
+	uint64_t nvlist_len;
+	int err = agent_read_all(vos, &nvlist_len, sizeof (nvlist_len));
+	if (err != 0) {
+		zfs_dbgmsg("agent_read_nvlist(%px) got err %d", curthread, err);
+		return (err);
+	}
+
+	void *buf = vmem_alloc(nvlist_len, KM_SLEEP);
+	err = agent_read_all(vos, buf, nvlist_len);
+	if (err != 0) {
+		zfs_dbgmsg("2 agent_read_nvlist(%px) got err %d", curthread,
+		    err);
+		vmem_free(buf, nvlist_len);
+		return (err);
+	}
+
+	err = nvlist_unpack(buf, nvlist_len, out, KM_SLEEP);
+	vmem_free(buf, nvlist_len);
+	if (err != 0) {
+		zfs_dbgmsg("got error %d from nvlist_unpack(len=%d)",
+		    err, (int)nvlist_len);
+		return (EAGAIN);
+	}
+	return (0);
+}
+
+static int
+agent_write_all(vdev_object_store_t *vos, void *buf,
+    size_t len)
 {
 	uint64_t buflen64 = len;
 	char *buflen64_base = (char *)& buflen64;
 	uint64_t total_size = sizeof (buflen64) + buflen64;
 	uint64_t write_total = 0;
 	kvec_t iov[2] = {};
+	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
 
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
@@ -305,15 +359,18 @@ agent_write_all(vdev_object_store_t *vos, void *buf, size_t len)
 			iov[0].iov_len = len - write_total + sizeof (buflen64);
 		}
 
-		mutex_enter(&vos->vos_lock);
+		if (!locked)
+			mutex_enter(&vos->vos_lock);
 		if (vos->vos_agent_thread_exit ||
 		    vos->vos_sock == INVALID_SOCKET) {
-			zfs_dbgmsg("(%px) agent_read_all shutting down",
+			zfs_dbgmsg("(%px) agent_write_all shutting down",
 			    curthread);
-			mutex_exit(&vos->vos_lock);
+			if (!locked)
+				mutex_exit(&vos->vos_lock);
 			return (SET_ERROR(ENOTCONN));
 		}
-		mutex_exit(&vos->vos_lock);
+		if (!locked)
+			mutex_exit(&vos->vos_lock);
 
 		ssize_t sent;
 		do {
@@ -377,7 +434,7 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 		    fnvlist_lookup_string(nv, AGENT_TYPE));
 	}
 
-	if (vos->vos_sock_state < VOS_SOCK_OPEN) {
+	if (vos->vos_sock_state < VOS_SOCK_OPENING) {
 		return (SET_ERROR(ENOTCONN));
 	}
 
@@ -411,6 +468,94 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	fnvlist_pack_free(buf, len);
 
 	return (err != 0 ? SET_ERROR(EINTR) : 0);
+}
+
+static int
+zfs_object_store_open(vdev_object_store_t *vos)
+{
+	ksocket_t s = INVALID_SOCKET;
+
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+	vos->vos_sock_state = VOS_SOCK_OPENING;
+	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open unable to create "
+		    "socket: %d", rc);
+		return (rc);
+	}
+
+	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
+	    sizeof (zfs_root_socket));
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open failed to "
+		    "connect: %d", rc);
+		ksock_close(s);
+		s = INVALID_SOCKET;
+	} else {
+		zfs_dbgmsg("zfs_object_store_open, socket connection "
+		    "ready, " SOCK_FMT, s);
+	}
+
+	VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
+	vos->vos_sock = s;
+	if (vos->vos_sock == INVALID_SOCKET)
+		return (0);
+
+	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
+	nvlist_t *request = fnvlist_alloc();
+	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_VERSION);
+
+	/*
+	 * This specifies that the kernel supports all 1.X.Y versions of the
+	 * agent communication protocol. This should be updated as new
+	 * capabilities are added and supported or required.
+	 */
+	fnvlist_add_string(request, AGENT_VERSION, "^1");
+
+	VERIFY0(agent_request(vos, request, FTAG));
+	fnvlist_free(request);
+
+	nvlist_t *response;
+	rc = agent_read_nvlist(vos, &response);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open failed to receive version "
+		    "negotiation response: %d", rc);
+		vos->vos_sock = INVALID_SOCKET;
+		ksock_close(s);
+		return (ENOTSUP);
+	}
+	char *type = NULL;
+	rc = nvlist_lookup_string(response, AGENT_TYPE, &type);
+	if (rc != 0 || strcmp(type, AGENT_TYPE_VERSION) != 0) {
+		zfs_dbgmsg("zfs_object_store_open received unexpected message "
+		    "during negotiation: %d \"%s\"", rc,
+		    type == NULL ? "" : type);
+		fnvlist_free(response);
+		vos->vos_sock = INVALID_SOCKET;
+		ksock_close(s);
+		return (ENOTSUP);
+	}
+	nvlist_t *version;
+	rc = nvlist_lookup_nvlist(response, AGENT_VERSION, &version);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open did not receive version "
+		    "during negotiation: %d", rc);
+		fnvlist_free(response);
+		vos->vos_sock = INVALID_SOCKET;
+		ksock_close(s);
+		return (ENOTSUP);
+	}
+	vos->vos_version_major = fnvlist_lookup_uint64(version, "major");
+	vos->vos_version_minor = fnvlist_lookup_uint64(version, "minor");
+	vos->vos_version_patch = fnvlist_lookup_uint64(version, "patch");
+	zfs_dbgmsg("zfs_object_store_open: Selected %llu.%llu.%llu in "
+	    "negotiation", (u_longlong_t)vos->vos_version_major,
+	    (u_longlong_t)vos->vos_version_minor,
+	    (u_longlong_t)vos->vos_version_patch);
+	fnvlist_free(response);
+	vos->vos_sock_state = VOS_SOCK_OPEN;
+	cv_broadcast(&vos->vos_sock_cv);
+	return (0);
 }
 
 static int
@@ -1318,83 +1463,15 @@ update_features(spa_t *spa, nvlist_t *nv)
 }
 
 static int
-agent_read_all(vdev_object_store_t *vos, void *buf, size_t len)
-{
-	size_t recvd_total = 0;
-	while (recvd_total < len) {
-		struct msghdr msg = {};
-		kvec_t iov = {};
-
-		iov.iov_base = buf + recvd_total;
-		iov.iov_len = len - recvd_total;
-
-		mutex_enter(&vos->vos_lock);
-		if (vos->vos_agent_thread_exit ||
-		    vos->vos_sock == INVALID_SOCKET) {
-			zfs_dbgmsg("(%px) agent_read_all shutting down",
-			    curthread);
-			mutex_exit(&vos->vos_lock);
-			return (SET_ERROR(ENOTCONN));
-		}
-
-		mutex_exit(&vos->vos_lock);
-
-		size_t recvd = ksock_receive(vos->vos_sock,
-		    &msg, &iov, 1, len - recvd_total, 0);
-		if (recvd > 0) {
-			recvd_total += recvd;
-			if (recvd_total < len &&
-			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
-				zfs_dbgmsg("incomplete recvmsg but trying for "
-				    "more len=%d recvd=%d recvd_total=%d",
-				    (int)len,
-				    (int)recvd,
-				    (int)recvd_total);
-			}
-		} else {
-			zfs_dbgmsg("got wrong length from agent socket: "
-			    "for total size %d, already received %d, "
-			    "expected up to %d got %d",
-			    (int)len,
-			    (int)recvd_total,
-			    (int)(len - recvd_total),
-			    (int)recvd);
-			/* XXX - Do we need to check for errors too? */
-			if (recvd == 0)
-				return (SET_ERROR(EAGAIN));
-		}
-	}
-	return (0);
-}
-
-static int
 agent_reader(void *arg)
 {
 	vdev_object_store_t *vos = arg;
-	uint64_t nvlist_len = 0;
 	char *cause = NULL;
-	int err = agent_read_all(vos, &nvlist_len, sizeof (nvlist_len));
-	if (err != 0) {
-		zfs_dbgmsg("agent_reader(%px) got err %d", curthread, err);
-		return (err);
-	}
-
-	void *buf = vmem_alloc(nvlist_len, KM_SLEEP);
-	err = agent_read_all(vos, buf, nvlist_len);
-	if (err != 0) {
-		zfs_dbgmsg("2 agent_reader(%px) got err %d", curthread, err);
-		vmem_free(buf, nvlist_len);
-		return (err);
-	}
-
 	nvlist_t *nv;
-	err = nvlist_unpack(buf, nvlist_len, &nv, KM_SLEEP);
-	vmem_free(buf, nvlist_len);
-	if (err != 0) {
-		zfs_dbgmsg("got error %d from nvlist_unpack(len=%d)",
-		    err, (int)nvlist_len);
-		return (EAGAIN);
-	}
+
+	int err = agent_read_nvlist(vos, &nv);
+	if (err != 0)
+		return (err);
 
 	const char *type = fnvlist_lookup_string(nv, AGENT_TYPE);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {

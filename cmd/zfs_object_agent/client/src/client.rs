@@ -1,6 +1,7 @@
 use nvpair::NvEncoding;
 use nvpair::NvList;
 use nvpair::NvListRef;
+use semver::Version;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
@@ -10,6 +11,7 @@ use zettaobject::base_types::*;
 pub struct Client {
     input: Option<OwnedReadHalf>,
     output: OwnedWriteHalf,
+    pub version: Version,
 }
 
 impl Client {
@@ -18,10 +20,25 @@ impl Client {
             .await
             .unwrap();
 
-        let (r, w) = s.into_split();
+        let (mut r, mut w) = s.into_split();
+
+        let mut vers_req_nvlist = NvList::new_unique_names();
+        vers_req_nvlist.insert("Type", "version").unwrap();
+        vers_req_nvlist.insert("version", "^1").unwrap();
+        Self::send_request_impl(&mut w, vers_req_nvlist.as_ref()).await;
+        let response = Self::get_next_response_impl(&mut r).await;
+        assert!(response.lookup_string("Type").unwrap().to_str() == Ok("version"));
+        let vers_nvl = response.lookup_nvlist("version").unwrap();
+        let version = Version::new(
+            vers_nvl.lookup_uint64("major").unwrap(),
+            vers_nvl.lookup_uint64("minor").unwrap(),
+            vers_nvl.lookup_uint64("patch").unwrap(),
+        );
+
         Client {
             input: Some(r), // None while get_responses_initiate() is running
             output: w,
+            version,
         }
     }
 
@@ -56,11 +73,15 @@ impl Client {
         self.input = Some(handle.await.unwrap());
     }
 
-    async fn send_request(&mut self, nvl: &NvListRef) {
+    async fn send_request_impl(output: &mut OwnedWriteHalf, nvl: &NvListRef) {
         println!("sending request: {:?}", nvl);
         let buf = nvl.pack(NvEncoding::Native).unwrap();
-        self.output.write_u64_le(buf.len() as u64).await.unwrap();
-        self.output.write_all(buf.as_ref()).await.unwrap();
+        output.write_u64_le(buf.len() as u64).await.unwrap();
+        output.write_all(buf.as_ref()).await.unwrap();
+    }
+
+    async fn send_request(&mut self, nvl: &NvListRef) {
+        Self::send_request_impl(&mut self.output, nvl).await
     }
 
     pub async fn create_pool(

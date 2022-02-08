@@ -1,6 +1,7 @@
 use anyhow::{anyhow, Result};
 use log::*;
 use nvpair::{NvEncoding, NvList};
+use semver::Version;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -48,6 +49,7 @@ impl From<std::str::Utf8Error> for RemoteError {
 pub struct RemoteChannel {
     stream: UnixStream,
     socket_path: String,
+    pub version: Version,
 }
 
 impl RemoteChannel {
@@ -88,28 +90,41 @@ impl RemoteChannel {
             "/etc/zfs/zfs_public_socket".to_string()
         };
 
-        let stream = RemoteChannel::open(&socket_path).await?;
+        let mut stream = RemoteChannel::open(&socket_path).await?;
+        let mut vers_req_nvlist = NvList::new_unique_names();
+        vers_req_nvlist.insert("Type", "version")?;
+        vers_req_nvlist.insert("version", "^1")?;
+        Self::send(&mut stream, vers_req_nvlist).await?;
+        let response = Self::receive(&mut stream).await?;
+        assert!(response.lookup_string("Type")?.to_str() == Ok("version"));
+        let vers_nvl = response.lookup_nvlist("version")?;
+        let version = Version::new(
+            vers_nvl.lookup_uint64("major")?,
+            vers_nvl.lookup_uint64("minor")?,
+            vers_nvl.lookup_uint64("patch")?,
+        );
 
         Ok(Self {
             stream,
             socket_path,
+            version,
         })
     }
 
-    async fn send(&mut self, message: NvList) -> Result<()> {
+    async fn send(stream: &mut UnixStream, message: NvList) -> Result<()> {
         // convert to packed nvlist and send...
         let buf = message.pack(NvEncoding::Native).unwrap();
         let len64 = buf.len() as u64;
-        self.stream.write_u64_le(len64).await?;
-        self.stream.write_all(buf.as_slice()).await?;
+        stream.write_u64_le(len64).await?;
+        stream.write_all(buf.as_slice()).await?;
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<NvList> {
+    async fn receive(stream: &mut UnixStream) -> Result<NvList> {
         // receive a packed nvlist and unpack it...
-        let len64 = self.stream.read_u64_le().await?;
+        let len64 = stream.read_u64_le().await?;
         let mut v: Vec<u8> = vec![0; usize::from64(len64)];
-        self.stream.read_exact(v.as_mut()).await?;
+        stream.read_exact(v.as_mut()).await?;
         Ok(NvList::try_unpack(v.as_ref()).unwrap())
     }
 
@@ -126,7 +141,7 @@ impl RemoteChannel {
             // send request, retrying as needed
             let mut nvlist = args.clone().unwrap_or_else(NvList::new_unique_names);
             nvlist.insert("Type", request).unwrap();
-            match self.send(nvlist).await {
+            match Self::send(&mut self.stream, nvlist).await {
                 Ok(_) => {}
                 Err(e) => {
                     // reopen the channel and resend the request
@@ -138,7 +153,7 @@ impl RemoteChannel {
             debug!("sent {} request, now waiting for response...", request);
 
             // receive response, retrying as needed
-            let response: NvList = match self.receive().await {
+            let response: NvList = match Self::receive(&mut self.stream).await {
                 Ok(response) => response,
                 Err(e) => {
                     // reopen the channel and resend the request
