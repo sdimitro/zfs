@@ -93,11 +93,12 @@ typedef enum {
 
 typedef enum {
 	VOS_RESUME_NOT_RUNNING = 0,
-	VOS_RESUME_START = (1 << 0),
-	VOS_RESUME_OPENING = (1 << 1),
-	VOS_RESUME_OPENED = (1 << 2),
-	VOS_RESUME_REISSUE = (1 << 3),
-	VOS_RESUME_FAILED = (1 << 4)
+	VOS_RESUME_STARTING = (1 << 0),
+	VOS_RESUME_START = (1 << 1),
+	VOS_RESUME_OPENING = (1 << 2),
+	VOS_RESUME_OPENED = (1 << 3),
+	VOS_RESUME_REISSUE = (1 << 4),
+	VOS_RESUME_FAILED = (1 << 5)
 } agent_resume_state_t;
 
 /*
@@ -1172,6 +1173,10 @@ agent_resume(void *arg)
 	while (!vos->vos_agent_thread_exit) {
 		/* synchronize with main agent thread */
 		mutex_enter(&vos->vos_resume_lock);
+
+		vos->vos_resume_state = VOS_RESUME_STARTING;
+		cv_signal(&vos->vos_resume_cv);
+
 		while (vos->vos_resume_state != VOS_RESUME_START) {
 			cv_wait(&vos->vos_resume_cv, &vos->vos_resume_lock);
 		}
@@ -1762,14 +1767,25 @@ vdev_agent_thread(void *arg)
 				vos->vos_result = SET_ERROR(ERESTART);
 				agent_serial_done(vos, VOS_SERIAL_OPEN_POOL);
 				/* resume task waits for VOS_RESUME_START */
+
 			}
 		} else {
 			VERIFY3U(taskq_dispatch(resume_taskq, agent_resume,
 			    vd, TQ_SLEEP), !=, TASKQID_INVALID);
 		}
+
+		/*
+		 * We need to synchronize with the agent to make sure
+		 * that it's ready to receive our start signal. If the
+		 * agent_resume taskq is not ready then we wait till
+		 * we get signaled.
+		 */
+		while (vos->vos_resume_state != VOS_RESUME_STARTING) {
+			cv_wait(&vos->vos_resume_cv, &vos->vos_resume_lock);
+		}
 		/* Signal resume task to start (avoids race for open state) */
 		vos->vos_resume_state = VOS_RESUME_START;
-		cv_broadcast(&vos->vos_resume_cv);
+		cv_signal(&vos->vos_resume_cv);
 		mutex_exit(&vos->vos_resume_lock);
 	}
 
