@@ -22,7 +22,7 @@ use log::*;
 use report_hits::ReportHits;
 use stats::Stats;
 use subcommand::ZcacheSubCommand;
-use util::writeln_stdout;
+use util::writeln_stderr;
 
 fn main() -> Result<()> {
     async_main()
@@ -83,10 +83,15 @@ async fn async_main() -> Result<()> {
     // Search for and invoke the appropriate sub-command
     let (cmd_name, cmd_args) = matches.subcommand();
     match sub_commands.into_iter().find(|cmd| cmd.name() == cmd_name) {
-        Some(mut subcmd) => subcmd.invoke(cmd_args.unwrap()).await?,
+        Some(mut subcmd) => {
+            if let Err(e) = subcmd.invoke(cmd_args.unwrap()).await {
+                writeln_stderr!("{:?}", e);
+                std::process::exit(1);
+            }
+        }
         None => {
-            writeln_stdout!("Unable to invoke {}", cmd_name);
-            writeln_stdout!("{}", matches.usage());
+            writeln_stderr!("Unable to invoke {}", cmd_name);
+            writeln_stderr!("{}", matches.usage());
             std::process::exit(exitcode::USAGE);
         }
     }
