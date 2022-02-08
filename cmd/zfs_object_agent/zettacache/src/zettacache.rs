@@ -76,6 +76,7 @@ lazy_static! {
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
     static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
+    static ref CACHE_WAIT_INSERT: bool = get_tunable("cache_wait_insert", false);
     static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
     static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
 
@@ -1428,32 +1429,45 @@ impl ZettaCache {
         bytes: usize,
         source: InsertSource,
     ) -> Option<OwnedSemaphorePermit> {
-        let (buffer, size, stat) = match source {
+        let (buffer, size, stat, wait_insert) = match source {
             InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => (
                 &self.speculative_buffer_bytes_available,
                 *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
                 SpeculativeBufferBytesAvailable,
+                false,
             ),
             InsertSource::Read => (
                 &self.demand_buffer_bytes_available,
                 *CACHE_INSERT_DEMAND_BUFFER_BYTES,
                 DemandBufferBytesAvailable,
+                *CACHE_WAIT_INSERT,
             ),
         };
 
-        // The permit should be dropped when the write to disk completes. It serves to limit the number
-        // of insert()'s that we can buffer before dropping (ignoring) insertion requests.
-        match buffer
-            .clone()
-            .try_acquire_many_owned(u32::try_from(bytes).unwrap())
-        {
-            Ok(permit) => {
-                self.stats
-                    .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
-                Some(permit)
+        if wait_insert {
+            let permit = buffer
+                .clone()
+                .acquire_many_owned(u32::try_from(bytes).unwrap())
+                .await
+                .expect("error from acquire_many_owned");
+            self.stats
+                .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
+            Some(permit)
+        } else {
+            // The permit should be dropped when the write to disk completes. It serves to limit the number
+            // of insert()'s that we can buffer before dropping (ignoring) insertion requests.
+            match buffer
+                .clone()
+                .try_acquire_many_owned(u32::try_from(bytes).unwrap())
+            {
+                Ok(permit) => {
+                    self.stats
+                        .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
+                    Some(permit)
+                }
+                Err(tokio::sync::TryAcquireError::NoPermits) => None,
+                Err(e) => panic!("unexpected error from try_acquire_many_owned: {:?}", e),
             }
-            Err(tokio::sync::TryAcquireError::NoPermits) => None,
-            Err(e) => panic!("unexpected error from try_acquire_many_owned: {:?}", e),
         }
     }
 
