@@ -966,17 +966,20 @@ impl ZettaCache {
         let system_memory = usize::from64(sysinfo.total_memory() * 1024);
 
         // Calculate a maximum size for the pending_changes as a percentage of system memory
-        // Note that we could actually consume twice this space during a merge (old_pending_changes + pending_changes)
+        // Note that during a merge, this space must also accomodate the space used by old_pending_changes
         let pending_changes_max_bytes = (*PENDING_CHANGES_MEM_PCT * system_memory as f64)
             .approx_as::<usize>()
             .unwrap()
             / 100;
         // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data entries
         let pending_changes_entries_bytes = pending_changes_max_bytes * 65 / 100;
-        let pending_changes_entry_size = mem::size_of::<PendingChange>();
+        // Each entry in the BTreeMap is comprised of a key (IndexKey) and a value (PendingChange)
+        let pending_changes_entry_size =
+            mem::size_of::<IndexKey>() + mem::size_of::<PendingChange>();
+        // Limit the number of pending change entries to not exceed the amount of memory being made available
         let pending_changes_cap = pending_changes_entries_bytes / pending_changes_entry_size;
         // In order to stay inside this desired cap, we need to be triggering a new merge before we are more
-        // than half way to the cap. Let's trigger at about 1/3 just to be safe
+        // than half way to the cap. Trigger at about 1/3 to provide some slop space.
         let pending_changes_trigger = pending_changes_cap / 3;
         info!(
             "pending changes max length set to {} entries [{}% of {} = {} and entry size {}]",
