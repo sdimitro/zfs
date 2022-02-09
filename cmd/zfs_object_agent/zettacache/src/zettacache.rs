@@ -69,6 +69,7 @@ lazy_static! {
     static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 2.0);
     static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
     static ref MERGE_PROGRESS_MESSAGE_INTERVAL: Duration = Duration::from_millis(get_tunable("merge_progress_message_interval_ms", 1000));
+    static ref MERGE_PROGRESS_CHUNK: usize = get_tunable("merge_progress_chunk", 1_000_000);
     static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
     static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
@@ -187,11 +188,19 @@ impl OnDisk for RebalanceLogEntry {}
 impl BlockBasedLogEntry for RebalanceLogEntry {}
 
 #[derive(Debug)]
+struct IndexMessage {
+    last_key: IndexKey,
+    entries: Vec<IndexEntry>,
+    frees: Vec<Extent>,
+    obsoleted: AtimeHistogramPhys, // entries obsoleted from old index, since last MergeProgress
+}
+
+#[derive(Debug)]
 struct MergeProgress {
     new_index: IndexRunPhys,
-    obsoleted: AtimeHistogramPhys, // entries obsoleted from old index, since last MergeProgress
+    obsoleted: AtimeHistogramPhys,
     index_delta: IndexFlushDelta,
-    free_list: Vec<Extent>,
+    frees: Vec<Extent>,
 }
 
 #[derive(Debug)]
@@ -205,17 +214,17 @@ impl MergeMessage {
     /// Compose a progress update to send to the checkpoint task.
     async fn new_progress(
         next_index: &mut IndexRun,
-        free_list: Vec<Extent>,
+        frees: Vec<Extent>,
         obsoleted: AtimeHistogramPhys,
     ) -> Self {
         let timer = Instant::now();
-        let free_count = free_list.len();
+        let free_count = frees.len();
         let (new_index, index_delta) = next_index.flush().await;
         let message = MergeProgress {
             new_index,
             index_delta,
             obsoleted,
-            free_list,
+            frees,
         };
         debug!("sending progress: index with {} entries ({}) last is {:?} flushed in {}ms, and {} frees",
             next_index.len(),
@@ -296,37 +305,36 @@ impl MergeState {
         }
     }
 
-    /// Add an entry to the new index, or evict it if its atime is before the eviction cut off.
-    fn add_to_index_or_evict(
+    /// This task offloads the task of writing out the next index from the merge task.
+    /// This allows the merge to proceed in parallel with the writes to disk. Relatively
+    /// large chunks of the new index are provided to make the IO as efficient as possible.
+    async fn next_index_task(
         &self,
-        entry: IndexEntry,
-        index: &mut IndexRun,
-        free_list: &mut Vec<Extent>,
+        mut merge_rx: mpsc::Receiver<IndexMessage>,
+        checkpoint_tx: mpsc::Sender<MergeMessage>,
+        next_index: &mut IndexRun,
     ) {
-        if entry.value.atime() >= self.eviction_cutoff {
-            // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
-            if let Some(entry) = self.map_index_entry_to_rebalanced_location(entry) {
-                index.append(entry);
-            }
-        } else {
-            let mut ghost_entry = entry;
-            if ghost_entry.value.location().is_some() {
-                // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
-                if let Some(entry) = self.map_index_entry_to_rebalanced_location(ghost_entry) {
-                    // This is a new ghost entry, free and strip old location infomation
-                    free_list.push(entry.value.extent().unwrap());
-                }
-                ghost_entry.value.set_location(None);
-                self.stats.track_count(Evictions);
-            }
-            if ghost_entry.value.atime() >= self.ghost_cutoff {
-                // Preserve ghost entry to our ghost history
-                index.append(ghost_entry);
-            } else {
-                // Entry is now gone from Index, update our traversal postion
-                index.update_last_key(ghost_entry.key);
-            }
+        let begin = Instant::now();
+        while let Some(message) = merge_rx.recv().await {
+            next_index.append(message.entries);
+            // The "last key" from the appended entries may not be the last key we actually
+            // processed in the merge (e.g, we may have evicted some entries later)
+            next_index.update_last_key(message.last_key);
+            checkpoint_tx
+                .send(
+                    MergeMessage::new_progress(next_index, message.frees, message.obsoleted).await,
+                )
+                .await
+                .unwrap_or_else(|e| panic!("couldn't send: {}", e));
         }
+
+        info!(
+            "wrote next index with {} entries ({}) in {:.1}s ({:.1}MB/s)",
+            next_index.len(),
+            nice_p2size(next_index.num_bytes()),
+            begin.elapsed().as_secs_f64(),
+            (next_index.num_bytes() as f64 / 1024f64 / 1024f64) / begin.elapsed().as_secs_f64(),
+        );
     }
 
     /// This function runs in an async task to merge a set of pending changes with the current on-disk
@@ -334,9 +342,9 @@ impl MergeState {
     /// (including block frees) to the checkpoint task.
     async fn merge_task(
         &self,
-        tx: mpsc::Sender<MergeMessage>,
+        tx: mpsc::Sender<IndexMessage>,
         old_index_lock: Arc<tokio::sync::RwLock<IndexRun>>,
-        next_index: &mut IndexRun,
+        start_key: Option<IndexKey>,
         block_access: &BlockAccess,
     ) {
         // We don't currently support concurrent free()'s while the rebalance is in-progress. Thus, we
@@ -344,13 +352,130 @@ impl MergeState {
         self.rebalance(block_access).await;
 
         let begin = Instant::now();
-        let mut free_list: Vec<Extent> = Vec::new();
-        let mut timer = Instant::now();
 
-        let start_key = next_index.last_key();
+        /// The merge task sends incremental progress messages to the checkpoint task
+        /// so that the progress can be persisted (and restarted if the agent dies) and
+        /// also so that space from evicted blocks can become available without needing
+        /// to wait for merge completion. Buffers for accumulated work are pre-allocated
+        /// to avoid the cost of growing those buffers during the merge.
+        struct Progress {
+            tx: mpsc::Sender<IndexMessage>,
+            last_key: Option<IndexKey>,
+            entries: Vec<IndexEntry>,
+            frees: Vec<Extent>,
+            obsoleted: AtimeHistogramPhys,
+            timer: Instant,
+        }
+        impl Progress {
+            fn new(tx: mpsc::Sender<IndexMessage>, first_ghost: Atime, first_live: Atime) -> Self {
+                Self {
+                    tx,
+                    last_key: None,
+                    entries: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                    frees: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                    obsoleted: AtimeHistogramPhys::new(first_ghost, first_live),
+                    timer: Instant::now(),
+                }
+            }
+
+            /// As entries from the old index are processed (possibly added to the new index),
+            /// they are now "obsolete" in the old index, so need to be removed from the atime histogram.
+            fn obsolete(&mut self, entry: IndexEntry) {
+                self.obsoleted.insert(entry.value);
+            }
+
+            /// When an old index entry already exists for a newly inserted key, the new entry will
+            /// replace the old, so "evict" the old entry: if the entry is a ghost, then there is
+            /// nothing to do, otherwise, add the entry to the free list.
+            async fn evict(&mut self, entry: IndexEntry) {
+                if let Some(extent) = entry.value.extent() {
+                    self.frees.push(extent);
+                    if self.entries.len() + self.frees.len() >= *MERGE_PROGRESS_CHUNK {
+                        self.report().await;
+                    }
+                }
+            }
+
+            /// The provided index entry is either:
+            /// 1. Added to the list of entries to be part of the new index, or
+            /// 2. Added to the list of entries to be evicted from the cache, or
+            /// 3. Dropped because it is an already evicted entry that is no longer being tracked.
+            async fn ingest(&mut self, state: &MergeState, entry: IndexEntry) {
+                if entry.value.atime() >= state.eviction_cutoff {
+                    // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
+                    if let Some(entry) = state.map_index_entry_to_rebalanced_location(entry) {
+                        self.entries.push(entry);
+                    }
+                } else {
+                    let mut ghost_entry = entry;
+                    if ghost_entry.value.location().is_some() {
+                        // If None, we don't add this entry to the free list, as it'll be freed automatically via rebalance_fini().
+                        if let Some(entry) =
+                            state.map_index_entry_to_rebalanced_location(ghost_entry)
+                        {
+                            // This is a new ghost entry, free and strip old location infomation
+                            self.frees.push(entry.value.extent().unwrap());
+                        }
+                        ghost_entry.value.set_location(None);
+                        state.stats.track_count(Evictions);
+                    }
+                    if ghost_entry.value.atime() >= state.ghost_cutoff {
+                        // Preserve ghost entry to our ghost history
+                        self.entries.push(ghost_entry);
+                    }
+                }
+                self.last_key = Some(entry.key);
+
+                if self.entries.len() + self.frees.len() >= *MERGE_PROGRESS_CHUNK {
+                    self.report().await;
+                }
+            }
+
+            /// Send a message to the next_index_task, with the current set of index entries to
+            /// add and the current set of freed entries. Note: if we don't have a "last_key"
+            /// then there is nothing to send.
+            async fn report(&mut self) {
+                if let Some(last_key) = self.last_key {
+                    self.tx
+                        .send(IndexMessage {
+                            last_key,
+                            entries: mem::replace(
+                                &mut self.entries,
+                                Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                            ),
+                            frees: mem::replace(
+                                &mut self.frees,
+                                Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                            ),
+                            obsoleted: self.obsoleted.take(),
+                        })
+                        .await
+                        .unwrap_or_else(|e| panic!("couldn't send: {}", e));
+                    trace!(
+                        "Collected and sent {} entries and {} frees to next_index_task in {}ms",
+                        self.entries.len(),
+                        self.frees.len(),
+                        self.timer.elapsed().as_millis()
+                    );
+                    self.timer = Instant::now();
+                } else {
+                    assert!(
+                        self.entries.is_empty(),
+                        "found {} entries, expected 0",
+                        self.entries.len()
+                    );
+                    assert!(
+                        self.frees.is_empty(),
+                        "found {} frees, expected 0",
+                        self.frees.len()
+                    );
+                }
+            }
+        }
+
         debug!("using {:?} as start key for merge", start_key);
         let mut index_stream;
-        let mut obsoleted;
+        let mut progress;
         {
             let old_index = old_index_lock.read().await;
             info!(
@@ -361,11 +486,9 @@ impl MergeState {
                 self.eviction_cutoff,
                 self.ghost_cutoff,
             );
-
             index_stream = old_index.iter_chunks();
-
-            // histogram to accumulate blocks that have been obsoleted between merge messages
-            obsoleted = AtimeHistogramPhys::new(
+            progress = Progress::new(
+                tx,
                 old_index.first_ghost_atime(),
                 old_index.first_live_atime(),
             );
@@ -376,25 +499,7 @@ impl MergeState {
             .peekable();
 
         let mut index_skips = 0;
-        let mut count = 0;
         while let Some(chunk) = index_stream.next().await {
-            // This can be a tight loop, so only check the elapsed time every
-            // 100 times through, so that .elapsed() doesn't take significant
-            // CPU time.
-            count += 1;
-            if count >= *MERGE_PROGRESS_CHECK_COUNT {
-                count = 0;
-                if timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL {
-                    // send free_list and current index phys to checkpointer
-                    tx.send(
-                        MergeMessage::new_progress(next_index, free_list, obsoleted.take()).await,
-                    )
-                    .await
-                    .unwrap_or_else(|e| panic!("couldn't send: {}", e));
-                    free_list = Vec::new();
-                    timer = Instant::now();
-                }
-            }
             for &entry in chunk.entries() {
                 // If the next index is already "started", advance the old index to the start point
                 // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
@@ -406,11 +511,8 @@ impl MergeState {
                     }
                 }
 
-                // This entry is no longer relevant to the old index
-                obsoleted.insert(entry.value);
-
                 // First, process any pending changes which are before this
-                // index entry, which must be all Inserts (AtimeUpdates refer
+                // index entry, which must all be Inserts (AtimeUpdates refer
                 // to existing Index entries).
                 while let Some((&pc_key, &PendingChange::Insert(pc_value))) =
                     pending_changes_iter.peek()
@@ -419,16 +521,19 @@ impl MergeState {
                         break;
                     }
                     // Add this new entry to the index
-                    self.add_to_index_or_evict(
-                        IndexEntry {
-                            key: pc_key,
-                            value: pc_value,
-                        },
-                        next_index,
-                        &mut free_list,
-                    );
+                    progress
+                        .ingest(
+                            self,
+                            IndexEntry {
+                                key: pc_key,
+                                value: pc_value,
+                            },
+                        )
+                        .await;
                     pending_changes_iter.next();
                 }
+
+                progress.obsolete(entry);
 
                 let next_pc_opt = pending_changes_iter.peek();
                 match next_pc_opt {
@@ -438,78 +543,64 @@ impl MergeState {
                         // be a ghost entry being recached or perhaps a heal() of a bad entry.
                         if pc_key == entry.key {
                             // Replace the index entry with the newly inserted entry.
-                            if let Some(extent) = entry.value.extent() {
-                                debug!("Insert of {:?} replaces {:?}", pc_value, entry);
-                                free_list.push(extent);
-                            }
-                            self.add_to_index_or_evict(
-                                IndexEntry {
-                                    key: pc_key,
-                                    value: pc_value,
-                                },
-                                next_index,
-                                &mut free_list,
-                            );
+                            debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                            progress.evict(entry).await;
+                            progress
+                                .ingest(
+                                    self,
+                                    IndexEntry {
+                                        key: pc_key,
+                                        value: pc_value,
+                                    },
+                                )
+                                .await;
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
                             assert_gt!(pc_key, entry.key);
-                            self.add_to_index_or_evict(entry, next_index, &mut free_list);
+                            progress.ingest(self, entry).await;
                         }
                     }
                     Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
                         if pc_key == entry.key {
-                            // Add the pending entry to the next generation instead of the current index's entry
+                            // Update this entry with the new atime from the pending change
                             assert_eq!(pc_value.extent(), entry.value.extent());
-                            self.add_to_index_or_evict(
-                                IndexEntry {
-                                    key: pc_key,
-                                    value: pc_value,
-                                },
-                                next_index,
-                                &mut free_list,
-                            );
+                            progress
+                                .ingest(
+                                    self,
+                                    IndexEntry {
+                                        key: pc_key,
+                                        value: pc_value,
+                                    },
+                                )
+                                .await;
 
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
                             // We shouldn't have skipped any, because there has to be a corresponding Index entry
                             assert_gt!(pc_key, entry.key);
-                            self.add_to_index_or_evict(entry, next_index, &mut free_list);
+                            progress.ingest(self, entry).await;
                         }
                     }
                     None => {
                         // no more pending changes
-                        self.add_to_index_or_evict(entry, next_index, &mut free_list);
+                        progress.ingest(self, entry).await;
                     }
                 }
             }
         }
-        let mut count = 0;
         while let Some((&pc_key, &PendingChange::Insert(pc_value))) = pending_changes_iter.peek() {
-            count += 1;
-            if count >= *MERGE_PROGRESS_CHECK_COUNT {
-                count = 0;
-                if timer.elapsed() >= *MERGE_PROGRESS_MESSAGE_INTERVAL {
-                    // send free_list and current index phys to checkpointer
-                    tx.send(
-                        MergeMessage::new_progress(next_index, free_list, obsoleted.take()).await,
-                    )
-                    .await
-                    .unwrap_or_else(|e| panic!("couldn't send: {}", e));
-                    free_list = Vec::new();
-                    timer = Instant::now();
-                }
-            }
             // Add this new entry to the index
-            self.add_to_index_or_evict(
-                IndexEntry {
-                    key: pc_key,
-                    value: pc_value,
-                },
-                next_index,
-                &mut free_list,
-            );
+            progress
+                .ingest(
+                    self,
+                    IndexEntry {
+                        key: pc_key,
+                        value: pc_value,
+                    },
+                )
+                .await;
             // Consume pending change.  We don't do that in the `while let`
             // because we want to leave any unmatched items in the iterator so
             // that we can print them out when failing below.
@@ -523,22 +614,12 @@ impl MergeState {
         );
         debug!("skipped {} index entries", index_skips);
 
-        // Send final checkpoint progress message with final free_list content
-        tx.send(MergeMessage::new_progress(next_index, free_list, obsoleted.take()).await)
-            .await
-            .unwrap_or_else(|e| panic!("couldn't send: {}", e));
+        // Send final progress message with final list content
+        progress.report().await;
 
-        super_trace!(
-            "new histogram: {:#?}, {} entries",
-            next_index.atime_histogram(),
-            next_index.atime_histogram().len()
-        );
         info!(
-            "wrote next index with {} entries ({}) in {:.1}s ({:.1}MB/s)",
-            next_index.len(),
-            nice_p2size(next_index.num_bytes()),
+            "merge task completed in {:.1}s",
             begin.elapsed().as_secs_f64(),
-            (next_index.num_bytes() as f64 / 1024f64 / 1024f64) / begin.elapsed().as_secs_f64(),
         );
     }
 
@@ -1167,12 +1248,12 @@ impl ZettaCache {
                         // capture merge progress: the current next index phys and eviction requests
                         Ok(Some(MergeMessage::Progress(merge_progress))) => {
                             msg_count += 1;
-                            free_count += merge_progress.free_list.len();
+                            free_count += merge_progress.frees.len();
                             trace!(
                                 "merge checkpoint with {} free requests",
-                                merge_progress.free_list.len()
+                                merge_progress.frees.len()
                             );
-                            super_trace!("eviction requested for {:?}", merge_progress.free_list);
+                            super_trace!("eviction requested for {:?}", merge_progress.frees);
                             *new_index_phys = merge_progress.new_index;
                             // free the extent ranges associated with the evicted blocks
                             // XXX - should check to see if the extent is still in the "coverage" area.
@@ -1180,7 +1261,7 @@ impl ZettaCache {
 
                             {
                                 let mut state = self.state.lock().await;
-                                for extent in merge_progress.free_list {
+                                for extent in merge_progress.frees {
                                     state.block_allocator.free(extent);
                                 }
                             } // drop state lock
@@ -2182,7 +2263,7 @@ impl ZettaCacheState {
 
         super_trace!("adding Insert to operation_log {:?} {:?}", key, value);
         self.operation_log
-            .append(OperationLogEntry::Insert(key, value));
+            .push(OperationLogEntry::Insert(key, value));
 
         let sem = Arc::new(Semaphore::new(0));
         with_alloctag("ZettaCacheState.outstanding_writes", || {
@@ -2405,27 +2486,38 @@ impl ZettaCacheState {
         // The checkpoint task will be constantly reading from the channel, so we don't really need
         // much of a buffer here. We use 100 because we might accumulate some messages while actually
         // flushing out the checkpoint.
-        let (tx, rx) = mpsc::channel(100);
+        let (index_tx, checkpoint_rx) = mpsc::channel(100);
+        let (merge_tx, index_rx) = mpsc::channel(100);
 
         let block_access = self.block_access.clone();
+        let spawn_merge = merge.clone();
+        let start_key = next_index.last_key();
+
+        tokio::spawn(async move {
+            spawn_merge
+                .merge_task(merge_tx, old_index, start_key, &block_access)
+                .await;
+        });
 
         tokio::spawn(async move {
             merge
-                .merge_task(tx.clone(), old_index, &mut next_index, &block_access)
+                .next_index_task(index_rx, index_tx.clone(), &mut next_index)
                 .await;
 
             // We drop this before sending the Complete message, so that rotate_index() can unwrap the Arc.
             drop(merge);
+            // XXX - wait for the merge_task to complete as well?
 
             // send the now complete next_index as the final message
-            tx.send(MergeMessage::Complete(next_index))
+            index_tx
+                .send(MergeMessage::Complete(next_index))
                 .await
                 .unwrap_or_else(|e| panic!("couldn't send: {}", e));
 
             trace!("sent final checkpoint message");
         });
 
-        rx
+        checkpoint_rx
     }
 
     /// Restart a merge task from the saved checkpoint state
@@ -2558,7 +2650,7 @@ impl ZettaCacheState {
                 );
 
                 for (&old, &new) in map.iter() {
-                    log.append(RebalanceLogEntry { old, new });
+                    log.push(RebalanceLogEntry { old, new });
                 }
 
                 let log_phys = log.flush().await;

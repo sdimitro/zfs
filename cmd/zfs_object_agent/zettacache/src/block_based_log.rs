@@ -320,11 +320,19 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.pending_len() * mem::size_of::<T>() as u64
     }
 
-    pub fn append(&mut self, entry: T) {
+    pub fn push(&mut self, entry: T) {
         with_alloctag("BlockBasedLog.pending_entries", || {
             self.pending_entries.push(entry)
         });
         // XXX if too many pending, initiate flush?
+    }
+
+    pub fn append(&mut self, mut list: Vec<T>) {
+        if self.pending_entries.is_empty() {
+            self.pending_entries = list;
+        } else {
+            self.pending_entries.append(&mut list);
+        }
     }
 
     async fn flush_impl<F>(&mut self, mut new_chunk_fn: F)
@@ -693,7 +701,7 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
                     first_entry,
                 };
                 new_chunks.push(entry);
-                self.chunk_summary.append(entry);
+                self.chunk_summary.push(entry);
             })
             .await;
         let (this, chunk_summary) = join(self.this.flush(), self.chunk_summary.flush()).await;
@@ -718,8 +726,8 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
         self.readonly.get_phys()
     }
 
-    pub fn append(&mut self, entry: T) {
-        self.this.append(entry);
+    pub fn append(&mut self, list: Vec<T>) {
+        self.this.append(list);
     }
 
     pub fn clear(&mut self) {

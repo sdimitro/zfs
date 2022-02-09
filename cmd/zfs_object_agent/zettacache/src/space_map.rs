@@ -91,20 +91,20 @@ impl SpaceMap {
 
     pub fn alloc(&mut self, extent: Extent) {
         if extent.size != 0 {
-            self.log.append(SpaceMapEntry::Alloc(extent));
+            self.log.push(SpaceMapEntry::Alloc(extent));
             self.alloc_entries += 1;
         }
     }
 
     pub fn free(&mut self, extent: Extent) {
         if extent.size != 0 {
-            self.log.append(SpaceMapEntry::Free(extent));
+            self.log.push(SpaceMapEntry::Free(extent));
         }
     }
 
     pub fn mark_generation(&mut self, slab_id: SlabId, generation: SlabGeneration) {
         self.log
-            .append(SpaceMapEntry::MarkGeneration(MarkGenerationEntry {
+            .push(SpaceMapEntry::MarkGeneration(MarkGenerationEntry {
                 slab_id,
                 generation,
             }));

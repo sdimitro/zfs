@@ -208,15 +208,19 @@ impl IndexRun {
 
     pub fn update_last_key(&mut self, key: IndexKey) {
         if let Some(last_key) = self.last_key {
-            assert_gt!(key, last_key);
+            assert_ge!(key, last_key);
         }
         self.last_key = Some(key);
     }
 
-    pub fn append(&mut self, entry: IndexEntry) {
-        self.update_last_key(entry.key);
-        self.atime_histogram_phys.insert(entry.value);
-        self.log.append(entry);
+    pub fn append(&mut self, list: Vec<IndexEntry>) {
+        if let Some(last_entry) = list.last() {
+            self.update_last_key(last_entry.key);
+        }
+        for entry in &list {
+            self.atime_histogram_phys.insert(entry.value);
+        }
+        self.log.append(list);
     }
 
     pub fn clear(&mut self) {
