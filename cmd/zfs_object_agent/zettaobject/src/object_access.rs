@@ -53,6 +53,7 @@ lazy_static! {
     static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
 
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
+    pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
@@ -542,14 +543,18 @@ impl ObjectAccess {
         key: String,
         stat_type: ObjectAccessStatType,
     ) -> Result<Bytes> {
-        let bytes = self.get_object_impl(key.clone(), stat_type, None).await?;
-        // Note: we *should* have the same data from S3 (in the `vec`) and in
-        // the cache, so this invalidation is normally not necessary.  However,
-        // in case a bug (or undetected RAM error) resulted in incorrect cached
-        // data, we want to invalidate the cache so that we won't get the bad
-        // cached data again.
-        Self::invalidate_cache(key);
-        Ok(bytes)
+        if *OBJECT_CACHE_IS_BYPASSABLE {
+            let bytes = self.get_object_impl(key.clone(), stat_type, None).await?;
+            // Note: we *should* have the same data from S3 (in the `vec`) and in
+            // the cache, so this invalidation is normally not necessary.  However,
+            // in case a bug (or undetected RAM error) resulted in incorrect cached
+            // data, we want to invalidate the cache so that we won't get the bad
+            // cached data again.
+            Self::invalidate_cache(key);
+            Ok(bytes)
+        } else {
+            self.get_object(key, stat_type).await
+        }
     }
 
     pub async fn get_object(&self, key: String, stat_type: ObjectAccessStatType) -> Result<Bytes> {
