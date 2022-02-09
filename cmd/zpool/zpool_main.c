@@ -4933,8 +4933,7 @@ print_one_oss(nvlist_t *oldnv, nvlist_t *newnv, const char *type,
 
 	/* Don't scale the active column values */
 	if (strcmp(stat, "active") == 0)
-		print_one_stat((uint64_t)(newval - oldval), format,
-		    width, scripted);
+		print_one_stat(newval, format, width, scripted);
 	else
 		print_one_stat_fractional((newval - oldval) * scale, format,
 		    width, scripted);
