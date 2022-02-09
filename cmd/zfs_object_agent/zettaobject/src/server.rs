@@ -162,7 +162,7 @@ impl<Ss: Send + Sync + 'static, Cs: ConnectionState + 'static> Server<Ss, Cs> {
     async fn get_next_request(input: &mut OwnedReadHalf) -> tokio::io::Result<NvList> {
         // XXX kernel sends this as host byte order
         let len64 = input.read_u64_le().await?;
-        //trace!("got request len: {}", len64);
+        super_trace!("got request len: {}", len64);
         if len64 > *UNREASONABLE_REQUEST_SIZE {
             panic!("got unreasonable request length {} ({:#x})", len64, len64);
         }
@@ -172,6 +172,7 @@ impl<Ss: Send + Sync + 'static, Cs: ConnectionState + 'static> Server<Ss, Cs> {
         with_alloctag_hf("get_next_request()", || v.resize(usize::from64(len64), 0));
         input.read_exact(v.as_mut()).await?;
         let nvl = NvList::try_unpack(v.as_ref()).unwrap();
+        super_trace!("got request nvl: {:?}", nvl);
         Ok(nvl)
     }
 

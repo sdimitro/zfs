@@ -83,6 +83,7 @@ impl PublicConnectionState {
     }
 
     async fn get_pools_impl(nvl: NvList) -> Result<Option<NvList>> {
+        // XXX convert to use serde nvlist request and response
         let region_cstr = nvl.lookup_string("region")?;
         let endpoint_cstr = nvl.lookup_string("endpoint")?;
         let region_str = region_cstr.to_str()?;
@@ -176,6 +177,7 @@ impl PublicConnectionState {
 
     fn get_destroying_pools(&mut self, nvl: NvList) -> HandlerReturn {
         Ok(Box::pin(async move {
+            // XXX convert to use serde nvlist response
             debug!("got request: {:?}", nvl);
             let pools = pool_destroy::get_destroy_list().await;
 
@@ -192,6 +194,7 @@ impl PublicConnectionState {
 
     fn clear_destroyed_pools(&mut self, nvl: NvList) -> HandlerReturn {
         Ok(Box::pin(async move {
+            // XXX convert to use serde nvlist response
             debug!("got request: {:?}", nvl);
             pool_destroy::remove_not_in_progress().await;
 
@@ -206,6 +209,7 @@ impl PublicConnectionState {
     }
 
     fn report_hits(&mut self, nvl: NvList) -> HandlerReturn {
+        // XXX convert to use serde nvlist response
         debug!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
@@ -243,6 +247,7 @@ impl PublicConnectionState {
     }
 
     fn list_devices(&mut self, nvl: NvList) -> HandlerReturn {
+        // XXX convert to use serde nvlist response
         debug!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
@@ -269,6 +274,7 @@ impl PublicConnectionState {
     }
 
     fn zcache_iostat(&mut self, nvl: NvList) -> HandlerReturn {
+        // XXX convert to use serde nvlist response
         debug!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
@@ -297,6 +303,7 @@ impl PublicConnectionState {
     }
 
     fn zcache_stats(&mut self, nvl: NvList) -> HandlerReturn {
+        // XXX convert to use serde nvlist response
         debug!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();

@@ -9,12 +9,16 @@ use crate::server::Server;
 use crate::server::{handler_return_ok, ConnectionState};
 use anyhow::anyhow;
 use anyhow::Result;
-use cstr_argument::CStrArgument;
+use derivative::Derivative;
+use futures::future;
 use lazy_static::lazy_static;
 use log::*;
-use nvpair::{NvData, NvList, NvListRef};
+use nvpair::NvList;
 use semver::Version;
-use std::ffi::CString;
+use serde::Deserialize;
+use serde::Serialize;
+use std::collections::HashMap;
+use std::fmt::Debug;
 use std::sync::Arc;
 use util::AlignedBytes;
 use util::From64;
@@ -72,6 +76,26 @@ impl RootServerState {
         server.start();
     }
 }
+#[derive(Deserialize, Debug)]
+struct ObjectAccessRequest {
+    bucket: String,
+    region: String,
+    endpoint: String,
+    #[serde(default)]
+    readonly: bool,
+    credentials_profile: Option<String>,
+}
+impl ObjectAccessRequest {
+    fn object_access(&self) -> Arc<ObjectAccess> {
+        ObjectAccess::new(
+            &self.endpoint,
+            &self.region,
+            &self.bucket,
+            self.credentials_profile.clone(),
+            self.readonly,
+        )
+    }
+}
 
 impl RootConnectionState {
     fn register(server: &mut Server<RootServerState, RootConnectionState>) {
@@ -92,70 +116,77 @@ impl RootConnectionState {
         server.register_handler("clear_hit_data", Box::new(Self::clear_hit_data));
     }
 
-    fn get_object_access(nvl: &NvListRef) -> Result<Arc<ObjectAccess>> {
-        let bucket_name = nvl.lookup_string("bucket")?;
-        let region_str = nvl.lookup_string("region")?;
-        let endpoint = nvl.lookup_string("endpoint")?;
-        let readonly = nvl.exists("readonly");
-        let credentials_profile: Option<String> = nvl
-            .lookup_string("credentials_profile")
-            .ok()
-            .map(|s| s.to_string_lossy().to_string());
-        Ok(ObjectAccess::new(
-            endpoint.to_str().unwrap(),
-            region_str.to_str().unwrap(),
-            bucket_name.to_str().unwrap(),
-            credentials_profile,
-            readonly,
-        ))
-    }
-
     fn create_pool(&mut self, nvl: NvList) -> SerialHandlerReturn {
-        info!("got request: {:?}", nvl);
         Box::pin(async move {
-            let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
-            let name = nvl.lookup_string("name")?;
-            let object_access = Self::get_object_access(&nvl)?;
-
-            let mut response = NvList::new_unique_names();
-            response.insert("Type", "pool create done").unwrap();
-            response.insert("GUID", &guid.0).unwrap();
-
-            if let Err(err) = Pool::create(&object_access, name.to_str()?, guid).await {
-                error!("pool create failed: {:?}", &err);
-                response
-                    .insert("cause", err.to_string().replace('\n', "").as_str())
-                    .unwrap();
+            #[derive(Deserialize, Debug)]
+            struct CreatePoolRequest {
+                #[serde(flatten)]
+                object_access: ObjectAccessRequest,
+                #[serde(rename = "GUID")]
+                guid: PoolGuid,
+                name: String,
             }
+            let request: CreatePoolRequest = nvpair::from_nvlist(&nvl)?;
+            info!("got {:?}", request);
 
-            maybe_die_with(|| format!("before sending response: {:?}", response));
-            debug!("sending response: {:?}", response);
-            Ok(Some(response))
+            let mut error = None;
+            if let Err(err) = Pool::create(
+                &request.object_access.object_access(),
+                &request.name,
+                request.guid,
+            )
+            .await
+            {
+                error!("pool create failed: {:?}", &err);
+                error = Some(err.to_string().replace('\n', ""));
+            }
+            #[derive(Debug, Serialize)]
+            struct CreatePoolResponse {
+                #[serde(rename = "Type")]
+                response_type: &'static str,
+                #[serde(rename = "GUID")]
+                guid: PoolGuid,
+                cause: Option<String>,
+            }
+            let response = CreatePoolResponse {
+                response_type: "pool create done",
+                guid: request.guid,
+                cause: error,
+            };
+            return_struct(response, true)
         })
     }
 
     fn open_pool(&mut self, nvl: NvList) -> SerialHandlerReturn {
-        info!("got request: {:?}", nvl);
         Box::pin(async move {
-            let guid = PoolGuid(nvl.lookup_uint64("GUID")?);
-            let rollback = bool_value(&nvl, "rollback")?;
+            #[derive(Deserialize, Debug)]
+            struct OpenPoolRequest {
+                #[serde(flatten)]
+                object_access: ObjectAccessRequest,
+                #[serde(rename = "GUID")]
+                guid: PoolGuid,
+                #[serde(default)]
+                rollback: bool,
+                #[serde(rename = "TXG")]
+                txg: Option<Txg>,
+                syncing_txg: Option<Txg>,
+            }
+            let request: OpenPoolRequest = nvpair::from_nvlist(&nvl)?;
+            info!("got {:?}", request);
 
-            let object_access = Self::get_object_access(&nvl)?;
-            let cache = self.cache.as_ref().cloned();
-            let txg = nvl.lookup_uint64("TXG").ok().map(Txg);
-            let syncing_txg = nvl.lookup_uint64("syncing_txg").ok().map(Txg);
+            // XXX convert response to use serde nvlist
             let mut response = NvList::new_unique_names();
             response.insert("Type", "pool open done").unwrap();
-            response.insert("GUID", &guid.0).unwrap();
+            response.insert("GUID", &request.guid.0).unwrap();
 
             let (pool, phys_opt, next_block) = match Pool::open(
-                object_access,
-                guid,
-                txg,
-                cache,
+                request.object_access.object_access(),
+                request.guid,
+                request.txg,
+                self.cache.as_ref().cloned(),
                 self.id,
-                syncing_txg,
-                rollback,
+                request.syncing_txg,
+                request.rollback,
             )
             .await
             {
@@ -230,16 +261,21 @@ impl RootConnectionState {
     }
 
     fn begin_txg(&mut self, nvl: NvList) -> HandlerReturn {
-        debug!("got request: {:?}", nvl);
-        let txg = Txg(nvl.lookup_uint64("TXG")?);
+        #[derive(Deserialize, Debug)]
+        struct BeginTxgRequest {
+            #[serde(rename = "TXG")]
+            txg: Txg,
+        }
+        let request: BeginTxgRequest = nvpair::from_nvlist(&nvl)?;
+        debug!("got {:?}", request);
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
-        pool.begin_txg(txg);
+        pool.begin_txg(request.txg);
 
         handler_return_ok(None)
     }
 
-    fn resume_complete(&mut self, nvl: NvList) -> SerialHandlerReturn {
-        info!("got request: {:?}", nvl);
+    fn resume_complete(&mut self, _nvl: NvList) -> SerialHandlerReturn {
+        info!("got ResumeComplete");
 
         // This is .await'ed by the server's thread, so we can't see any new writes
         // come in while it's in progress.
@@ -251,56 +287,31 @@ impl RootConnectionState {
     }
 
     fn flush_writes(&mut self, nvl: NvList) -> HandlerReturn {
-        debug!("got request: {:?}", nvl);
+        #[derive(Deserialize, Debug)]
+        struct FlushWritesRequest {
+            block: BlockId,
+        }
+        let request: FlushWritesRequest = nvpair::from_nvlist(&nvl)?;
+        debug!("got {:?}", request);
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
-        let block = BlockId(nvl.lookup_uint64("block")?);
-        pool.initiate_flush(block);
+        pool.initiate_flush(request.block);
         handler_return_ok(None)
     }
 
-    // sends response when completed
-    async fn end_txg_impl(
-        pool: Arc<Pool>,
-        uberblock: Vec<u8>,
-        config: Vec<u8>,
-        checkpoint_txg: Option<Txg>,
-    ) -> Result<Option<NvList>> {
-        let (stats, features) = pool.end_txg(uberblock, config, checkpoint_txg).await;
-        let mut feature_nvl = NvList::new_unique_names();
-        for (feature, refcount) in features {
-            feature_nvl.insert(feature.name, &refcount).unwrap();
-        }
-        let mut response = NvList::new_unique_names();
-        response.insert("Type", "end txg done").unwrap();
-        response
-            .insert("blocks_count", &stats.blocks_count)
-            .unwrap();
-        response
-            .insert("blocks_bytes", &stats.blocks_bytes)
-            .unwrap();
-        response
-            .insert("pending_frees_count", &stats.pending_frees_count)
-            .unwrap();
-        response
-            .insert("pending_frees_bytes", &stats.pending_frees_bytes)
-            .unwrap();
-        response
-            .insert("objects_count", &stats.objects_count)
-            .unwrap();
-        response.insert("features", feature_nvl.as_ref()).unwrap();
-        maybe_die_with(|| format!("before sending response: {:?}", response));
-        debug!("sending response: {:?}", response);
-        Ok(Some(response))
-    }
-
     fn end_txg(&mut self, nvl: NvList) -> HandlerReturn {
-        // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid filling the log unnecessarily.
-        debug!(
-            "got request: Type={:?}, TXG={:?}, checkpoint={:?}",
-            nvl.lookup_string("Type").ok(),
-            nvl.lookup_uint64("TXG").ok(),
-            nvl.lookup_uint64("checkpoint")
-        );
+        #[derive(Deserialize, Derivative)]
+        #[derivative(Debug)]
+        struct EndTxgRequest<'a> {
+            #[serde(with = "serde_bytes")]
+            // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid filling the log unnecessarily.
+            #[derivative(Debug = "ignore")]
+            uberblock: &'a [u8],
+            #[serde(with = "serde_bytes")]
+            #[derivative(Debug = "ignore")]
+            config: &'a [u8],
+            checkpoint: Option<Txg>,
+            // XXX kernel also sends TXG, which we ignore; we should remove it from the API.
+        }
 
         let pool = self
             .pool
@@ -308,40 +319,59 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
         Ok(Box::pin(async move {
-            let uberblock = u8_array_value(&nvl, "uberblock")?.to_vec();
-            let config = u8_array_value(&nvl, "config")?.to_vec();
-            let checkpoint_txg = match nvl.lookup_uint64("checkpoint").ok() {
-                Some(0) | None => None,
-                Some(t) => Some(Txg(t)),
+            let request: EndTxgRequest = nvpair::from_nvlist(&nvl)?;
+            debug!("got {:?}", request);
+            // XXX change kernel to not send this field if it doesn't want to take a checkpoint
+            let checkpoint_txg = match &request.checkpoint {
+                Some(Txg(0)) | None => None,
+                Some(txg) => Some(*txg),
             };
 
-            Self::end_txg_impl(pool, uberblock, config, checkpoint_txg).await
+            let (stats, features) = pool
+                .end_txg(
+                    request.uberblock.to_owned(),
+                    request.config.to_owned(),
+                    checkpoint_txg,
+                )
+                .await;
+            #[derive(Debug, Serialize)]
+            struct EndTxgResponse {
+                #[serde(rename = "Type")]
+                response_type: &'static str,
+                #[serde(flatten)]
+                stats: PoolStatsPhys,
+                features: HashMap<String, u64>,
+            }
+            let response = EndTxgResponse {
+                response_type: "end txg done",
+                stats,
+                features: features
+                    .into_iter()
+                    .map(|(flag, refcount)| (flag.name, refcount))
+                    .collect(),
+            };
+            return_struct(response, true)
         }))
     }
 
     /// queue write, sends response when completed (persistent).
     /// completion may not happen until flush_pool() is called
     fn write_block(&mut self, nvl: NvList) -> HandlerReturn {
-        // It would be simpler to pass the &str literal to
-        // NvListRef::lookup_uint64(), but that would require doing an
-        // allocation for each one.  This does the allocation of the CString
-        // once.
-        lazy_static! {
-            static ref BLOCK: CString = CString::new("block").unwrap();
-            static ref DATA: CString = CString::new("data").unwrap();
-            static ref REQUEST_ID: CString = CString::new("request_id").unwrap();
-            static ref TOKEN: CString = CString::new("token").unwrap();
+        #[derive(Deserialize, Derivative)]
+        #[derivative(Debug)]
+        struct WriteBlockRequest<'a> {
+            block: BlockId,
+            #[serde(with = "serde_bytes")]
+            #[derivative(Debug = "ignore")]
+            data: &'a [u8],
+            request_id: u64,
+            token: u64,
+            #[serde(default)]
+            reissue: bool,
+            // XXX kernel also includes the write size, which is not needed.
         }
-        let block = BlockId(nvl.lookup_uint64(&*BLOCK)?);
-        let slice = u8_array_value(&nvl, &*DATA)?;
-        let request_id = nvl.lookup_uint64(&*REQUEST_ID)?;
-        let token = nvl.lookup_uint64(&*TOKEN)?;
-        super_trace!(
-            "got write request id={}: {:?} len={}",
-            request_id,
-            block,
-            slice.len()
-        );
+        let request: WriteBlockRequest = nvpair::from_nvlist(&nvl)?;
+        super_trace!("got request struct: {:?}", request);
 
         let pool = self
             .pool
@@ -354,46 +384,63 @@ impl RootConnectionState {
         };
         // XXX copying data
         let bytes = with_alloctag("write_block()", || {
-            AlignedBytes::copy_from_slice(slice, alignment)
+            AlignedBytes::copy_from_slice(request.data, alignment)
         });
         Ok(with_alloctag_hf(
             "write_block() Box::pin({closure})",
             || {
                 Box::pin(async move {
-                    pool.write_block(block, bytes).await;
-                    let mut response = NvList::new_unique_names();
-                    response.insert("Type", "write done").unwrap();
-                    response.insert("block", &block.0).unwrap();
-                    response.insert("request_id", &request_id).unwrap();
-                    response.insert("token", &token).unwrap();
-                    super_trace!("sending response: {:?}", response);
-                    if nvl.exists("reissued") {
+                    pool.write_block(request.block, bytes).await;
+                    #[derive(Debug, Serialize)]
+                    struct WriteBlockResponse {
+                        #[serde(rename = "Type")]
+                        response_type: &'static str,
+                        block: BlockId,
+                        request_id: u64,
+                        token: u64,
+                    }
+                    let response = WriteBlockResponse {
+                        response_type: "write done",
+                        block: request.block,
+                        request_id: request.request_id,
+                        token: request.token,
+                    };
+                    if request.reissue {
                         maybe_die_with(|| "after reissued write block request".to_string());
                     }
-                    Ok(Some(response))
+                    return_struct(response, false)
                 })
             },
         ))
     }
 
     fn free_blocks(&mut self, nvl: NvList) -> HandlerReturn {
-        trace!("got request: {:?}", nvl);
-        let blocks = u64_array_value(&nvl, "block")?;
-        let sizes = u32_array_value(&nvl, "size")?;
+        #[derive(Deserialize, Debug)]
+        struct FreeBlocksRequest {
+            block: Vec<u64>,
+            size: Vec<u32>,
+        }
+        let request: FreeBlocksRequest = nvpair::from_nvlist(&nvl)?;
+        debug!("got FreeBlocksRequest({} entries)", request.block.len());
 
         let pool = self.pool.as_ref().ok_or_else(|| anyhow!("no pool open"))?;
-        pool.free_blocks(blocks, sizes);
+        pool.free_blocks(&request.block, &request.size);
         maybe_die_with(|| "after free block request".to_string());
         handler_return_ok(None)
     }
 
     fn read_block(&mut self, nvl: NvList) -> HandlerReturn {
-        super_trace!("got request: {:?}", nvl);
-        let block = BlockId(nvl.lookup_uint64("block")?);
-        let request_id = nvl.lookup_uint64("request_id")?;
-        let token = nvl.lookup_uint64("token")?;
-        let heal = bool_value(&nvl, "heal")?;
-        let size = nvl.lookup_uint64("size")?;
+        #[derive(Deserialize, Debug)]
+        struct ReadBlockRequest {
+            size: u64,
+            block: BlockId,
+            request_id: u64,
+            token: u64,
+            #[serde(default)]
+            heal: bool,
+        }
+        let request: ReadBlockRequest = nvpair::from_nvlist(&nvl)?;
+        super_trace!("got {:?}", request);
 
         let pool = self
             .pool
@@ -401,39 +448,51 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
         Ok(Box::pin(async move {
-            let mut data = pool.read_block(block, heal).await;
+            let mut data = pool.read_block(request.block, request.heal).await;
 
             //
             // If the cache has the wrong content/size for this BlockId, then proactively do a healing read
             // from the object store.
             //
-            if !heal && data.len() != usize::from64(size) {
+            if !request.heal && data.len() != usize::from64(request.size) {
                 debug!(
                     "read size mismatch: expected={} actual={}",
-                    size,
+                    request.size,
                     data.len()
                 );
-                data = pool.read_block(block, true).await;
+                data = pool.read_block(request.block, true).await;
             }
-            let mut nvl = NvList::new_unique_names();
-            nvl.insert("Type", "read done").unwrap();
-            nvl.insert("block", &block.0).unwrap();
-            nvl.insert("request_id", &request_id).unwrap();
-            nvl.insert("token", &token).unwrap();
-            nvl.insert("data", data.as_ref()).unwrap();
-            super_trace!(
-                "sending read done response: block={} req={} data=[{} bytes]",
-                block,
-                request_id,
-                data.len()
-            );
-            Ok(Some(nvl))
+            #[derive(Serialize, Derivative)]
+            #[derivative(Debug)]
+            struct ReadBlockResponse<'a> {
+                #[serde(rename = "Type")]
+                response_type: &'static str,
+                block: BlockId,
+                request_id: u64,
+                token: u64,
+                #[serde(with = "serde_bytes")]
+                #[derivative(Debug = "ignore")]
+                data: &'a [u8],
+            }
+            let response = ReadBlockResponse {
+                response_type: "read done",
+                block: request.block,
+                request_id: request.request_id,
+                token: request.token,
+                data: &data,
+            };
+
+            return_struct(response, false)
         }))
     }
 
     fn get_stats(&mut self, nvl: NvList) -> HandlerReturn {
-        trace!("got request: {:?}", nvl);
-        let token = nvl.lookup_uint64("token")?;
+        #[derive(Deserialize, Debug)]
+        struct GetStatsRequest {
+            token: u64,
+        }
+        let request: GetStatsRequest = nvpair::from_nvlist(&nvl)?;
+        trace!("got {:?}", request);
 
         let pool = self
             .pool
@@ -446,6 +505,7 @@ impl RootConnectionState {
         // Each map entry can be a Counter, a CounterMap, or a Histogram
         //
         let stats = pool.state.shared_state.object_access.collect_stats();
+        // XXX convert response to use serde nvlist
         let mut nvl = NvList::new_unique_names();
         for (name, stat_value) in stats.iter() {
             match stat_value {
@@ -465,7 +525,7 @@ impl RootConnectionState {
 
         let mut response = NvList::new_unique_names();
         response.insert("Type", "get stats done").unwrap();
-        response.insert("token", &token).unwrap();
+        response.insert("token", &request.token).unwrap();
         response.insert("stats", nvl.as_ref()).unwrap();
 
         trace!("sending stats done response: {:?}", response);
@@ -473,11 +533,13 @@ impl RootConnectionState {
     }
 
     fn close_pool(&mut self, nvl: NvList) -> HandlerReturn {
-        info!("got request: {:?}", nvl);
-        let destroy = match nvl.lookup("destroy").unwrap().data() {
-            NvData::BoolV(destroy) => destroy,
-            _ => panic!("destroy not expected type"),
-        };
+        #[derive(Deserialize, Debug)]
+        struct ClosePoolRequest {
+            #[serde(default)]
+            destroy: bool,
+        }
+        let request: ClosePoolRequest = nvpair::from_nvlist(&nvl)?;
+        info!("got {:?}", request);
 
         let pool_opt = self.pool.take();
         Ok(Box::pin(async move {
@@ -486,14 +548,18 @@ impl RootConnectionState {
                     .map_err(|_| {
                         anyhow!("pool close request while there are other operations in progress")
                     })?
-                    .close(destroy)
+                    .close(request.destroy)
                     .await;
             }
-            let mut response = NvList::new_unique_names();
-            response.insert("Type", "pool close done").unwrap();
-            maybe_die_with(|| format!("before sending response: {:?}", response));
-            debug!("sending response: {:?}", response);
-            Ok(Some(response))
+            #[derive(Debug, Serialize)]
+            struct ClosePoolResponse {
+                #[serde(rename = "Type")]
+                response_type: &'static str,
+            }
+            let response = ClosePoolResponse {
+                response_type: "pool close done",
+            };
+            return_struct(response, true)
         }))
     }
 
@@ -506,128 +572,122 @@ impl RootConnectionState {
     }
 
     fn enable_feature(&mut self, nvl: NvList) -> HandlerReturn {
-        debug!("got request: {:?}", nvl);
+        #[derive(Deserialize, Debug)]
+        struct EnableFeatureRequest {
+            feature: String,
+        }
+        let request: EnableFeatureRequest = nvpair::from_nvlist(&nvl)?;
+        info!("got {:?}", request);
         let pool = self
             .pool
             .as_ref()
             .expect("Attempted to set feature with no pool")
             .clone();
-        let feature_name = nvl.lookup_string("feature").unwrap().into_string().unwrap();
-        pool.enable_feature(&feature_name);
-        let mut response = NvList::new_unique_names();
-        response.insert("Type", "enable feature done").unwrap();
-        response.insert("feature", feature_name.as_str()).unwrap();
-        debug!("sending response: {:?}", response);
-        handler_return_ok(Some(response))
+        pool.enable_feature(&request.feature);
+
+        #[derive(Debug, Serialize)]
+        struct EnableFeatureResponse {
+            #[serde(rename = "Type")]
+            response_type: &'static str,
+            feature: String,
+        }
+        let response = EnableFeatureResponse {
+            response_type: "enable feature done",
+            feature: request.feature,
+        };
+        handler_return_struct(response, true)
     }
 
     fn resume_destroy_pool(&mut self, nvl: NvList) -> HandlerReturn {
         Ok(Box::pin(async move {
-            debug!("got request: {:?}", nvl);
+            #[derive(Deserialize, Debug)]
+            struct ResumeDestroyPoolRequest {
+                #[serde(flatten)]
+                object_access: ObjectAccessRequest,
+                #[serde(rename = "GUID")]
+                guid: PoolGuid,
+            }
+            let request: ResumeDestroyPoolRequest = nvpair::from_nvlist(&nvl)?;
+            debug!("got {:?}", request);
 
-            let guid = PoolGuid(nvl.lookup_uint64("GUID").unwrap());
-            let object_access = Self::get_object_access(&nvl).unwrap();
-
-            let mut response = NvList::new_unique_names();
-
-            match pool_destroy::resume_destroy(object_access, guid).await {
-                Ok(_) => {
-                    response.insert("Type", "resume destroy pool done").unwrap();
-                }
+            #[derive(Debug, Serialize)]
+            struct ResumeDestroyPoolResponse {
+                #[serde(rename = "Type")]
+                response_type: &'static str,
+            }
+            let response = match pool_destroy::resume_destroy(
+                request.object_access.object_access(),
+                request.guid,
+            )
+            .await
+            {
+                Ok(_) => ResumeDestroyPoolResponse {
+                    response_type: "resume destroy pool done",
+                },
                 Err(error) => {
                     error!("resume destroy pool failed, {:?}", error);
-                    response
-                        .insert("Type", "resume destroy pool failed")
-                        .unwrap();
+                    ResumeDestroyPoolResponse {
+                        response_type: "resume destroy pool failed",
+                    }
                 }
             };
 
-            debug!("sending response: {:?}", response);
-            Ok(Some(response))
+            return_struct(response, true)
         }))
     }
 
-    fn clear_hit_data(&mut self, nvl: NvList) -> HandlerReturn {
+    fn clear_hit_data(&mut self, _nvl: NvList) -> HandlerReturn {
+        #[derive(Debug, Serialize)]
+        struct ClearHitDataResponse {
+            #[serde(rename = "Type")]
+            response_type: &'static str,
+            result: &'static str,
+        }
         if let Some(cache) = self.cache.as_ref() {
             let cache = cache.clone();
             Ok(Box::pin(async move {
-                debug!("got request: {:?}", nvl);
+                debug!("got ClearHitDataRequest");
 
                 cache.clear_hit_data().await;
-                let mut response = NvList::new_unique_names();
-                response.insert("Type", "clear_hit_data").unwrap();
-                response.insert("result", "ok").unwrap();
-
-                debug!("sending response: {:?}", response);
-                Ok(Some(response))
+                let response = ClearHitDataResponse {
+                    response_type: "clear_hit_data",
+                    result: "ok",
+                };
+                return_struct(response, true)
             }))
         } else {
-            debug!("got request with no cache: {:?}", nvl);
-            let mut response = NvList::new_unique_names();
-            response.insert("Type", "clear_hit_data").unwrap();
-            response.insert("result", "err").unwrap();
-            debug!("sending response: {:?}", response);
-            handler_return_ok(Some(response))
+            debug!("got ClearHitDataRequest, no zettacache present");
+            let response = ClearHitDataResponse {
+                response_type: "clear_hit_data",
+                result: "err",
+            };
+            handler_return_struct(response, true)
         }
     }
 }
 
-/// Get the BoolV type value, or if not present then default to false.
-/// Return Err if value is present but not BoolV type.
-fn bool_value<S>(nvl: &NvListRef, name: S) -> Result<bool>
+fn return_struct<T>(response: T, debug: bool) -> Result<Option<NvList>>
 where
-    S: CStrArgument,
+    T: Debug + Serialize,
 {
-    match nvl.lookup(name) {
-        Ok(pair) => {
-            if let NvData::BoolV(resume) = pair.data() {
-                Ok(resume)
-            } else {
-                Err(anyhow!("pair {:?} not expected type (boolean_value)", pair))
-            }
-        }
-        Err(_) => Ok(false),
+    if debug {
+        trace!("sending response: {:?}", response);
+    } else {
+        super_trace!("sending response: {:?}", response);
     }
+    let nvl = nvpair::to_nvlist(&response)?;
+    if debug {
+        maybe_die_with(|| format!("before sending response: {:?}", response));
+        debug!("sending response nvl: {:?}", nvl);
+    } else {
+        super_trace!("sending response nvl: {:?}", nvl);
+    }
+    Ok(Some(nvl))
 }
 
-/// Get the uint8_array type value.
-/// Return Err if value is not present, or not the expected type.
-fn u8_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u8]>
+fn handler_return_struct<T>(response: T, debug: bool) -> HandlerReturn
 where
-    S: CStrArgument,
+    T: Debug + Serialize,
 {
-    let pair = nvl.lookup(name)?;
-    if let NvData::Uint8Array(slice) = pair.data() {
-        Ok(slice)
-    } else {
-        Err(anyhow!("pair {:?} not expected type (uint8_array)", pair))
-    }
-}
-
-/// Get the uint32_array type value.
-/// Return Err if value is not present, or not the expected type.
-fn u32_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u32]>
-where
-    S: CStrArgument,
-{
-    let pair = nvl.lookup(name)?;
-    if let NvData::Uint32Array(slice) = pair.data() {
-        Ok(slice)
-    } else {
-        Err(anyhow!("pair {:?} not expected type (uint32_array)", pair))
-    }
-}
-
-/// Get the uint64_array type value.
-/// Return Err if value is not present, or not the expected type.
-fn u64_array_value<S>(nvl: &NvListRef, name: S) -> Result<&[u64]>
-where
-    S: CStrArgument,
-{
-    let pair = nvl.lookup(name)?;
-    if let NvData::Uint64Array(slice) = pair.data() {
-        Ok(slice)
-    } else {
-        Err(anyhow!("pair {:?} not expected type (uint64_array)", pair))
-    }
+    Ok(Box::pin(future::ready(return_struct(response, debug))))
 }
