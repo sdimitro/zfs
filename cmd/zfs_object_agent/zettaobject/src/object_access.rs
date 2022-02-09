@@ -27,6 +27,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
+use tokio::sync::Semaphore;
 use tokio::{sync::watch, time::error::Elapsed};
 use util::{get_tunable, super_trace, with_alloctag};
 
@@ -54,10 +55,11 @@ lazy_static! {
 
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
     pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
+    pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
-pub enum ObjectAccessStatType {
+pub enum ObjectAccessOpType {
     ReadsGet,
     TxgSyncPut,
     ReclaimGet,
@@ -81,7 +83,7 @@ enum RequestSizeHistogramType {
     Deletes,
 }
 
-impl Display for ObjectAccessStatType {
+impl Display for ObjectAccessOpType {
     fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
         write!(f, "{:?}", self)
     }
@@ -129,20 +131,20 @@ struct StatTypeCounts {
 
 struct ObjectAccessStats {
     timebase: Instant,
-    counters: EnumMap<ObjectAccessStatType, StatTypeCounts>,
+    counters: EnumMap<ObjectAccessOpType, StatTypeCounts>,
     latency_histograms: EnumMap<LatencyHistogramType, LatencyHistogram>,
     request_size_histograms: EnumMap<RequestSizeHistogramType, RequestSizeHistogram>,
 }
 
 #[must_use]
 struct OpInProgress<'a> {
-    stat_type: ObjectAccessStatType,
+    stat_type: ObjectAccessOpType,
     begin: Instant,
     stats: &'a ObjectAccessStats,
 }
 
 impl<'a> OpInProgress<'a> {
-    fn new(stat_type: ObjectAccessStatType, stats: &'a ObjectAccessStats) -> Self {
+    fn new(stat_type: ObjectAccessOpType, stats: &'a ObjectAccessStats) -> Self {
         stats.counters[stat_type]
             .active_count
             .fetch_add(1, Ordering::Relaxed);
@@ -173,17 +175,17 @@ impl<'a> OpInProgress<'a> {
 
         // Map the ObjectAccessStatType to the corresponding histogram type
         let (latency_type, request_type) = match self.stat_type {
-            ObjectAccessStatType::ReadsGet
-            | ObjectAccessStatType::ReclaimGet
-            | ObjectAccessStatType::MetadataGet => {
+            ObjectAccessOpType::ReadsGet
+            | ObjectAccessOpType::ReclaimGet
+            | ObjectAccessOpType::MetadataGet => {
                 (LatencyHistogramType::Gets, RequestSizeHistogramType::Gets)
             }
-            ObjectAccessStatType::TxgSyncPut
-            | ObjectAccessStatType::ReclaimPut
-            | ObjectAccessStatType::MetadataPut => {
+            ObjectAccessOpType::TxgSyncPut
+            | ObjectAccessOpType::ReclaimPut
+            | ObjectAccessOpType::MetadataPut => {
                 (LatencyHistogramType::Puts, RequestSizeHistogramType::Puts)
             }
-            ObjectAccessStatType::ObjectDelete => (
+            ObjectAccessOpType::ObjectDelete => (
                 LatencyHistogramType::Deletes,
                 RequestSizeHistogramType::Deletes,
             ),
@@ -211,7 +213,7 @@ impl<'a> Drop for OpInProgress<'a> {
 }
 
 impl ObjectAccessStats {
-    fn begin(&self, stat_type: ObjectAccessStatType) -> OpInProgress<'_> {
+    fn begin(&self, stat_type: ObjectAccessOpType) -> OpInProgress<'_> {
         OpInProgress::new(stat_type, self)
     }
 }
@@ -231,6 +233,14 @@ pub struct ObjectAccess {
     endpoint_str: String,
     credentials_profile: Option<String>,
     access_stats: ObjectAccessStats,
+    outstanding_ops: EnumMap<ObjectAccessOpType, OutstandingOps>,
+}
+
+struct OutstandingOps(Semaphore);
+impl Default for OutstandingOps {
+    fn default() -> Self {
+        Self(Semaphore::new(*OBJECT_QUEUE_DEPTH_PER_TYPE))
+    }
 }
 
 #[derive(Debug)]
@@ -454,6 +464,7 @@ impl ObjectAccess {
                 latency_histograms: Default::default(),
                 request_size_histograms: Default::default(),
             },
+            outstanding_ops: Default::default(),
         })
     }
 
@@ -477,15 +488,17 @@ impl ObjectAccess {
                 latency_histograms: Default::default(),
                 request_size_histograms: Default::default(),
             },
+            outstanding_ops: Default::default(),
         })
     }
 
     pub async fn get_object_impl(
         &self,
         key: String,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         timeout: Option<Duration>,
     ) -> Result<Bytes> {
+        let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
         let op = self.access_stats.begin(stat_type);
         let msg = format!("get {}", key);
         let bytes = retry(&msg, timeout, || async {
@@ -541,7 +554,7 @@ impl ObjectAccess {
     pub async fn get_object_uncached(
         &self,
         key: String,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
     ) -> Result<Bytes> {
         if *OBJECT_CACHE_IS_BYPASSABLE {
             let bytes = self.get_object_impl(key.clone(), stat_type, None).await?;
@@ -557,7 +570,7 @@ impl ObjectAccess {
         }
     }
 
-    pub async fn get_object(&self, key: String, stat_type: ObjectAccessStatType) -> Result<Bytes> {
+    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
         let either = {
             // need this block separate so that we can drop the mutex before the .await
             let mut c = CACHE.lock().unwrap();
@@ -725,13 +738,14 @@ impl ObjectAccess {
         // need to iterate it multiple times, if we need to retry.  streamfunc
         // returns (stream, stream_len_bytes).
         streamfunc: F,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>>
     where
         F: Fn() -> (ByteStream, usize),
     {
         assert!(!self.readonly);
+        let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
         let op = self.access_stats.begin(stat_type);
 
         let result = retry(&format!("put {}", key), timeout, || async {
@@ -759,7 +773,7 @@ impl ObjectAccess {
         &self,
         key: String,
         bytes: Bytes,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
         self.put_object_stream_impl(
@@ -796,7 +810,7 @@ impl ObjectAccess {
         cache.reading.remove(&key);
     }
 
-    pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessStatType) {
+    pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessOpType) {
         // Note that we need to PutObject before invalidating the cache.  If a
         // get_object() is called while put_object() is in progress, it may see
         // the old or new value, which is fine.  After put_object() returns,
@@ -814,7 +828,7 @@ impl ObjectAccess {
         &self,
         key: String,
         streamfunc: F,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
     ) where
         F: Fn() -> (ByteStream, usize),
     {
@@ -828,7 +842,7 @@ impl ObjectAccess {
         &self,
         key: String,
         data: Bytes,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         timeout: Option<Duration>,
     ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
         let result = self
@@ -853,7 +867,7 @@ impl ObjectAccess {
             .for_each(|chunk| async move {
                 let msg = format!("delete {} objects including {}", chunk.len(), &chunk[0]);
                 assert!(!self.readonly);
-                let op = self.access_stats.begin(ObjectAccessStatType::ObjectDelete);
+                let op = self.access_stats.begin(ObjectAccessOpType::ObjectDelete);
 
                 retry(&msg, None, || async {
                     let req = DeleteObjectsRequest {
@@ -906,7 +920,7 @@ impl ObjectAccess {
         self.readonly
     }
 
-    fn sum_stats(&self, stat_types: &[ObjectAccessStatType]) -> HashMap<String, u64> {
+    fn sum_stats(&self, stat_types: &[ObjectAccessOpType]) -> HashMap<String, u64> {
         let mut total = HashMap::new();
 
         total.insert(
@@ -982,17 +996,17 @@ impl ObjectAccess {
         outer.insert(
             "TotalGet".into(),
             StatMapValue::CounterMap(self.sum_stats(&[
-                ObjectAccessStatType::ReadsGet,
-                ObjectAccessStatType::MetadataGet,
-                ObjectAccessStatType::ReclaimGet,
+                ObjectAccessOpType::ReadsGet,
+                ObjectAccessOpType::MetadataGet,
+                ObjectAccessOpType::ReclaimGet,
             ])),
         );
         outer.insert(
             "TotalPut".into(),
             StatMapValue::CounterMap(self.sum_stats(&[
-                ObjectAccessStatType::TxgSyncPut,
-                ObjectAccessStatType::MetadataPut,
-                ObjectAccessStatType::ReclaimPut,
+                ObjectAccessOpType::TxgSyncPut,
+                ObjectAccessOpType::MetadataPut,
+                ObjectAccessOpType::ReclaimPut,
             ])),
         );
 

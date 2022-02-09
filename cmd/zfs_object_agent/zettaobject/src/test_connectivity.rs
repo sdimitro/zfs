@@ -1,4 +1,4 @@
-use crate::{ObjectAccess, ObjectAccessStatType};
+use crate::{ObjectAccess, ObjectAccessOpType};
 use rand::Rng;
 use std::time::Duration;
 
@@ -12,7 +12,7 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> anyhow::Result<()
         .put_object_timed(
             file.clone(),
             content.into(),
-            ObjectAccessStatType::MetadataPut,
+            ObjectAccessOpType::MetadataPut,
             Some(Duration::from_secs(30)),
         )
         .await?;

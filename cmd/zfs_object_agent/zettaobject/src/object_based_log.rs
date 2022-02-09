@@ -1,5 +1,5 @@
 use crate::base_types::*;
-use crate::object_access::{ObjectAccess, ObjectAccessStatType};
+use crate::object_access::{ObjectAccess, ObjectAccessOpType};
 use crate::pool::PoolSharedState;
 use anyhow::{Context, Result};
 use futures::future;
@@ -93,7 +93,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
         let buf = object_access
             .get_object(
                 Self::key(name, generation, chunk),
-                ObjectAccessStatType::MetadataGet,
+                ObjectAccessOpType::MetadataGet,
             )
             .await?;
         let begin = Instant::now();
@@ -125,7 +125,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
             .put_object(
                 Self::key(name, self.generation, self.chunk),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                ObjectAccessOpType::MetadataPut,
             )
             .await;
     }

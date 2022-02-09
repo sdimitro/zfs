@@ -8,7 +8,7 @@ use crate::heartbeat::HeartbeatGuard;
 use crate::heartbeat::HeartbeatPhys;
 use crate::heartbeat::HEARTBEAT_INTERVAL;
 use crate::heartbeat::LEASE_DURATION;
-use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
+use crate::object_access::{OAError, ObjectAccess, ObjectAccessOpType};
 use crate::object_based_log::*;
 use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
@@ -131,7 +131,7 @@ impl PoolOwnerPhys {
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_impl(Self::key(id), ObjectAccessStatType::MetadataGet, None)
+            .get_object_impl(Self::key(id), ObjectAccessOpType::MetadataGet, None)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -152,7 +152,7 @@ impl PoolOwnerPhys {
             .put_object_timed(
                 Self::key(self.id),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                ObjectAccessOpType::MetadataPut,
                 timeout,
             )
             .await
@@ -295,7 +295,7 @@ impl PoolPhys {
 
     pub async fn get(object_access: &ObjectAccess, guid: PoolGuid) -> Result<Self> {
         let buf = object_access
-            .get_object(Self::key(guid), ObjectAccessStatType::MetadataGet)
+            .get_object(Self::key(guid), ObjectAccessOpType::MetadataGet)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(guid)))?;
@@ -312,7 +312,7 @@ impl PoolPhys {
             .put_object(
                 Self::key(self.guid),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                ObjectAccessOpType::MetadataPut,
             )
             .await;
     }
@@ -329,7 +329,7 @@ impl PoolPhys {
             .put_object_timed(
                 Self::key(self.guid),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                ObjectAccessOpType::MetadataPut,
                 timeout,
             )
             .await
@@ -356,7 +356,7 @@ impl UberblockPhys {
 
     pub async fn get(object_access: &ObjectAccess, guid: PoolGuid, txg: Txg) -> Result<Self> {
         let buf = object_access
-            .get_object(Self::key(guid, txg), ObjectAccessStatType::MetadataGet)
+            .get_object(Self::key(guid, txg), ObjectAccessOpType::MetadataGet)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(guid, txg)))?;
@@ -374,7 +374,7 @@ impl UberblockPhys {
             .put_object(
                 Self::key(self.guid, self.txg),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                ObjectAccessOpType::MetadataPut,
             )
             .await;
     }
@@ -1136,7 +1136,7 @@ impl Pool {
                         DataObject::get_from_key(
                             &shared_state.object_access,
                             key,
-                            ObjectAccessStatType::ReadsGet,
+                            ObjectAccessOpType::ReadsGet,
                             false,
                         )
                         .await
@@ -1579,11 +1579,8 @@ impl Pool {
                     .await;
             }
 
-            phys.put(
-                &shared_state.object_access,
-                ObjectAccessStatType::TxgSyncPut,
-            )
-            .await;
+            phys.put(&shared_state.object_access, ObjectAccessOpType::TxgSyncPut)
+                .await;
             for sender in senders {
                 sender.send(()).unwrap();
             }
@@ -1659,7 +1656,7 @@ impl Pool {
             &shared_state.object_access,
             shared_state.guid,
             object,
-            ObjectAccessStatType::ReadsGet,
+            ObjectAccessOpType::ReadsGet,
             bypass_cache,
         )
         .await
@@ -1676,7 +1673,7 @@ impl Pool {
             shared_state.guid,
             object,
             block,
-            ObjectAccessStatType::ReadsGet,
+            ObjectAccessOpType::ReadsGet,
             bypass_cache,
         )
         .await
@@ -2136,7 +2133,7 @@ async fn reclaim_frees_object(
             // overwrite it with put(), we don't need to copy the data into the
             // cache to invalidate.
             let mut phys =
-                DataObject::get(&shared_state.object_access, shared_state.guid, object, ObjectAccessStatType::ReclaimGet, true)
+                DataObject::get(&shared_state.object_access, shared_state.guid, object, ObjectAccessOpType::ReclaimGet, true)
                     .await
                     .unwrap();
 
@@ -2243,7 +2240,7 @@ async fn reclaim_frees_object(
     new_phys
         .put(
             &state.shared_state.object_access,
-            ObjectAccessStatType::ReclaimPut,
+            ObjectAccessOpType::ReclaimPut,
         )
         .await;
 

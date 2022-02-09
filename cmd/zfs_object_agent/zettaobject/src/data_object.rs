@@ -1,5 +1,5 @@
 use crate::base_types::*;
-use crate::object_access::{ObjectAccess, ObjectAccessStatType};
+use crate::object_access::{ObjectAccess, ObjectAccessOpType};
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use core::slice;
@@ -162,7 +162,7 @@ impl DataObject {
     async fn get_impl<F: FnOnce() -> String>(
         object_access: &ObjectAccess,
         key: String,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         bypass_cache: bool,
         context: F,
     ) -> Result<Self> {
@@ -206,7 +206,7 @@ impl DataObject {
         guid: PoolGuid,
         object: ObjectId,
         block: BlockId,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         bypass_cache: bool,
     ) -> Result<Bytes> {
         // XXX if not in object cache, just get the header and then specific block needed from S3?
@@ -239,7 +239,7 @@ impl DataObject {
     pub async fn get_from_key(
         object_access: &ObjectAccess,
         key: String,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         bypass_cache: bool,
     ) -> Result<Self> {
         Self::get_impl(object_access, key.clone(), stat_type, bypass_cache, || {
@@ -252,7 +252,7 @@ impl DataObject {
         object_access: &ObjectAccess,
         guid: PoolGuid,
         object: ObjectId,
-        stat_type: ObjectAccessStatType,
+        stat_type: ObjectAccessOpType,
         bypass_cache: bool,
     ) -> Result<Self> {
         // We use get_impl() rather than get_from_key() to avoid allocating and
@@ -267,7 +267,7 @@ impl DataObject {
         .await
     }
 
-    pub async fn put(&self, object_access: &ObjectAccess, stat_type: ObjectAccessStatType) {
+    pub async fn put(&self, object_access: &ObjectAccess, stat_type: ObjectAccessOpType) {
         let begin = Instant::now();
 
         let mut offset = 0;

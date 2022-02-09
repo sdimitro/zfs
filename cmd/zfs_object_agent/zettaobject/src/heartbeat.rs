@@ -1,4 +1,4 @@
-use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
+use crate::object_access::{OAError, ObjectAccess, ObjectAccessOpType};
 use crate::pool::CLAIM_DURATION;
 use anyhow::Context;
 use lazy_static::lazy_static;
@@ -39,7 +39,7 @@ impl HeartbeatPhys {
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_impl(Self::key(id), ObjectAccessStatType::MetadataGet, None)
+            .get_object_impl(Self::key(id), ObjectAccessOpType::MetadataGet, None)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -60,7 +60,8 @@ impl HeartbeatPhys {
             .put_object_timed(
                 Self::key(self.id),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                // XXX should this be its own stat type so that it has its own queue in the ObjectAccess layer?
+                ObjectAccessOpType::MetadataPut,
                 timeout,
             )
             .await

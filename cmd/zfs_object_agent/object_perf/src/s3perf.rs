@@ -10,7 +10,7 @@ use std::error::Error;
 use std::string::String;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use zettaobject::{ObjectAccess, ObjectAccessStatType};
+use zettaobject::{ObjectAccess, ObjectAccessOpType};
 
 enum WriteTestBounds {
     Time(Duration),
@@ -30,7 +30,7 @@ impl Perf {
     #[measure(HitCount)]
     async fn put(&self, object_access: &ObjectAccess, key: String, data: Vec<u8>) {
         object_access
-            .put_object(key, data.into(), ObjectAccessStatType::MetadataPut)
+            .put_object(key, data.into(), ObjectAccessOpType::MetadataPut)
             .await;
     }
 
@@ -40,7 +40,7 @@ impl Perf {
     #[measure(HitCount)]
     async fn get(&self, object_access: &ObjectAccess, key: String) {
         object_access
-            .get_object(key, ObjectAccessStatType::MetadataGet)
+            .get_object(key, ObjectAccessOpType::MetadataGet)
             .await
             .unwrap();
     }
