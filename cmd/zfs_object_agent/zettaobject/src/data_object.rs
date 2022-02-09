@@ -2,14 +2,19 @@ use crate::base_types::*;
 use crate::object_access::{ObjectAccess, ObjectAccessStatType};
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use core::slice;
+use futures::stream;
 use log::*;
 use more_asserts::*;
+use rusoto_core::ByteStream;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::fmt;
 use std::fmt::Display;
+use std::mem::size_of;
 use std::time::Instant;
+use std::{fmt, iter};
 use util::with_alloctag;
+use util::From64;
 use zettacache::base_types::*;
 
 pub const NUM_DATA_PREFIXES: u64 = 64;
@@ -28,11 +33,80 @@ pub struct DataObjectHeader {
     pub max_txg: Txg, // inclusive
 }
 
+/// This is encoded on-disk in the object.  We use serde_bytes::Bytes rather
+/// than Vec<u64> for the blockids (and Vec<u32> for the offsets) because
+/// deserializing this needs to be very fast, and the Bytes can be deserialized
+/// in constant time (it just points into the whole-object buffer), whereas
+/// deserializing a Vec<_> takes O(N) with a large constant factor.
+/// Deserializing needs to be fast because we do it on every "read block"
+/// request, even if the object was present in the object cache (in RAM) and
+/// therefore not read from S3.
+///
+/// The BlockIds are sorted.
 #[derive(Serialize, Deserialize, Debug)]
 struct DataObjectPhys<'a> {
     header: DataObjectHeader,
     #[serde(borrow)]
-    blocks: Vec<(u64, &'a serde_bytes::Bytes)>,
+    blockids_raw: &'a serde_bytes::Bytes,
+    #[serde(borrow)]
+    offsets_raw: &'a serde_bytes::Bytes,
+}
+
+/// Alternative type for DataObjectPhys.  This is computed in constant time by
+/// pointer casting.  Note it would be unsafe to cast to `&[u64]` due to byte
+/// order and memory alignment constraints.  This just casts the byte slice to a
+/// slice of fixed-size arrays, which makes it easier to use `from_le_bytes()`
+/// to convert to u64.
+struct DataObjectArrays<'a> {
+    blockids: &'a [[u8; 8]],
+    offsets: &'a [[u8; 4]],
+}
+
+impl<'a> DataObjectArrays<'a> {
+    fn new(phys: &'a DataObjectPhys<'a>) -> Self {
+        assert_eq!(phys.blockids_raw.len() % 8, 0);
+        assert_eq!(phys.offsets_raw.len() % 4, 0);
+        let arrays = Self {
+            // It would be possible to treat the Bytes as an array of u64's
+            // without any unsafe code, but accessing it as a slice of 8-byte
+            // arrays is very convenient.  In particular, it lets us use
+            // binary_search_by_key(), which looks for an element of the slice,
+            // and we want to find a specific 8-byte array, not a specific byte.
+            // It also makes the accessors (e.g. blockid()) simpler, since they
+            // don't need to divide by 8, create an 8-byte slice, unwrap to an
+            // 8-byte array, etc.
+            blockids: unsafe {
+                slice::from_raw_parts(
+                    phys.blockids_raw.as_ptr() as *const [u8; 8],
+                    phys.blockids_raw.len() / 8,
+                )
+            },
+            offsets: unsafe {
+                slice::from_raw_parts(
+                    phys.offsets_raw.as_ptr() as *const [u8; 4],
+                    phys.offsets_raw.len() / 4,
+                )
+            },
+        };
+        assert_eq!(arrays.blockids.len(), arrays.offsets.len());
+        arrays
+    }
+    fn blockid(&self, index: usize) -> BlockId {
+        BlockId(u64::from_le_bytes(self.blockids[index]))
+    }
+    fn offset(&self, index: usize) -> usize {
+        u32::from_le_bytes(self.offsets[index]) as usize
+    }
+    fn len(&self) -> usize {
+        self.blockids.len()
+    }
+    fn iter(&self) -> impl Iterator<Item = (BlockId, usize)> + '_ {
+        (0..self.len()).map(|index| (self.blockid(index), self.offset(index)))
+    }
+    fn binary_search(&self, key: BlockId) -> Result<usize, usize> {
+        self.blockids
+            .binary_search_by_key(&key, |array| BlockId(u64::from_le_bytes(*array)))
+    }
 }
 
 #[derive(Debug)]
@@ -42,6 +116,10 @@ pub struct DataObject {
 }
 
 impl DataObject {
+    /// The data object header is constrained to be less than 1MB, so that the high
+    /// 44 bits are reserved for future use.
+    const MAX_HEADER_LEN: usize = (1 << 20) - 1;
+
     pub fn key(guid: PoolGuid, object: ObjectId) -> String {
         format!("zfs/{}/data/{:03}/{}", guid, object.prefix(), object)
     }
@@ -70,6 +148,17 @@ impl DataObject {
         }
     }
 
+    fn deserialize<F: FnOnce() -> String>(
+        bytes: &Bytes,
+        context: F,
+    ) -> Result<(DataObjectPhys<'_>, Bytes)> {
+        let header_len = usize::from64(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
+        let header_slice = &bytes[8..8 + header_len];
+        let data_bytes = bytes.slice(8 + header_len..);
+        let phys: DataObjectPhys = bincode::deserialize(header_slice).with_context(context)?;
+        Ok((phys, data_bytes))
+    }
+
     async fn get_impl<F: FnOnce() -> String>(
         object_access: &ObjectAccess,
         key: String,
@@ -82,23 +171,27 @@ impl DataObject {
             false => object_access.get_object(key, stat_type).await?,
         };
         let begin = Instant::now();
-        let borrowed: DataObjectPhys = with_alloctag("DataObjectPhys deserialize", || {
-            bincode::deserialize(&bytes).with_context(context)
-        })?;
+        let (phys, data_bytes) = Self::deserialize(&bytes, context)?;
+        let arrays = DataObjectArrays::new(&phys);
+        let mut blocks = with_alloctag("DataObjectPhys HashMap", || {
+            HashMap::with_capacity(arrays.len())
+        });
+        let mut iter = arrays.iter().peekable();
+        while let Some((blockid, offset)) = iter.next() {
+            let next_offset = match iter.peek() {
+                Some((_, next_offset)) => *next_offset,
+                None => data_bytes.len(),
+            };
+            blocks.insert(blockid, data_bytes.slice(offset..next_offset));
+        }
         let data_object = DataObject {
-            header: borrowed.header,
-            blocks: with_alloctag("DataObject.blocks (HashMap, not actual data)", || {
-                borrowed
-                    .blocks
-                    .into_iter()
-                    .map(|(block, slice)| (BlockId(block), bytes.slice_ref(slice)))
-                    .collect()
-            }),
+            header: phys.header,
+            blocks,
         };
 
         trace!(
             "{:?}: deserialized {} blocks from {} bytes in {}us",
-            borrowed.header.object,
+            phys.header.object,
             data_object.blocks.len(),
             bytes.len(),
             begin.elapsed().as_micros()
@@ -106,6 +199,41 @@ impl DataObject {
 
         data_object.verify();
         Ok(data_object)
+    }
+
+    pub async fn get_block(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        object: ObjectId,
+        block: BlockId,
+        stat_type: ObjectAccessStatType,
+        bypass_cache: bool,
+    ) -> Result<Bytes> {
+        // XXX if not in object cache, just get the header and then specific block needed from S3?
+        let key = Self::key(guid, object);
+        let bytes = match bypass_cache {
+            true => object_access.get_object_uncached(key, stat_type).await?,
+            false => object_access.get_object(key, stat_type).await?,
+        };
+        let (phys, data_bytes) =
+            Self::deserialize(&bytes, || format!("get {:?} for {:?}", object, block))?;
+        let arrays = DataObjectArrays::new(&phys);
+
+        assert_eq!(phys.header.guid, guid);
+        assert_eq!(phys.header.object, object);
+        assert_ge!(block, object.as_min_block());
+        assert_lt!(block, phys.header.next_block);
+        let index = arrays
+            .binary_search(block)
+            .expect("expected BlockId not in DataObjectPhys"); // XXX return new error
+        let offset = arrays.offset(index);
+        let next_offset = if index < arrays.len() - 1 {
+            arrays.offset(index + 1)
+        } else {
+            assert_eq!(index, arrays.len() - 1);
+            data_bytes.len()
+        };
+        Ok(data_bytes.slice(offset..next_offset))
     }
 
     pub async fn get_from_key(
@@ -142,32 +270,61 @@ impl DataObject {
     pub async fn put(&self, object_access: &ObjectAccess, stat_type: ObjectAccessStatType) {
         let begin = Instant::now();
 
-        let blocks = self
-            .blocks
-            .iter()
-            .map(|(block, bytes)| (block.0, serde_bytes::Bytes::new(bytes)))
-            .collect::<Vec<_>>();
+        let mut offset = 0;
+        let mut blockids_raw = Vec::with_capacity(self.blocks.len() * size_of::<u64>());
+        let mut offsets_raw = Vec::with_capacity(self.blocks.len() * size_of::<u32>());
+        let mut sorted = self.blocks.keys().cloned().collect::<Vec<_>>();
+        sorted.sort_unstable();
+        for blockid in &sorted {
+            let bytes = self.blocks.get(blockid).unwrap();
+            // Use fully-qualified function invocation `u64::to_le_bytes(x)`
+            // rather than method invocation `x.to_le_bytes()` so that if the
+            // type of `blockid.0` changes, this will fail to compile, rather
+            // than silently changing the on-disk format.
+            blockids_raw.extend_from_slice(&u64::to_le_bytes(blockid.0));
+            offsets_raw.extend_from_slice(&u32::to_le_bytes(offset));
+            offset += u32::try_from(bytes.len()).unwrap();
+        }
+        let data_len = offset as usize;
 
-        let borrowed = DataObjectPhys {
+        let phys = DataObjectPhys {
             header: self.header,
-            blocks,
+            blockids_raw: serde_bytes::Bytes::new(&blockids_raw),
+            offsets_raw: serde_bytes::Bytes::new(&offsets_raw),
         };
 
-        let contents = with_alloctag("DataObject::put() bincode::serialize()", || {
-            bincode::serialize(&borrowed).unwrap()
-        });
+        let phys_bytes = Bytes::from(with_alloctag(
+            "DataObject::put() bincode::serialize()",
+            || bincode::serialize(&phys).unwrap(),
+        ));
         trace!(
-            "{:?}: serialized {} blocks in {} bytes in {}ms",
+            "{:?}: serialized {} blocks in {} bytes in {}us",
             self.header.object,
             self.blocks.len(),
-            contents.len(),
-            begin.elapsed().as_millis()
+            phys_bytes.len(),
+            begin.elapsed().as_micros()
         );
+        assert_le!(phys_bytes.len(), Self::MAX_HEADER_LEN);
         self.verify();
+        let header_len_bytes = Bytes::copy_from_slice(&u64::to_le_bytes(phys_bytes.len() as u64));
+        let len = header_len_bytes.len() + phys_bytes.len() + data_len;
         object_access
-            .put_object(
+            .put_object_stream(
                 Self::key(self.header.guid, self.header.object),
-                contents.into(),
+                || {
+                    // The returned ByteStream can't capture `self`.
+                    #[allow(clippy::needless_collect)]
+                    let my_bytesvec = sorted
+                        .iter()
+                        .map(|block| self.blocks.get(block).unwrap().clone())
+                        .collect::<Vec<_>>();
+                    // By passing a ByteStream here, we avoid copying the block contents into a contiguous buffer.
+                    let iter = iter::once(header_len_bytes.clone())
+                        .chain(iter::once(phys_bytes.clone()))
+                        .chain(my_bytesvec.into_iter())
+                        .map(Ok);
+                    (ByteStream::new_with_size(stream::iter(iter), len), len)
+                },
                 stat_type,
             )
             .await;
@@ -195,7 +352,7 @@ impl DataObject {
         }
     }
 
-    pub fn get_block(&self, block: BlockId) -> Bytes {
+    pub fn block(&self, block: BlockId) -> Bytes {
         self.blocks.get(&block).unwrap().clone()
     }
 

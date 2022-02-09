@@ -1522,7 +1522,7 @@ impl ZettaCache {
         });
     }
 
-    pub async fn ingest_all(
+    pub async fn insert_all(
         &self,
         guid: PoolGuid,
         blocks: &HashMap<BlockId, Bytes>,
@@ -2027,7 +2027,7 @@ impl ZettaCacheState {
     ) -> impl Future<Output = Option<AlignedBytes>> {
         let mut value = valid_value.0;
         let key = locked_key.key();
-        trace!("cache hit: reading {:?} from {:?}", key, value);
+        super_trace!("cache hit: reading {:?} from {:?}", key, value);
 
         if matches!(source, LookupSource::Read) {
             // Add an entry to the hit-by-size histogram
@@ -2057,7 +2057,7 @@ impl ZettaCacheState {
                     // Perserve the original atime (from the Index) in case we "replace" this block and
                     // need to reset the histogram for the orignal block (i.e. when we find the old block
                     // during the merge, we can decrement the atime histogram)
-                    trace!(
+                    super_trace!(
                         "adding PendingChanges::UpdateAtime({:?}) for {:?}",
                         value,
                         key

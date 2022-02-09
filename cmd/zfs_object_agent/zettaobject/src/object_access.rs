@@ -505,6 +505,9 @@ impl ObjectAccess {
                 .body
                 .unwrap()
                 .try_for_each(|b| {
+                    // XXX This memory copy is expensive.  Redesign this to
+                    // return a bytes::Buf that chains together all of the Bytes
+                    // provided here?
                     v.extend_from_slice(&b);
                     count += 1;
                     future::ready(Ok(()))
@@ -582,7 +585,7 @@ impl ObjectAccess {
                         })
                     }
                     Some(rx) => {
-                        trace!("found {} read in progress", key);
+                        super_trace!("found {} read in progress", key);
                         let mut myrx = rx.clone();
                         Either::Right(async move {
                             if let Some(vec) = myrx.borrow().as_ref() {
@@ -710,24 +713,29 @@ impl ObjectAccess {
         self.head_object(key).await.is_some()
     }
 
-    async fn put_object_impl(
+    async fn put_object_stream_impl<F>(
         &self,
         key: String,
-        bytes: Bytes,
+        // We unfortunately can't take the ByteStream directly because we may
+        // need to iterate it multiple times, if we need to retry.  streamfunc
+        // returns (stream, stream_len_bytes).
+        streamfunc: F,
         stat_type: ObjectAccessStatType,
         timeout: Option<Duration>,
-    ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
+    ) -> Result<PutObjectOutput, OAError<PutObjectError>>
+    where
+        F: Fn() -> (ByteStream, usize),
+    {
         assert!(!self.readonly);
-        let len = bytes.len();
         let op = self.access_stats.begin(stat_type);
 
-        let result = retry(&format!("put {} ({} bytes)", key, len), timeout, || async {
-            let my_bytes = bytes.clone();
-            let stream = with_alloctag(
-                "ObjectAccess::put_object_impl() ByteStream::new_with_size() Box::pin(stream)",
-                || ByteStream::new_with_size(stream::iter(iter::once(Ok(my_bytes))), len),
-            );
-
+        let result = retry(&format!("put {}", key), timeout, || async {
+            // We want to only call streamfunc() once in the common case,
+            // because for DataObject::put() it needs to clone (bump the
+            // refcount) of every block's Bytes.  Therefore we don't want to
+            // call streamfunc() for the sole purpuse of getting the size_hint.
+            // Instead, get it here and return it.
+            let (stream, len) = streamfunc();
             let req = PutObjectRequest {
                 bucket: self.bucket_str.clone(),
                 key: key.clone(),
@@ -735,11 +743,41 @@ impl ObjectAccess {
                 ..Default::default()
             };
             // Note: Ok(...?) converts the RusotoError to an OAError for us
-            Ok(self.client.put_object(req).await?)
+            Ok((len, self.client.put_object(req).await?))
         })
         .await;
-        op.end(len as u64);
-        result
+        op.end(result.as_ref().map(|(len, _)| *len).unwrap_or_default() as u64);
+        result.map(|(_, output)| output)
+    }
+
+    async fn put_object_impl(
+        &self,
+        key: String,
+        bytes: Bytes,
+        stat_type: ObjectAccessStatType,
+        timeout: Option<Duration>,
+    ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
+        self.put_object_stream_impl(
+            key,
+            || {
+                let my_bytes = bytes.clone();
+                with_alloctag(
+                    "ObjectAccess::put_object_impl() ByteStream::new_with_size() Box::pin(stream)",
+                    || {
+                        (
+                            ByteStream::new_with_size(
+                                stream::iter(iter::once(Ok(my_bytes))),
+                                bytes.len(),
+                            ),
+                            bytes.len(),
+                        )
+                    },
+                )
+            },
+            stat_type,
+            timeout,
+        )
+        .await
     }
 
     fn invalidate_cache(key: String) {
@@ -762,6 +800,20 @@ impl ObjectAccess {
         // add it to the cache, allowing the old value to be read (from the
         // cache) after put_object() returns.
         self.put_object_impl(key.clone(), data, stat_type, None)
+            .await
+            .unwrap();
+        Self::invalidate_cache(key);
+    }
+
+    pub async fn put_object_stream<F>(
+        &self,
+        key: String,
+        streamfunc: F,
+        stat_type: ObjectAccessStatType,
+    ) where
+        F: Fn() -> (ByteStream, usize),
+    {
+        self.put_object_stream_impl(key.clone(), streamfunc, stat_type, None)
             .await
             .unwrap();
         Self::invalidate_cache(key);

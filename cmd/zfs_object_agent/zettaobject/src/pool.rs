@@ -1575,7 +1575,7 @@ impl Pool {
         tokio::spawn(async move {
             if let Some(cache) = cache {
                 cache
-                    .ingest_all(guid, &phys.blocks, InsertSource::Write)
+                    .insert_all(guid, &phys.blocks, InsertSource::Write)
                     .await;
             }
 
@@ -1651,16 +1651,6 @@ impl Pool {
     }
 
     async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {
-        // If we are in the middle of resuming, wait for that to complete before
-        // processing this read.  This is needed because we may be reading from
-        // a block that hasn't yet been added to the ObjectBlockMap.
-        if *self.state.resuming.borrow() {
-            let mut resuming = self.state.resuming.clone();
-            while *resuming.borrow_and_update() {
-                resuming.changed().await.unwrap();
-            }
-        }
-
         let object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
 
@@ -1676,17 +1666,38 @@ impl Pool {
         .unwrap()
     }
 
+    async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Bytes {
+        let object = self.state.object_block_map.block_to_object(block);
+        let shared_state = self.state.shared_state.clone();
+
+        super_trace!("reading {:?} for {:?}", object, block);
+        DataObject::get_block(
+            &shared_state.object_access,
+            shared_state.guid,
+            object,
+            block,
+            ObjectAccessStatType::ReadsGet,
+            bypass_cache,
+        )
+        .await
+        .unwrap()
+    }
+
     pub async fn read_block(&self, block: BlockId, heal: bool) -> Bytes {
-        // Note: bytes.clone().into() will result in a memcpy in
-        // BlockAccess::write_raw_permit(), if we end up actually writing it to
-        // disk.
+        // If we are in the middle of resuming, wait for that to complete before
+        // processing this read.  This is needed because we may be reading from
+        // a block that hasn't yet been added to the ObjectBlockMap.
+        if *self.state.resuming.borrow() {
+            let mut resuming = self.state.resuming.clone();
+            while *resuming.borrow_and_update() {
+                resuming.changed().await.unwrap();
+            }
+        }
+
         match &self.state.zettacache {
             Some(cache) => match heal {
                 true => {
-                    let bytes = self
-                        .read_object_for_block(block, heal)
-                        .await
-                        .get_block(block);
+                    let bytes = self.read_block_impl(block, heal).await;
                     cache
                         .heal(self.state.shared_state.guid, block, bytes.clone().into())
                         .await;
@@ -1698,10 +1709,33 @@ impl Pool {
                 {
                     LookupResponse::Present((cached_bytes, _key)) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
-                        let mut data_object = self.read_object_for_block(block, heal).await;
-                        let bytes = data_object.blocks.remove(&block).unwrap();
+                        if *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
+                            let mut data_object = self.read_object_for_block(block, heal).await;
+                            let bytes = data_object.blocks.remove(&block).unwrap();
 
-                        let demand_read = async {
+                            // Note: bytes.clone().into() will result in a
+                            // memcpy in BlockAccess::write_raw_permit(), if we
+                            // end up actually writing it to disk.
+                            let demand_insert = async {
+                                cache
+                                    .insert(key, bytes.clone().into(), InsertSource::Read)
+                                    .await;
+                            };
+
+                            let speculative_inserts = async {
+                                cache
+                                    .insert_all(
+                                        self.state.shared_state.guid,
+                                        &data_object.blocks,
+                                        InsertSource::SpeculativeRead,
+                                    )
+                                    .await;
+                            };
+                            join(demand_insert, speculative_inserts).await;
+                            bytes
+                        } else {
+                            let bytes = self.read_block_impl(block, heal).await;
+
                             // We explicitly copy to a new buffer so that the
                             // object buffer, which is much larger than this one
                             // block, can be freed before the insert write
@@ -1717,35 +1751,12 @@ impl Pool {
                                     InsertSource::Read,
                                 )
                                 .await;
-                        };
-
-                        let speculative_reads = async {
-                            cache
-                                .ingest_all(
-                                    self.state.shared_state.guid,
-                                    &data_object.blocks,
-                                    InsertSource::SpeculativeRead,
-                                )
-                                .await;
-                        };
-
-                        match *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
-                            true => {
-                                join(demand_read, speculative_reads).await;
-                            }
-                            false => {
-                                demand_read.await;
-                            }
+                            bytes
                         }
-
-                        bytes
                     }
                 },
             },
-            None => self
-                .read_object_for_block(block, heal)
-                .await
-                .get_block(block),
+            None => self.read_block_impl(block, heal).await,
         }
     }
 
@@ -2202,7 +2213,7 @@ async fn reclaim_frees_object(
                     Some(old_bytes) => {
                         // May have already been transferred in a previous job
                         // during which we crashed before updating the metadata.
-                        assert_eq!(old_bytes, a.get_block(k));
+                        assert_eq!(old_bytes, a.block(k));
                         already_moved += 1;
                     }
                     None => {
