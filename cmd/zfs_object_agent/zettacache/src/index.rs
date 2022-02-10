@@ -9,9 +9,15 @@ use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
 use more_asserts::*;
+use safer_ffi::prelude::*;
+use serde::de::Error;
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
+use std::mem::size_of;
 use std::sync::Arc;
+use util::message::slice_to_struct;
+use util::message::struct_to_slice;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[repr(packed)]
@@ -64,12 +70,109 @@ impl IndexValue {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct IndexEntry {
     pub key: IndexKey,
     pub value: IndexValue,
 }
 impl BlockBasedLogEntry for IndexEntry {}
+impl From<&IndexEntryPhys> for IndexEntry {
+    fn from(phys: &IndexEntryPhys) -> Self {
+        let location = if phys.offset == 0 {
+            let disk = phys.disk;
+            assert_eq!(disk, 0);
+            None
+        } else {
+            Some(DiskLocation::new(DiskId(phys.disk), phys.offset - 1))
+        };
+        IndexEntry {
+            key: IndexKey {
+                id: PoolId(phys.pool_id),
+                block: BlockId(phys.block),
+            },
+            value: IndexValue {
+                location,
+                sectors: phys.sectors,
+                atime: Atime(phys.atime),
+            },
+        }
+    }
+}
+impl Serialize for IndexEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let phys: IndexEntryPhys = self.into();
+        if cfg!(target_endian = "little") {
+            serializer.serialize_bytes(struct_to_slice(&phys))
+        } else {
+            panic!("little endian machine required");
+        }
+    }
+}
+impl<'de> Deserialize<'de> for IndexEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let visitor = IndexEntryVisitor;
+        deserializer.deserialize_bytes(visitor)
+    }
+}
+struct IndexEntryVisitor;
+impl<'de> Visitor<'de> for IndexEntryVisitor {
+    type Value = IndexEntry;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            formatter,
+            "a byte array of length {}",
+            size_of::<IndexEntryPhys>()
+        )
+    }
+    fn visit_bytes<E: Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+        if cfg!(target_endian = "little") {
+            // slice_to_struct() copies the data, but we should be able to just get
+            // a pointer, because it's packed (alignment unconstrained).  However,
+            // this is not significant to performance.
+            let phys: IndexEntryPhys = slice_to_struct(v);
+            Ok((&phys).into())
+        } else {
+            panic!("little endian machine required");
+        }
+    }
+}
+
+#[derive_ReprC]
+#[repr(C)]
+#[repr(packed)]
+struct IndexEntryPhys {
+    pool_id: u8,
+    block: u64,
+    disk: u16,
+    offset: u64, // stored with bias of 1; if zero then None
+    sectors: u16,
+    atime: u32,
+}
+impl From<&IndexEntry> for IndexEntryPhys {
+    fn from(entry: &IndexEntry) -> Self {
+        let (disk, offset) = entry
+            .value
+            .location
+            .as_ref()
+            .map(|l| (l.disk().0, l.offset() + 1))
+            .unwrap_or_default();
+        IndexEntryPhys {
+            pool_id: entry.key.id.0,
+            block: entry.key.block.0,
+            disk,
+            offset,
+            sectors: entry.value.sectors,
+            atime: entry.value.atime.0,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexRunPhys {

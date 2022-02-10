@@ -355,9 +355,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             let first_entry = *chunk.entries.first().unwrap();
 
             // XXX I think we only want to use Bincode for the main index?
-            let raw_chunk = self
-                .block_access
-                .chunk_to_raw(EncodeType::BincodeFixint, &chunk);
+            let raw_chunk = self.block_access.chunk_to_raw(EncodeType::Bincode, &chunk);
             let raw_size = raw_chunk.len() as u64;
             let extent = match self.next_write_location() {
                 Some(extent) if extent.size >= raw_size => extent,

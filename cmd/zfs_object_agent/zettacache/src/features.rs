@@ -29,6 +29,7 @@ lazy_static! {
         SPLIT_INDEX.clone(),
         INDEXVALUE16.clone(),
         POOLGUIDTABLE.clone(),
+        INDEX_ENTERY_SERDE.clone(),
     ]
     .map(|feature| (feature.name, feature.info))
     .into_iter()
@@ -63,6 +64,10 @@ lazy_static! {
     };
     pub static ref POOLGUIDTABLE: Feature = Feature {
         name: FeatureName("com.delphix:poolguidtable".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref INDEX_ENTERY_SERDE: Feature = Feature {
+        name: FeatureName("com.delphix:index_entry_serde".to_string()),
         info: FeatureType::NonUpgradeable
     };
 }
