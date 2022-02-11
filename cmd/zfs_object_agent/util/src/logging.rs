@@ -14,8 +14,7 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::PanicInfo;
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::RwLock;
+use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
 use std::{panic, process, ptr, thread};
 
 static LOG_MESSAGES_PTR: AtomicPtr<std::sync::Mutex<VecDeque<String>>> =
@@ -34,14 +33,14 @@ lazy_static! {
     static ref PANIC_LOG_FOLDER: String =
         get_tunable("panic_log_folder", "/var/log/zoa".to_string());
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
-    pub static ref SUPER_EXPENSIVE_TRACE: RwLock<bool> =
-        RwLock::new(get_tunable("super_expensive_trace", false));
+    pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool =
+        AtomicBool::new(get_tunable("super_expensive_trace", false));
 }
 
 #[macro_export]
 macro_rules! super_trace {
     ($($arg:tt)+) => ({
-        if $crate::SUPER_EXPENSIVE_TRACE.read().unwrap().to_owned() {
+        if $crate::SUPER_EXPENSIVE_TRACE.load(std::sync::atomic::Ordering::Relaxed) {
             log!(log::Level::Trace, $($arg)+)
         }
     })
@@ -145,7 +144,7 @@ impl Deserialize for BufferAppenderDeserializer {
 }
 
 fn setup_console_logging(verbosity: u64) {
-    *SUPER_EXPENSIVE_TRACE.write().unwrap() = verbosity > 3;
+    SUPER_EXPENSIVE_TRACE.store(verbosity > 3, Ordering::Relaxed);
     let config = Config::builder()
         .appender(
             Appender::builder()
