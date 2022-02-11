@@ -99,6 +99,7 @@ struct MergeProgressPhys {
 #[derive(Serialize, Deserialize, Debug)]
 struct ZettaCheckpointPhys {
     generation: CheckpointId,
+    pool_guids: Vec<PoolGuid>,
     extent_allocator: ExtentAllocatorPhys,
     block_allocator: BlockAllocatorPhys,
     last_atime: Atime,
@@ -682,6 +683,7 @@ struct ZettaCacheState {
     primary: PrimaryPhys,
     guid: u64,
     primary_disk: DiskId,
+    pool_guids: Vec<PoolGuid>,
     block_allocator: BlockAllocator,
     pending_changes: PendingChanges,
     pending_changes_trigger: usize,
@@ -810,6 +812,7 @@ impl ZettaCache {
 
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
+            pool_guids: Vec::new(),
             block_allocator: BlockAllocatorPhys::new(data_capacity),
             extent_allocator: ExtentAllocatorPhys::new(metadata_capacity),
             old_index: IndexRunPhys::new(Atime(0), Atime(0)),
@@ -1111,6 +1114,7 @@ impl ZettaCache {
             primary,
             primary_disk,
             guid,
+            pool_guids: checkpoint.pool_guids,
             outstanding_reads: Default::default(),
             outstanding_writes: Default::default(),
             atime: checkpoint.last_atime,
@@ -1374,7 +1378,7 @@ impl ZettaCache {
         block: BlockId,
         source: LookupSource,
     ) -> LookupResponse {
-        let key = IndexKey { guid, block };
+        let key = IndexKey::new(self.state.lock().await.map_pool_guid(guid), block);
         let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
 
         // In debug mode, return failure randomly every specified number of requests
@@ -1646,6 +1650,7 @@ impl ZettaCache {
         blocks: &HashMap<BlockId, Bytes>,
         source: InsertSource,
     ) {
+        let pool_id = self.state.lock().await.map_pool_guid(guid);
         let insert_permit = match self
             .reserve_buffer_space(
                 blocks.values().map(|bytes| bytes.len()).sum::<usize>(),
@@ -1669,7 +1674,7 @@ impl ZettaCache {
             let block = *block;
             let aligned_bytes = AlignedBytes::from((*bytes).clone());
             let fut = async move {
-                let key = IndexKey { guid, block };
+                let key = IndexKey::new(pool_id, block);
                 let locked_key = LockedKey(cache.outstanding_lookups.lock(key).await);
 
                 // We need to check for presence in the cache even for
@@ -2116,6 +2121,22 @@ impl ZettaCacheState {
         }
     }
 
+    /// Returns the Id (index) associated with the pool GUID.
+    /// If not found, the GUID is added to the known set and a new Id generated.
+    fn map_pool_guid(&mut self, guid: PoolGuid) -> PoolId {
+        // XXX - this is an O(n) algorithm, which is fine for a small number of pools,
+        // but we may want to use a hashmap for this if there are lots of pools.
+        for (id, mapped_guid) in self.pool_guids.iter().enumerate() {
+            if *mapped_guid == guid {
+                return PoolId(u8::try_from(id).unwrap());
+            }
+        }
+        let id = u8::try_from(self.pool_guids.len()).unwrap();
+        debug!("New {:?} added with {:?}", guid, PoolId(id));
+        self.pool_guids.push(guid);
+        PoolId(id)
+    }
+
     fn lookup_with_value_from_index(
         &mut self,
         key: &IndexKey,
@@ -2413,6 +2434,7 @@ impl ZettaCacheState {
 
         let checkpoint = ZettaCheckpointPhys {
             generation: self.primary.checkpoint_id.next(),
+            pool_guids: self.pool_guids.clone(),
             extent_allocator: self.extent_allocator.get_phys(),
             old_index,
             operation_log: operation_log_phys,

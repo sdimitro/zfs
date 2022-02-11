@@ -14,9 +14,16 @@ use std::cmp::max;
 use std::sync::Arc;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[repr(packed)]
 pub struct IndexKey {
-    pub guid: PoolGuid,
-    pub block: BlockId,
+    id: PoolId,
+    block: BlockId,
+}
+
+impl IndexKey {
+    pub fn new(id: PoolId, block: BlockId) -> Self {
+        Self { id, block }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]

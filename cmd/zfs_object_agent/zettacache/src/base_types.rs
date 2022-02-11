@@ -21,6 +21,10 @@ impl Display for PoolGuid {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+pub struct PoolId(pub u8);
+impl OnDisk for PoolId {}
+
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct BlockId(pub u64);
 impl OnDisk for BlockId {}
 impl Display for BlockId {
