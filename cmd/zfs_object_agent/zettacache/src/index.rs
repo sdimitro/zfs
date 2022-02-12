@@ -4,7 +4,6 @@ use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
-use derivative::Derivative;
 use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
@@ -241,14 +240,10 @@ impl IndexRunPhys {
     }
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct IndexRun {
     trim_key: Option<IndexKey>, // The key and all before it are logically removed from the index.
     last_key: Option<IndexKey>,
-    #[derivative(Debug = "ignore")]
     atime_histogram_phys: AtimeHistogramPhys,
-    #[derivative(Debug = "ignore")]
     log: SummarizedBlockBasedLog<IndexEntry>,
 }
 

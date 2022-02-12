@@ -241,12 +241,8 @@ impl RootConnectionState {
             };
 
             if let Some(phys) = phys_opt {
-                response
-                    .insert("uberblock", &phys.get_zfs_uberblock()[..])
-                    .unwrap();
-                response
-                    .insert("config", &phys.get_zfs_config()[..])
-                    .unwrap();
+                response.insert("uberblock", phys.zfs_uberblock()).unwrap();
+                response.insert("config", phys.zfs_config()).unwrap();
                 let mut feature_nvl = NvList::new_unique_names();
                 for (feature, refcount) in phys.features() {
                     feature_nvl.insert(&feature.name, refcount).unwrap();

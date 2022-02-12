@@ -20,6 +20,7 @@ use anyhow::Error;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use conv::ConvUtil;
+use derivative::Derivative;
 use futures::future;
 use futures::future::join;
 use futures::future::Either;
@@ -56,7 +57,6 @@ use util::maybe_die_with;
 use util::super_trace;
 use util::with_alloctag;
 use util::AlignedBytes;
-use util::TerseVec;
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::InsertSource;
@@ -212,7 +212,8 @@ impl ReclaimInfoPhys {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Derivative)]
+#[derivative(Debug)]
 pub struct UberblockPhys {
     guid: PoolGuid,   // redundant with key, for verification
     txg: Txg,         // redundant with key, for verification
@@ -223,8 +224,10 @@ pub struct UberblockPhys {
     obsolete_objects: ObjectDeleterPhys,
     stats: PoolStatsPhys,
     features: Vec<(FeatureFlag, u64)>, // Each pair is a feature and its refcount
-    zfs_uberblock: TerseVec<u8>,
-    zfs_config: TerseVec<u8>,
+    #[derivative(Debug(format_with = "util::tersevec"))]
+    zfs_uberblock: Vec<u8>,
+    #[derivative(Debug(format_with = "util::tersevec"))]
+    zfs_config: Vec<u8>,
 }
 impl OnDisk for UberblockPhys {}
 
@@ -341,12 +344,12 @@ impl UberblockPhys {
         format!("zfs/{}/txg/{}", guid, txg)
     }
 
-    pub fn get_zfs_uberblock(&self) -> &Vec<u8> {
-        &self.zfs_uberblock.0
+    pub fn zfs_uberblock(&self) -> &[u8] {
+        &self.zfs_uberblock
     }
 
-    pub fn get_zfs_config(&self) -> &Vec<u8> {
-        &self.zfs_config.0
+    pub fn zfs_config(&self) -> &[u8] {
+        &self.zfs_config
     }
 
     // Each pair is a featureflag and its refcount.
@@ -827,7 +830,7 @@ impl Pool {
         let pool_phys = PoolPhys::get(object_access, guid).await?;
         let uberblock_phys =
             UberblockPhys::get(object_access, pool_phys.guid, pool_phys.last_txg).await?;
-        let nvl = NvList::try_unpack(&uberblock_phys.zfs_config.0)?;
+        let nvl = NvList::try_unpack(&uberblock_phys.zfs_config)?;
         Ok(nvl)
     }
 
@@ -1301,8 +1304,8 @@ impl Pool {
 
     pub async fn end_txg(
         &self,
-        uberblock: Vec<u8>,
-        config: Vec<u8>,
+        zfs_uberblock: Vec<u8>,
+        zfs_config: Vec<u8>,
         checkpoint_txg: Option<Txg>,
     ) -> (PoolStatsPhys, Vec<(FeatureFlag, u64)>) {
         let state = &self.state;
@@ -1321,8 +1324,8 @@ impl Pool {
             )
             .await
             .unwrap();
-            assert_eq!(phys.zfs_uberblock.0, uberblock);
-            assert_eq!(phys.zfs_config.0, config);
+            assert_eq!(phys.zfs_uberblock, zfs_uberblock);
+            assert_eq!(phys.zfs_config, zfs_config);
 
             assert!(!syncing_state.pending_object.is_pending());
             assert!(syncing_state.pending_unordered_writes.is_empty());
@@ -1425,9 +1428,9 @@ impl Pool {
             reclaim_info: syncing_state.reclaim_info.to_phys(),
             next_block: syncing_state.next_block(),
             obsolete_objects: syncing_state.object_deleter.phys(),
-            zfs_uberblock: uberblock.into(),
+            zfs_uberblock,
             stats: syncing_state.stats,
-            zfs_config: config.into(),
+            zfs_config,
             features: syncing_state
                 .features
                 .iter()

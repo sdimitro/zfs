@@ -40,7 +40,7 @@ pub use nicenum::{nice_number_count, nice_number_time, nice_p2size};
 pub use range_tree::RangeTree;
 pub use tunable::get_tunable;
 pub use tunable::read_tunable_config;
+pub use vec_ext::tersevec;
 pub use vec_ext::AlignedBytes;
 pub use vec_ext::AlignedVec;
-pub use vec_ext::TerseVec;
 pub use zcache_devices::{DeviceEntry, DeviceList};

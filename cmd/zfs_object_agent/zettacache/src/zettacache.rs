@@ -206,7 +206,6 @@ struct MergeProgress {
     remaps: Vec<IndexEntry>,
 }
 
-#[derive(Debug)]
 #[allow(clippy::large_enum_variant)]
 enum MergeMessage {
     Progress(MergeProgress),
