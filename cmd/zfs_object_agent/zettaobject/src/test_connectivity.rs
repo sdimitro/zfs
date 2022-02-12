@@ -51,8 +51,8 @@ pub fn test_connectivity(
                 ObjectAccess::from_client(client, &bucket, false, &endpoint, &region);
 
             std::process::exit(match do_test_connectivity(&object_access).await {
-                Err(_) => {
-                    eprintln!("Connectivity test failed.");
+                Err(err) => {
+                    eprintln!("Connectivity test failed: {}", err);
                     1
                 }
                 Ok(_) => {
