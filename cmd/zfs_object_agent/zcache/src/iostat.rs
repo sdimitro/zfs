@@ -2,6 +2,7 @@
 
 use crate::remote_channel::{RemoteChannel, RemoteError};
 use crate::subcommand::ZcacheSubCommand;
+use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
@@ -336,8 +337,7 @@ impl IoStatDisplay {
                     latest
                 }
                 Err(RemoteError::ResultError(_)) => {
-                    info!("No cache found?");
-                    continue;
+                    return Err(anyhow!("No cache found"));
                 }
                 Err(RemoteError::Other(e)) => {
                     info!("object agent restarted: {}", e);

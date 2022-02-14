@@ -49,7 +49,6 @@ impl From<std::str::Utf8Error> for RemoteError {
 pub struct RemoteChannel {
     stream: UnixStream,
     socket_path: String,
-    pub version: Version,
 }
 
 impl RemoteChannel {
@@ -59,8 +58,9 @@ impl RemoteChannel {
         let mut reconnect_retries = 0;
         loop {
             match UnixStream::connect(socket_path).await {
-                Ok(stream) => {
-                    info!("opened socket {}", socket_path);
+                Ok(mut stream) => {
+                    let version = RemoteChannel::agent_version(&mut stream).await?;
+                    info!("opened socket {}, {:?}", socket_path, version);
                     return Ok(stream);
                 }
                 Err(e) => {
@@ -82,6 +82,23 @@ impl RemoteChannel {
         }
     }
 
+    /// Establish protocol version with object agent.
+    /// Required after each open.
+    async fn agent_version(stream: &mut UnixStream) -> Result<Version> {
+        let mut vers_req_nvlist = NvList::new_unique_names();
+        vers_req_nvlist.insert("Type", "version")?;
+        vers_req_nvlist.insert("version", "^1")?;
+        Self::send(stream, vers_req_nvlist).await?;
+        let response = Self::receive(stream).await?;
+        assert!(response.lookup_string("Type")?.to_str() == Ok("version"));
+        let vers_nvl = response.lookup_nvlist("version")?;
+        Ok(Version::new(
+            vers_nvl.lookup_uint64("major")?,
+            vers_nvl.lookup_uint64("minor")?,
+            vers_nvl.lookup_uint64("patch")?,
+        ))
+    }
+
     /// Create a new RemoteChannel and establish a remote connection to the object agent.
     pub async fn new(need_priv: bool) -> Result<Self> {
         let socket_path = if need_priv {
@@ -89,25 +106,11 @@ impl RemoteChannel {
         } else {
             "/etc/zfs/zfs_public_socket".to_string()
         };
-
-        let mut stream = RemoteChannel::open(&socket_path).await?;
-        let mut vers_req_nvlist = NvList::new_unique_names();
-        vers_req_nvlist.insert("Type", "version")?;
-        vers_req_nvlist.insert("version", "^1")?;
-        Self::send(&mut stream, vers_req_nvlist).await?;
-        let response = Self::receive(&mut stream).await?;
-        assert!(response.lookup_string("Type")?.to_str() == Ok("version"));
-        let vers_nvl = response.lookup_nvlist("version")?;
-        let version = Version::new(
-            vers_nvl.lookup_uint64("major")?,
-            vers_nvl.lookup_uint64("minor")?,
-            vers_nvl.lookup_uint64("patch")?,
-        );
+        let stream = RemoteChannel::open(&socket_path).await?;
 
         Ok(Self {
             stream,
             socket_path,
-            version,
         })
     }
 

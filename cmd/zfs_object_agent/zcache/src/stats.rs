@@ -2,6 +2,7 @@
 
 use crate::remote_channel::{RemoteChannel, RemoteError};
 use crate::subcommand::ZcacheSubCommand;
+use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
@@ -195,7 +196,6 @@ impl StatsDisplay {
         } else {
             1.0 / values.timestamp.as_secs_f64()
         };
-        debug!("interval {:?} has scaling {}", self.interval, scale);
 
         // TIMESTAMP (optional)
         if self.show_time {
@@ -295,8 +295,7 @@ impl StatsDisplay {
                     latest = serde_json::from_str(stats_json.to_str()?).unwrap();
                 }
                 Err(RemoteError::ResultError(_)) => {
-                    writeln_stdout!("No cache found?");
-                    continue;
+                    return Err(anyhow!("No cache found"));
                 }
                 Err(RemoteError::Other(e)) => {
                     writeln_stdout!("remote call error: {}", e);
