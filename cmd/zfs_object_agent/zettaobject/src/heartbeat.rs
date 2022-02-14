@@ -22,6 +22,7 @@ lazy_static! {
     pub static ref WRITE_TIMEOUT: Duration =
         Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
     pub static ref HEARTBEAT_PANIC: bool = get_tunable("heartbeat_panic", true);
+    pub static ref INTERVAL_PANIC: bool = get_tunable("interval_panic", false);
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -194,7 +195,26 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
         info!("Starting heartbeat with id {}", id);
         let mut interval = tokio::time::interval(*HEARTBEAT_INTERVAL);
         loop {
+            let interval_start = Instant::now();
             interval.tick().await;
+            let interval_end = Instant::now();
+            trace!(
+                "Interval tick started at {:?}, ended at {:?}, duration {:?}",
+                interval_start,
+                interval_end,
+                interval_end.duration_since(interval_start)
+            );
+            if interval_end.duration_since(interval_start) > *HEARTBEAT_INTERVAL * 10 {
+                if *INTERVAL_PANIC {
+                    panic!("Long interval detected at {:?}", SystemTime::now());
+                } else {
+                    error!(
+                        "Long interval ({:?}) detected at {:?}",
+                        interval_end.duration_since(interval_start),
+                        SystemTime::now()
+                    );
+                }
+            }
             if let Some(time) = last_heartbeat {
                 let since = Instant::now().duration_since(time);
                 if since > *LEASE_DURATION {
