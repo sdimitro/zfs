@@ -1156,6 +1156,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "mini_paste"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d2499b7bd9834270bf24cfc4dd96be59020ba6fd7f3276b772aee2de66e82b63"
+dependencies = [
+ "mini_paste-proc_macro",
+]
+
+[[package]]
+name = "mini_paste-proc_macro"
+version = "0.1.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e6c5f1f52e39b728e73af4b454f1b29173d4544607bd395dafe1918fd149db67"
+
+[[package]]
 name = "minimal-lexical"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1646,6 +1661,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "require_unsafe_in_body"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "296446f2214753e33792f632262451e8d037cd9697df15db2fd531bdce5a0138"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
 name = "retain_mut"
 version = "0.1.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1785,6 +1811,31 @@ name = "ryu"
 version = "1.0.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "73b4b750c782965c211b42f022f59af1fbceabdd026623714f104152f1ec149f"
+
+[[package]]
+name = "safer-ffi"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "42ec1c6fcafcdbbda83d4befd5abcb420b938c9f0cbdf66462cd8039433ccc2d"
+dependencies = [
+ "libc",
+ "mini_paste",
+ "proc-macro-hack",
+ "require_unsafe_in_body",
+ "safer_ffi-proc_macro",
+]
+
+[[package]]
+name = "safer_ffi-proc_macro"
+version = "0.0.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fe307735c43497c06629c572171e73f592b1d52a69c86131560dbc3cab75d88c"
+dependencies = [
+ "proc-macro-hack",
+ "proc-macro2",
+ "quote",
+ "syn",
+]
 
 [[package]]
 name = "schannel"
@@ -2308,6 +2359,7 @@ dependencies = [
  "rand",
  "roaring",
  "rusoto_credential",
+ "safer-ffi",
  "serde 1.0.133",
  "tokio",
  "uuid",
@@ -2474,6 +2526,7 @@ dependencies = [
  "num-traits 0.2.14",
  "rand",
  "roaring",
+ "safer-ffi",
  "seahash",
  "serde 1.0.133",
  "serde_json",
@@ -2516,6 +2569,7 @@ dependencies = [
  "rusoto_core",
  "rusoto_credential",
  "rusoto_s3",
+ "safer-ffi",
  "semver",
  "serde 1.0.133",
  "serde_bytes",
@@ -2602,6 +2656,7 @@ dependencies = [
  "serde_bytes",
  "serde_json",
  "tokio",
+ "util",
  "zettacache",
  "zettaobject",
 ]

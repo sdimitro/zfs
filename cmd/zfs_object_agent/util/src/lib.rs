@@ -12,6 +12,7 @@ mod die;
 mod from64;
 mod lock_set;
 mod logging;
+pub mod message;
 mod mutex_ext;
 mod nicenum;
 mod range_tree;

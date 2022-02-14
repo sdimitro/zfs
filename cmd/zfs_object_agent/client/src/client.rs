@@ -5,6 +5,7 @@ use semver::Version;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
+use util::message::MessageHeader;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;
 
@@ -43,9 +44,9 @@ impl Client {
     }
 
     async fn get_next_response_impl(input: &mut OwnedReadHalf) -> NvList {
-        let len64 = input.read_u64_le().await.unwrap();
+        let header = MessageHeader::read(input).await.unwrap();
         let mut v = Vec::new();
-        v.resize(len64 as usize, 0);
+        v.resize(header.payload_len as usize, 0);
         input.read_exact(v.as_mut()).await.unwrap();
         let nvl = NvList::try_unpack(v.as_ref()).unwrap();
         println!("got response: {:?}", nvl);
@@ -76,7 +77,11 @@ impl Client {
     async fn send_request_impl(output: &mut OwnedWriteHalf, nvl: &NvListRef) {
         println!("sending request: {:?}", nvl);
         let buf = nvl.pack(NvEncoding::Native).unwrap();
-        output.write_u64_le(buf.len() as u64).await.unwrap();
+
+        MessageHeader::new_nvlist(buf.len())
+            .write(output)
+            .await
+            .unwrap();
         output.write_all(buf.as_ref()).await.unwrap();
     }
 

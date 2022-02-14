@@ -126,6 +126,19 @@ impl AlignedVec {
         self.verify();
     }
 
+    /// Zero out any uninitialized part.
+    pub fn resize(&mut self, new_len: usize) {
+        self.vec.resize(self.pad + new_len, 0);
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.vec[self.pad..]
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.vec[self.pad..]
+    }
+
     pub fn len(&self) -> usize {
         self.vec.len() - self.pad
     }

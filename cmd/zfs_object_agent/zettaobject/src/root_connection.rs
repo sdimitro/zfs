@@ -3,12 +3,15 @@ use crate::features::FeatureError;
 use crate::object_access::{ObjectAccess, StatMapValue};
 use crate::pool::*;
 use crate::pool_destroy;
+use crate::server::handler_return_ok;
+use crate::server::ConnectionState;
 use crate::server::HandlerReturn;
+use crate::server::Responder;
 use crate::server::SerialHandlerReturn;
 use crate::server::Server;
-use crate::server::{handler_return_ok, ConnectionState};
 use anyhow::anyhow;
 use anyhow::Result;
+use bytes::Bytes;
 use derivative::Derivative;
 use futures::future;
 use lazy_static::lazy_static;
@@ -20,10 +23,10 @@ use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::Arc;
-use util::AlignedBytes;
-use util::From64;
-use util::{get_tunable, super_trace, with_alloctag};
-use util::{maybe_die_with, with_alloctag_hf};
+use util::maybe_die_with;
+use util::message::*;
+use util::AlignedVec;
+use util::{get_tunable, super_trace};
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -105,15 +108,15 @@ impl RootConnectionState {
         server.register_handler("begin txg", Box::new(Self::begin_txg));
         server.register_handler("flush writes", Box::new(Self::flush_writes));
         server.register_handler("end txg", Box::new(Self::end_txg));
-        server.register_handler("write block", Box::new(Self::write_block));
         server.register_handler("free blocks", Box::new(Self::free_blocks));
-        server.register_handler("read block", Box::new(Self::read_block));
         server.register_handler("get stats", Box::new(Self::get_stats));
         server.register_handler("close pool", Box::new(Self::close_pool));
         server.register_handler("exit agent", Box::new(Self::exit_agent));
         server.register_handler("enable feature", Box::new(Self::enable_feature));
         server.register_handler("resume destroy pool", Box::new(Self::resume_destroy_pool));
         server.register_handler("clear_hit_data", Box::new(Self::clear_hit_data));
+        server.register_struct_handler(MessageType::ReadBlock, Box::new(Self::read_block));
+        server.register_struct_handler(MessageType::WriteBlock, Box::new(Self::write_block));
     }
 
     fn create_pool(&mut self, nvl: NvList) -> SerialHandlerReturn {
@@ -356,62 +359,29 @@ impl RootConnectionState {
 
     /// queue write, sends response when completed (persistent).
     /// completion may not happen until flush_pool() is called
-    fn write_block(&mut self, nvl: NvList) -> HandlerReturn {
-        #[derive(Deserialize, Derivative)]
-        #[derivative(Debug)]
-        struct WriteBlockRequest<'a> {
-            block: BlockId,
-            #[serde(with = "serde_bytes")]
-            #[derivative(Debug = "ignore")]
-            data: &'a [u8],
-            request_id: u64,
-            token: u64,
-            #[serde(default)]
-            reissue: bool,
-            // XXX kernel also includes the write size, which is not needed.
-        }
-        let request: WriteBlockRequest = nvpair::from_nvlist(&nvl)?;
-        super_trace!("got request struct: {:?}", request);
+    fn write_block(
+        &mut self,
+        responder: Responder,
+        write_block_request_slice: &[u8],
+        data: AlignedVec,
+    ) -> Result<()> {
+        let request: WriteBlockRequest = slice_to_struct(write_block_request_slice);
 
         let pool = self
             .pool
             .as_ref()
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
-        let alignment = match self.cache.as_ref() {
-            Some(cache) => cache.sector_size(),
-            None => 1,
-        };
-        // XXX copying data
-        let bytes = with_alloctag("write_block()", || {
-            AlignedBytes::copy_from_slice(request.data, alignment)
+
+        tokio::spawn(async move {
+            pool.write_block(BlockId(request.block), data.into()).await;
+            let response = WriteBlockResponse {
+                block: request.block,
+                token: request.token,
+            };
+            responder.respond_with_struct(MessageType::WriteBlock, &response, Bytes::new());
         });
-        Ok(with_alloctag_hf(
-            "write_block() Box::pin({closure})",
-            || {
-                Box::pin(async move {
-                    pool.write_block(request.block, bytes).await;
-                    #[derive(Debug, Serialize)]
-                    struct WriteBlockResponse {
-                        #[serde(rename = "Type")]
-                        response_type: &'static str,
-                        block: BlockId,
-                        request_id: u64,
-                        token: u64,
-                    }
-                    let response = WriteBlockResponse {
-                        response_type: "write done",
-                        block: request.block,
-                        request_id: request.request_id,
-                        token: request.token,
-                    };
-                    if request.reissue {
-                        maybe_die_with(|| "after reissued write block request".to_string());
-                    }
-                    return_struct(response, false)
-                })
-            },
-        ))
+        Ok(())
     }
 
     fn free_blocks(&mut self, nvl: NvList) -> HandlerReturn {
@@ -429,61 +399,43 @@ impl RootConnectionState {
         handler_return_ok(None)
     }
 
-    fn read_block(&mut self, nvl: NvList) -> HandlerReturn {
-        #[derive(Deserialize, Debug)]
-        struct ReadBlockRequest {
-            size: u64,
-            block: BlockId,
-            request_id: u64,
-            token: u64,
-            #[serde(default)]
-            heal: bool,
-        }
-        let request: ReadBlockRequest = nvpair::from_nvlist(&nvl)?;
-        super_trace!("got {:?}", request);
+    fn read_block(
+        &mut self,
+        responder: Responder,
+        read_block_request_slice: &[u8],
+        request_payload: AlignedVec,
+    ) -> Result<()> {
+        assert_eq!(request_payload.len(), 0);
+        let request: ReadBlockRequest = slice_to_struct(read_block_request_slice);
+        let heal = request.heal();
 
         let pool = self
             .pool
             .as_ref()
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
-        Ok(Box::pin(async move {
-            let mut data = pool.read_block(request.block, request.heal).await;
+        tokio::spawn(async move {
+            let mut data = pool.read_block(BlockId(request.block), heal).await;
 
             //
             // If the cache has the wrong content/size for this BlockId, then proactively do a healing read
             // from the object store.
             //
-            if !request.heal && data.len() != usize::from64(request.size) {
+            if !heal && data.len() != request.size as usize {
                 debug!(
                     "read size mismatch: expected={} actual={}",
                     request.size,
                     data.len()
                 );
-                data = pool.read_block(request.block, true).await;
-            }
-            #[derive(Serialize, Derivative)]
-            #[derivative(Debug)]
-            struct ReadBlockResponse<'a> {
-                #[serde(rename = "Type")]
-                response_type: &'static str,
-                block: BlockId,
-                request_id: u64,
-                token: u64,
-                #[serde(with = "serde_bytes")]
-                #[derivative(Debug = "ignore")]
-                data: &'a [u8],
+                data = pool.read_block(BlockId(request.block), true).await;
             }
             let response = ReadBlockResponse {
-                response_type: "read done",
                 block: request.block,
-                request_id: request.request_id,
                 token: request.token,
-                data: &data,
             };
-
-            return_struct(response, false)
-        }))
+            responder.respond_with_struct(MessageType::ReadBlock, &response, data);
+        });
+        Ok(())
     }
 
     fn get_stats(&mut self, nvl: NvList) -> HandlerReturn {

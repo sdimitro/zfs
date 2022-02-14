@@ -6,8 +6,8 @@ use std::thread::sleep;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use util::message::MessageHeader;
 use util::writeln_stderr;
-use util::From64;
 
 #[derive(Debug)]
 pub enum RemoteError {
@@ -114,16 +114,17 @@ impl RemoteChannel {
     async fn send(stream: &mut UnixStream, message: NvList) -> Result<()> {
         // convert to packed nvlist and send...
         let buf = message.pack(NvEncoding::Native).unwrap();
-        let len64 = buf.len() as u64;
-        stream.write_u64_le(len64).await?;
-        stream.write_all(buf.as_slice()).await?;
+
+        MessageHeader::new_nvlist(buf.len()).write(stream).await?;
+        stream.write_all(&buf).await?;
         Ok(())
     }
 
     async fn receive(stream: &mut UnixStream) -> Result<NvList> {
         // receive a packed nvlist and unpack it...
-        let len64 = stream.read_u64_le().await?;
-        let mut v: Vec<u8> = vec![0; usize::from64(len64)];
+        let header = MessageHeader::read(stream).await?;
+
+        let mut v: Vec<u8> = vec![0; header.payload_len as usize];
         stream.read_exact(v.as_mut()).await?;
         Ok(NvList::try_unpack(v.as_ref()).unwrap())
     }

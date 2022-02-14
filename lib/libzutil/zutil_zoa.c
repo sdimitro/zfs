@@ -110,14 +110,19 @@ zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock, int *err)
 	size_t len;
 	char *buf = fnvlist_pack(msg, &len);
 
-	uint64_t len_le = htole64(len);
-	ssize_t rv = write_all(sock, &len_le, sizeof (len_le));
+	message_header_t header = {
+		.message_type = MESSAGE_NVLIST,
+		.struct_len = 0,
+		.payload_len = len,
+	};
+
+	ssize_t rv = write_all(sock, &header, sizeof (header));
 	if (rv < 0) {
 		*err = rv;
 		fnvlist_pack_free(buf, len);
 		return (NULL);
 	}
-	ASSERT3U(rv, ==, sizeof (len_le));
+	ASSERT3U(rv, ==, sizeof (header));
 
 	rv = write_all(sock, buf, len);
 	fnvlist_pack_free(buf, len);
@@ -127,27 +132,27 @@ zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock, int *err)
 	}
 	VERIFY3U(rv, ==, len);
 
-	uint64_t resp_size;
-	size_t size;
-	rv = read_all(sock, &resp_size, sizeof (resp_size));
+	rv = read_all(sock, &header, sizeof (header));
 	if (rv < 0) {
 		*err = rv;
 		return (NULL);
 	}
-	VERIFY3U(rv, ==, sizeof (resp_size));
+	VERIFY3U(rv, ==, sizeof (header));
 
-	size = le64toh(resp_size);
-	buf = malloc(size);
+	VERIFY3U(header.message_type, ==, MESSAGE_NVLIST);
+	VERIFY0(header.struct_len);
+	VERIFY3U(header.payload_len, <=, SPA_MAXBLOCKSIZE);
 
-	rv = read_all(sock, buf, size);
+	buf = malloc(header.payload_len);
+	rv = read_all(sock, buf, header.payload_len);
 	if (rv < 0) {
 		*err = rv;
 		free(buf);
 		return (NULL);
 	}
-	ASSERT3U(rv, ==, size);
+	ASSERT3U(rv, ==, header.payload_len);
 
-	nvlist_t *resp = fnvlist_unpack(buf, size);
+	nvlist_t *resp = fnvlist_unpack(buf, header.payload_len);
 	free(buf);
 
 	return (resp);

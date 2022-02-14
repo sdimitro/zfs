@@ -275,7 +275,7 @@ impl PublicConnectionState {
 
     fn zcache_iostat(&mut self, nvl: NvList) -> HandlerReturn {
         // XXX convert to use serde nvlist response
-        debug!("got request: {:?}", nvl);
+        trace!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
 
@@ -289,14 +289,14 @@ impl PublicConnectionState {
                 response.insert("Type", "zcache_iostat").unwrap();
                 response.insert("result", "ok").unwrap();
 
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         } else {
             Ok(Box::pin(async move {
                 response.insert("Type", "zcache_iostat").unwrap();
                 response.insert("result", "err").unwrap();
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         }
@@ -304,7 +304,7 @@ impl PublicConnectionState {
 
     fn zcache_stats(&mut self, nvl: NvList) -> HandlerReturn {
         // XXX convert to use serde nvlist response
-        debug!("got request: {:?}", nvl);
+        trace!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
 
@@ -316,14 +316,14 @@ impl PublicConnectionState {
                 response.insert("Type", "zcache_stats").unwrap();
                 response.insert("result", "ok").unwrap();
 
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         } else {
             Ok(Box::pin(async move {
                 response.insert("Type", "zcache_stats").unwrap();
                 response.insert("result", "err").unwrap();
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         }

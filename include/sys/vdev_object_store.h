@@ -26,10 +26,6 @@
 #define	AGENT_TYPE_CREATE_POOL_DONE	"pool create done"
 #define	AGENT_TYPE_OPEN_POOL		"open pool"
 #define	AGENT_TYPE_OPEN_POOL_DONE	"pool open done"
-#define	AGENT_TYPE_READ_BLOCK		"read block"
-#define	AGENT_TYPE_READ_DONE		"read done"
-#define	AGENT_TYPE_WRITE_BLOCK		"write block"
-#define	AGENT_TYPE_WRITE_DONE		"write done"
 #define	AGENT_TYPE_FREE_BLOCKS		"free blocks"
 #define	AGENT_TYPE_BEGIN_TXG		"begin txg"
 #define	AGENT_TYPE_RESUME_COMPLETE	"resume complete"
@@ -61,10 +57,9 @@
 #define	AGENT_CRED_PROFILE		"credentials_profile"
 #define	AGENT_ENDPOINT			"endpoint"
 #define	AGENT_REGION			"region"
-#define	AGENT_BLKID			"block"
+#define	AGENT_BLOCK			"block"
 #define	AGENT_DATA			"data"
 #define	AGENT_STATS			"stats"
-#define	AGENT_REQUEST_ID		"request_id"
 #define	AGENT_UBERBLOCK			"uberblock"
 #define	AGENT_CONFIG			"config"
 #define	AGENT_NEXT_BLOCK		"next_block"
@@ -97,6 +92,58 @@ typedef struct vdev_object_store_stats {
 	uint64_t voss_pending_frees_bytes;
 	uint64_t voss_objects_count;
 } vdev_object_store_stats_t;
+
+/*
+ * XXX this should be auto-generated from the rust type
+ */
+typedef enum MessageType {
+	MESSAGE_NVLIST,
+	MESSAGE_READ_BLOCK,
+	MESSAGE_WRITE_BLOCK,
+} message_type_t;
+
+/*
+ * XXX this should be auto-generated from the rust type
+ */
+typedef struct MessageHeader {
+    uint32_t message_type;
+    uint32_t struct_len;
+    uint32_t payload_len;
+} message_header_t;
+
+/*
+ * XXX this should be auto-generated from the rust type
+ */
+typedef struct ReadBlockRequest {
+    uint64_t block;
+    uint64_t token;
+    uint32_t heal;
+    uint32_t size;
+} read_block_request_t;
+
+/*
+ * XXX this should be auto-generated from the rust type
+ */
+typedef struct WriteBlockRequest {
+    uint64_t block;
+    uint64_t token;
+} write_block_request_t;
+
+/*
+ * XXX this should be auto-generated from the rust type
+ */
+typedef struct ReadBlockResponse {
+    uint64_t block;
+    uint64_t token;
+} read_block_response_t;
+
+/*
+ * XXX this should be auto-generated from the rust type
+ */
+typedef struct WriteBlockResponse {
+    uint64_t block;
+    uint64_t token;
+} write_block_response_t;
 
 void object_store_begin_txg(vdev_t *, uint64_t);
 void object_store_end_txg(vdev_t *, nvlist_t *, uint64_t);
