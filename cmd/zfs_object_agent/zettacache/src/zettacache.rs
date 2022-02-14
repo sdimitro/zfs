@@ -700,13 +700,13 @@ struct ZettaCacheState {
     size_histogram: SizeHistogramPhys,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
-    // When i/o completes, the value will be sent, and the entry can be removed
-    // from the tree.  These are needed to prevent the ExtentAllocator from
-    // overwriting them while i/o is in flight, and to ensure that writes
-    // complete before we complete the next checkpoint.
-    // XXX I don't think we do lookups here so these could be Vec's?
-    outstanding_reads: BTreeMap<IndexValue, Arc<Semaphore>>,
-    outstanding_writes: BTreeMap<IndexValue, Arc<Semaphore>>,
+    // This is needed to ensure that reads complete before we complete the next
+    // checkpoint, so that we don't overwrite their locations on disk (if the
+    // block is evicted and freed from the cache).
+    outstanding_reads: Arc<tokio::sync::RwLock<()>>,
+    // This is needed to ensure that writes complete before we complete the next
+    // checkpoint, so that they are persisted to disk.
+    outstanding_writes: Arc<tokio::sync::RwLock<()>>,
 
     atime: Atime,
     stats: Arc<CacheStats>,
@@ -2218,27 +2218,27 @@ impl ZettaCacheState {
             },
         }
 
-        // If there's a write to this location in progress, we will need to wait for it to complete before reading.
-        // Since we won't be able to remove the entry from outstanding_writes after we wait, we just get the semaphore.
-        let write_sem_opt = self
-            .outstanding_writes
-            .get_mut(&value)
-            .map(|arc| arc.clone());
+        // Note: it's unlikely but possible that this lookup is for a block that
+        // was just inserted, and whose write has not yet completed.  In this
+        // case we may read stale data from disk.  The real fix would be to know
+        // which Atime's have been persisted by the last checkpoint, and if the
+        // entry is too new, to treat it as a cache miss.
 
-        let sem = Arc::new(Semaphore::new(0));
-        self.outstanding_reads.insert(value, sem.clone());
+        // There can't be a write lock on the outstanding_reads because it's
+        // only held for write when the state lock is also held, and we have the
+        // state lock.
+        let read_permit = self.outstanding_reads.clone().try_read_owned().unwrap();
+
         let block_access = self.block_access.clone();
 
         async move {
-            if let Some(write_sem) = write_sem_opt {
-                trace!("{:?} at {:?}: waiting for outstanding write", key, value);
-                let _permit = write_sem.acquire().await.unwrap();
-            }
-
             let bytes = block_access
                 .read_raw(valid_value.extent(), DiskIoType::ReadDataForLookup)
                 .await;
-            sem.add_permits(1);
+
+            // It's now OK for a checkpoint to complete, potentially freeing this block.
+            drop(read_permit);
+
             // XXX we can easily handle an io error here by returning None
             Some(bytes)
         }
@@ -2323,10 +2323,7 @@ impl ZettaCacheState {
         self.operation_log
             .push(OperationLogEntry::Insert(key, value));
 
-        let sem = Arc::new(Semaphore::new(0));
-        with_alloctag("ZettaCacheState.outstanding_writes", || {
-            self.outstanding_writes.insert(value, sem.clone())
-        });
+        let write_permit = self.outstanding_writes.clone().try_read_owned().unwrap();
 
         let block_access = self.block_access.clone();
         // Note: locked_key can be dropped before the i/o completes, since the
@@ -2335,7 +2332,10 @@ impl ZettaCacheState {
             block_access
                 .write_raw(location, bytes, DiskIoType::WriteDataForInsert)
                 .await;
-            sem.add_permits(1);
+
+            // It's now OK for a checkpoint to complete, persisting the index
+            // entry that references this block.
+            drop(write_permit);
         })
     }
 
@@ -2365,42 +2365,24 @@ impl ZettaCacheState {
 
         let begin_checkpoint = Instant::now();
 
-        // Wait for all outstanding reads, so that if the ExtentAllocator needs
-        // to overwrite some blocks, there aren't any outstanding i/os to that
-        // region.
-        // XXX It would be better to only wait for the reads that are in the
-        // region that we're overwriting.  But it will be tricky to do the
-        // waiting down in the ExtentAllocator.  If we get that working, we'll
-        // still need to clean up the outstanding_reads entries that have
-        // completed, at some point.  Even as-is, letting them accumulate for a
-        // whole checkpoint might not be great.  It might be "cleaner" to
-        // run every second and remove completed entries.  Or have the read task
-        // lock the outstanding_reads and remove itself (which might perform
-        // worse due to contention on the global lock).
+        // Wait for all outstanding reads, so that if we free the space they are
+        // reading, it can't be overwritten until after the read completes.
         let begin = Instant::now();
-        for sem in self.outstanding_reads.values_mut() {
-            let _permit = sem.acquire().await.unwrap();
-        }
+        self.outstanding_reads.write().await;
         debug!(
-            "waited for {} outstanding_reads in {}ms",
-            self.outstanding_reads.len(),
+            "waited for outstanding_reads in {}ms",
             begin.elapsed().as_millis()
         );
-        self.outstanding_reads.clear();
 
-        // Wait for all outstanding writes, for the same reason as reads, and
-        // also so that if we crash, the blocks referenced by the
-        // index/operation_log will actually have the correct contents.
+        // Wait for all outstanding writes, so that if we crash, the blocks
+        // referenced by the index/operation_log will actually have the correct
+        // contents.
         let begin = Instant::now();
-        for sem in self.outstanding_writes.values_mut() {
-            let _permit = sem.acquire().await.unwrap();
-        }
+        self.outstanding_writes.write().await;
         debug!(
-            "waited for {} outstanding_writes in {}ms",
-            self.outstanding_writes.len(),
+            "waited for outstanding_writes in {}ms",
             begin.elapsed().as_millis()
         );
-        self.outstanding_writes.clear();
 
         debug!(
             "{:?} pending changes at checkpoint",
