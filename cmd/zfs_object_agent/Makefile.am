@@ -1,5 +1,3 @@
-lib_LTLIBRARIES = $(RUSTDIR)/libzoa.la
-
 sbin_PROGRAMS = $(RUSTDIR)/zcache $(RUSTDIR)/zcachedb $(RUSTDIR)/zfs_object_agent $(RUSTDIR)/zfs_object_perf $(RUSTDIR)/zoa_test
 
 common_sources = $(wildcard util/src/*.rs util/Cargo.toml zettacache/src/*.rs zettacache/Cargo.toml zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
@@ -14,7 +12,9 @@ __RUSTDIR__zfs_object_perf_SOURCES = $(wildcard object_perf/src/*.rs object_perf
 
 __RUSTDIR__zoa_test_SOURCES = $(wildcard client/src/*.rs client/Cargo.toml) $(common_sources)
 
-__RUSTDIR__libzoa_la_SOURCES = $(wildcard zoa/src/*.rs zoa/Cargo.toml) $(common_sources)
+__RUSTDIR__libzoa_so_SOURCES = $(wildcard zoa/src/*.rs zoa/Cargo.toml) $(common_sources)
+
+EXTRA_DIST = $(__RUSTDIR__libzoa_so_SOURCES)
 
 RUSTFLAGS = \
 	-L $(abs_top_builddir)/lib/libzfs/.libs \
@@ -23,35 +23,30 @@ RUSTFLAGS = \
 GITREV = $(shell cat $(abs_top_builddir)/include/zfs_gitrev.h | awk '{print $$3}')
 
 .PHONY: \
-	$(RUSTDIR)/zcache$(EXEEXT) \
-	$(RUSTDIR)/zcachedb$(EXEEXT) \
-	$(RUSTDIR)/zfs_object_agent$(EXEEXT) \
-	$(RUSTDIR)/zfs_object_perf$(EXEEXT) \
-	$(RUSTDIR)/zoa_test$(EXEEXT) \
-	libzoa.la
+	build
 
-$(RUSTDIR)/libzoa.la :
+$(RUSTDIR)/libzoa.so : $(__RUSTDIR__libzoa_so_SOURCES)
 	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa $(RUSTTARGET)
 
-$(RUSTDIR)/zfs_object_agent$(EXEEXT) :
+$(RUSTDIR)/zfs_object_agent$(EXEEXT) : $(__RUSTDIR__zfs_object_agent_SOURCES)
 	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_agent $(RUSTTARGET)
 
-$(RUSTDIR)/zfs_object_perf$(EXEEXT) :
+$(RUSTDIR)/zfs_object_perf$(EXEEXT) : $(__RUSTDIR__zfs_object_perf_SOURCES)
 	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zfs_object_perf $(RUSTTARGET)
 
-$(RUSTDIR)/zoa_test$(EXEEXT) :
+$(RUSTDIR)/zoa_test$(EXEEXT) : $(__RUSTDIR__zoa_test_SOURCES)
 	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zoa_test $(RUSTTARGET)
 
-$(RUSTDIR)/zcachedb$(EXEEXT) :
+$(RUSTDIR)/zcachedb$(EXEEXT) : $(__RUSTDIR__zcachedb_SOURCES)
 	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zcachedb $(RUSTTARGET)
 
-$(RUSTDIR)/zcache$(EXEEXT) :
+$(RUSTDIR)/zcache$(EXEEXT) : $(__RUSTDIR__zcache_SOURCES)
 	CARGO_ZOA_GITREV="$(GITREV)" RUSTFLAGS="$(RUSTFLAGS)" cargo build --package zcache $(RUSTTARGET)
 
 all: build
 
 build: \
-	libzoa.la \
+	$(RUSTDIR)/libzoa.so \
 	$(RUSTDIR)/zcache$(EXEEXT) \
 	$(RUSTDIR)/zcachedb$(EXEEXT) \
 	$(RUSTDIR)/zfs_object_agent$(EXEEXT) \
