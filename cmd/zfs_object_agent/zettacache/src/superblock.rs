@@ -10,6 +10,8 @@ use log::*;
 use serde::{Deserialize, Serialize};
 use util::maybe_die_with;
 use util::nice_p2size;
+use util::writeln_stderr;
+use util::writeln_stdout;
 use util::zettacache_stats::DiskIoType;
 
 pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
@@ -190,7 +192,7 @@ impl SuperblockPhys {
         // from the actual disk's state (e.g. its Superblock).
         for block_access_disk_id in block_access.disks() {
             match Self::read_impl(block_access, block_access_disk_id).await {
-                Ok(superblock) => println!(
+                Ok(superblock) => writeln_stdout!(
                     "{:?} - Path: {} Size: {} GUID: {} Primary?: {}",
                     superblock.disk,
                     block_access.disk_path(block_access_disk_id),
@@ -201,7 +203,7 @@ impl SuperblockPhys {
                         None => "No".to_string(),
                     }
                 ),
-                Err(_) => eprintln!(
+                Err(_) => writeln_stderr!(
                     "error: {}: not a valid zettacache disk",
                     block_access.disk_path(block_access_disk_id)
                 ),

@@ -2,6 +2,8 @@
 #![warn(clippy::cast_possible_truncation)]
 #![warn(clippy::cast_possible_wrap)]
 #![warn(clippy::cast_sign_loss)]
+#![deny(clippy::print_stdout)]
+#![deny(clippy::print_stderr)]
 
 pub mod base_types;
 mod data_object;

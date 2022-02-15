@@ -18,6 +18,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use util::message::slice_to_struct;
 use util::message::struct_to_slice;
+use util::writeln_stdout;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[repr(packed)]
@@ -236,7 +237,7 @@ impl IndexRunPhys {
             })
             .await;
         histogram.assert_eq(&self.atime_histogram_phys);
-        println!("Verified index histogram: {}", histogram);
+        writeln_stdout!("Verified index histogram: {}", histogram);
     }
 }
 

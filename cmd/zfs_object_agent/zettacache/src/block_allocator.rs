@@ -20,9 +20,13 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{fmt, iter, mem};
 use util::get_tunable;
+use util::nice_p2size;
+use util::super_trace;
+use util::with_alloctag;
+use util::writeln_stdout;
+use util::BitmapRangeIterator;
+use util::From64;
 use util::RangeTree;
-use util::{nice_p2size, From64};
-use util::{super_trace, with_alloctag, BitmapRangeIterator};
 
 lazy_static! {
     static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
@@ -370,7 +374,7 @@ impl SlabTrait for BitmapSlab {
 
     fn dump_info(&self) {
         let used_slots = self.total_slots - u32::try_from(self.allocatable.len()).unwrap();
-        println!(
+        writeln_stdout!(
             "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {}%",
             self.location.offset(),
             nice_p2size(u64::from(self.slot_size)),
@@ -381,7 +385,7 @@ impl SlabTrait for BitmapSlab {
         for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
             let first_location = self.slot_to_location(first);
             let last_location = self.slot_to_location(last + 1);
-            println!(
+            writeln_stdout!(
                 "\tALLOC {:?} offset: [{}, {}) length: {} - slots: [{}, {}) count: {}",
                 first_location.disk(),
                 first_location.offset(),
@@ -392,7 +396,7 @@ impl SlabTrait for BitmapSlab {
                 last - first + 1
             );
         }
-        println!();
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -614,7 +618,7 @@ impl SlabTrait for ExtentSlab {
     }
 
     fn dump_info(&self) {
-        println!(
+        writeln_stdout!(
             "slab_offset: {} max_allowed_alloc_size: {} allocated_bytes: {} utilization: {}%",
             self.location.offset(),
             nice_p2size(u64::from(self.max_allowed_alloc_size)),
@@ -625,14 +629,14 @@ impl SlabTrait for ExtentSlab {
             .allocatable
             .iter_inverse(self.location.offset(), self.slab_end().offset())
         {
-            println!(
+            writeln_stdout!(
                 "\tALLOC offset: [{}  {}) length: {}",
                 offset,
                 offset + size,
                 nice_p2size(size),
             );
         }
-        println!();
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -726,8 +730,8 @@ impl SlabTrait for FreeSlab {
     }
 
     fn dump_info(&self) {
-        println!("{:?}", self.extent);
-        println!();
+        writeln_stdout!("{:?}", self.extent);
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -809,8 +813,8 @@ impl SlabTrait for EvacuatingSlab {
     }
 
     fn dump_info(&self) {
-        println!("{:?}", self.extent);
-        println!();
+        writeln_stdout!("{:?}", self.extent);
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -946,7 +950,7 @@ impl Slab {
     }
 
     fn dump_info(&self) {
-        println!("{:?} {:?}", self.id, self.generation);
+        writeln_stdout!("{:?} {:?}", self.id, self.generation);
         self.info.with_trait(|t| t.dump_info());
     }
 
@@ -2044,24 +2048,26 @@ pub async fn zcachedb_dump_spacemaps(
     block_access: Arc<BlockAccess>,
     extent_allocator: Arc<ExtentAllocator>,
 ) {
-    println!("DUMP SPACEMAP");
-    println!("{:?}", phys.spacemap);
+    writeln_stdout!("DUMP SPACEMAP");
+    writeln_stdout!("{:?}", phys.spacemap);
     let spacemap = SpaceMap::open(
         block_access.clone(),
         extent_allocator.clone(),
         phys.spacemap,
     );
-    spacemap.load(|entry| println!("{:?}", entry)).await;
-    println!();
+    spacemap.load(|entry| writeln_stdout!("{:?}", entry)).await;
+    writeln_stdout!();
 
-    println!("DUMP SPACEMAP_NEXT");
-    println!("{:?}", phys.spacemap_next);
+    writeln_stdout!("DUMP SPACEMAP_NEXT");
+    writeln_stdout!("{:?}", phys.spacemap_next);
     let spacemap_next = SpaceMap::open(
         block_access.clone(),
         extent_allocator.clone(),
         phys.spacemap_next,
     );
-    spacemap_next.load(|entry| println!("{:?}", entry)).await;
+    spacemap_next
+        .load(|entry| writeln_stdout!("{:?}", entry))
+        .await;
 }
 
 async fn zcachedb_load_slab_state(
@@ -2069,7 +2075,7 @@ async fn zcachedb_load_slab_state(
     extent_allocator: Arc<ExtentAllocator>,
     phys: BlockAllocatorPhys,
 ) -> Slabs {
-    println!(
+    writeln_stdout!(
         "reading {} of spacemaps...",
         nice_p2size(phys.spacemap.bytes() + phys.spacemap_next.bytes())
     );
@@ -2097,7 +2103,7 @@ async fn zcachedb_load_slab_state(
             .collect()
     };
     let slabs = Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await;
-    println!(
+    writeln_stdout!(
         "processed {} spacemap entries in {:.2} seconds",
         spacemap.total_entries() + spacemap_next.total_entries(),
         begin.elapsed().as_secs_f32()
@@ -2284,9 +2290,9 @@ impl SlabBucketsReport {
     }
 
     fn dump_report(&self, verbosity: u64) {
-        println!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
+        writeln_stdout!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
         for bucket in self.buckets.values() {
-            println!(
+            writeln_stdout!(
                 "{} {}",
                 bucket,
                 bucket.stats.stackgraph(self.hist_scaling_factor)
@@ -2314,49 +2320,49 @@ impl SlabBucketsReport {
                 let (perm_10_bytes, perm_10_perc) = bucket.allocated_quantile(10);
                 let (perm_100_bytes, perm_100_perc) = bucket.allocated_quantile(100);
 
-                println!("\t%CAP: NSLABS");
+                writeln_stdout!("\t%CAP: NSLABS");
                 for (idx, count) in cap_hist.iter().enumerate() {
-                    println!(
+                    writeln_stdout!(
                         "\t{:>4}: {} {}",
                         idx * CAP_BUCKET_PERCENTAGE_RANGE,
                         "*".repeat((usize::from64(*count) * REPORT_HISTOGRAM_WIDTH) / max_count),
                         *count
                     );
                 }
-                println!("\t-------------");
-                println!(
+                writeln_stdout!("\t-------------");
+                writeln_stdout!(
                     "\tallocated space in 0.1% of free-est slabs: {} ({:.1}%)",
                     nice_p2size(perm_1_bytes),
                     perm_1_perc * 100.0
                 );
-                println!(
+                writeln_stdout!(
                     "\tallocated space in   1% of free-est slabs: {} ({:.1}%)",
                     nice_p2size(perm_10_bytes),
                     perm_10_perc * 100.0
                 );
-                println!(
+                writeln_stdout!(
                     "\tallocated space in  10% of free-est slabs: {} ({:.1}%)",
                     nice_p2size(perm_100_bytes),
                     perm_100_perc * 100.0
                 );
-                println!("\t-------------");
+                writeln_stdout!("\t-------------");
             }
         }
     }
 }
 
 fn zcachedb_dump_slabs_print_legend() {
-    println!("============================================================");
-    println!("E: Extent-based");
-    println!("MAX_SIZE: largest allocation that can be made to these slabs");
-    println!("NSLAB: number of slabs");
-    println!("SIZE: total bytes in slabs (ALLOC + FREE)");
-    println!("ALLOC: allocated bytes in slabs");
-    println!("FREE: free (available) bytes in slabs");
-    println!("CAP: percent allocated (ALLOC / SIZE)");
-    println!("SEG/S: average number of disjoint free segments per slab");
-    println!("============================================================");
-    println!();
+    writeln_stdout!("============================================================");
+    writeln_stdout!("E: Extent-based");
+    writeln_stdout!("MAX_SIZE: largest allocation that can be made to these slabs");
+    writeln_stdout!("NSLAB: number of slabs");
+    writeln_stdout!("SIZE: total bytes in slabs (ALLOC + FREE)");
+    writeln_stdout!("ALLOC: allocated bytes in slabs");
+    writeln_stdout!("FREE: free (available) bytes in slabs");
+    writeln_stdout!("CAP: percent allocated (ALLOC / SIZE)");
+    writeln_stdout!("SEG/S: average number of disjoint free segments per slab");
+    writeln_stdout!("============================================================");
+    writeln_stdout!();
 }
 
 pub async fn zcachedb_dump_slabs(
@@ -2387,14 +2393,14 @@ pub async fn zcachedb_dump_slabs(
 
     zcachedb_dump_slabs_print_legend();
     for (disk, device_slabs) in slabs_per_device {
-        println!("============================================================");
-        println!("=                        {}", block_access.disk_path(disk));
-        println!("============================================================");
+        writeln_stdout!("============================================================");
+        writeln_stdout!("=                        {}", block_access.disk_path(disk));
+        writeln_stdout!("============================================================");
         zcachedb_dump_slabs_report(&device_slabs, slab_size, &buckets, &opts)
     }
-    println!("============================================================");
-    println!("=                        whole cache");
-    println!("============================================================");
+    writeln_stdout!("============================================================");
+    writeln_stdout!("=                        whole cache");
+    writeln_stdout!("============================================================");
     zcachedb_dump_slabs_report(&cache_slabs, slab_size, &buckets, &opts);
 }
 
@@ -2437,21 +2443,21 @@ fn zcachedb_dump_slabs_report(
     buckets_by_max_size.reset_hist_scaling_factor(max_scaling_factor);
 
     buckets_by_max_size.dump_report(opts.verbosity);
-    println!();
-    println!("~~~~~~~~~~~~~~~~~~~~~~~~  SUMMARY  ~~~~~~~~~~~~~~~~~~~~~~~~~");
+    writeln_stdout!();
+    writeln_stdout!("~~~~~~~~~~~~~~~~~~~~~~~~  SUMMARY  ~~~~~~~~~~~~~~~~~~~~~~~~~");
     bitmap_based_summary.dump_report(opts.verbosity);
-    println!("------------------------------------------------------------");
-    println!("    BITMAP: {}", bitmap_based_summary.total);
-    println!();
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("    BITMAP: {}", bitmap_based_summary.total);
+    writeln_stdout!();
     extent_based_summary.dump_report(opts.verbosity);
-    println!("------------------------------------------------------------");
-    println!("    EXTENT: {}", extent_based_summary.total);
-    println!("------------------------------------------------------------");
-    println!("     EMPTY: {}", empty_total);
-    println!("------------------------------------------------------------");
-    println!("EVACUATING: {}", evacuating_total);
-    println!("============================================================");
-    println!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
-    println!("     TOTAL: {}", buckets_by_max_size.total);
-    println!();
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("    EXTENT: {}", extent_based_summary.total);
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("     EMPTY: {}", empty_total);
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("EVACUATING: {}", evacuating_total);
+    writeln_stdout!("============================================================");
+    writeln_stdout!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
+    writeln_stdout!("     TOTAL: {}", buckets_by_max_size.total);
+    writeln_stdout!();
 }
