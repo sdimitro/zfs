@@ -218,7 +218,10 @@ impl PublicConnectionState {
                 response.insert("Type", "report_hits").unwrap();
                 let size_data = zettacache.hits_by_size_data().await;
                 response
-                    .insert("histogram", &size_data.histogram[..])
+                    .insert("live_histogram", &size_data.live_histogram[..])
+                    .unwrap();
+                response
+                    .insert("ghost_histogram", &size_data.ghost_histogram[..])
                     .unwrap();
                 response
                     .insert("cache_capacity", &size_data.cache_capacity)

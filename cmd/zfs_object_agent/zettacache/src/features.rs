@@ -30,6 +30,7 @@ lazy_static! {
         INDEXVALUE16.clone(),
         POOLGUIDTABLE.clone(),
         INDEX_ENTERY_SERDE.clone(),
+        GHOST_HITS_HISTOGRAM.clone(),
     ]
     .map(|feature| (feature.name, feature.info))
     .into_iter()
@@ -68,6 +69,10 @@ lazy_static! {
     };
     pub static ref INDEX_ENTERY_SERDE: Feature = Feature {
         name: FeatureName("com.delphix:index_entry_serde".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
+    pub static ref GHOST_HITS_HISTOGRAM: Feature = Feature {
+        name: FeatureName("com.delphix:ghost_hits_histogram".to_string()),
         info: FeatureType::NonUpgradeable
     };
 }

@@ -42,10 +42,6 @@ impl AtimeHistogramPhys {
         }
     }
 
-    pub fn len(&self) -> usize {
-        self.histogram.len()
-    }
-
     pub fn first_ghost(&self) -> Atime {
         self.first_ghost
     }

@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
-use std::convert::TryFrom;
 use std::time::SystemTime;
+use util::From64;
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SizeHistogramPhys {
@@ -9,7 +9,8 @@ pub struct SizeHistogramPhys {
     pub cache_capacity: u64,
     pub meta_overhead: u64,
     pub bucket_size: u64,
-    pub histogram: Vec<u64>,
+    pub live_histogram: Vec<u64>,
+    pub ghost_histogram: Vec<u64>,
 }
 
 impl SizeHistogramPhys {
@@ -27,16 +28,27 @@ impl SizeHistogramPhys {
             cache_capacity,
             meta_overhead,
             bucket_size: histogram_range / quantiles as u64,
-            histogram: vec![0; quantiles],
+            live_histogram: vec![0; quantiles],
+            ghost_histogram: vec![0; quantiles],
         }
     }
 
     /// Record a "hit" in the appropriate size bucket (taking into account the cache metadata overhead)
-    pub fn hit(&mut self, size_at_hit: u64) {
-        let index = usize::try_from((size_at_hit + self.meta_overhead) / self.bucket_size).unwrap();
+    pub fn live_hit(&mut self, size_at_hit: u64) {
+        let index = usize::from64((size_at_hit + self.meta_overhead) / self.bucket_size);
         // The histogram may not be large enough if we've expanded the capacity
         // since the histogram was created (e.g. by adding disks).
-        if let Some(value) = self.histogram.get_mut(index) {
+        if let Some(value) = self.live_histogram.get_mut(index) {
+            *value += 1;
+        }
+    }
+
+    /// Record a ghost "hit" in the appropriate size bucket
+    pub fn ghost_hit(&mut self, size_at_hit: u64) {
+        let index = usize::from64((size_at_hit + self.meta_overhead) / self.bucket_size);
+        // The histogram may not be large enough if we've expanded the capacity
+        // since the histogram was created (e.g. by adding disks).
+        if let Some(value) = self.ghost_histogram.get_mut(index) {
             *value += 1;
         }
     }

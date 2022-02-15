@@ -1090,11 +1090,7 @@ impl ZettaCache {
 
         let pending_changes =
             Self::load_operation_log(&operation_log, &mut atime_histogram_phys).await;
-        debug!(
-            "atime_histogram: {:#?}, {} entries",
-            atime_histogram_phys,
-            atime_histogram_phys.len()
-        );
+        debug!("atime_histogram: {:#?}", atime_histogram_phys,);
 
         let stats = Arc::new(CacheStats::default());
 
@@ -2114,9 +2110,9 @@ impl ZettaCacheState {
             && value.atime() < live_cutoff
             && matches!(source, LookupSource::Read)
         {
-            // This is a hit in the ghost range of the hit-by-size histogram
+            // This is a hit in the ghost hit-by-size histogram
             let size = self.atime_histogram.size_at(value.atime());
-            self.size_histogram.hit(size);
+            self.size_histogram.ghost_hit(size);
         }
     }
 
@@ -2171,7 +2167,7 @@ impl ZettaCacheState {
             // Add an entry to the hit-by-size histogram
             let size = self.atime_histogram.size_at(value.atime());
             super_trace!("cache size {} at {:?}", size, value.atime());
-            self.size_histogram.hit(size);
+            self.size_histogram.live_hit(size);
         }
         let original_atime = value.atime();
         if original_atime != self.atime {

@@ -19,33 +19,32 @@ struct SizeHistogram {
     lookups: u64,
     cache_capacity: u64,
     bucket_size: u64,
-    histogram: Vec<u64>,
+    live_histogram: Vec<u64>,
+    ghost_histogram: Vec<u64>,
 }
 
 impl SizeHistogram {
     fn sum_live_hits(&self) -> u64 {
-        //let index = self.histogram.len() - usize::from64(self.cache_capacity / self.bucket_size);
-        let index = usize::from64(self.cache_capacity / self.bucket_size);
-        self.histogram[..index].iter().sum()
+        self.live_histogram.iter().sum()
     }
 
-    /// Resample the histogram to produce a new histogram with the requested
+    /// Resample a histogram to produce a new histogram with the requested
     /// number of buckets for the capacity portion of the original histogram.
     /// This works by dividing each sample in the original histogram into "samples"
     /// chunks and then adding the number of samples for the physical cache in the
     /// original histogram of these chunks together for each bucket in the new histogram.
-    fn resample(&self, samples_in_capacity: usize) -> Vec<u64> {
+    fn resample(&self, samples_in_capacity: usize, histogram: &[u64]) -> Vec<u64> {
         // Given the desired number of samples for the cache capacity portion of the histogram,
         // calculate the total number of samples needed for the capacity covered by the histogram.
         let resample_bucket_size = self.cache_capacity / samples_in_capacity as u64;
-        let target_samples = (self.histogram.len() as f64 * self.bucket_size as f64
+        let target_samples = (histogram.len() as f64 * self.bucket_size as f64
             / resample_bucket_size as f64)
             .ceil()
             .to_usize()
             .unwrap();
 
         let sub_samples_per_resample = usize::from64(self.cache_capacity / self.bucket_size);
-        let mut sample_iter = self.histogram.iter();
+        let mut sample_iter = histogram.iter();
         let mut sub_sample_value = 0.0;
         let mut samples_left = 0;
         let mut resample: Vec<u64> = Vec::new();
@@ -98,38 +97,45 @@ impl SizeHistogram {
             return;
         }
         const HISTOGRAM_WIDTH: usize = 50;
-        let histogram_capacity = self.histogram.len() as u64 * self.bucket_size;
+        let histogram_length = self.live_histogram.len() as u64;
+        let histogram_capacity = histogram_length * self.bucket_size;
         let mut bucket_total = 0;
         let mut cache_size = 0;
-        let resampled_histogram = self.resample(quantiles);
-        let bucket_size: u64 =
-            self.bucket_size * self.histogram.len() as u64 / resampled_histogram.len() as u64;
-        for (index, hits) in resampled_histogram.iter().enumerate() {
-            if index == quantiles {
+        let live_histogram = self.resample(quantiles, &self.live_histogram);
+        let ghost_histogram = self.resample(quantiles, &self.ghost_histogram);
+        let bucket_size = self.bucket_size * histogram_length / live_histogram.len() as u64;
+        let mut beyond_live = false;
+
+        for (index, (live_hits, ghost_hits)) in
+            live_histogram.into_iter().zip(ghost_histogram).enumerate()
+        {
+            if !beyond_live && (ghost_hits > live_hits || index == quantiles) {
                 if !ghost {
                     return;
                 }
                 writeln_stdout!("-------------------ghost hits---------------------");
+                beyond_live = true;
             }
             cache_size += bucket_size;
             // The last bucket may not be the "full" bucket size
             if cache_size > histogram_capacity {
                 assert!(
-                    index == self.histogram.len() - 1,
+                    index == self.live_histogram.len() - 1,
                     "Capacity overflow at histogram index {}",
                     index
                 );
                 cache_size = histogram_capacity;
             }
+
             write_stdout!("{: >8} : ", nice_p2size(cache_size));
             if total == 0 {
                 writeln_stdout!();
                 continue;
             }
             if cumulative {
-                bucket_total += *hits;
+                bucket_total += live_hits + ghost_hits;
             } else {
-                bucket_total = *hits;
+                bucket_total = live_hits + ghost_hits;
             };
             if bucket_total == 0 {
                 // this bucket is empty (if we are accumulating, no hits have been seen yet)
@@ -201,7 +207,8 @@ impl ZcacheSubCommand for ReportHits {
                     lookups: response.lookup_uint64("lookups")?,
                     cache_capacity: response.lookup_uint64("cache_capacity")?,
                     bucket_size: response.lookup_uint64("bucket_size")?,
-                    histogram: response.lookup_uint64_array("histogram")?,
+                    live_histogram: response.lookup_uint64_array("live_histogram")?,
+                    ghost_histogram: response.lookup_uint64_array("ghost_histogram")?,
                 };
                 hits_by_size.print(quantiles, cumulative, ghost);
             }
