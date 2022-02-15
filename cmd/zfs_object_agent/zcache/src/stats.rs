@@ -2,6 +2,7 @@
 
 use crate::remote_channel::{RemoteChannel, RemoteError};
 use crate::subcommand::ZcacheSubCommand;
+use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
@@ -79,9 +80,7 @@ impl StatsDisplay {
 
         if self.show_exact_values {
             write_stdout!("{:0.0}\t", percent.round());
-        } else if percent <= 0.0 {
-            write_stdout!("{:>6}  ", "-");
-        } else if percent >= 100.0 {
+        } else if !(0.05..99.95).contains(&percent) {
             write_stdout!("{:>5.0}%  ", percent.round());
         } else {
             write_stdout!("{:>5.1}%  ", percent);
@@ -162,12 +161,9 @@ impl StatsDisplay {
 
         if self.show_lookup_detail {
             // Slot in right after "CACHE-LOOKUP" column
-            top_header.insert(1, ("LOOKUP-SOURCE", 2));
-            top_header.insert(2, ("HIT-READ-INDEX", 2));
-            bottom_header.insert(2, "read");
-            bottom_header.insert(3, "write");
-            bottom_header.insert(4, "sans");
-            bottom_header.insert(5, "after");
+            top_header.insert(1, ("HIT-READ-INDEX", 2));
+            bottom_header.insert(2, "sans");
+            bottom_header.insert(3, "after");
         }
 
         // the following optional headers are appended in the order presented here
@@ -179,7 +175,7 @@ impl StatsDisplay {
 
         if self.show_extended {
             top_header.append(&mut vec![("BUF-BYTES-USED", 2)]);
-            bottom_header.append(&mut vec!["block", "non-blk"]);
+            bottom_header.append(&mut vec!["demand", "spec"]);
             top_header.append(&mut vec![("CACHE-OTHER", 3)]);
             bottom_header.append(&mut vec!["evicts", "pending", "healed"]);
         }
@@ -200,7 +196,6 @@ impl StatsDisplay {
         } else {
             1.0 / values.timestamp.as_secs_f64()
         };
-        debug!("interval {:?} has scaling {}", self.interval, scale);
 
         // TIMESTAMP (optional)
         if self.show_time {
@@ -215,9 +210,6 @@ impl StatsDisplay {
 
         // LOOKUP DETAILS (optional)
         if self.show_lookup_detail {
-            self.display_percent(values.value(LookupForRead) as f64 * scale, total_lookups);
-            self.display_percent(values.value(LookupForWrite) as f64 * scale, total_lookups);
-
             let total_hits = (values.value(CacheHitWithoutIndexRead)
                 + values.value(CacheHitAfterIndexRead)) as f64
                 * scale;
@@ -303,8 +295,7 @@ impl StatsDisplay {
                     latest = serde_json::from_str(stats_json.to_str()?).unwrap();
                 }
                 Err(RemoteError::ResultError(_)) => {
-                    writeln_stdout!("No cache found?");
-                    continue;
+                    return Err(anyhow!("No cache found"));
                 }
                 Err(RemoteError::Other(e)) => {
                     writeln_stdout!("remote call error: {}", e);
@@ -318,6 +309,11 @@ impl StatsDisplay {
                 self.display_headers();
             }
 
+            if previous.cache_runtime_id.is_nil() {
+                // Initial empty previous needs to match (so we get first line totals)
+                previous.cache_runtime_id = latest.cache_runtime_id;
+            }
+
             if latest.cache_runtime_id == previous.cache_runtime_id {
                 // Display the net values of collected stats
                 self.display_stat_values(&(&latest - &&previous));
@@ -328,17 +324,16 @@ impl StatsDisplay {
             // Flush stdout in case output is redirected to a file
             io::stdout().flush().unwrap_or(());
 
-            if let Some(count) = self.count {
-                if iteration >= count {
-                    return Ok(());
-                }
-            }
-
             match self.interval {
                 None => return Ok(()),
                 Some(duration) => {
                     previous = latest;
                     iteration += 1;
+                    if let Some(count) = self.count {
+                        if iteration >= count {
+                            return Ok(());
+                        }
+                    }
                     sleep(duration)
                 }
             }
@@ -376,6 +371,12 @@ impl ZcacheSubCommand for Stats {
 
         SubCommand::with_name(NAME)
             .about("Display cache statistics.")
+            .arg(
+                Arg::with_name("timestamp")
+                    .long("timestamp")
+                    .short("t")
+                    .help("Display a timestamp on each line of stats"),
+            )
             .arg(
                 Arg::with_name("insert-detail")
                     .long("insert-detail")
@@ -442,7 +443,7 @@ impl ZcacheSubCommand for Stats {
         let all = args.is_present("all");
 
         StatsDisplay {
-            show_time: true,
+            show_time: all || args.is_present("timestamp"),
             show_extended: all || args.is_present("extended"),
             show_insert_detail: all || args.is_present("insert-detail"),
             show_lookup_detail: all || args.is_present("lookup-detail"),

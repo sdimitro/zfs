@@ -45,6 +45,9 @@
  */
 unsigned long vdev_object_store_logical_ashift = SPA_MINBLOCKSHIFT;
 unsigned long vdev_object_store_physical_ashift = SPA_MINBLOCKSHIFT;
+
+unsigned long vdev_object_store_max_payload = SPA_MAXBLOCKSIZE;
+
 struct sockaddr_un zfs_root_socket = {
 	AF_UNIX, "/etc/zfs/zfs_root_socket"
 };
@@ -93,19 +96,13 @@ typedef enum {
 
 typedef enum {
 	VOS_RESUME_NOT_RUNNING = 0,
-	VOS_RESUME_START = (1 << 0),
-	VOS_RESUME_OPENING = (1 << 1),
-	VOS_RESUME_OPENED = (1 << 2),
-	VOS_RESUME_REISSUE = (1 << 3),
-	VOS_RESUME_FAILED = (1 << 4)
+	VOS_RESUME_STARTING = (1 << 0),
+	VOS_RESUME_START = (1 << 1),
+	VOS_RESUME_OPENING = (1 << 2),
+	VOS_RESUME_OPENED = (1 << 3),
+	VOS_RESUME_REISSUE = (1 << 4),
+	VOS_RESUME_FAILED = (1 << 5)
 } agent_resume_state_t;
-
-/*
- * Per request private data
- */
-typedef struct vdev_object_store_request {
-	uint64_t vosr_req;
-} vdev_object_store_request_t;
 
 typedef struct object_store_free_block {
 	list_node_t osfb_list_node;
@@ -146,15 +143,16 @@ typedef struct vdev_object_store {
 	kcondvar_t vos_resume_cv;
 	agent_resume_state_t vos_resume_state;
 
-	kmutex_t vos_max_offset_lock;
-	uint64_t vos_max_offset;
-
 	uint64_t vos_next_block;
 	uberblock_t vos_uberblock;
 	nvlist_t *vos_config;
 
 	list_t vos_free_list;
 	uint64_t vos_free_list_len;
+
+	uint64_t vos_version_major;
+	uint64_t vos_version_minor;
+	uint64_t vos_version_patch;
 } vdev_object_store_t;
 
 /*
@@ -167,7 +165,6 @@ typedef struct object_store_stats_call {
 	nvlist_t	*oss_nvl;
 	avl_node_t	oss_node;
 } object_store_stats_call_t;
-
 
 static mode_t
 vdev_object_store_open_mode(spa_mode_t spa_mode)
@@ -185,25 +182,6 @@ vdev_object_store_open_mode(spa_mode_t spa_mode)
 	return (mode);
 }
 
-static inline vdev_object_store_request_t *
-vdev_object_store_request_alloc(void)
-{
-	return (kmem_zalloc(
-	    sizeof (vdev_object_store_request_t), KM_SLEEP));
-}
-
-static void
-vdev_object_store_request_free(zio_t *zio)
-{
-	/*
-	 * Per request private data cleanup.
-	 */
-}
-
-static const zio_vsd_ops_t vdev_object_store_vsd_ops = {
-	.vsd_free = vdev_object_store_request_free,
-};
-
 static void
 zfs_object_store_wait(vdev_object_store_t *vos, socket_state_t state)
 {
@@ -212,42 +190,6 @@ zfs_object_store_wait(vdev_object_store_t *vos, socket_state_t state)
 	while (vos->vos_sock_state < state) {
 		cv_wait(&vos->vos_sock_cv, &vos->vos_sock_lock);
 	}
-}
-
-static int
-zfs_object_store_open(vdev_object_store_t *vos)
-{
-	ksocket_t s = INVALID_SOCKET;
-
-	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
-	vos->vos_sock_state = VOS_SOCK_OPENING;
-	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open unable to create "
-		    "socket: %d", rc);
-		return (rc);
-	}
-
-	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
-	    sizeof (zfs_root_socket));
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open failed to "
-		    "connect: %d", rc);
-		ksock_close(s);
-		s = INVALID_SOCKET;
-	} else {
-		zfs_dbgmsg("zfs_object_store_open, socket connection "
-		    "ready, " SOCK_FMT, s);
-	}
-
-	VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
-	vos->vos_sock = s;
-	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
-	if (vos->vos_sock != INVALID_SOCKET) {
-		vos->vos_sock_state = VOS_SOCK_OPEN;
-		cv_broadcast(&vos->vos_sock_cv);
-	}
-	return (0);
 }
 
 static void
@@ -280,40 +222,153 @@ zfs_object_store_close(vdev_object_store_t *vos)
 }
 
 static int
-agent_write_all(vdev_object_store_t *vos, void *buf, size_t len)
+agent_read_all(vdev_object_store_t *vos, void *buf,
+    size_t len)
 {
-	uint64_t buflen64 = len;
-	char *buflen64_base = (char *)& buflen64;
-	uint64_t total_size = sizeof (buflen64) + buflen64;
+	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
+	size_t recvd_total = 0;
+	while (recvd_total < len) {
+		struct msghdr msg = {};
+		kvec_t iov = {};
+
+		iov.iov_base = buf + recvd_total;
+		iov.iov_len = len - recvd_total;
+
+		if (!locked)
+			mutex_enter(&vos->vos_lock);
+		if (vos->vos_agent_thread_exit ||
+		    vos->vos_sock == INVALID_SOCKET) {
+			zfs_dbgmsg("(%px) agent_read_all shutting down",
+			    curthread);
+			if (!locked)
+				mutex_exit(&vos->vos_lock);
+			return (SET_ERROR(ENOTCONN));
+		}
+
+		if (!locked)
+			mutex_exit(&vos->vos_lock);
+
+		size_t recvd = ksock_receive(vos->vos_sock,
+		    &msg, &iov, 1, len - recvd_total, 0);
+		if (recvd > 0) {
+			recvd_total += recvd;
+			if (recvd_total < len &&
+			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
+				zfs_dbgmsg("incomplete recvmsg but trying for "
+				    "more len=%d recvd=%d recvd_total=%d",
+				    (int)len,
+				    (int)recvd,
+				    (int)recvd_total);
+			}
+		} else {
+			zfs_dbgmsg("got wrong length from agent socket: "
+			    "for total size %d, already received %d, "
+			    "expected up to %d got %d",
+			    (int)len,
+			    (int)recvd_total,
+			    (int)(len - recvd_total),
+			    (int)recvd);
+			/* XXX - Do we need to check for errors too? */
+			if (recvd == 0)
+				return (SET_ERROR(EAGAIN));
+		}
+	}
+	return (0);
+}
+
+static int
+agent_read_nvlist(vdev_object_store_t *vos, nvlist_t **out)
+{
+	message_header_t header;
+	int err = agent_read_all(vos, &header, sizeof (header));
+	if (err != 0) {
+		zfs_dbgmsg("agent_read_nvlist(%px) got err %d", curthread, err);
+		return (err);
+	}
+	if (header.message_type != MESSAGE_NVLIST) {
+		zfs_dbgmsg("agent_read_nvlist(%px) invalid message_type %u",
+		    curthread, header.message_type);
+		return (EINVAL);
+	}
+	if (header.payload_len > SPA_MAXBLOCKSIZE) {
+		zfs_dbgmsg("agent_read_nvlist(%px) got invalid payload_len %x",
+		    curthread, header.payload_len);
+		return (EINVAL);
+	}
+
+	void *buf = vmem_alloc(header.payload_len, KM_SLEEP);
+	err = agent_read_all(vos, buf, header.payload_len);
+	if (err != 0) {
+		zfs_dbgmsg("2 agent_read_nvlist(%px) got err %d", curthread,
+		    err);
+		vmem_free(buf, header.payload_len);
+		return (err);
+	}
+
+	err = nvlist_unpack(buf, header.payload_len, out, KM_SLEEP);
+	vmem_free(buf, header.payload_len);
+	if (err != 0) {
+		zfs_dbgmsg("got error %d from nvlist_unpack(len=%d)",
+		    err, header.payload_len);
+		return (EAGAIN);
+	}
+	return (0);
+}
+
+static int
+agent_write_all(vdev_object_store_t *vos, message_header_t *header,
+    void *struct_buf, void *payload_buf)
+{
+	uint64_t total_size = sizeof (*header) +
+	    header->struct_len + header->payload_len;
 	uint64_t write_total = 0;
-	kvec_t iov[2] = {};
+	kvec_t iov[3] = {};
+	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
 
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
 	while (write_total < total_size) {
 		struct msghdr msg = {};
 		int iov_count;
-		if (write_total < sizeof (buflen64)) {
+		if (write_total < sizeof (*header)) {
+			uint64_t already_written = write_total;
+			iov_count = 3;
+			iov[0].iov_base = ((char *)header) + already_written;
+			iov[0].iov_len = sizeof (*header) - already_written;
+			iov[1].iov_base = struct_buf;
+			iov[1].iov_len = header->struct_len;
+			iov[2].iov_base = payload_buf;
+			iov[2].iov_len = header->payload_len;
+		} else if (write_total <
+		    sizeof (*header) + header->struct_len) {
+			uint64_t already_written =
+			    write_total - sizeof (*header);
 			iov_count = 2;
-			iov[0].iov_base = buflen64_base + write_total;
-			iov[0].iov_len = sizeof (buflen64) - write_total;
-			iov[1].iov_base = buf;
-			iov[1].iov_len = len;
+			iov[0].iov_base = struct_buf + already_written;
+			iov[0].iov_len = header->struct_len - already_written;
+			iov[1].iov_base = payload_buf;
+			iov[1].iov_len = header->payload_len;
 		} else {
+			uint64_t already_written =
+			    write_total - sizeof (*header) - header->struct_len;
 			iov_count = 1;
-			iov[0].iov_base = buf + write_total - sizeof (buflen64);
-			iov[0].iov_len = len - write_total + sizeof (buflen64);
+			iov[0].iov_base = payload_buf + already_written;
+			iov[0].iov_len =
+			    header->payload_len - already_written;
 		}
 
-		mutex_enter(&vos->vos_lock);
+		if (!locked)
+			mutex_enter(&vos->vos_lock);
 		if (vos->vos_agent_thread_exit ||
 		    vos->vos_sock == INVALID_SOCKET) {
-			zfs_dbgmsg("(%px) agent_read_all shutting down",
+			zfs_dbgmsg("(%px) agent_write_all shutting down",
 			    curthread);
-			mutex_exit(&vos->vos_lock);
+			if (!locked)
+				mutex_exit(&vos->vos_lock);
 			return (SET_ERROR(ENOTCONN));
 		}
-		mutex_exit(&vos->vos_lock);
+		if (!locked)
+			mutex_exit(&vos->vos_lock);
 
 		ssize_t sent;
 		do {
@@ -363,21 +418,23 @@ agent_write_all(vdev_object_store_t *vos, void *buf, size_t len)
 }
 
 static int
-agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
+agent_request(vdev_object_store_t *vos, message_type_t message_type,
+    void *struct_buf, size_t struct_len,
+    void *payload_buf, size_t payload_len, char *tag)
 {
 	spa_t *spa = vos->vos_vdev->vdev_spa;
 
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
-	size_t len = 0;
-	char *buf = fnvlist_pack(nv, &len);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
-		zfs_dbgmsg("sending %llu-byte request to agent type=%s",
-		    (u_longlong_t)len,
-		    fnvlist_lookup_string(nv, AGENT_TYPE));
+		zfs_dbgmsg("sending message_type=%u struct_len=%u "
+		    "payload_len=%u",
+		    (int)message_type,
+		    (int)struct_len,
+		    (int)payload_len);
 	}
 
-	if (vos->vos_sock_state < VOS_SOCK_OPEN) {
+	if (vos->vos_sock_state < VOS_SOCK_OPENING) {
 		return (SET_ERROR(ENOTCONN));
 	}
 
@@ -386,7 +443,13 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 		zio_handle_panic_injection(spa, tag, 1);
 	}
 
-	int err = agent_write_all(vos, buf, len);
+	message_header_t header = {
+		.message_type = message_type,
+		.struct_len = struct_len,
+		.payload_len = payload_len,
+	};
+
+	int err = agent_write_all(vos, &header, struct_buf, payload_buf);
 	if (err != 0) {
 		zfs_dbgmsg("agent_request(%px) got err %d", curthread, err);
 
@@ -408,9 +471,136 @@ agent_request(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 		zfs_dbgmsg("%s INJECTION after send", tag);
 		zio_handle_panic_injection(spa, tag, 2);
 	}
-	fnvlist_pack_free(buf, len);
 
 	return (err != 0 ? SET_ERROR(EINTR) : 0);
+}
+
+static int
+agent_request_nv(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
+{
+	size_t payload_len;
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("sending %llu-byte request to agent nvlist type=%s",
+		    (u_longlong_t)payload_len,
+		    fnvlist_lookup_string(nv, AGENT_TYPE));
+	}
+	void *payload_buf = fnvlist_pack(nv, &payload_len);
+	int err = agent_request(vos, MESSAGE_NVLIST, NULL, 0,
+	    payload_buf, payload_len, tag);
+	fnvlist_pack_free(payload_buf, payload_len);
+	return (err);
+}
+
+static int
+agent_request_read(vdev_object_store_t *vos, read_block_request_t *req)
+{
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("agent_request_read(blockid=%llu)",
+		    (u_longlong_t)req->block);
+	}
+	return (agent_request(vos, MESSAGE_READ_BLOCK, req, sizeof (*req),
+	    NULL, 0, FTAG));
+}
+
+static int
+agent_request_write(vdev_object_store_t *vos, write_block_request_t *req,
+    void *buf, size_t len)
+{
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+		zfs_dbgmsg("agent_request_write(blockid=%llu)",
+		    (u_longlong_t)req->block);
+	}
+	return (agent_request(vos, MESSAGE_WRITE_BLOCK, req, sizeof (*req),
+	    buf, len, FTAG));
+}
+
+
+static int
+zfs_object_store_open(vdev_object_store_t *vos)
+{
+	ksocket_t s = INVALID_SOCKET;
+
+	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+	vos->vos_sock_state = VOS_SOCK_OPENING;
+	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open unable to create "
+		    "socket: %d", rc);
+		return (rc);
+	}
+
+	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
+	    sizeof (zfs_root_socket));
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open failed to "
+		    "connect: %d", rc);
+		ksock_close(s);
+		s = INVALID_SOCKET;
+	} else {
+		zfs_dbgmsg("zfs_object_store_open, socket connection "
+		    "ready, " SOCK_FMT, s);
+	}
+
+	VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
+	vos->vos_sock = s;
+	if (vos->vos_sock == INVALID_SOCKET)
+		return (0);
+
+	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
+	nvlist_t *request = fnvlist_alloc();
+	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_VERSION);
+
+	/*
+	 * This specifies that the kernel supports all 1.X.Y versions of the
+	 * agent communication protocol. This should be updated as new
+	 * capabilities are added and supported or required.
+	 */
+	fnvlist_add_string(request, AGENT_VERSION, "^1");
+
+	VERIFY0(agent_request_nv(vos, request, FTAG));
+	fnvlist_free(request);
+
+	nvlist_t *response;
+	rc = agent_read_nvlist(vos, &response);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open failed to receive version "
+		    "negotiation response: %d", rc);
+		vos->vos_sock = INVALID_SOCKET;
+		ksock_close(s);
+		return (ENOTSUP);
+	}
+	char *type = NULL;
+	rc = nvlist_lookup_string(response, AGENT_TYPE, &type);
+	if (rc != 0 || strcmp(type, AGENT_TYPE_VERSION) != 0) {
+		zfs_dbgmsg("zfs_object_store_open received unexpected message "
+		    "during negotiation: %d \"%s\"", rc,
+		    type == NULL ? "" : type);
+		fnvlist_free(response);
+		vos->vos_sock = INVALID_SOCKET;
+		ksock_close(s);
+		return (ENOTSUP);
+	}
+	nvlist_t *version;
+	rc = nvlist_lookup_nvlist(response, AGENT_VERSION, &version);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open did not receive version "
+		    "during negotiation: %d", rc);
+		fnvlist_free(response);
+		vos->vos_sock = INVALID_SOCKET;
+		ksock_close(s);
+		return (ENOTSUP);
+	}
+	vos->vos_version_major = fnvlist_lookup_uint64(version, "major");
+	vos->vos_version_minor = fnvlist_lookup_uint64(version, "minor");
+	vos->vos_version_patch = fnvlist_lookup_uint64(version, "patch");
+	zfs_dbgmsg("zfs_object_store_open: Selected %llu.%llu.%llu in "
+	    "negotiation", (u_longlong_t)vos->vos_version_major,
+	    (u_longlong_t)vos->vos_version_minor,
+	    (u_longlong_t)vos->vos_version_patch);
+	fnvlist_free(response);
+	vos->vos_sock_state = VOS_SOCK_OPEN;
+	cv_broadcast(&vos->vos_sock_cv);
+	return (0);
 }
 
 static int
@@ -418,40 +608,45 @@ agent_request_serial(vdev_object_store_t *vos, nvlist_t *nv, char *tag,
     vos_serial_types_t wait_type)
 {
 	ASSERT(!vos->vos_serial_done[wait_type]);
-	return (agent_request(vos, nv, tag));
+	return (agent_request_nv(vos, nv, tag));
 }
 
 /*
  * Send request to agent; nvlist may be modified.
  */
-static void
-agent_request_zio(vdev_object_store_t *vos, zio_t *zio, nvlist_t *nv)
+static int
+agent_request_zio(vdev_object_store_t *vos, zio_t *zio)
 {
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
-	vdev_t *vd = vos->vos_vdev;
-	vdev_object_store_request_t *vosr = zio->io_vsd;
-	vdev_queue_t *vq = &vd->vdev_queue;
 	uint64_t blockid = zio->io_offset >> SPA_MINBLOCKSHIFT;
 
-	mutex_enter(&vq->vq_lock);
-	vdev_queue_pending_add(vq, zio);
-	mutex_exit(&vq->vq_lock);
-
-	fnvlist_add_uint64(nv, AGENT_REQUEST_ID, blockid);
-	fnvlist_add_uint64(nv, AGENT_TOKEN, (uint64_t)zio);
-	vosr->vosr_req = blockid;
-	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
-		zfs_dbgmsg("agent_request_zio(blockid=%llu)",
-		    (u_longlong_t)blockid);
+	int err = 0;
+	if (zio->io_type == ZIO_TYPE_WRITE) {
+		write_block_request_t req = {
+			.block = blockid,
+			.token = (uintptr_t)zio,
+		};
+		void *buf = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
+		err = agent_request_write(vos, &req, buf, zio->io_size);
+		abd_return_buf(zio->io_abd, buf, zio->io_size);
+	} else if (zio->io_type == ZIO_TYPE_READ) {
+		read_block_request_t req = {
+			.block = blockid,
+			.token = (uintptr_t)zio,
+			.heal = ((zio->io_flags & ZIO_FLAG_IO_RETRY) ||
+			    (zio->io_flags & ZIO_FLAG_SCRUB)),
+			.size = zio->io_size,
+		};
+		err = agent_request_read(vos, &req);
+	} else {
+		ASSERT(!"invalid io_type");
 	}
-
-	agent_request(vos, nv, FTAG);
+	return (err);
 }
 
 static zio_t *
-agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid,
-    uintptr_t token)
+agent_complete_zio(vdev_object_store_t *vos, uintptr_t token)
 {
 	vdev_t *vd = vos->vos_vdev;
 	vdev_queue_t *vq = &vd->vdev_queue;
@@ -460,11 +655,8 @@ agent_complete_zio(vdev_object_store_t *vos, uint64_t blockid,
 	zio_t *zio = avl_find(&vq->vq_active_tree, (zio_t *)token, NULL);
 	VERIFY3P(zio, !=, NULL);
 	VERIFY3P(zio, ==, token);
-	VERIFY3U(zio->io_offset >> SPA_MINBLOCKSHIFT, ==, blockid);
 
 	vdev_queue_pending_remove(vq, zio);
-	vdev_object_store_request_t *vosr = zio->io_vsd;
-	VERIFY3U(vosr->vosr_req, ==, blockid);
 	mutex_exit(&vq->vq_lock);
 
 	return (zio);
@@ -497,54 +689,15 @@ agent_serial_done(vdev_object_store_t *vos, vos_serial_types_t wait_type)
 	mutex_exit(&vos->vos_outstanding_lock);
 }
 
-static nvlist_t *
-agent_io_block_alloc(zio_t *zio)
-{
-	uint64_t blockid = zio->io_offset >> SPA_MINBLOCKSHIFT;
-	nvlist_t *nv = fnvlist_alloc();
-
-	if (zio->io_type == ZIO_TYPE_WRITE) {
-		fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_WRITE_BLOCK);
-		void *buf = abd_borrow_buf_copy(zio->io_abd, zio->io_size);
-		fnvlist_add_uint8_array(nv, AGENT_DATA, buf, zio->io_size);
-		abd_return_buf(zio->io_abd, buf, zio->io_size);
-	} else {
-		ASSERT3U(zio->io_type, ==, ZIO_TYPE_READ);
-		fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_READ_BLOCK);
-	}
-	fnvlist_add_uint64(nv, AGENT_SIZE, zio->io_size);
-	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
-
-	if ((zio->io_flags & ZIO_FLAG_IO_RETRY) ||
-	    (zio->io_flags & ZIO_FLAG_SCRUB)) {
-		fnvlist_add_boolean_value(nv, AGENT_HEAL, B_TRUE);
-	}
-
-	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
-		zfs_dbgmsg("agent_io_block_alloc(guid=%llu blkid=%llu "
-		    "len=%llu) %s",
-		    (u_longlong_t)spa_guid(zio->io_spa), (u_longlong_t)blockid,
-		    (u_longlong_t)zio->io_size,
-		    zio->io_type == ZIO_TYPE_WRITE ? "WRITE" : "READ");
-	}
-	return (nv);
-}
-
-static inline void
-agent_io_block_free(nvlist_t *nv)
-{
-	fnvlist_free(nv);
-}
-
 static int
 agent_free_blocks_impl(vdev_object_store_t *vos,
     uint64_t *blkids, uint32_t *sizes, int num)
 {
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCKS);
-	fnvlist_add_uint64_array(nv, AGENT_BLKID, blkids, num);
+	fnvlist_add_uint64_array(nv, AGENT_BLOCK, blkids, num);
 	fnvlist_add_uint32_array(nv, AGENT_SIZE, sizes, num);
-	int err = agent_request(vos, nv, FTAG);
+	int err = agent_request_nv(vos, nv, FTAG);
 	fnvlist_free(nv);
 	if (err == 0) {
 		zfs_dbgmsg("agent_free_blocks freed %d blocks", num);
@@ -716,7 +869,7 @@ agent_begin_txg(vdev_object_store_t *vos, uint64_t txg)
 	zfs_dbgmsg("agent_begin_txg(%llu)",
 	    (u_longlong_t)txg);
 
-	agent_request(vos, nv, FTAG);
+	agent_request_nv(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
 
@@ -730,7 +883,7 @@ agent_resume_complete(vdev_object_store_t *vos)
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_RESUME_COMPLETE);
 
 	zfs_dbgmsg("agent_resume_complete()");
-	agent_request(vos, nv, FTAG);
+	agent_request_nv(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
 
@@ -769,10 +922,10 @@ agent_flush_writes(vdev_object_store_t *vos, uint64_t blockid)
 
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FLUSH_WRITES);
-	fnvlist_add_uint64(nv, AGENT_BLKID, blockid);
+	fnvlist_add_uint64(nv, AGENT_BLOCK, blockid);
 	zfs_dbgmsg("agent_flush: blockid %llu", (u_longlong_t)blockid);
 
-	agent_request(vos, nv, FTAG);
+	agent_request_nv(vos, nv, FTAG);
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(nv);
 }
@@ -819,7 +972,7 @@ object_store_restart_agent(vdev_t *vd)
 	 * ourself.  Or change the agent code to actually exit.
 	 */
 	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_EXIT);
-	agent_request(vos, nv, FTAG);
+	agent_request_nv(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
 
@@ -906,8 +1059,6 @@ agent_resume_set_state(vdev_object_store_t *vos, agent_resume_state_t state)
 static int
 agent_resume_reissue(vdev_object_store_t *vos, vdev_t *vd)
 {
-	int ret;
-
 	agent_resume_set_state(vos, VOS_RESUME_REISSUE);
 
 	mutex_enter(&vos->vos_sock_lock);
@@ -921,9 +1072,7 @@ agent_resume_reissue(vdev_object_store_t *vos, vdev_t *vd)
 
 	for (zio_t *zio = avl_first(&vq->vq_active_tree); zio != NULL;
 	    zio = AVL_NEXT(&vq->vq_active_tree, zio)) {
-		uint64_t req = zio->io_offset >> SPA_MINBLOCKSHIFT;
-		vdev_object_store_request_t *vosr = zio->io_vsd;
-		VERIFY3U(vosr->vosr_req, ==, req);
+		uint64_t blockid = zio->io_offset >> SPA_MINBLOCKSHIFT;
 
 		/*
 		 * If we're at END state then we shouldn't have
@@ -933,23 +1082,17 @@ agent_resume_reissue(vdev_object_store_t *vos, vdev_t *vd)
 			VERIFY3U(zio->io_type, !=, ZIO_TYPE_WRITE);
 		}
 
-		nvlist_t *nv = agent_io_block_alloc(zio);
-		fnvlist_add_uint64(nv, AGENT_REQUEST_ID, req);
-		fnvlist_add_uint64(nv, AGENT_TOKEN, (uint64_t)zio);
-		/* tag this I/O for possibe agent maybe_die_with() candidate */
-		if (zio->io_type == ZIO_TYPE_WRITE)
-			fnvlist_add_boolean(nv, AGENT_REISSUE);
-		zfs_dbgmsg("ZIO REISSUE (%px) req %llu",
-		    zio, (u_longlong_t)req);
-		if ((ret = agent_request(vos, nv, FTAG)) != 0) {
+		zfs_dbgmsg("ZIO REISSUE (%px) blockid %llu",
+		    zio, (u_longlong_t)blockid);
+
+		int ret = agent_request_zio(vos, zio);
+		if (ret != 0) {
 			zfs_dbgmsg("agent_resume failed: %d", ret);
-			agent_io_block_free(nv);
 			mutex_exit(&vq->vq_lock);
 			mutex_exit(&vos->vos_sock_lock);
 			agent_resume_set_state(vos, VOS_RESUME_FAILED);
 			return (-1);
 		}
-		agent_io_block_free(nv);
 	}
 	mutex_exit(&vq->vq_lock);
 
@@ -968,7 +1111,7 @@ agent_resume_reissue(vdev_object_store_t *vos, vdev_t *vd)
 		zfs_dbgmsg("reissue ovdev_object_store_stats_generate, owner "
 		    "0x%llx", (u_longlong_t)caller->oss_owner);
 
-		agent_request(vos, request, FTAG);
+		agent_request_nv(vos, request, FTAG);
 		fnvlist_free(request);
 	}
 	mutex_exit(&vos->vos_stats_lock);
@@ -1027,6 +1170,10 @@ agent_resume(void *arg)
 	while (!vos->vos_agent_thread_exit) {
 		/* synchronize with main agent thread */
 		mutex_enter(&vos->vos_resume_lock);
+
+		vos->vos_resume_state = VOS_RESUME_STARTING;
+		cv_signal(&vos->vos_resume_cv);
+
 		while (vos->vos_resume_state != VOS_RESUME_START) {
 			cv_wait(&vos->vos_resume_cv, &vos->vos_resume_lock);
 		}
@@ -1286,7 +1433,7 @@ vdev_object_store_stats_generate(vdev_t *vd, nvlist_t *nv)
 		    (u_longlong_t)spa_guid(vd->vdev_spa));
 	}
 
-	agent_request(vos, request, FTAG);
+	agent_request_nv(vos, request, FTAG);
 	mutex_exit(&vos->vos_sock_lock);
 	fnvlist_free(request);
 
@@ -1317,91 +1464,15 @@ update_features(spa_t *spa, nvlist_t *nv)
 	}
 }
 
-static int
-agent_read_all(vdev_object_store_t *vos, void *buf, size_t len)
+static void
+agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 {
-	size_t recvd_total = 0;
-	while (recvd_total < len) {
-		struct msghdr msg = {};
-		kvec_t iov = {};
-
-		iov.iov_base = buf + recvd_total;
-		iov.iov_len = len - recvd_total;
-
-		mutex_enter(&vos->vos_lock);
-		if (vos->vos_agent_thread_exit ||
-		    vos->vos_sock == INVALID_SOCKET) {
-			zfs_dbgmsg("(%px) agent_read_all shutting down",
-			    curthread);
-			mutex_exit(&vos->vos_lock);
-			return (SET_ERROR(ENOTCONN));
-		}
-
-		mutex_exit(&vos->vos_lock);
-
-		size_t recvd = ksock_receive(vos->vos_sock,
-		    &msg, &iov, 1, len - recvd_total, 0);
-		if (recvd > 0) {
-			recvd_total += recvd;
-			if (recvd_total < len &&
-			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
-				zfs_dbgmsg("incomplete recvmsg but trying for "
-				    "more len=%d recvd=%d recvd_total=%d",
-				    (int)len,
-				    (int)recvd,
-				    (int)recvd_total);
-			}
-		} else {
-			zfs_dbgmsg("got wrong length from agent socket: "
-			    "for total size %d, already received %d, "
-			    "expected up to %d got %d",
-			    (int)len,
-			    (int)recvd_total,
-			    (int)(len - recvd_total),
-			    (int)recvd);
-			/* XXX - Do we need to check for errors too? */
-			if (recvd == 0)
-				return (SET_ERROR(EAGAIN));
-		}
-	}
-	return (0);
-}
-
-static int
-agent_reader(void *arg)
-{
-	vdev_object_store_t *vos = arg;
-	uint64_t nvlist_len = 0;
 	char *cause = NULL;
-	int err = agent_read_all(vos, &nvlist_len, sizeof (nvlist_len));
-	if (err != 0) {
-		zfs_dbgmsg("agent_reader(%px) got err %d", curthread, err);
-		return (err);
-	}
-
-	void *buf = vmem_alloc(nvlist_len, KM_SLEEP);
-	err = agent_read_all(vos, buf, nvlist_len);
-	if (err != 0) {
-		zfs_dbgmsg("2 agent_reader(%px) got err %d", curthread, err);
-		vmem_free(buf, nvlist_len);
-		return (err);
-	}
-
-	nvlist_t *nv;
-	err = nvlist_unpack(buf, nvlist_len, &nv, KM_SLEEP);
-	vmem_free(buf, nvlist_len);
-	if (err != 0) {
-		zfs_dbgmsg("got error %d from nvlist_unpack(len=%d)",
-		    err, (int)nvlist_len);
-		return (EAGAIN);
-	}
-
 	const char *type = fnvlist_lookup_string(nv, AGENT_TYPE);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("got response from agent type=%s", type);
 	}
 	vos->vos_result = 0;
-	// XXX debug message the nvlist
 	if (strcmp(type, AGENT_TYPE_CREATE_POOL_DONE) == 0) {
 		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
 			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
@@ -1423,10 +1494,6 @@ agent_reader(void *arg)
 		    fnvlist_lookup_uint64(nv, "pending_frees_bytes");
 		vos->vos_stats.voss_objects_count =
 		    fnvlist_lookup_uint64(nv, "objects_count");
-		/*
-		 * vos->vos_vdev->vdev_stat.vs_alloc =
-		 *  vos->vos_stats.voss_blocks_bytes;
-		 */
 		mutex_exit(&vos->vos_stats_lock);
 
 		metaslab_space_update(vos->vos_vdev,
@@ -1514,37 +1581,6 @@ agent_reader(void *arg)
 		}
 		vos->vos_open_completed = B_TRUE;
 		agent_serial_done(vos, VOS_SERIAL_OPEN_POOL);
-	} else if (strcmp(type, AGENT_TYPE_READ_DONE) == 0) {
-		uint64_t req = fnvlist_lookup_uint64(nv,
-		    AGENT_REQUEST_ID);
-		uintptr_t token = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
-		uint_t len;
-		void *data = fnvlist_lookup_uint8_array(nv,
-		    AGENT_DATA, &len);
-		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
-			zfs_dbgmsg("got read done req=%llu datalen=%u, "
-			    "token %px",
-			    (u_longlong_t)req, len, (zio_t *)token);
-		}
-		zio_t *zio = agent_complete_zio(vos, req, token);
-		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
-		    zio->io_offset >> SPA_MINBLOCKSHIFT);
-		VERIFY3U(len, ==, zio->io_size);
-		VERIFY3U(len, ==, abd_get_size(zio->io_abd));
-		abd_copy_from_buf(zio->io_abd, data, len);
-		zio_delay_interrupt(zio);
-	} else if (strcmp(type, AGENT_TYPE_WRITE_DONE) == 0) {
-		uint64_t req = fnvlist_lookup_uint64(nv,
-		    AGENT_REQUEST_ID);
-		uintptr_t token = fnvlist_lookup_uint64(nv, AGENT_TOKEN);
-		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
-			zfs_dbgmsg("got write done req=%llu, token %px",
-			    (u_longlong_t)req, (zio_t *)token);
-		}
-		zio_t *zio = agent_complete_zio(vos, req, token);
-		VERIFY3U(fnvlist_lookup_uint64(nv, AGENT_BLKID), ==,
-		    zio->io_offset >> SPA_MINBLOCKSHIFT);
-		zio_delay_interrupt(zio);
 	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL_DONE) == 0) {
 		zfs_dbgmsg("got %s", type);
 		agent_serial_done(vos, VOS_SERIAL_CLOSE_POOL);
@@ -1581,10 +1617,117 @@ agent_reader(void *arg)
 			    "owner 0x%llx", (longlong_t)search.oss_owner);
 		}
 	} else {
-		zfs_dbgmsg("unrecognized response type!");
+		zfs_dbgmsg("unrecognized response type '%s'!", type);
+	}
+}
+
+static int
+agent_reader(void *arg)
+{
+	vdev_object_store_t *vos = arg;
+
+	message_header_t header;
+	int err = agent_read_all(vos, &header, sizeof (header));
+	if (err != 0) {
+		zfs_dbgmsg("agent_reader(%px) got err %d", curthread, err);
+		return (err);
 	}
 
-	fnvlist_free(nv);
+	union {
+		read_block_response_t read_block;
+		write_block_response_t write_block;
+	} struct_buf;
+	switch (header.message_type) {
+	case MESSAGE_NVLIST:
+		VERIFY0(header.struct_len);
+		break;
+	case MESSAGE_READ_BLOCK:
+		VERIFY3U(header.struct_len, ==,
+		    sizeof (struct_buf.read_block));
+		err = agent_read_all(vos,
+		    &struct_buf.read_block, sizeof (struct_buf.read_block));
+		break;
+	case MESSAGE_WRITE_BLOCK:
+		VERIFY3U(header.struct_len, ==,
+		    sizeof (struct_buf.write_block));
+		err = agent_read_all(vos,
+		    &struct_buf.write_block, sizeof (struct_buf.write_block));
+		break;
+	default:
+		panic("invalid message_type %x", header.message_type);
+	}
+	if (err != 0) {
+		zfs_dbgmsg("2 agent_reader(%px) got err %d",
+		    curthread, err);
+		return (err);
+	}
+
+	void *payload_buf = NULL;
+	if (header.payload_len != 0) {
+		VERIFY3U(header.payload_len, <=, vdev_object_store_max_payload);
+		payload_buf = vmem_alloc(header.payload_len, KM_SLEEP);
+		err = agent_read_all(vos, payload_buf, header.payload_len);
+		if (err != 0) {
+			zfs_dbgmsg("2 agent_reader(%px) got err %d",
+			    curthread, err);
+			vmem_free(payload_buf, header.payload_len);
+			return (err);
+		}
+	}
+
+	switch (header.message_type) {
+	case MESSAGE_NVLIST: {
+		nvlist_t *nv;
+		err = nvlist_unpack(payload_buf, header.payload_len,
+		    &nv, KM_SLEEP);
+		vmem_free(payload_buf, header.payload_len);
+		if (err != 0) {
+			zfs_dbgmsg("got error %d from nvlist_unpack(len=%d)",
+			    err, (int)header.payload_len);
+			return (EAGAIN);
+		}
+		agent_nvlist_response(vos, nv);
+		fnvlist_free(nv);
+		break;
+	}
+	case MESSAGE_READ_BLOCK: {
+		read_block_response_t *response = &struct_buf.read_block;
+		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+			zfs_dbgmsg("got read done blockid=%llu datalen=%u, "
+			    "token %px",
+			    (u_longlong_t)response->block,
+			    header.payload_len,
+			    (zio_t *)response->token);
+		}
+		zio_t *zio = agent_complete_zio(vos, response->token);
+		VERIFY3U(response->block, ==,
+		    zio->io_offset >> SPA_MINBLOCKSHIFT);
+		VERIFY3U(header.payload_len, ==, zio->io_size);
+		VERIFY3U(header.payload_len, ==, abd_get_size(zio->io_abd));
+		abd_copy_from_buf(zio->io_abd, payload_buf, header.payload_len);
+		vmem_free(payload_buf, header.payload_len);
+		zio_delay_interrupt(zio);
+		break;
+	}
+	case MESSAGE_WRITE_BLOCK: {
+		write_block_response_t *response = &struct_buf.write_block;
+		if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
+			zfs_dbgmsg("got write done blockid=%llu, token %px",
+			    (u_longlong_t)response->block,
+			    (zio_t *)response->token);
+		}
+		VERIFY0(header.payload_len);
+		VERIFY3P(payload_buf, ==, NULL);
+		zio_t *zio = agent_complete_zio(vos, response->token);
+		VERIFY3U(response->block, ==,
+		    zio->io_offset >> SPA_MINBLOCKSHIFT);
+		zio_delay_interrupt(zio);
+		break;
+	}
+	default:
+		panic("invalid message_type %x", header.message_type);
+	}
+
 	return (0);
 }
 
@@ -1685,14 +1828,25 @@ vdev_agent_thread(void *arg)
 				vos->vos_result = SET_ERROR(ERESTART);
 				agent_serial_done(vos, VOS_SERIAL_OPEN_POOL);
 				/* resume task waits for VOS_RESUME_START */
+
 			}
 		} else {
 			VERIFY3U(taskq_dispatch(resume_taskq, agent_resume,
 			    vd, TQ_SLEEP), !=, TASKQID_INVALID);
 		}
+
+		/*
+		 * We need to synchronize with the agent to make sure
+		 * that it's ready to receive our start signal. If the
+		 * agent_resume taskq is not ready then we wait till
+		 * we get signaled.
+		 */
+		while (vos->vos_resume_state != VOS_RESUME_STARTING) {
+			cv_wait(&vos->vos_resume_cv, &vos->vos_resume_lock);
+		}
 		/* Signal resume task to start (avoids race for open state) */
 		vos->vos_resume_state = VOS_RESUME_START;
-		cv_broadcast(&vos->vos_resume_cv);
+		cv_signal(&vos->vos_resume_cv);
 		mutex_exit(&vos->vos_resume_lock);
 	}
 
@@ -1730,13 +1884,11 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	vos->vos_sock = INVALID_SOCKET;
 	vos->vos_vdev = NULL;
 	vos->vos_send_txg_selector = VOS_TXG_NONE;
-	vos->vos_max_offset = 0;
 	mutex_init(&vos->vos_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_stats_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_sock_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_resume_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_outstanding_lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&vos->vos_max_offset_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&vos->vos_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_sock_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_resume_cv, NULL, CV_DEFAULT, NULL);
@@ -1782,7 +1934,6 @@ vdev_object_store_fini(vdev_t *vd)
 	mutex_destroy(&vos->vos_sock_lock);
 	mutex_destroy(&vos->vos_resume_lock);
 	mutex_destroy(&vos->vos_outstanding_lock);
-	mutex_destroy(&vos->vos_max_offset_lock);
 	cv_destroy(&vos->vos_cv);
 	cv_destroy(&vos->vos_sock_cv);
 	cv_destroy(&vos->vos_resume_cv);
@@ -1978,11 +2129,6 @@ vdev_object_store_io_start(zio_t *zio)
 		return;
 	}
 
-	zio->io_vsd = vdev_object_store_request_alloc();
-	zio->io_vsd_ops = &vdev_object_store_vsd_ops;
-
-	nvlist_t *nv = agent_io_block_alloc(zio);
-
 	/*
 	 * We need to ensure that we only issue a request when the
 	 * socket is ready. Otherwise, we block here since the agent
@@ -1992,10 +2138,14 @@ vdev_object_store_io_start(zio_t *zio)
 	zfs_object_store_wait(vos, VOS_SOCK_READY);
 
 	zio->io_target_timestamp = zio_handle_io_delay(zio);
-	agent_request_zio(vos, zio, nv);
-	mutex_exit(&vos->vos_sock_lock);
 
-	agent_io_block_free(nv);
+	vdev_queue_t *vq = &vd->vdev_queue;
+	mutex_enter(&vq->vq_lock);
+	vdev_queue_pending_add(vq, zio);
+	mutex_exit(&vq->vq_lock);
+
+	agent_request_zio(vos, zio);
+	mutex_exit(&vos->vos_sock_lock);
 }
 
 /* ARGSUSED */
@@ -2056,103 +2206,6 @@ vdev_object_store_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
 	agent_wait_serial(vos, VOS_SERIAL_ENABLE_FEATURE);
 }
 
-void
-vdev_object_store_set_max_offset(vdev_t *vd, uint64_t offset)
-{
-	ASSERT3P(vd, !=, NULL);
-	ASSERT3P(vd, ==, vd->vdev_top);
-	ASSERT(vd->vdev_ops->vdev_op_leaf);
-	vdev_object_store_t *vos = vd->vdev_tsd;
-	mutex_enter(&vos->vos_max_offset_lock);
-	vos->vos_max_offset = MAX(vos->vos_max_offset, offset);
-	mutex_exit(&vos->vos_max_offset_lock);
-}
-
-/*
- * This function implements a barrier for writes to the agent.
- * Normally this is provided by grabbing the SCL_ZIO lock as writer
- * in zio_vdev_io_start. For object store pools, we guarantee the
- * agent that writes that are issued will create a contiguous range
- * of block ids. The writes can be received in any order with the
- * provision that any gaps will be filled in eventually. Under normal
- * circumstances the zio pipeline will notify the agent periodically
- * to flush a range of blocks that have been issued. However, when
- * another thread is trying to lock the pipeline we need to stop issuing
- * I/Os to the agent but we still need to honor our gurantee to the
- * agent and fill any gaps in the block ids which may exist.
- * When the barrier is invoked (i.e. another thread is requesting
- * the SCL_ZIO lock as writer), we will only allow additional
- * SCL_ZIO read lock holders which will fill the gap of issued writes
- * to the agent. All other zios will call spa_config_enter() and
- * sleep until the SCL_ZIO write lock is released.
- */
-void
-vdev_object_store_config_lock(zio_t *zio)
-{
-	spa_t *spa = zio->io_spa;
-	vdev_t *vd = vdev_find_leaf(spa->spa_root_vdev,
-	    &vdev_object_store_ops);
-	ASSERT(vdev_is_object_based(vd));
-	ASSERT3P(vd, !=, NULL);
-	ASSERT3P(vd, ==, vd->vdev_top);
-	ASSERT(vd->vdev_ops->vdev_op_leaf);
-	ASSERT3U(zio->io_type, ==, ZIO_TYPE_WRITE);
-
-	/*
-	 * Object based pools may need to continue to push I/Os even
-	 * if there is writer waiting for the SCL_ZIO lock because
-	 * we need to ensure that the agent receives all pending
-	 * writes up to a specific allocated block.
-	 *
-	 * If we're unable to obtain a READER lock, then we know that
-	 * there must be a writer waiting. Check the max offset for our
-	 * zio to see if it's in the range that is allowed to proceed.
-	 * If so, then we immediately take the SCL_ZIO reader lock,
-	 * giving ourself priority over the waiting writer.
-	 */
-	if (!spa_config_tryenter(spa, SCL_ZIO, zio, RW_READER)) {
-		vdev_object_store_t *vos = vd->vdev_tsd;
-		mutex_enter(&vos->vos_max_offset_lock);
-		boolean_t io_issue =
-		    zio->io_max_offset <= vos->vos_max_offset;
-
-		/*
-		 * We are locking the zio pipeline because there
-		 * is a thread that is wanting the SCL_ZIO lock as writer.
-		 * We need to notify the agent to flush out any
-		 * blocks which have already been issued.
-		 */
-		zfs_dbgmsg("vdev_object_store_config_lock send flush "
-		    "for: %llu", (u_longlong_t)vos->vos_max_offset);
-		agent_flush_writes(vos,
-		    vos->vos_max_offset >> SPA_MINBLOCKSHIFT);
-		mutex_exit(&vos->vos_max_offset_lock);
-
-		/*
-		 * Writes which are allowed to be issued will
-		 * grab the SCL_ZIO lock as reader immediately
-		 * and proceed.
-		 */
-		if (io_issue) {
-			mutex_exit(&vos->vos_max_offset_lock);
-			zfs_dbgmsg("ZIO %px allowed: max %llu",
-			    zio, (u_longlong_t)zio->io_max_offset);
-			spa_config_enter_read_priority(spa, SCL_ZIO, zio);
-		} else {
-			spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
-		}
-	}
-
-	/*
-	 * Track the maximum offset for any writes which will be issued
-	 * to the agent. We use this value to determine which I/Os
-	 * are allowed to proceed even if another thread is trying to
-	 * get the SCL_ZIO lock as writer.
-	 */
-	vdev_object_store_set_max_offset(vd, zio->io_max_offset);
-}
-
-
 vdev_ops_t vdev_object_store_ops = {
 	.vdev_op_init = vdev_object_store_init,
 	.vdev_op_fini = vdev_object_store_fini,
@@ -2185,3 +2238,6 @@ ZFS_MODULE_PARAM(zfs_vdev_object_store, vdev_object_store_,
 ZFS_MODULE_PARAM(zfs_vdev_object_store, vdev_object_store_,
     physical_ashift, ULONG, ZMOD_RW,
 	"Physical ashift for object store based devices");
+ZFS_MODULE_PARAM(zfs_vdev_object_store, vdev_object_store_,
+    max_payload, ULONG, ZMOD_RW,
+	"maximum message payload in bytes");

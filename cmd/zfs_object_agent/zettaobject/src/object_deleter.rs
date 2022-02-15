@@ -2,6 +2,7 @@ use crate::base_types::ObjectId;
 use crate::data_object::DataObject;
 use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
 use crate::ObjectAccess;
+use derivative::Derivative;
 use futures::stream;
 use log::info;
 use serde::Deserialize;
@@ -21,8 +22,9 @@ pub struct ObjectDeleter {
     tx: mpsc::UnboundedSender<Vec<ObjectId>>,
 }
 
-#[derive(Default, Debug, Serialize, Deserialize, Clone)]
-pub struct ObjectDeleterPhys(Vec<ObjectId>);
+#[derive(Default, Derivative, Serialize, Deserialize, Clone)]
+#[derivative(Debug)]
+pub struct ObjectDeleterPhys(#[derivative(Debug(format_with = "util::tersevec"))] Vec<ObjectId>);
 
 impl ObjectDeleter {
     pub fn new(object_access: Arc<ObjectAccess>, guid: PoolGuid) -> ObjectDeleter {

@@ -12,7 +12,7 @@
 #
 
 #
-# Copyright (c) 2015, 2021 by Delphix. All rights reserved.
+# Copyright (c) 2015, 2022 by Delphix. All rights reserved.
 #
 
 . $STF_SUITE/include/libtest.shlib
@@ -57,30 +57,6 @@ export PERF_SYNC_TYPES=${PERF_SYNC_TYPES:-'1'}
 # force the use of only one file system when testing over NFS.
 [[ $NFS -eq 1 ]] && PERF_NTHREADS_PER_FS='0'
 
-lun_list=$(pool_to_lun_list $PERFPOOL)
-log_note "Collecting backend IO stats with lun list $lun_list"
-if is_linux; then
-	export collect_scripts=(
-	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
-	    "vmstat -t 1" "vmstat"
-	    "mpstat -P ALL 1" "mpstat"
-	    "iostat -tdxyz 1" "iostat"
-	    "arcstat 1" "arcstat"
-	    "dstat -at --nocolor 1" "dstat"
-	    "$PERF_RECORD_CMD" "perf"
-	)
-else
-	export collect_scripts=(
-	    "kstat zfs:0 1" "kstat"
-	    "vmstat -T d 1" "vmstat"
-	    "mpstat -T d 1" "mpstat"
-	    "iostat -T d -xcnz 1" "iostat"
-	    "dtrace -Cs $PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
-	    "dtrace  -s $PERF_SCRIPTS/zil.d $PERFPOOL 1" "zil"
-	    "dtrace  -s $PERF_SCRIPTS/profile.d" "profile"
-	    "dtrace  -s $PERF_SCRIPTS/offcpu-profile.d" "offcpu-profile"
-	)
-fi
 log_note \
     "ZIL specific random write workload with settings: $(print_perf_settings)"
 do_fio_run random_writes.fio true false

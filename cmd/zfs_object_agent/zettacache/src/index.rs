@@ -4,19 +4,32 @@ use crate::block_access::*;
 use crate::block_based_log::*;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
-use derivative::Derivative;
 use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
 use more_asserts::*;
+use safer_ffi::prelude::*;
+use serde::de::Error;
+use serde::de::Visitor;
 use serde::{Deserialize, Serialize};
 use std::cmp::max;
+use std::mem::size_of;
+use std::num::NonZeroU64;
 use std::sync::Arc;
+use util::message::slice_to_struct;
+use util::message::struct_to_slice;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+#[repr(packed)]
 pub struct IndexKey {
-    pub guid: PoolGuid,
-    pub block: BlockId,
+    id: PoolId,
+    block: BlockId,
+}
+
+impl IndexKey {
+    pub fn new(id: PoolId, block: BlockId) -> Self {
+        Self { id, block }
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
@@ -57,12 +70,99 @@ impl IndexValue {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub struct IndexEntry {
     pub key: IndexKey,
     pub value: IndexValue,
 }
 impl BlockBasedLogEntry for IndexEntry {}
+impl From<&IndexEntryPhys> for IndexEntry {
+    fn from(phys: &IndexEntryPhys) -> Self {
+        IndexEntry {
+            key: IndexKey {
+                id: PoolId(phys.pool_id),
+                block: BlockId(phys.block),
+            },
+            value: IndexValue {
+                location: NonZeroU64::new(phys.location).map(DiskLocation::from_raw),
+                sectors: phys.sectors,
+                atime: Atime(phys.atime),
+            },
+        }
+    }
+}
+impl Serialize for IndexEntry {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        let phys: IndexEntryPhys = self.into();
+        if cfg!(target_endian = "little") {
+            serializer.serialize_bytes(struct_to_slice(&phys))
+        } else {
+            panic!("little endian machine required");
+        }
+    }
+}
+impl<'de> Deserialize<'de> for IndexEntry {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let visitor = IndexEntryVisitor;
+        deserializer.deserialize_bytes(visitor)
+    }
+}
+struct IndexEntryVisitor;
+impl<'de> Visitor<'de> for IndexEntryVisitor {
+    type Value = IndexEntry;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        write!(
+            formatter,
+            "a byte array of length {}",
+            size_of::<IndexEntryPhys>()
+        )
+    }
+    fn visit_bytes<E: Error>(self, v: &[u8]) -> Result<Self::Value, E> {
+        if cfg!(target_endian = "little") {
+            // slice_to_struct() copies the data, but we should be able to just get
+            // a pointer, because it's packed (alignment unconstrained).  However,
+            // this is not significant to performance.
+            let phys: IndexEntryPhys = slice_to_struct(v);
+            Ok((&phys).into())
+        } else {
+            panic!("little endian machine required");
+        }
+    }
+}
+
+#[derive_ReprC]
+#[repr(C)]
+#[repr(packed)]
+struct IndexEntryPhys {
+    pool_id: u8,
+    block: u64,
+    location: u64, // if zero then None
+    sectors: u16,
+    atime: u32,
+}
+impl From<&IndexEntry> for IndexEntryPhys {
+    fn from(entry: &IndexEntry) -> Self {
+        IndexEntryPhys {
+            pool_id: entry.key.id.0,
+            block: entry.key.block.0,
+            location: entry
+                .value
+                .location
+                .as_ref()
+                .map(|l| l.to_raw().get())
+                .unwrap_or_default(),
+            sectors: entry.value.sectors,
+            atime: entry.value.atime.0,
+        }
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct IndexRunPhys {
@@ -90,18 +190,18 @@ impl IndexRunPhys {
         self.log.claim(builder);
     }
 
-    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = IndexEntry> {
-        self.log.iter_entries(block_access)
+    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = IndexEntry> {
+        self.log.iter(block_access)
     }
 
-    pub fn iter_log_chunks(
+    pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
     ) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
         self.log.iter_chunks(block_access)
     }
 
-    pub fn iter_log_summary(
+    pub fn iter_summary_chunks(
         &self,
         block_access: Arc<BlockAccess>,
     ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<IndexEntry>>> {
@@ -129,7 +229,7 @@ impl IndexRunPhys {
             self.atime_histogram_phys.first_ghost(),
             self.atime_histogram_phys.first_live(),
         );
-        self.iter_entries(block_access)
+        self.iter(block_access)
             .for_each(|entry| {
                 histogram.insert(entry.value);
                 future::ready(())
@@ -140,14 +240,10 @@ impl IndexRunPhys {
     }
 }
 
-#[derive(Derivative)]
-#[derivative(Debug)]
 pub struct IndexRun {
     trim_key: Option<IndexKey>, // The key and all before it are logically removed from the index.
     last_key: Option<IndexKey>,
-    #[derivative(Debug = "ignore")]
     atime_histogram_phys: AtimeHistogramPhys,
-    #[derivative(Debug = "ignore")]
     log: SummarizedBlockBasedLog<IndexEntry>,
 }
 
@@ -208,15 +304,19 @@ impl IndexRun {
 
     pub fn update_last_key(&mut self, key: IndexKey) {
         if let Some(last_key) = self.last_key {
-            assert_gt!(key, last_key);
+            assert_ge!(key, last_key);
         }
         self.last_key = Some(key);
     }
 
-    pub fn append(&mut self, entry: IndexEntry) {
-        self.update_last_key(entry.key);
-        self.atime_histogram_phys.insert(entry.value);
-        self.log.append(entry);
+    pub fn append(&mut self, list: Vec<IndexEntry>) {
+        if let Some(last_entry) = list.last() {
+            self.update_last_key(last_entry.key);
+        }
+        for entry in &list {
+            self.atime_histogram_phys.insert(entry.value);
+        }
+        self.log.append(list);
     }
 
     pub fn clear(&mut self) {
@@ -250,8 +350,13 @@ impl IndexRun {
         self.log.num_bytes()
     }
 
+    #[allow(dead_code)]
     pub fn iter(&self) -> impl Stream<Item = IndexEntry> {
         self.log.iter()
+    }
+
+    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
+        self.log.iter_chunks()
     }
 
     pub fn trim_key(&self) -> Option<IndexKey> {

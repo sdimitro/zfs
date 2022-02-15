@@ -1,12 +1,13 @@
 use anyhow::{anyhow, Result};
 use log::*;
 use nvpair::{NvEncoding, NvList};
+use semver::Version;
 use std::thread::sleep;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use util::message::MessageHeader;
 use util::writeln_stderr;
-use util::From64;
 
 #[derive(Debug)]
 pub enum RemoteError {
@@ -57,8 +58,9 @@ impl RemoteChannel {
         let mut reconnect_retries = 0;
         loop {
             match UnixStream::connect(socket_path).await {
-                Ok(stream) => {
-                    info!("opened socket {}", socket_path);
+                Ok(mut stream) => {
+                    let version = RemoteChannel::agent_version(&mut stream).await?;
+                    info!("opened socket {}, {:?}", socket_path, version);
                     return Ok(stream);
                 }
                 Err(e) => {
@@ -80,6 +82,23 @@ impl RemoteChannel {
         }
     }
 
+    /// Establish protocol version with object agent.
+    /// Required after each open.
+    async fn agent_version(stream: &mut UnixStream) -> Result<Version> {
+        let mut vers_req_nvlist = NvList::new_unique_names();
+        vers_req_nvlist.insert("Type", "version")?;
+        vers_req_nvlist.insert("version", "^1")?;
+        Self::send(stream, vers_req_nvlist).await?;
+        let response = Self::receive(stream).await?;
+        assert!(response.lookup_string("Type")?.to_str() == Ok("version"));
+        let vers_nvl = response.lookup_nvlist("version")?;
+        Ok(Version::new(
+            vers_nvl.lookup_uint64("major")?,
+            vers_nvl.lookup_uint64("minor")?,
+            vers_nvl.lookup_uint64("patch")?,
+        ))
+    }
+
     /// Create a new RemoteChannel and establish a remote connection to the object agent.
     pub async fn new(need_priv: bool) -> Result<Self> {
         let socket_path = if need_priv {
@@ -87,7 +106,6 @@ impl RemoteChannel {
         } else {
             "/etc/zfs/zfs_public_socket".to_string()
         };
-
         let stream = RemoteChannel::open(&socket_path).await?;
 
         Ok(Self {
@@ -96,20 +114,21 @@ impl RemoteChannel {
         })
     }
 
-    async fn send(&mut self, message: NvList) -> Result<()> {
+    async fn send(stream: &mut UnixStream, message: NvList) -> Result<()> {
         // convert to packed nvlist and send...
         let buf = message.pack(NvEncoding::Native).unwrap();
-        let len64 = buf.len() as u64;
-        self.stream.write_u64_le(len64).await?;
-        self.stream.write_all(buf.as_slice()).await?;
+
+        MessageHeader::new_nvlist(buf.len()).write(stream).await?;
+        stream.write_all(&buf).await?;
         Ok(())
     }
 
-    async fn receive(&mut self) -> Result<NvList> {
+    async fn receive(stream: &mut UnixStream) -> Result<NvList> {
         // receive a packed nvlist and unpack it...
-        let len64 = self.stream.read_u64_le().await?;
-        let mut v: Vec<u8> = vec![0; usize::from64(len64)];
-        self.stream.read_exact(v.as_mut()).await?;
+        let header = MessageHeader::read(stream).await?;
+
+        let mut v: Vec<u8> = vec![0; header.payload_len as usize];
+        stream.read_exact(v.as_mut()).await?;
         Ok(NvList::try_unpack(v.as_ref()).unwrap())
     }
 
@@ -126,7 +145,7 @@ impl RemoteChannel {
             // send request, retrying as needed
             let mut nvlist = args.clone().unwrap_or_else(NvList::new_unique_names);
             nvlist.insert("Type", request).unwrap();
-            match self.send(nvlist).await {
+            match Self::send(&mut self.stream, nvlist).await {
                 Ok(_) => {}
                 Err(e) => {
                     // reopen the channel and resend the request
@@ -138,7 +157,7 @@ impl RemoteChannel {
             debug!("sent {} request, now waiting for response...", request);
 
             // receive response, retrying as needed
-            let response: NvList = match self.receive().await {
+            let response: NvList = match Self::receive(&mut self.stream).await {
                 Ok(response) => response,
                 Err(e) => {
                     // reopen the channel and resend the request

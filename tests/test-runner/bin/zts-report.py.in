@@ -148,6 +148,12 @@ na_reason = "Not applicable"
 object_store_skip = "Not applicable for object_store"
 
 #
+# Some tests are not applicable for block devices. Any tests which are skipped
+# for this reason will be suppressed in the final analysis output.
+#
+block_devices_skip = "Not applicable for block devices"
+
+#
 # Some test cases doesn't have all requirements to run on Github actions CI.
 #
 ci_reason = 'CI runner doesn\'t have all requirements'
@@ -343,6 +349,15 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'inuse/inuse_009_pos': ['SKIP', object_store_skip],
         'log_spacemap/log_spacemap_import_logs': ['SKIP', object_store_skip],
 
+    })
+else:
+    known.update({
+        'cli_root/zpool_destroy/zpool_destroy_object_store':
+            ['SKIP', block_devices_skip],
+        'cli_root/zpool_destroy/zpool_resume_destroy_object_store':
+            ['SKIP', block_devices_skip],
+        'cli_root/zpool_destroy/zpool_resume_destroy_on_import_object_store':
+            ['SKIP', block_devices_skip],
     })
 
 #

@@ -647,8 +647,6 @@ int vdev_checkpoint_sm_object(vdev_t *vd, uint64_t *sm_obj);
 void vdev_metaslab_group_create(vdev_t *vd);
 uberblock_t *vdev_object_store_get_uberblock(vdev_t *vd);
 nvlist_t *vdev_object_store_get_config(vdev_t *vd);
-void vdev_object_store_set_max_offset(vdev_t *vd, uint64_t offset);
-void vdev_object_store_config_lock(zio_t *zio);
 vdev_t *vdev_find_leaf(vdev_t *vd, vdev_ops_t *ops);
 
 extern void vdev_queue_pending_add(vdev_queue_t *vq, zio_t *zio);

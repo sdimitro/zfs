@@ -226,7 +226,7 @@ impl BlockAccess {
     /// DiskId's will probably not be sequential.  By using this accessor we
     /// need not assume anything about the values inside the DiskId's.
     pub fn disks(&self) -> impl Iterator<Item = DiskId> {
-        (0..u16::try_from(self.disks.len()).unwrap()).map(DiskId)
+        (0..self.disks.len()).map(DiskId::new)
     }
 
     // Gather a list of devices for zcache list_devices command.
@@ -243,7 +243,7 @@ impl BlockAccess {
     }
 
     fn disk(&self, disk: DiskId) -> &Disk {
-        &self.disks[disk.0 as usize]
+        &self.disks[disk.get()]
     }
 
     pub fn disk_size(&self, disk: DiskId) -> u64 {

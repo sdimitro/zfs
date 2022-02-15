@@ -114,7 +114,7 @@ impl PrimaryPhys {
             .enumerate()
             .filter_map(|(id, result)| match result {
                 Ok(_) => None,
-                Err(_) => Some(DiskId(id.try_into().unwrap())),
+                Err(_) => Some(DiskId::new(id)),
             })
             .collect::<Vec<_>>();
 
@@ -122,7 +122,7 @@ impl PrimaryPhys {
             // XXX proper error handling
             // XXX we should be able to reorder them?
             if let Ok(phys) = result {
-                assert_eq!(DiskId(id.try_into().unwrap()), phys.disk);
+                assert_eq!(DiskId::new(id), phys.disk);
                 assert_eq!(phys.guid, guid);
                 assert!(phys.primary.is_none() || phys.disk == primary_disk);
             }
@@ -232,7 +232,7 @@ impl PrimaryFeaturesPhys {
             // XXX proper error handling
             // XXX we should be able to reorder them?
             if let Ok(phys) = result {
-                assert_eq!(DiskId(id.try_into().unwrap()), phys.disk);
+                assert_eq!(DiskId::new(id), phys.disk);
                 assert_eq!(phys.guid, guid);
                 assert!(phys.primary.is_none() || phys.disk == primary_disk);
             }

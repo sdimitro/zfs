@@ -71,6 +71,7 @@ jobs:
         ZTS_REGION: us-west-2
         AWS_ACCESS_KEY_ID: minioadmin
         AWS_SECRET_ACCESS_KEY: minioadmin
+        AWS_EC2_METADATA_DISABLED: true
     - name: Prepare artifacts
       if: failure()
       run: |

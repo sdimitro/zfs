@@ -12,7 +12,7 @@
 #
 
 #
-# Copyright (c) 2016, 2021 by Delphix. All rights reserved.
+# Copyright (c) 2016, 2022 by Delphix. All rights reserved.
 #
 
 #
@@ -47,11 +47,7 @@ recreate_perf_pool
 populate_perf_filesystems
 
 # Ensure the working set can be cached in the dbuf cache.
-if use_object_store; then
-	export TOTAL_SIZE=$((128 * 1024 * 1024 * 1024))
-else
-	export TOTAL_SIZE=$(($(get_dbuf_cache_size) * 3 / 4))
-fi
+export TOTAL_SIZE=$(($(get_dbuf_cache_size) * 3 / 4))
 
 # Variables specific to this test for use by fio.
 export PERF_NTHREADS=${PERF_NTHREADS:-'64'}
@@ -67,30 +63,12 @@ export FILE_SIZE=$((TOTAL_SIZE / NUMJOBS))
 export DIRECTORY=$(get_directory)
 log_must fio $FIO_SCRIPTS/mkfiles.fio
 
-# Set up the scripts and output files that will log performance data.
-lun_list=$(pool_to_lun_list $PERFPOOL)
-log_note "Collecting backend IO stats with lun list $lun_list"
+# Add test specific data collection scripts to the defaults
 if is_linux; then
-	export collect_scripts=(
-	    "zpool iostat -lpvyL $PERFPOOL 1" "zpool.iostat"
+	PERF_COLLECT_SCRIPTS+=(
 	    "$PERF_SCRIPTS/prefetch_io.sh $PERFPOOL 1" "prefetch"
-	    "vmstat -t 1" "vmstat"
-	    "mpstat -P ALL 1" "mpstat"
-	    "iostat -tdxyz 1" "iostat"
-	    "arcstat 1" "arcstat"
-	    "dstat -at --nocolor 1" "dstat"
-	    "$PERF_RECORD_CMD" "perf"
 	)
-else
-	export collect_scripts=(
-	    "kstat zfs:0 1" "kstat"
-	    "vmstat -T d 1" "vmstat"
-	    "mpstat -T d 1" "mpstat"
-	    "iostat -T d -xcnz 1" "iostat"
-	    "dtrace -Cs $PERF_SCRIPTS/io.d $PERFPOOL $lun_list 1" "io"
-	    "dtrace -Cs $PERF_SCRIPTS/prefetch_io.d $PERFPOOL 1" "prefetch"
-	    "dtrace -s $PERF_SCRIPTS/profile.d" "profile"
-	)
+	export PERF_COLLECT_SCRIPTS
 fi
 
 log_note "Sequential cached reads with settings: $(print_perf_settings)"

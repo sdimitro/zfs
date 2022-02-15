@@ -3,6 +3,7 @@ use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::fmt::*;
+use std::num::NonZeroU64;
 use std::ops::Add;
 use std::ops::Sub;
 
@@ -21,6 +22,10 @@ impl Display for PoolGuid {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
+pub struct PoolId(pub u8);
+impl OnDisk for PoolId {}
+
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct BlockId(pub u64);
 impl OnDisk for BlockId {}
 impl Display for BlockId {
@@ -35,23 +40,50 @@ impl BlockId {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-pub struct DiskId(pub u16);
+pub struct DiskId(u16);
+impl DiskId {
+    /// Due to encoding in the DiskLocation, the maximum DiskId + 1 has to fit into 9 bits
+    pub const MAX_VALUE: usize = (1 << 9) - 2;
+    pub fn new(value: usize) -> Self {
+        assert_le!(value, Self::MAX_VALUE);
+        DiskId(u16::try_from(value).unwrap())
+    }
+    pub fn get(self) -> usize {
+        self.0 as usize
+    }
+}
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 #[repr(packed)]
-pub struct DiskLocation {
-    disk: DiskId,
-    offset: u64,
-}
+pub struct DiskLocation(NonZeroU64);
 impl DiskLocation {
+    /// The low 9 bits of the offset must be zero, and the DiskId + 1 fit in 9 bits
+    const BITS: usize = 9;
+    const MASK: u64 = (1 << Self::BITS) - 1;
     pub fn new(disk: DiskId, offset: u64) -> Self {
-        Self { disk, offset }
+        let disk_raw = u64::from(disk.0) + 1;
+        // Check that the high bits of disk_raw are not set, i.e. the maximum DiskId is (2^BITS) - 2
+        assert_eq!(disk_raw & Self::MASK, disk_raw);
+        // Check that the low bits of the offset are not set, i.e. it is aligned to 512 bytes
+        assert_eq!(offset & Self::MASK, 0);
+        // Note, we want the DiskId to be stored in the high bits, so that the
+        // derived Ord will sort first by DiskId and then by Offset
+        // The value is nonzero because we added one to `disk_raw`.
+        Self(NonZeroU64::new(disk_raw << (64 - Self::BITS) | offset >> Self::BITS).unwrap())
     }
     pub fn disk(&self) -> DiskId {
-        self.disk
+        // truncation is not possible, because we've shifted it down to the low 9 bits
+        #[allow(clippy::cast_possible_truncation)]
+        DiskId(((self.0.get() >> (64 - Self::BITS)) - 1) as u16)
     }
     pub fn offset(&self) -> u64 {
-        self.offset
+        self.0.get() << Self::BITS
+    }
+    pub fn from_raw(raw: NonZeroU64) -> Self {
+        Self(raw)
+    }
+    pub fn to_raw(&self) -> NonZeroU64 {
+        self.0
     }
 }
 impl Add<u64> for DiskLocation {

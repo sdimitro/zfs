@@ -8,7 +8,8 @@ dist_pkgdata_DATA = \
 	math.shlib \
 	properties.shlib \
 	tunables.cfg \
-	zpool_script.shlib
+	zpool_script.shlib \
+	object_store.shlib
 
 nodist_pkgdata_DATA = default.cfg
 SUBSTFILES += $(nodist_pkgdata_DATA)

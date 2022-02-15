@@ -1,26 +1,21 @@
 use bytes::Bytes;
 use more_asserts::*;
-use serde::Deserialize;
-use serde::Serialize;
-use std::fmt::Debug;
 use std::fmt::Formatter;
 use std::fmt::Result;
 use std::ops::Deref;
 
-/// exists just to reduce Debug output on fields we don't really care about
-#[derive(Serialize, Deserialize, Clone)]
-pub struct TerseVec<T>(pub Vec<T>);
-
-impl<T> Debug for TerseVec<T> {
-    fn fmt(&self, fmt: &mut Formatter) -> Result {
-        fmt.write_fmt(format_args!("[...{} elements...]", self.0.len()))
-    }
-}
-
-impl<T> From<Vec<T>> for TerseVec<T> {
-    fn from(vec: Vec<T>) -> Self {
-        Self(vec)
-    }
+/// # Examples:
+/// ```
+/// use derivative::Derivative;
+/// #[derive(Derivative)]
+/// #[derivative(Debug)]
+/// struct Foo {
+///     #[derivative(Debug(format_with = "util::tersevec"))]
+///     member: Vec<Bar>
+/// }
+/// ```
+pub fn tersevec<E>(vec: &[E], fmt: &mut Formatter) -> Result {
+    fmt.write_fmt(format_args!("[...{} elements...]", vec.len()))
 }
 
 pub struct AlignedBytes {
@@ -124,6 +119,19 @@ impl AlignedVec {
         assert_le!(slice.len(), self.vec.capacity() - self.vec.len());
         self.vec.extend_from_slice(slice);
         self.verify();
+    }
+
+    /// Zero out any uninitialized part.
+    pub fn resize(&mut self, new_len: usize) {
+        self.vec.resize(self.pad + new_len, 0);
+    }
+
+    pub fn as_mut_slice(&mut self) -> &mut [u8] {
+        &mut self.vec[self.pad..]
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        &self.vec[self.pad..]
     }
 
     pub fn len(&self) -> usize {

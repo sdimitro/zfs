@@ -1833,6 +1833,75 @@ function invalidate_zcache
 	sudo systemctl start zfs-object-agent
 }
 
+#
+# Start zfs object agent using the service if available, otherwise
+# start it manually.
+#
+function start_zfs_object_agent
+{
+	if $HAS_ZOA_SERVICE; then
+		sudo systemctl start zfs-object-agent
+	else
+		sudo -E /sbin/zfs_object_agent -vv -t $ZOA_CONFIG \
+		    --output-file=$ZOA_LOG 2>&1 | \
+		    sudo tee $ZOA_OUTPUT > /dev/null &
+	fi
+	# Wait for a moment for the zfs-object-agent to be active & running
+	sleep 1
+}
+
+#
+# Stop zfs object agent using the service if available, otherwise
+# stop it manually.
+#
+function stop_zfs_object_agent
+{
+	if $HAS_ZOA_SERVICE; then
+		sudo systemctl stop zfs-object-agent
+	else
+		sudo pkill -9 -f zfs_object_agent
+	fi
+}
+
+# Add a tunable with name and value in the
+# /etc/zfs/zoa_config.toml
+function add_tunable
+{
+    name="$1"
+    value="$2"
+    echo "$name=$value" | sudo tee -a $ZOA_CONFIG > /dev/null
+}
+
+# Returns if a tunable is already configured
+# in the zoa configuration file
+function is_tunable_configured
+{
+    grep "$1" $ZOA_CONFIG 1>/dev/null 2>&1
+    return $?
+}
+
+# Adds or updates a tunable into the /etc/zfs/zoa_config.toml
+function add_or_update_tunable
+{
+    name="$1"
+    value="$2"
+
+    if is_tunable_configured "$name"; then
+        # sed -E enables extended regexp
+
+        # Anything that has 0 or more whitespace
+        # followed by keyword identified by $name
+        # followed by 0 or more white spaces
+        # followed by a =
+        # followed by 0 or more white spaces
+        # followed by group that captures anything
+        sudo -E \
+            sed -E -i "s/\s*${name}\s*=\s*(.*)/${name}=${value}/" $ZOA_CONFIG
+    else
+        add_tunable "$name" "$value"
+    fi
+}
+
 # Return 0 if create successfully or the pool exists; $? otherwise
 # Note: In local zones, this function should return 0 silently.
 #

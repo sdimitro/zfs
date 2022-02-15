@@ -2,7 +2,7 @@
 
 use crate::remote_channel::{RemoteChannel, RemoteError};
 use crate::subcommand::ZcacheSubCommand;
-use anyhow::Result;
+use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use clap::{Arg, SubCommand};
 use std::fs;
@@ -76,12 +76,10 @@ impl DeviceDisplay {
                 }
             }
             Err(RemoteError::ResultError(_)) => {
-                writeln_stdout!("No cache found?");
-                return Ok(());
+                return Err(anyhow!("No cache found"));
             }
             Err(RemoteError::Other(e)) => {
-                writeln_stdout!("remote call error: {}", e);
-                return Err(e);
+                return Err(e).context("remote call error");
             }
         }
         Ok(())

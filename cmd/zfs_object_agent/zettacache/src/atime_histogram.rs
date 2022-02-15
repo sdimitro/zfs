@@ -27,7 +27,7 @@ lazy_static! {
 /// buckets prior to "first_live" represent this data. "first ghost"
 /// is the oldest (first) bucket in the histogram.
 pub struct AtimeHistogramPhys {
-    #[derivative(Debug = "ignore")]
+    #[derivative(Debug(format_with = "util::tersevec"))]
     histogram: Vec<u64>,
     first_ghost: Atime,
     first_live: Atime,
@@ -40,10 +40,6 @@ impl AtimeHistogramPhys {
             first_ghost,
             first_live,
         }
-    }
-
-    pub fn len(&self) -> usize {
-        self.histogram.len()
     }
 
     pub fn first_ghost(&self) -> Atime {

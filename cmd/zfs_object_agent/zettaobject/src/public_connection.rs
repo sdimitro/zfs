@@ -2,6 +2,7 @@ use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
+use crate::server::ConnectionState;
 use crate::server::{HandlerReturn, Server};
 use anyhow::Result;
 use futures::stream::StreamExt;
@@ -9,6 +10,7 @@ use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
+use semver::Version;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use util::get_tunable;
@@ -26,12 +28,21 @@ pub struct PublicServerState {
 
 struct PublicConnectionState {
     cache: Option<ZettaCache>,
+    version: Option<Version>,
+}
+
+impl ConnectionState for PublicConnectionState {
+    fn set_version(&mut self, version: Version) {
+        assert!(self.version.is_none());
+        self.version = Some(version);
+    }
 }
 
 impl PublicServerState {
     fn connection_handler(&self) -> PublicConnectionState {
         PublicConnectionState {
             cache: self.cache.as_ref().cloned(),
+            version: None,
         }
     }
 
@@ -43,6 +54,7 @@ impl PublicServerState {
             0o666, // world writable
             PublicServerState { cache },
             Box::new(Self::connection_handler),
+            vec![Version::new(1, 0, 0)],
         );
 
         PublicConnectionState::register(&mut server);
@@ -71,6 +83,7 @@ impl PublicConnectionState {
     }
 
     async fn get_pools_impl(nvl: NvList) -> Result<Option<NvList>> {
+        // XXX convert to use serde nvlist request and response
         let region_cstr = nvl.lookup_string("region")?;
         let endpoint_cstr = nvl.lookup_string("endpoint")?;
         let region_str = region_cstr.to_str()?;
@@ -164,6 +177,7 @@ impl PublicConnectionState {
 
     fn get_destroying_pools(&mut self, nvl: NvList) -> HandlerReturn {
         Ok(Box::pin(async move {
+            // XXX convert to use serde nvlist response
             debug!("got request: {:?}", nvl);
             let pools = pool_destroy::get_destroy_list().await;
 
@@ -180,6 +194,7 @@ impl PublicConnectionState {
 
     fn clear_destroyed_pools(&mut self, nvl: NvList) -> HandlerReturn {
         Ok(Box::pin(async move {
+            // XXX convert to use serde nvlist response
             debug!("got request: {:?}", nvl);
             pool_destroy::remove_not_in_progress().await;
 
@@ -194,6 +209,7 @@ impl PublicConnectionState {
     }
 
     fn report_hits(&mut self, nvl: NvList) -> HandlerReturn {
+        // XXX convert to use serde nvlist response
         debug!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
@@ -202,7 +218,10 @@ impl PublicConnectionState {
                 response.insert("Type", "report_hits").unwrap();
                 let size_data = zettacache.hits_by_size_data().await;
                 response
-                    .insert("histogram", &size_data.histogram[..])
+                    .insert("live_histogram", &size_data.live_histogram[..])
+                    .unwrap();
+                response
+                    .insert("ghost_histogram", &size_data.ghost_histogram[..])
                     .unwrap();
                 response
                     .insert("cache_capacity", &size_data.cache_capacity)
@@ -231,6 +250,7 @@ impl PublicConnectionState {
     }
 
     fn list_devices(&mut self, nvl: NvList) -> HandlerReturn {
+        // XXX convert to use serde nvlist response
         debug!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
@@ -257,7 +277,8 @@ impl PublicConnectionState {
     }
 
     fn zcache_iostat(&mut self, nvl: NvList) -> HandlerReturn {
-        debug!("got request: {:?}", nvl);
+        // XXX convert to use serde nvlist response
+        trace!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
 
@@ -271,21 +292,22 @@ impl PublicConnectionState {
                 response.insert("Type", "zcache_iostat").unwrap();
                 response.insert("result", "ok").unwrap();
 
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         } else {
             Ok(Box::pin(async move {
                 response.insert("Type", "zcache_iostat").unwrap();
                 response.insert("result", "err").unwrap();
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         }
     }
 
     fn zcache_stats(&mut self, nvl: NvList) -> HandlerReturn {
-        debug!("got request: {:?}", nvl);
+        // XXX convert to use serde nvlist response
+        trace!("got request: {:?}", nvl);
         let mut response = NvList::new_unique_names();
         let cache = self.cache.as_ref().cloned();
 
@@ -297,14 +319,14 @@ impl PublicConnectionState {
                 response.insert("Type", "zcache_stats").unwrap();
                 response.insert("result", "ok").unwrap();
 
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         } else {
             Ok(Box::pin(async move {
                 response.insert("Type", "zcache_stats").unwrap();
                 response.insert("result", "err").unwrap();
-                debug!("sending response: {:?}", response);
+                trace!("sending response: {:?}", response);
                 Ok(Some(response))
             }))
         }

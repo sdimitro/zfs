@@ -1,4 +1,4 @@
-use crate::object_access::{OAError, ObjectAccess, ObjectAccessStatType};
+use crate::object_access::{OAError, ObjectAccess, ObjectAccessOpType};
 use crate::pool::CLAIM_DURATION;
 use anyhow::Context;
 use lazy_static::lazy_static;
@@ -22,6 +22,7 @@ lazy_static! {
     pub static ref WRITE_TIMEOUT: Duration =
         Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
     pub static ref HEARTBEAT_PANIC: bool = get_tunable("heartbeat_panic", true);
+    pub static ref INTERVAL_PANIC: bool = get_tunable("interval_panic", false);
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -39,7 +40,7 @@ impl HeartbeatPhys {
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_impl(Self::key(id), ObjectAccessStatType::MetadataGet, None)
+            .get_object_impl(Self::key(id), ObjectAccessOpType::MetadataGet, None)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -60,7 +61,8 @@ impl HeartbeatPhys {
             .put_object_timed(
                 Self::key(self.id),
                 buf.into(),
-                ObjectAccessStatType::MetadataPut,
+                // XXX should this be its own stat type so that it has its own queue in the ObjectAccess layer?
+                ObjectAccessOpType::MetadataPut,
                 timeout,
             )
             .await
@@ -193,7 +195,26 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
         info!("Starting heartbeat with id {}", id);
         let mut interval = tokio::time::interval(*HEARTBEAT_INTERVAL);
         loop {
+            let interval_start = Instant::now();
             interval.tick().await;
+            let interval_end = Instant::now();
+            trace!(
+                "Interval tick started at {:?}, ended at {:?}, duration {:?}",
+                interval_start,
+                interval_end,
+                interval_end.duration_since(interval_start)
+            );
+            if interval_end.duration_since(interval_start) > *HEARTBEAT_INTERVAL * 10 {
+                if *INTERVAL_PANIC {
+                    panic!("Long interval detected at {:?}", SystemTime::now());
+                } else {
+                    error!(
+                        "Long interval ({:?}) detected at {:?}",
+                        interval_end.duration_since(interval_start),
+                        SystemTime::now()
+                    );
+                }
+            }
             if let Some(time) = last_heartbeat {
                 let since = Instant::now().duration_since(time);
                 if since > *LEASE_DURATION {

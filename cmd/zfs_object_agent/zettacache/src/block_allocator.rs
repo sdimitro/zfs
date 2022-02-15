@@ -3,6 +3,7 @@ use crate::extent_allocator::{ExtentAllocator, ExtentAllocatorBuilder};
 use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
 use crate::{base_types::*, DumpSlabsOptions};
 use bimap::BiBTreeMap;
+use derivative::Derivative;
 use either::Either;
 use lazy_static::lazy_static;
 use log::*;
@@ -18,8 +19,8 @@ use std::ops::{Add, Bound::*, Sub};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{fmt, iter, mem};
+use util::get_tunable;
 use util::RangeTree;
-use util::{get_tunable, TerseVec};
 use util::{nice_p2size, From64};
 use util::{super_trace, with_alloctag, BitmapRangeIterator};
 
@@ -1106,7 +1107,7 @@ impl Slabs {
         spacemap: &SpaceMap,
         spacemap_next: &SpaceMap,
         slab_size: u32,
-        slabs_phys: &TerseVec<SlabPhys>,
+        slabs_phys: &[SlabPhys],
     ) -> Self {
         let begin = Instant::now();
 
@@ -1114,7 +1115,7 @@ impl Slabs {
         let mut extent_iter = capacity.iter().map(|(_, &extent)| extent);
         let mut current_extent = extent_iter.next().unwrap();
 
-        let slab_iter = slabs_phys.0.iter().enumerate().map(|(slab_id, phys_slab)| {
+        let slab_iter = slabs_phys.iter().enumerate().map(|(slab_id, phys_slab)| {
             let sid = SlabId(slab_id as u64);
 
             if current_extent.size < slab_size.into() {
@@ -1837,13 +1838,7 @@ impl BlockAllocator {
             spacemap,
             spacemap_next,
             next_slab_to_condense: self.next_slab_to_condense,
-            slabs: self
-                .slabs
-                .0
-                .iter()
-                .map(|slab| slab.get_phys())
-                .collect::<Vec<_>>()
-                .into(),
+            slabs: self.slabs.0.iter().map(|slab| slab.get_phys()).collect(),
             slab_buckets: SlabAllocationBucketsPhys {
                 buckets: self
                     .slab_buckets
@@ -1956,7 +1951,8 @@ impl SlabAllocationBucketsPhys {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone)]
+#[derive(Derivative, Serialize, Deserialize, Clone)]
+#[derivative(Debug)]
 pub struct BlockAllocatorPhys {
     slab_size: u32,
 
@@ -1969,7 +1965,8 @@ pub struct BlockAllocatorPhys {
     // TODO: if this is too big to be writing every checkpoint,
     //       we could use a BlockBasedLog<(SlabId, SlabPhysType)>
     // Note: slabs are located within the `capacity` in the order given
-    slabs: TerseVec<SlabPhys>,
+    #[derivative(Debug(format_with = "util::tersevec"))]
+    slabs: Vec<SlabPhys>,
     slab_buckets: SlabAllocationBucketsPhys,
 }
 impl OnDisk for BlockAllocatorPhys {}
@@ -1985,7 +1982,7 @@ impl BlockAllocatorPhys {
             spacemap_next: SpaceMapPhys::new(),
             next_slab_to_condense: SlabId(0),
             capacity: Default::default(),
-            slabs: TerseVec(Vec::new()),
+            slabs: Vec::new(),
             slab_buckets: DEFAULT_SLAB_BUCKETS.clone(),
         };
         this.extend(capacity);
@@ -2000,7 +1997,7 @@ impl BlockAllocatorPhys {
         let slabsize = u64::from(self.slab_size);
         for extent in capacity {
             let nslabs = extent.size / slabsize;
-            self.slabs.0.extend(
+            self.slabs.extend(
                 iter::repeat(SlabPhys {
                     generation: SlabGeneration(0),
                     slab_type: SlabPhysType::Free,

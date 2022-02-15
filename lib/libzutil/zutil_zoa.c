@@ -39,6 +39,13 @@
  */
 #define	ZOA_MAX_RETRIES	15
 
+/*
+ * This specifies that this code supports all 1.X.Y versions of the agent
+ * communication protocol. This should be updated as new capabilities are
+ * added and supported or required.
+ */
+#define	AGENT_PROTOCOL_VERSION "^1"
+
 struct sockaddr_un zfs_public_socket = {
 	AF_UNIX, "/etc/zfs/zfs_public_socket"
 };
@@ -97,8 +104,63 @@ get_zfs_socket(zoa_socket_t zoa_sock)
 	}
 }
 
+static nvlist_t *
+zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock, int *err)
+{
+	size_t len;
+	char *buf = fnvlist_pack(msg, &len);
+
+	message_header_t header = {
+		.message_type = MESSAGE_NVLIST,
+		.struct_len = 0,
+		.payload_len = len,
+	};
+
+	ssize_t rv = write_all(sock, &header, sizeof (header));
+	if (rv < 0) {
+		*err = rv;
+		fnvlist_pack_free(buf, len);
+		return (NULL);
+	}
+	ASSERT3U(rv, ==, sizeof (header));
+
+	rv = write_all(sock, buf, len);
+	fnvlist_pack_free(buf, len);
+	if (rv < 0) {
+		*err = rv;
+		return (NULL);
+	}
+	VERIFY3U(rv, ==, len);
+
+	rv = read_all(sock, &header, sizeof (header));
+	if (rv < 0) {
+		*err = rv;
+		return (NULL);
+	}
+	VERIFY3U(rv, ==, sizeof (header));
+
+	VERIFY3U(header.message_type, ==, MESSAGE_NVLIST);
+	VERIFY0(header.struct_len);
+	VERIFY3U(header.payload_len, <=, SPA_MAXBLOCKSIZE);
+
+	buf = malloc(header.payload_len);
+	rv = read_all(sock, buf, header.payload_len);
+	if (rv < 0) {
+		*err = rv;
+		free(buf);
+		return (NULL);
+	}
+	ASSERT3U(rv, ==, header.payload_len);
+
+	nvlist_t *resp = fnvlist_unpack(buf, header.payload_len);
+	free(buf);
+
+	return (resp);
+}
+
 int
-zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock)
+zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock,
+    const char *version_req_str, nvlist_t **version)
 {
 	int sock;
 	int retries = 0;
@@ -142,66 +204,39 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock)
 		}
 		close(sock);
 	}
+	nvlist_t *version_nvl = fnvlist_alloc();
+	fnvlist_add_string(version_nvl, AGENT_TYPE, AGENT_TYPE_VERSION);
+	fnvlist_add_string(version_nvl, AGENT_VERSION, version_req_str);
+	int err;
+	nvlist_t *resp = zoa_send_recv_msg_impl(sock, version_nvl, zoa_sock,
+	    &err);
+	fnvlist_free(version_nvl);
+	if (resp == NULL) {
+		zutil_error_aux(hdl, "%s", strerror(err));
+		zutil_error(hdl, EZFS_CONNECT_REFUSED, dgettext(TEXT_DOMAIN,
+		    "could not negotiate version with object agent process"));
+		close(sock);
+		return (-1);
+	}
+	if (version != NULL) {
+		ASSERT0(strcmp(fnvlist_lookup_string(resp, AGENT_TYPE),
+		    AGENT_TYPE_VERSION));
+		*version = fnvlist_dup(fnvlist_lookup_nvlist(resp,
+		    AGENT_VERSION));
+	}
+	fnvlist_free(resp);
 	return (sock);
 }
 
-static nvlist_t *
-zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock,
-    int *err)
-{
-	size_t len;
-	char *buf = fnvlist_pack(msg, &len);
-
-	uint64_t len_le = htole64(len);
-	ssize_t rv = write_all(sock, &len_le, sizeof (len_le));
-	if (rv < 0) {
-		*err = rv;
-		fnvlist_pack_free(buf, len);
-		return (NULL);
-	}
-	ASSERT3U(rv, ==, sizeof (len_le));
-
-	rv = write_all(sock, buf, len);
-	fnvlist_pack_free(buf, len);
-	if (rv < 0) {
-		*err = rv;
-		return (NULL);
-	}
-	VERIFY3U(rv, ==, len);
-
-	uint64_t resp_size;
-	size_t size;
-	rv = read_all(sock, &resp_size, sizeof (resp_size));
-	if (rv < 0) {
-		*err = rv;
-		return (NULL);
-	}
-	VERIFY3U(rv, ==, sizeof (resp_size));
-
-	size = le64toh(resp_size);
-	buf = malloc(size);
-
-	rv = read_all(sock, buf, size);
-	if (rv < 0) {
-		*err = rv;
-		free(buf);
-		return (NULL);
-	}
-	ASSERT3U(rv, ==, size);
-
-	nvlist_t *resp = fnvlist_unpack(buf, size);
-	free(buf);
-
-	return (resp);
-}
-
 nvlist_t *
-zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg, zoa_socket_t zoa_sock)
+zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
+    const char *version_req_str, zoa_socket_t zoa_sock)
 {
 	nvlist_t *resp = NULL;
 	int retries = 0;
 	for (; retries < ZOA_MAX_RETRIES; retries++) {
-		int sock = zoa_connect_agent(hdl, zoa_sock);
+		int sock = zoa_connect_agent(hdl, zoa_sock, version_req_str,
+		    NULL);
 		if (sock == -1) {
 			break;
 		}
@@ -293,7 +328,8 @@ zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_DESTROYING_POOLS);
 
-	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, ZFS_PUBLIC_SOCKET);
+	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
+	    ZFS_PUBLIC_SOCKET);
 	if (resp == NULL)
 		return;
 
@@ -379,7 +415,8 @@ zoa_clear_destroyed_pools(void *hdl)
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_CLEAR_DESTROYED_POOLS);
 
-	zoa_send_recv_msg(&handle, msg, ZFS_PUBLIC_SOCKET);
+	zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
+	    ZFS_PUBLIC_SOCKET);
 }
 
 nvlist_t *

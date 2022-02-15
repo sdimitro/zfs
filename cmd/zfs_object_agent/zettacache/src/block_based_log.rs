@@ -158,7 +158,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         ReceiverStream::new(chunk_rx)
     }
 
-    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
         self.iter_chunks(block_access)
             .flat_map(|chunk| stream::iter(chunk.entries.into_iter()))
     }
@@ -195,8 +195,8 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLogPhys<T> {
         self.chunk_summary.claim(builder);
     }
 
-    pub fn iter_entries(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
-        self.this.iter_entries(block_access)
+    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
+        self.this.iter(block_access)
     }
 
     pub fn iter_chunks(
@@ -266,6 +266,12 @@ pub struct BlockBasedLogChunk<T: BlockBasedLogEntry> {
     entries: Vec<T>,
 }
 
+impl<T: BlockBasedLogEntry> BlockBasedLogChunk<T> {
+    pub fn entries(&self) -> &[T] {
+        &self.entries
+    }
+}
+
 #[derive(Serialize, Debug)]
 pub struct BlockBasedLogChunkBorrowed<'a, T: BlockBasedLogEntry> {
     id: ChunkId,
@@ -314,11 +320,19 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         self.pending_len() * mem::size_of::<T>() as u64
     }
 
-    pub fn append(&mut self, entry: T) {
+    pub fn push(&mut self, entry: T) {
         with_alloctag("BlockBasedLog.pending_entries", || {
             self.pending_entries.push(entry)
         });
         // XXX if too many pending, initiate flush?
+    }
+
+    pub fn append(&mut self, mut list: Vec<T>) {
+        if self.pending_entries.is_empty() {
+            self.pending_entries = list;
+        } else {
+            self.pending_entries.append(&mut list);
+        }
     }
 
     async fn flush_impl<F>(&mut self, mut new_chunk_fn: F)
@@ -341,9 +355,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             let first_entry = *chunk.entries.first().unwrap();
 
             // XXX I think we only want to use Bincode for the main index?
-            let raw_chunk = self
-                .block_access
-                .chunk_to_raw(EncodeType::BincodeFixint, &chunk);
+            let raw_chunk = self.block_access.chunk_to_raw(EncodeType::Bincode, &chunk);
             let raw_size = raw_chunk.len() as u64;
             let extent = match self.next_write_location() {
                 Some(extent) if extent.size >= raw_size => extent,
@@ -456,7 +468,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         assert!(self.pending_entries.is_empty());
-        self.phys.iter_entries(self.block_access.clone())
+        self.phys.iter(self.block_access.clone())
     }
 }
 impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
@@ -469,7 +481,7 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         // XXX how to measure memory usage, since it's gathered async?  Copy it later?  Or just rely on the log statement below?
         let chunks = phys
             .chunk_summary
-            .iter_entries(block_access.clone())
+            .iter(block_access.clone())
             .collect::<Vec<_>>()
             .await;
         info!(
@@ -512,7 +524,11 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
 
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
-        self.this.iter_entries(self.block_access.clone())
+        self.this.iter(self.block_access.clone())
+    }
+
+    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        self.this.iter_chunks(self.block_access.clone())
     }
 
     /// Returns the exact location/size of this chunk (not the whole contiguous extent)
@@ -683,7 +699,7 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
                     first_entry,
                 };
                 new_chunks.push(entry);
-                self.chunk_summary.append(entry);
+                self.chunk_summary.push(entry);
             })
             .await;
         let (this, chunk_summary) = join(self.this.flush(), self.chunk_summary.flush()).await;
@@ -708,8 +724,8 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
         self.readonly.get_phys()
     }
 
-    pub fn append(&mut self, entry: T) {
-        self.this.append(entry);
+    pub fn append(&mut self, list: Vec<T>) {
+        self.this.append(list);
     }
 
     pub fn clear(&mut self) {
@@ -736,6 +752,10 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         self.readonly.iter()
+    }
+
+    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        self.readonly.iter_chunks()
     }
 
     /// See ReadOnlySummarizedBlockBasedLog::lookup_by_key()
