@@ -550,7 +550,10 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         extent.range(chunk_summary.offset - *extent_offset, chunk_size)
     }
 
-    async fn lookup_by_key_impl<B, F>(&self, key: &B, mut f: F) -> Option<T>
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
+    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
+    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    async fn lookup_by_key_impl<B, F>(&self, key: &B, mut f: F) -> (Option<T>, bool)
     where
         B: Ord + Debug,
         F: FnMut(&T) -> B,
@@ -563,7 +566,7 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             .binary_search_by_key(key, |chunk_summary| f(&chunk_summary.first_entry))
         {
             Ok(index) => ChunkId(index as u64),
-            Err(index) if index == 0 => return None, // key is before the first chunk, therefore not present
+            Err(index) if index == 0 => return (None, false), // key is before the first chunk, therefore not present
             Err(index) => ChunkId(index as u64 - 1),
         };
 
@@ -571,11 +574,14 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             super_trace!("found {:?} in cache", chunk_id);
             // found in cache
             // Search within this chunk.
-            return chunk
-                .entries
-                .binary_search_by_key(key, f)
-                .ok()
-                .map(|index| chunk.entries[index]);
+            return (
+                chunk
+                    .entries
+                    .binary_search_by_key(key, f)
+                    .ok()
+                    .map(|index| chunk.entries[index]),
+                true,
+            );
         }
 
         // Lock the chunk so that only one thread reads it
@@ -586,11 +592,14 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             super_trace!("found {:?} in cache after waiting for lock", chunk_id);
             // found in cache
             // Search within this chunk.
-            return chunk
-                .entries
-                .binary_search_by_key(key, f)
-                .ok()
-                .map(|index| chunk.entries[index]);
+            return (
+                chunk
+                    .entries
+                    .binary_search_by_key(key, f)
+                    .ok()
+                    .map(|index| chunk.entries[index]),
+                true,
+            );
         }
 
         // Read the chunk from disk.
@@ -620,7 +629,7 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         super_trace!("inserting {:?} to cache", chunk_id);
         self.chunk_cache.lock().unwrap().put(chunk_id, chunk);
 
-        result
+        (result, false)
     }
 
     /// Entries must have been added in sorted order, according to the provided
@@ -629,16 +638,27 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
     /// longer than the reference on the Log (however, since the Entry is Copy,
     /// the caller still needs to be careful to not copy it, then drop the Log,
     /// allowing the Log to be modified before using the copy of the Entry).
-    pub async fn lookup_by_key<B, F>(&self, key: &B, f: F) -> Option<BlockBasedLogValueGuard<'_, T>>
+    ///
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
+    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
+    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    pub async fn lookup_by_key<B, F>(
+        &self,
+        key: &B,
+        f: F,
+    ) -> (Option<BlockBasedLogValueGuard<'_, T>>, bool)
     where
         B: Ord + Debug,
         F: FnMut(&T) -> B,
     {
-        let value = self.lookup_by_key_impl(key, f).await;
-        value.map(|v| BlockBasedLogValueGuard {
-            inner: v,
-            _marker: &PhantomData,
-        })
+        let (value, chunk_cache_hit) = self.lookup_by_key_impl(key, f).await;
+        (
+            value.map(|v| BlockBasedLogValueGuard {
+                inner: v,
+                _marker: &PhantomData,
+            }),
+            chunk_cache_hit,
+        )
     }
 
     /// Update this readonly view to reflect newly-appended chunks.
@@ -759,7 +779,11 @@ impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     }
 
     /// See ReadOnlySummarizedBlockBasedLog::lookup_by_key()
-    pub async fn lookup_by_key<B, F>(&self, key: &B, f: F) -> Option<BlockBasedLogValueGuard<'_, T>>
+    pub async fn lookup_by_key<B, F>(
+        &self,
+        key: &B,
+        f: F,
+    ) -> (Option<BlockBasedLogValueGuard<'_, T>>, bool)
     where
         B: Ord + Debug,
         F: FnMut(&T) -> B,

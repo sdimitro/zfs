@@ -1399,6 +1399,7 @@ impl ZettaCache {
             Some(bytes) => {
                 self.stats.track_bytes(LookupBytes, bytes.len() as u64);
                 super_trace!("cache hit for {:?}", key);
+                self.stats.track_count(CacheHit);
                 LookupResponse::Present((bytes, locked_key))
             }
             None => LookupResponse::Absent(locked_key),
@@ -1437,6 +1438,9 @@ impl ZettaCache {
                             let validated = state.validate(value);
                             // All entries in the pending changes should be valid
                             assert!(validated.is_some());
+                            if matches!(source, LookupSource::Read) {
+                                self.stats.track_count(IndexHitPendingChanges);
+                            }
                             Either::Left(f(&mut state, validated))
                         }
                     }
@@ -1449,6 +1453,9 @@ impl ZettaCache {
                                 | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
                                     state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
+                                    if matches!(source, LookupSource::Read) {
+                                        self.stats.track_count(IndexHitPendingChanges);
+                                    }
                                     Either::Left(f(&mut state, validated))
                                 }
                             }
@@ -1457,6 +1464,9 @@ impl ZettaCache {
                                 Some(&value) => {
                                     state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
+                                    if matches!(source, LookupSource::Read) {
+                                        self.stats.track_count(IndexHitIndexCache);
+                                    }
                                     Either::Left(f(&mut state, validated))
                                 }
                                 None => Either::Right(f),
@@ -1467,6 +1477,9 @@ impl ZettaCache {
                             Some(&value) => {
                                 state.ghost_hit_check(value, source);
                                 let validated = state.validate(value);
+                                if matches!(source, LookupSource::Read) {
+                                    self.stats.track_count(IndexHitIndexCache);
+                                }
                                 Either::Left(f(&mut state, validated))
                             }
                             None => Either::Right(f),
@@ -1481,17 +1494,11 @@ impl ZettaCache {
                 // Got the index entry from pending state or index cache and
                 // already called f().  Now that we've dropped the state lock,
                 // run the future that it returned.
-                let result = fut.await;
-                if matches!(source, LookupSource::Read) {
-                    self.stats.track_count(CacheHitWithoutIndexRead);
-                }
-                return result;
+                return fut.await;
             }
             Either::Right(f) => f,
         };
 
-        // TODO -- is CacheMissWithoutIndexRead possible anymore? See DOSE-939
-        // XXX - No, it is not possible (except with index chunk cache)
         super_trace!(
             "lookup has no pending_change for {:?} and it's absent from the index-cache; checking index",
             key
@@ -1506,44 +1513,39 @@ impl ZettaCache {
                 }
             }
         }
-        let entry_opt = match index {
+        let (entry_opt, chunk_cache_hit) = match index {
             Either::Left(index) => index.lookup(key).await,
             Either::Right(index) => index.lookup(key).await,
         };
-        let stat_counter;
+        if matches!(source, LookupSource::Read) {
+            if chunk_cache_hit {
+                self.stats.track_count(IndexHitChunkCache);
+            } else {
+                self.stats.track_count(IndexHitDisk);
+            }
+        }
         let fut = match entry_opt {
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
                 let mut state = lock_non_send(&self.state).await;
                 let value = state.lookup_with_value_from_index(&key, entry.value, source);
-                stat_counter = match value {
-                    Some(_) => CacheHitAfterIndexRead,
-                    None => {
-                        super_trace!(
-                            "cache miss after reading index for {:?}, invalid entry",
-                            key
-                        );
-                        CacheMissAfterIndexRead
-                    }
-                };
+                if value.is_none() {
+                    super_trace!(
+                        "cache miss after reading index for {:?}, invalid entry",
+                        key
+                    );
+                }
                 f(&mut state, value)
             }
             None => {
                 // key not in index
-                stat_counter = CacheMissAfterIndexRead;
                 super_trace!("cache miss after reading index for {:?}", key);
                 let mut state = lock_non_send(&self.state).await;
                 f(&mut state, None)
             }
         };
-        let result = fut.await;
-
-        // Update relevant stat after waiting
-        if matches!(source, LookupSource::Read) {
-            self.stats.track_count(stat_counter);
-        }
-        result
+        fut.await
     }
 
     async fn reserve_buffer_space(

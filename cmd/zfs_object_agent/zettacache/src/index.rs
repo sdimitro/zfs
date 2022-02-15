@@ -368,7 +368,13 @@ impl IndexRun {
         self.last_key
     }
 
-    pub async fn lookup(&self, key: IndexKey) -> Option<BlockBasedLogValueGuard<'_, IndexEntry>> {
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
+    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
+    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    pub async fn lookup(
+        &self,
+        key: IndexKey,
+    ) -> (Option<BlockBasedLogValueGuard<'_, IndexEntry>>, bool) {
         if let Some(trim_key) = self.trim_key {
             assert_gt!(key, trim_key);
         }
@@ -396,7 +402,13 @@ impl ReadOnlyIndexRun {
         self.last_key
     }
 
-    pub async fn lookup(&self, key: IndexKey) -> Option<BlockBasedLogValueGuard<'_, IndexEntry>> {
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
+    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
+    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    pub async fn lookup(
+        &self,
+        key: IndexKey,
+    ) -> (Option<BlockBasedLogValueGuard<'_, IndexEntry>>, bool) {
         if let Some(trim_key) = self.trim_key {
             assert_gt!(key, trim_key);
         }

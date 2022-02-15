@@ -359,12 +359,12 @@ pub enum CacheStatCounter {
     LookupBytes,
     LookupForRead,
     LookupForWrite,
-    CacheMissWithoutIndexRead, // pending work in DOSE-939
-    CacheMissAfterIndexRead,
-    CacheMissForcedEviction,
     CacheMissLockBusy, // pending, DOSE-905
-    CacheHitWithoutIndexRead,
-    CacheHitAfterIndexRead,
+    IndexHitPendingChanges,
+    IndexHitIndexCache,
+    IndexHitChunkCache,
+    IndexHitDisk,
+    CacheHit,
     InsertBytes,
     InsertForRead,
     InsertForWrite,
