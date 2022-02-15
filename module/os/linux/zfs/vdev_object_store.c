@@ -143,9 +143,6 @@ typedef struct vdev_object_store {
 	kcondvar_t vos_resume_cv;
 	agent_resume_state_t vos_resume_state;
 
-	kmutex_t vos_max_offset_lock;
-	uint64_t vos_max_offset;
-
 	uint64_t vos_next_block;
 	uberblock_t vos_uberblock;
 	nvlist_t *vos_config;
@@ -1887,13 +1884,11 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	vos->vos_sock = INVALID_SOCKET;
 	vos->vos_vdev = NULL;
 	vos->vos_send_txg_selector = VOS_TXG_NONE;
-	vos->vos_max_offset = 0;
 	mutex_init(&vos->vos_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_stats_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_sock_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_resume_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_outstanding_lock, NULL, MUTEX_DEFAULT, NULL);
-	mutex_init(&vos->vos_max_offset_lock, NULL, MUTEX_DEFAULT, NULL);
 	cv_init(&vos->vos_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_sock_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_resume_cv, NULL, CV_DEFAULT, NULL);
@@ -1939,7 +1934,6 @@ vdev_object_store_fini(vdev_t *vd)
 	mutex_destroy(&vos->vos_sock_lock);
 	mutex_destroy(&vos->vos_resume_lock);
 	mutex_destroy(&vos->vos_outstanding_lock);
-	mutex_destroy(&vos->vos_max_offset_lock);
 	cv_destroy(&vos->vos_cv);
 	cv_destroy(&vos->vos_sock_cv);
 	cv_destroy(&vos->vos_resume_cv);
@@ -2211,103 +2205,6 @@ vdev_object_store_enable_feature(vdev_t *vd, zfeature_info_t *zfeature)
 	agent_set_feature(vd->vdev_tsd, zfeature->fi_guid);
 	agent_wait_serial(vos, VOS_SERIAL_ENABLE_FEATURE);
 }
-
-void
-vdev_object_store_set_max_offset(vdev_t *vd, uint64_t offset)
-{
-	ASSERT3P(vd, !=, NULL);
-	ASSERT3P(vd, ==, vd->vdev_top);
-	ASSERT(vd->vdev_ops->vdev_op_leaf);
-	vdev_object_store_t *vos = vd->vdev_tsd;
-	mutex_enter(&vos->vos_max_offset_lock);
-	vos->vos_max_offset = MAX(vos->vos_max_offset, offset);
-	mutex_exit(&vos->vos_max_offset_lock);
-}
-
-/*
- * This function implements a barrier for writes to the agent.
- * Normally this is provided by grabbing the SCL_ZIO lock as writer
- * in zio_vdev_io_start. For object store pools, we guarantee the
- * agent that writes that are issued will create a contiguous range
- * of block ids. The writes can be received in any order with the
- * provision that any gaps will be filled in eventually. Under normal
- * circumstances the zio pipeline will notify the agent periodically
- * to flush a range of blocks that have been issued. However, when
- * another thread is trying to lock the pipeline we need to stop issuing
- * I/Os to the agent but we still need to honor our gurantee to the
- * agent and fill any gaps in the block ids which may exist.
- * When the barrier is invoked (i.e. another thread is requesting
- * the SCL_ZIO lock as writer), we will only allow additional
- * SCL_ZIO read lock holders which will fill the gap of issued writes
- * to the agent. All other zios will call spa_config_enter() and
- * sleep until the SCL_ZIO write lock is released.
- */
-void
-vdev_object_store_config_lock(zio_t *zio)
-{
-	spa_t *spa = zio->io_spa;
-	vdev_t *vd = vdev_find_leaf(spa->spa_root_vdev,
-	    &vdev_object_store_ops);
-	ASSERT(vdev_is_object_based(vd));
-	ASSERT3P(vd, !=, NULL);
-	ASSERT3P(vd, ==, vd->vdev_top);
-	ASSERT(vd->vdev_ops->vdev_op_leaf);
-	ASSERT3U(zio->io_type, ==, ZIO_TYPE_WRITE);
-
-	/*
-	 * Object based pools may need to continue to push I/Os even
-	 * if there is writer waiting for the SCL_ZIO lock because
-	 * we need to ensure that the agent receives all pending
-	 * writes up to a specific allocated block.
-	 *
-	 * If we're unable to obtain a READER lock, then we know that
-	 * there must be a writer waiting. Check the max offset for our
-	 * zio to see if it's in the range that is allowed to proceed.
-	 * If so, then we immediately take the SCL_ZIO reader lock,
-	 * giving ourself priority over the waiting writer.
-	 */
-	if (!spa_config_tryenter(spa, SCL_ZIO, zio, RW_READER)) {
-		vdev_object_store_t *vos = vd->vdev_tsd;
-		mutex_enter(&vos->vos_max_offset_lock);
-		boolean_t io_issue =
-		    zio->io_max_offset <= vos->vos_max_offset;
-
-		/*
-		 * We are locking the zio pipeline because there
-		 * is a thread that is wanting the SCL_ZIO lock as writer.
-		 * We need to notify the agent to flush out any
-		 * blocks which have already been issued.
-		 */
-		zfs_dbgmsg("vdev_object_store_config_lock send flush "
-		    "for: %llu", (u_longlong_t)vos->vos_max_offset);
-		agent_flush_writes(vos,
-		    vos->vos_max_offset >> SPA_MINBLOCKSHIFT);
-		mutex_exit(&vos->vos_max_offset_lock);
-
-		/*
-		 * Writes which are allowed to be issued will
-		 * grab the SCL_ZIO lock as reader immediately
-		 * and proceed.
-		 */
-		if (io_issue) {
-			mutex_exit(&vos->vos_max_offset_lock);
-			zfs_dbgmsg("ZIO %px allowed: max %llu",
-			    zio, (u_longlong_t)zio->io_max_offset);
-			spa_config_enter_read_priority(spa, SCL_ZIO, zio);
-		} else {
-			spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
-		}
-	}
-
-	/*
-	 * Track the maximum offset for any writes which will be issued
-	 * to the agent. We use this value to determine which I/Os
-	 * are allowed to proceed even if another thread is trying to
-	 * get the SCL_ZIO lock as writer.
-	 */
-	vdev_object_store_set_max_offset(vd, zio->io_max_offset);
-}
-
 
 vdev_ops_t vdev_object_store_ops = {
 	.vdev_op_init = vdev_object_store_init,

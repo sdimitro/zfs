@@ -3839,12 +3839,39 @@ zio_vdev_io_start(zio_t *zio)
 			metaslab_class_t *mc = spa_normal_class(spa);
 
 			/*
-			 * If we are writing to an object-based pool,
-			 * use the object store config lock.
+			 * For object store pools, we guarantee the
+			 * agent that writes that are issued will create
+			 * a contiguous range of block ids. The writes can
+			 * be received in any order with the provision that
+			 * any gaps will be filled in eventually. The
+			 * zio pipeline will notify the agent periodically
+			 * to flush a range of blocks that have been issued.
+			 * However, when another thread is trying to lock the
+			 * pipeline (i.e. grabbing the SCL_ZIO lock as writer)
+			 * we need to keep issuing writes to the agent to
+			 * honor our gurantee to the agent and fill any
+			 * gaps in the block ids which may exist. We only
+			 * need to give priority to writes that have been
+			 * flushed, but which writes are flushed can change
+			 * over time so the obvious solution of only allowing
+			 * writes for block ids below the flush point to
+			 * to proceed can still result in a pipeline deadlock.
+			 * Instead we need to give all writes priority to
+			 * ensure that we never leave a gap and that the
+			 * agent always receives the full range of blocks
+			 * that it is expecting. This gives write zios a
+			 * temporary priority over the waiting
+			 * spa_config_lock writer.
+			 *
+			 * XXX - Once we allow ZIL writes to object storage
+			 * we will need to re-evaluate this mechanism since
+			 * those write may result truly starve out any
+			 * SCL_ZIO writers.
 			 */
 			if (zio->io_type == ZIO_TYPE_WRITE &&
 			    !mc->mc_ops->msop_block_based) {
-				vdev_object_store_config_lock(zio);
+				spa_config_enter_read_priority(spa,
+				    SCL_ZIO, zio);
 			} else {
 				spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
 			}
