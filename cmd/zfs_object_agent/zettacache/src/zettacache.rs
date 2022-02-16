@@ -195,7 +195,7 @@ struct IndexMessage {
     last_key: IndexKey,
     entries: Vec<IndexEntry>,
     frees: Vec<Extent>,
-    remaps: Vec<IndexEntry>,
+    cache_updates: Vec<IndexEntry>,
     obsoleted: AtimeHistogramPhys, // entries obsoleted from old index, since last MergeProgress
 }
 
@@ -205,7 +205,7 @@ struct MergeProgress {
     obsoleted: AtimeHistogramPhys,
     index_delta: IndexFlushDelta,
     frees: Vec<Extent>,
-    remaps: Vec<IndexEntry>,
+    cache_updates: Vec<IndexEntry>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -219,26 +219,26 @@ impl MergeMessage {
     async fn new_progress(
         next_index: &mut IndexRun,
         frees: Vec<Extent>,
-        remaps: Vec<IndexEntry>,
+        cache_updates: Vec<IndexEntry>,
         obsoleted: AtimeHistogramPhys,
     ) -> Self {
         let timer = Instant::now();
         let free_count = frees.len();
-        let remap_count = remaps.len();
+        let cache_updates_count = cache_updates.len();
         let (new_index, index_delta) = next_index.flush().await;
         let message = MergeProgress {
             new_index,
             index_delta,
             obsoleted,
             frees,
-            remaps,
+            cache_updates,
         };
-        debug!("sending progress: index with {} entries ({}) last is {:?} flushed in {}ms, and {} frees, and {} remap requests",
+        debug!("sending progress: index with {} entries ({}) last is {:?} flushed in {}ms, and {} frees, and {} cache_updates.",
             next_index.len(),
             nice_p2size(next_index.num_bytes()),
             next_index.last_key(), timer.elapsed().as_millis(),
             free_count,
-            remap_count);
+            cache_updates_count);
         Self::Progress(message)
     }
 }
@@ -317,7 +317,7 @@ impl MergeState {
                     MergeMessage::new_progress(
                         next_index,
                         message.frees,
-                        message.remaps,
+                        message.cache_updates,
                         message.obsoleted,
                     )
                     .await,
@@ -361,10 +361,19 @@ impl MergeState {
             last_key: Option<IndexKey>,
             entries: Vec<IndexEntry>,
             frees: Vec<Extent>,
-            remaps: Vec<IndexEntry>,
+            // This contains a list of entries that will be used to update the index cache. These
+            // may originate from new updates (i.e. from the pending changes list), or from disk
+            // location changes (i.e. from a block allocator rebalance operation).
+            cache_updates: Vec<IndexEntry>,
             obsoleted: AtimeHistogramPhys,
             timer: Instant,
         }
+
+        enum IngestSource {
+            Index,
+            PendingChange,
+        }
+
         impl Progress {
             fn new(tx: mpsc::Sender<IndexMessage>, first_ghost: Atime, first_live: Atime) -> Self {
                 Self {
@@ -372,7 +381,7 @@ impl MergeState {
                     last_key: None,
                     entries: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                     frees: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
-                    remaps: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                    cache_updates: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                     obsoleted: AtimeHistogramPhys::new(first_ghost, first_live),
                     timer: Instant::now(),
                 }
@@ -392,7 +401,7 @@ impl MergeState {
                     self.frees.push(extent);
                     if self.entries.len() >= *MERGE_PROGRESS_CHUNK
                         || self.frees.len() >= *MERGE_PROGRESS_CHUNK
-                        || self.remaps.len() >= *MERGE_PROGRESS_CHUNK
+                        || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
                     {
                         self.report().await;
                     }
@@ -403,7 +412,12 @@ impl MergeState {
             /// 1. Added to the list of entries to be part of the new index, or
             /// 2. Added to the list of entries to be evicted from the cache, or
             /// 3. Dropped because it is an already evicted entry that is no longer being tracked.
-            async fn ingest(&mut self, state: &MergeState, mut entry: IndexEntry) {
+            async fn ingest(
+                &mut self,
+                state: &MergeState,
+                mut entry: IndexEntry,
+                source: IngestSource,
+            ) {
                 if let Some(extent) = entry.value.extent() {
                     if let Some(rebalance) = &state.rebalance {
                         let remapped_location = rebalance.remap(extent);
@@ -413,7 +427,7 @@ impl MergeState {
                             // was unable to move the data (evicting the entry instead) the new location
                             // will be None.
                             entry.value.set_location(remapped_location);
-                            self.remaps.push(entry);
+                            self.cache_updates.push(entry);
                         }
                     }
                 }
@@ -421,6 +435,10 @@ impl MergeState {
                     // If this entry was evicted during rebalance, don't put it in the new index
                     if entry.value.location().is_some() {
                         self.entries.push(entry);
+
+                        if matches!(source, IngestSource::PendingChange) {
+                            self.cache_updates.push(entry);
+                        }
                     }
                 } else {
                     if let Some(extent) = entry.value.extent() {
@@ -438,7 +456,7 @@ impl MergeState {
 
                 if self.entries.len() >= *MERGE_PROGRESS_CHUNK
                     || self.frees.len() >= *MERGE_PROGRESS_CHUNK
-                    || self.remaps.len() >= *MERGE_PROGRESS_CHUNK
+                    || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
                 {
                     self.report().await;
                 }
@@ -460,8 +478,8 @@ impl MergeState {
                                 &mut self.frees,
                                 Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                             ),
-                            remaps: mem::replace(
-                                &mut self.remaps,
+                            cache_updates: mem::replace(
+                                &mut self.cache_updates,
                                 Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                             ),
                             obsoleted: self.obsoleted.take(),
@@ -545,6 +563,7 @@ impl MergeState {
                                 key: pc_key,
                                 value: pc_value,
                             },
+                            IngestSource::PendingChange,
                         )
                         .await;
                     pending_changes_iter.next();
@@ -571,13 +590,14 @@ impl MergeState {
                                         key: pc_key,
                                         value: pc_value,
                                     },
+                                    IngestSource::PendingChange,
                                 )
                                 .await;
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
                             assert_gt!(pc_key, entry.key);
-                            progress.ingest(self, entry).await;
+                            progress.ingest(self, entry, IngestSource::Index).await;
                         }
                     }
                     Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
@@ -591,6 +611,7 @@ impl MergeState {
                                         key: pc_key,
                                         value: pc_value,
                                     },
+                                    IngestSource::PendingChange,
                                 )
                                 .await;
 
@@ -599,12 +620,12 @@ impl MergeState {
                         } else {
                             // We shouldn't have skipped any, because there has to be a corresponding Index entry
                             assert_gt!(pc_key, entry.key);
-                            progress.ingest(self, entry).await;
+                            progress.ingest(self, entry, IngestSource::Index).await;
                         }
                     }
                     None => {
                         // no more pending changes
-                        progress.ingest(self, entry).await;
+                        progress.ingest(self, entry, IngestSource::Index).await;
                     }
                 }
             }
@@ -618,6 +639,7 @@ impl MergeState {
                         key: pc_key,
                         value: pc_value,
                     },
+                    IngestSource::PendingChange,
                 )
                 .await;
             // Consume pending change.  We don't do that in the `while let`
@@ -1260,57 +1282,68 @@ impl ZettaCache {
                 let begin = Instant::now();
                 let mut msg_count = 0;
                 let mut free_count = 0;
-                let mut remap_count = 0;
+                let mut cache_updates_count = 0;
+                let mut state_lock_held = Duration::ZERO;
                 // we have a channel to an active merge task, check it for messages
                 loop {
                     let result = timeout_at(next_tick, rx.recv()).await;
                     match result {
                         // capture merge progress: the current next index phys and eviction requests
-                        Ok(Some(MergeMessage::Progress(merge_progress))) => {
+                        Ok(Some(MergeMessage::Progress(progress))) => {
                             msg_count += 1;
-                            free_count += merge_progress.frees.len();
-                            remap_count += merge_progress.remaps.len();
+                            free_count += progress.frees.len();
+                            cache_updates_count += progress.cache_updates.len();
+
                             trace!(
-                                "merge checkpoint with {} free requests and {} remap requests",
-                                merge_progress.frees.len(),
-                                merge_progress.remaps.len()
+                                "merge message with {} frees and {} cache updates.",
+                                progress.frees.len(),
+                                progress.cache_updates.len(),
                             );
-                            super_trace!("eviction requested for {:?}", merge_progress.frees);
-                            super_trace!("remap requested for {:?}", merge_progress.remaps);
+
+                            super_trace!("eviction requested for {:?}", progress.frees);
+                            super_trace!(
+                                "cache updates requested for {:?}",
+                                progress.cache_updates
+                            );
+
                             {
                                 let mut state = self.state.lock().await;
+                                let begin = Instant::now();
 
                                 // free the extent ranges associated with the evicted blocks
-                                for extent in merge_progress.frees {
+                                for extent in progress.frees {
                                     state.block_allocator.free(extent);
                                 }
 
-                                // update any remapped (possibly evicted) locations in the index cache
-                                for entry in &merge_progress.remaps {
+                                // Here is where we populate the index cache to contain any new
+                                // keys that may have been inserted or updated, as well as ensure
+                                // any existing keys are consistent w.r.t. a remap (i.e. ensuring
+                                // the cache references the key's new/remapped location on disk).
+                                //
+                                // Note that keys that are already in the cache will have their
+                                // associated values updated, and keys that are not will be added
+                                // (with their values). Also note that any keys with no associated
+                                // values (ghost keys) will be removed from the index. This is
+                                // important for keys which may have been "valid", but were evicted
+                                // because they could not be remapped.
+                                for entry in progress.cache_updates.into_iter() {
                                     match entry.value.location() {
-                                        Some(location) => {
-                                            if let Some(value) =
-                                                state.index_cache.peek_mut(&entry.key)
-                                            {
-                                                value.set_location(Some(location));
-                                            }
-                                        }
-                                        None => {
-                                            state.index_cache.pop(&entry.key);
-                                        }
-                                    }
+                                        // It's possible the key wasn't already in the cache, so this may add or update the key.
+                                        Some(_) => state.index_cache.put(entry.key, entry.value),
+                                        // It's possible the key isn't in the cache; .pop() doesn't fail in that case.
+                                        None => state.index_cache.pop(&entry.key),
+                                    };
                                 }
+
+                                state_lock_held += begin.elapsed();
                             } // drop state lock
 
-                            *new_index_phys = merge_progress.new_index;
+                            *new_index_phys = progress.new_index;
                             let mut old_index = self.old_index.write().await;
                             let mut new_index_opt = self.new_index.write().await;
                             match &mut *new_index_opt {
                                 Some(new_index) => {
-                                    new_index.update(
-                                        new_index_phys.clone(),
-                                        &merge_progress.index_delta,
-                                    );
+                                    new_index.update(new_index_phys.clone(), &progress.index_delta);
                                 }
                                 None => {
                                     *new_index_opt = Some(
@@ -1323,7 +1356,7 @@ impl ZettaCache {
                                 }
                             }
                             if let Some(last_key) = new_index_phys.last_key() {
-                                old_index.trim(last_key, &merge_progress.obsoleted);
+                                old_index.trim(last_key, &progress.obsoleted);
                             }
                         }
                         // merge task complete, replace the current index with the new index
@@ -1343,11 +1376,12 @@ impl ZettaCache {
                     }
                 }
                 debug!(
-                    "processed {} merge checkpoints with {} evictions and {} remaps in {}ms",
+                    "processed {} merge messages with {} frees and {} cache updates in {}ms (state lock held for {}ms)",
                     msg_count,
                     free_count,
-                    remap_count,
-                    begin.elapsed().as_millis()
+                    cache_updates_count,
+                    begin.elapsed().as_millis(),
+                    state_lock_held.as_millis(),
                 );
             }
 
@@ -2775,49 +2809,6 @@ impl ZettaCacheState {
             self.atime_histogram.first_ghost()
         );
         self.atime_histogram.reset_first_live(merge.eviction_cutoff);
-
-        let begin = Instant::now();
-
-        // Populate index_cache with old_pending_changes
-        for (key, pc) in &merge.old_pending_changes {
-            match pc {
-                PendingChange::Insert(value)
-                | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                    // For the "old pending changes" list, we need to not only do the remap for atime updates, but also
-                    // for inserts. This is because an insert could have occurred just prior to the merge starting, and
-                    // then the location for that new insert may have been rebalanced via the merge. In this case, we need
-                    // to ensure index cache is populated correctly with the new location(s).
-                    match self.validate(*value) {
-                        Some(_) => {
-                            let remapped = match merge.rebalance.as_ref() {
-                                Some(rebalance) => {
-                                    rebalance.remap(value.extent().unwrap()).map(|location| {
-                                        IndexValue::new(Some(location), value.size(), value.atime())
-                                    })
-                                }
-                                None => Some(*value),
-                            };
-
-                            match remapped {
-                                Some(value) => with_alloctag("ZettaCacheState.index_cache", || {
-                                    self.index_cache.put(*key, value);
-                                }),
-                                None => {
-                                    self.index_cache.pop(key);
-                                }
-                            }
-                        }
-                        None => continue,
-                    }
-                }
-            }
-        }
-
-        debug!(
-            "took {}ms to add old pending changes with {} entries to index cache",
-            begin.elapsed().as_millis(),
-            merge.old_pending_changes.len()
-        );
 
         if let Some(mut rebalance) = merge.rebalance {
             // Free up the extents that have been allocated for the cache rebalancing
