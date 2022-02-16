@@ -560,7 +560,9 @@ impl MergeState {
                         // be a ghost entry being recached or perhaps a heal() of a bad entry.
                         if pc_key == entry.key {
                             // Replace the index entry with the newly inserted entry.
-                            debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                            if entry.value.location().is_some() {
+                                debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                            }
                             progress.evict(entry).await;
                             progress
                                 .ingest(
