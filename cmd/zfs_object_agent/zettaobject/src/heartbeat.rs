@@ -23,6 +23,8 @@ lazy_static! {
         Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
     pub static ref HEARTBEAT_PANIC: bool = get_tunable("heartbeat_panic", true);
     pub static ref INTERVAL_PANIC: bool = get_tunable("interval_panic", false);
+    pub static ref HEARTBEAT_TIMEOUT: Duration =
+        get_tunable("heartbeat_timeout", *LEASE_DURATION / 5);
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -257,7 +259,7 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
             };
             let instant = Instant::now();
             let result = heartbeat
-                .put_timeout(&object_access, Some(*LEASE_DURATION * 2 / 3))
+                .put_timeout(&object_access, Some(*HEARTBEAT_TIMEOUT))
                 .await;
             if lease_timed_out(last_heartbeat) {
                 if *HEARTBEAT_PANIC {
