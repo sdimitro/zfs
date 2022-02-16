@@ -18,6 +18,7 @@ pub fn tersevec<E>(vec: &[E], fmt: &mut Formatter) -> Result {
     fmt.write_fmt(format_args!("[...{} elements...]", vec.len()))
 }
 
+#[derive(Debug)]
 pub struct AlignedBytes {
     alignment: usize,
     bytes: Bytes,
@@ -88,6 +89,7 @@ impl From<AlignedVec> for AlignedBytes {
     }
 }
 
+#[derive(Debug)]
 pub struct AlignedVec {
     alignment: usize,
     vec: Vec<u8>,
