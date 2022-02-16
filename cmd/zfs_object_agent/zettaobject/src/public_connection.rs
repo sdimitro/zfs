@@ -288,12 +288,12 @@ impl PublicConnectionState {
         Ok(Box::pin(async move {
             #[derive(Debug, Serialize)]
             struct ZcacheStatsResponse {
-                zcache_stats: String,
+                stats_json: String,
             }
 
             let response = match cache {
                 Some(cache) => Ok(ZcacheStatsResponse {
-                    zcache_stats: cache.stats_as_json().await,
+                    stats_json: cache.stats_as_json().await,
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };
