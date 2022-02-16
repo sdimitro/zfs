@@ -13,7 +13,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2021 by Delphix. All rights reserved.
+ * Copyright (c) 2021, 2022 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -21,7 +21,9 @@
 /*
  * Possible keys in nvlist requests / responses to/from the Agent
  */
-#define	AGENT_TYPE			"Type"
+#define	AGENT_REQUEST_TYPE		"request_type"
+#define	AGENT_RESPONSE_TYPE		"response_type"
+
 #define	AGENT_TYPE_CREATE_POOL		"create pool"
 #define	AGENT_TYPE_CREATE_POOL_DONE	"pool create done"
 #define	AGENT_TYPE_OPEN_POOL		"open pool"
@@ -53,8 +55,8 @@
 #define	AGENT_MESSAGE			"message"
 #define	AGENT_NAME			"name"
 #define	AGENT_SIZE			"size"
-#define	AGENT_TXG			"TXG"
-#define	AGENT_GUID			"GUID"
+#define	AGENT_TXG			"txg"
+#define	AGENT_GUID			"guid"
 #define	AGENT_BUCKET			"bucket"
 #define	AGENT_CRED_PROFILE		"credentials_profile"
 #define	AGENT_ENDPOINT			"endpoint"

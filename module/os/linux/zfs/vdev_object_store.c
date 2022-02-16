@@ -13,7 +13,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2021 by Delphix. All rights reserved.
+ * Copyright (c) 2021, 2022 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -482,7 +482,7 @@ agent_request_nv(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("sending %llu-byte request to agent nvlist type=%s",
 		    (u_longlong_t)payload_len,
-		    fnvlist_lookup_string(nv, AGENT_TYPE));
+		    fnvlist_lookup_string(nv, AGENT_REQUEST_TYPE));
 	}
 	void *payload_buf = fnvlist_pack(nv, &payload_len);
 	int err = agent_request(vos, MESSAGE_NVLIST, NULL, 0,
@@ -548,7 +548,7 @@ zfs_object_store_open(vdev_object_store_t *vos)
 
 	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
 	nvlist_t *request = fnvlist_alloc();
-	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_VERSION);
+	fnvlist_add_string(request, AGENT_REQUEST_TYPE, AGENT_TYPE_VERSION);
 
 	/*
 	 * This specifies that the kernel supports all 1.X.Y versions of the
@@ -570,7 +570,7 @@ zfs_object_store_open(vdev_object_store_t *vos)
 		return (ENOTSUP);
 	}
 	char *type = NULL;
-	rc = nvlist_lookup_string(response, AGENT_TYPE, &type);
+	rc = nvlist_lookup_string(response, AGENT_RESPONSE_TYPE, &type);
 	if (rc != 0 || strcmp(type, AGENT_TYPE_VERSION) != 0) {
 		zfs_dbgmsg("zfs_object_store_open received unexpected message "
 		    "during negotiation: %d \"%s\"", rc,
@@ -694,7 +694,7 @@ agent_free_blocks_impl(vdev_object_store_t *vos,
     uint64_t *blkids, uint32_t *sizes, int num)
 {
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCKS);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_FREE_BLOCKS);
 	fnvlist_add_uint64_array(nv, AGENT_BLOCK, blkids, num);
 	fnvlist_add_uint32_array(nv, AGENT_SIZE, sizes, num);
 	int err = agent_request_nv(vos, nv, FTAG);
@@ -757,7 +757,7 @@ static void
 agent_close_pool(vdev_object_store_t *vos, boolean_t destroy)
 {
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CLOSE_POOL);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_CLOSE_POOL);
 	fnvlist_add_boolean_value(nv, AGENT_DESTROY, destroy);
 	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CLOSE_POOL);
 	vos->vos_closing = B_TRUE;
@@ -777,7 +777,7 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CREATE_POOL);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_CREATE_POOL);
 	fnvlist_add_string(nv, AGENT_NAME, spa_name(vd->vdev_spa));
 	fnvlist_add_uint64(nv, AGENT_GUID, spa_guid(vd->vdev_spa));
 	if (vos->vos_cred_profile != NULL) {
@@ -809,7 +809,7 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_OPEN_POOL);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_OPEN_POOL);
 	fnvlist_add_uint64(nv, AGENT_GUID, spa_guid(vd->vdev_spa));
 	if (vos->vos_cred_profile != NULL) {
 		fnvlist_add_string(nv, AGENT_CRED_PROFILE,
@@ -864,7 +864,7 @@ agent_begin_txg(vdev_object_store_t *vos, uint64_t txg)
 	zfs_object_store_wait(vos, VOS_SOCK_READY);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_BEGIN_TXG);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_BEGIN_TXG);
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 	zfs_dbgmsg("agent_begin_txg(%llu)",
 	    (u_longlong_t)txg);
@@ -880,7 +880,7 @@ agent_resume_complete(vdev_object_store_t *vos)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_RESUME_COMPLETE);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_RESUME_COMPLETE);
 
 	zfs_dbgmsg("agent_resume_complete()");
 	agent_request_nv(vos, nv, FTAG);
@@ -900,7 +900,7 @@ agent_end_txg(vdev_object_store_t *vos, uint64_t txg, void *ub_buf,
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_END_TXG);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_END_TXG);
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 	fnvlist_add_uint8_array(nv, AGENT_UBERBLOCK, ub_buf, ub_len);
 	fnvlist_add_uint8_array(nv, AGENT_CONFIG, config_buf, config_len);
@@ -921,7 +921,7 @@ agent_flush_writes(vdev_object_store_t *vos, uint64_t blockid)
 	zfs_object_store_wait(vos, VOS_SOCK_READY);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FLUSH_WRITES);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_FLUSH_WRITES);
 	fnvlist_add_uint64(nv, AGENT_BLOCK, blockid);
 	zfs_dbgmsg("agent_flush: blockid %llu", (u_longlong_t)blockid);
 
@@ -937,7 +937,7 @@ agent_set_feature(vdev_object_store_t *vos, const char *guid)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_ENABLE_FEATURE);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_ENABLE_FEATURE);
 	fnvlist_add_string(nv, AGENT_FEATURE, guid);
 	zfs_dbgmsg("agent_set_feature: feature %s", guid);
 
@@ -971,7 +971,7 @@ object_store_restart_agent(vdev_t *vd)
 	 * close the connection.  We could just as easily close the connection
 	 * ourself.  Or change the agent code to actually exit.
 	 */
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_EXIT);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_EXIT);
 	agent_request_nv(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
@@ -1105,7 +1105,8 @@ agent_resume_reissue(vdev_object_store_t *vos, vdev_t *vd)
 	    caller = AVL_NEXT(&vos->vos_pending_stats_tree, caller)) {
 		nvlist_t *request = fnvlist_alloc();
 
-		fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_GET_STATS);
+		fnvlist_add_string(request, AGENT_REQUEST_TYPE,
+		    AGENT_TYPE_GET_STATS);
 		fnvlist_add_uint64(request, AGENT_TOKEN, caller->oss_owner);
 
 		zfs_dbgmsg("reissue ovdev_object_store_stats_generate, owner "
@@ -1425,7 +1426,7 @@ vdev_object_store_stats_generate(vdev_t *vd, nvlist_t *nv)
 	mutex_exit(&vos->vos_stats_lock);
 
 	nvlist_t *request = fnvlist_alloc();
-	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_GET_STATS);
+	fnvlist_add_string(request, AGENT_REQUEST_TYPE, AGENT_TYPE_GET_STATS);
 	fnvlist_add_uint64(request, AGENT_TOKEN, stats_call.oss_owner);
 
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
@@ -1467,7 +1468,7 @@ update_features(spa_t *spa, nvlist_t *nv)
 static void
 agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 {
-	const char *type = fnvlist_lookup_string(nv, AGENT_TYPE);
+	const char *type = fnvlist_lookup_string(nv, AGENT_RESPONSE_TYPE);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("got response from agent type=%s", type);
 	}

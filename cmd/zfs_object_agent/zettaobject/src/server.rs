@@ -105,7 +105,7 @@ where
     }
 
     /// Register a function to be called for a regular, concurrent operation.
-    /// When a connection receives a request with "Type" = request_type, the
+    /// When a connection receives a request with "request_type" = request_type, the
     /// Handler will be called.  The Handler returns a Future, which the server
     /// will run in a new task.  If either the Handler or its returned Future
     /// return an Err, the connection will be closed.  This should primarily be
@@ -249,7 +249,7 @@ where
 
         assert_eq!(struct_len, 0);
         let nvl = NvList::try_unpack(payload_vec.as_slice()).unwrap();
-        let request_type_cstr = nvl.lookup_string("Type")?;
+        let request_type_cstr = nvl.lookup_string("request_type")?;
         let request_type = request_type_cstr.to_str()?;
         if request_type != "version" {
             return Err(anyhow!("Negotiation failed, no version request received"));
@@ -259,7 +259,7 @@ where
         for version in versions.iter().rev() {
             if version_req.matches(version) {
                 let mut response = NvList::new_unique_names();
-                response.insert("Type", "version")?;
+                response.insert("response_type", "version")?;
                 response.insert("version", Self::version_to_nvlist(version).as_ref())?;
                 responder.respond_with_nvlist(response);
                 return Ok(version.clone());
@@ -300,7 +300,7 @@ where
                 super_trace!("got nvlist request {:?}", nvl);
                 let request_type_cstr =
                     with_alloctag_hf("Server::start_connection() NvList::lookup_string()", || {
-                        nvl.lookup_string("Type")
+                        nvl.lookup_string("request_type")
                     })?;
                 let request_type = request_type_cstr.to_str()?;
                 match self.nvlist_handlers.get(request_type) {
@@ -464,7 +464,7 @@ impl FailureMessage {
 /// (not tuple-like).  FailureMessage is an example.
 ///
 /// The response nvlist will have the following nvpairs:
-/// * "Type" -> response_type (string)
+/// * "response_type" -> response_type (string)
 /// * fields from R
 /// * if result.is_ok(), fields from O
 /// * if result.is_err(), "err" -> EnumVariantName (string)
@@ -482,7 +482,6 @@ where
 {
     #[derive(Debug, Serialize)]
     struct Response<'a, R, O, E> {
-        #[serde(rename = "Type")]
         response_type: &'a str,
         #[serde(flatten)]
         request: R,

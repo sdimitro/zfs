@@ -133,7 +133,6 @@ impl RootConnectionState {
             }
             #[derive(Debug, Serialize, Deserialize)]
             struct RequestId {
-                #[serde(rename = "GUID")]
                 guid: PoolGuid,
             }
 
@@ -159,7 +158,6 @@ impl RootConnectionState {
         Box::pin(async move {
             #[derive(Debug, Serialize, Deserialize)]
             struct RequestId {
-                #[serde(rename = "GUID")]
                 guid: PoolGuid,
             }
             #[derive(Debug, Deserialize)]
@@ -170,7 +168,6 @@ impl RootConnectionState {
                 id: RequestId,
                 #[serde(default)]
                 rollback: bool,
-                #[serde(rename = "TXG")]
                 txg: Option<Txg>,
                 syncing_txg: Option<Txg>,
             }
@@ -274,7 +271,6 @@ impl RootConnectionState {
     fn begin_txg(&mut self, nvl: NvList) -> HandlerReturn {
         #[derive(Deserialize, Debug)]
         struct BeginTxgRequest {
-            #[serde(rename = "TXG")]
             txg: Txg,
         }
         let request: BeginTxgRequest = nvpair::from_nvlist(&nvl)?;
@@ -347,7 +343,6 @@ impl RootConnectionState {
                 .await;
             #[derive(Debug, Serialize)]
             struct EndTxgResponse {
-                #[serde(rename = "Type")]
                 response_type: &'static str,
                 #[serde(flatten)]
                 stats: PoolStatsPhys,
@@ -484,7 +479,7 @@ impl RootConnectionState {
         }
 
         let mut response = NvList::new_unique_names();
-        response.insert("Type", "get stats done").unwrap();
+        response.insert("response_type", "get stats done").unwrap();
         response.insert("token", &request.token).unwrap();
         response.insert("stats", nvl.as_ref()).unwrap();
 
@@ -513,7 +508,6 @@ impl RootConnectionState {
             }
             #[derive(Debug, Serialize)]
             struct ClosePoolResponse {
-                #[serde(rename = "Type")]
                 response_type: &'static str,
             }
             let response = ClosePoolResponse {
@@ -547,7 +541,6 @@ impl RootConnectionState {
 
         #[derive(Debug, Serialize)]
         struct EnableFeatureResponse {
-            #[serde(rename = "Type")]
             response_type: &'static str,
             feature: String,
         }
@@ -564,7 +557,6 @@ impl RootConnectionState {
             struct ResumeDestroyPoolRequest {
                 #[serde(flatten)]
                 object_access: ObjectAccessRequest,
-                #[serde(rename = "GUID")]
                 guid: PoolGuid,
             }
             let request: ResumeDestroyPoolRequest = nvpair::from_nvlist(&nvl)?;
@@ -583,7 +575,6 @@ impl RootConnectionState {
         Ok(Box::pin(async move {
             #[derive(Debug, Serialize)]
             struct ClearHitDataResponse {
-                #[serde(rename = "Type")]
                 response_type: &'static str,
                 result: &'static str,
             }

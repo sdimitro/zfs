@@ -19,7 +19,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2021 by Delphix. All rights reserved.
+ * Copyright (c) 2021, 2022 by Delphix. All rights reserved.
  */
 
 #include <sys/stat.h>
@@ -205,7 +205,7 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock,
 		close(sock);
 	}
 	nvlist_t *version_nvl = fnvlist_alloc();
-	fnvlist_add_string(version_nvl, AGENT_TYPE, AGENT_TYPE_VERSION);
+	fnvlist_add_string(version_nvl, AGENT_REQUEST_TYPE, AGENT_TYPE_VERSION);
 	fnvlist_add_string(version_nvl, AGENT_VERSION, version_req_str);
 	int err;
 	nvlist_t *resp = zoa_send_recv_msg_impl(sock, version_nvl, zoa_sock,
@@ -219,7 +219,7 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock,
 		return (-1);
 	}
 	if (version != NULL) {
-		ASSERT0(strcmp(fnvlist_lookup_string(resp, AGENT_TYPE),
+		ASSERT0(strcmp(fnvlist_lookup_string(resp, AGENT_RESPONSE_TYPE),
 		    AGENT_TYPE_VERSION));
 		*version = fnvlist_dup(fnvlist_lookup_nvlist(resp,
 		    AGENT_VERSION));
@@ -326,14 +326,15 @@ static void
 zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 {
 	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_DESTROYING_POOLS);
+	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
+	    AGENT_TYPE_GET_DESTROYING_POOLS);
 
 	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
 	    ZFS_PUBLIC_SOCKET);
 	if (resp == NULL)
 		return;
 
-	const char *type = fnvlist_lookup_string(resp, AGENT_TYPE);
+	const char *type = fnvlist_lookup_string(resp, AGENT_RESPONSE_TYPE);
 	VERIFY0(strcmp(type, AGENT_TYPE_GET_DESTROYING_POOLS_DONE));
 
 	nvlist_t *nvpools = NULL;
@@ -413,7 +414,8 @@ zoa_clear_destroyed_pools(void *hdl)
 	handle.lpc_printerr = B_TRUE;
 
 	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_CLEAR_DESTROYED_POOLS);
+	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
+	    AGENT_TYPE_CLEAR_DESTROYED_POOLS);
 
 	zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
 	    ZFS_PUBLIC_SOCKET);

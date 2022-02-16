@@ -86,11 +86,11 @@ impl RemoteChannel {
     /// Required after each open.
     async fn agent_version(stream: &mut UnixStream) -> Result<Version> {
         let mut vers_req_nvlist = NvList::new_unique_names();
-        vers_req_nvlist.insert("Type", "version")?;
+        vers_req_nvlist.insert("request_type", "version")?;
         vers_req_nvlist.insert("version", "^1")?;
         Self::send(stream, vers_req_nvlist).await?;
         let response = Self::receive(stream).await?;
-        assert!(response.lookup_string("Type")?.to_str() == Ok("version"));
+        assert!(response.lookup_string("response_type")?.to_str() == Ok("version"));
         let vers_nvl = response.lookup_nvlist("version")?;
         Ok(Version::new(
             vers_nvl.lookup_uint64("major")?,
@@ -144,7 +144,7 @@ impl RemoteChannel {
         loop {
             // send request, retrying as needed
             let mut nvlist = args.clone().unwrap_or_else(NvList::new_unique_names);
-            nvlist.insert("Type", request).unwrap();
+            nvlist.insert("request_type", request).unwrap();
             match Self::send(&mut self.stream, nvlist).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -168,7 +168,7 @@ impl RemoteChannel {
             };
             debug!("received response: {:?}", response);
 
-            let response_type = response.lookup_string("Type")?;
+            let response_type = response.lookup_string("response_type")?;
             let response_type = response_type.to_str()?;
             if response_type != request {
                 return Err(RemoteError::Other(anyhow!(

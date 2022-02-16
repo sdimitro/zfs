@@ -123,7 +123,7 @@ impl PublicConnectionState {
                 endpoint,
                 region_str,
             ));
-            let guid_result = nvl.lookup_uint64("GUID");
+            let guid_result = nvl.lookup_uint64("guid");
             if let Ok(guid) = guid_result {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {
                     continue;
@@ -185,7 +185,7 @@ impl PublicConnectionState {
 
             let mut response = NvList::new_unique_names();
             response
-                .insert("Type", "get destroying pools done")
+                .insert("response_type", "get destroying pools done")
                 .unwrap();
             response.insert("pools", pools.as_ref()).unwrap();
 
@@ -202,7 +202,7 @@ impl PublicConnectionState {
 
             let mut response = NvList::new_unique_names();
             response
-                .insert("Type", "clear destroying pools done")
+                .insert("response_type", "clear destroying pools done")
                 .unwrap();
 
             debug!("sending response: {:?}", response);
