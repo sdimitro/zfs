@@ -1373,9 +1373,6 @@ impl Pool {
                 checkpoint_txg,
                 syncing_state.syncing_txg.unwrap().checked_sub(1)
             );
-            syncing_state.feature_increment_refcount(&features::CHECKPOINT);
-        } else if syncing_state.checkpoint_txg.is_some() && checkpoint_txg.is_none() {
-            syncing_state.feature_decrement_refcount(&features::CHECKPOINT);
         } else {
             // Either there's no checkpoint now or before, or there should be the same checkpoint
             // txg in both this txg and the previous one.

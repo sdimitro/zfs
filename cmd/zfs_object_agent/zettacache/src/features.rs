@@ -20,61 +20,10 @@ pub struct Feature {
 }
 
 lazy_static! {
-    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = [
-        ORIGIN.clone(),
-        EXPAND.clone(),
-        GHOSTS.clone(),
-        NOREMOVE.clone(),
-        FIXINT.clone(),
-        SPLIT_INDEX.clone(),
-        INDEXVALUE16.clone(),
-        POOLGUIDTABLE.clone(),
-        INDEX_ENTERY_SERDE.clone(),
-        GHOST_HITS_HISTOGRAM.clone(),
-    ]
-    .map(|feature| (feature.name, feature.info))
-    .into_iter()
-    .collect();
-    pub static ref ORIGIN: Feature = Feature {
-        name: FeatureName("com.delphix:origin".to_string()),
-        info: FeatureType::Upgradeable
-    };
-    pub static ref EXPAND: Feature = Feature {
-        name: FeatureName("com.delphix:expand".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref GHOSTS: Feature = Feature {
-        name: FeatureName("com.delphix:ghosts".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref NOREMOVE: Feature = Feature {
-        name: FeatureName("com.delphix:noremove".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref FIXINT: Feature = Feature {
-        name: FeatureName("com.delphix:fixint".to_string()),
-        info: FeatureType::Upgradeable
-    };
-    pub static ref SPLIT_INDEX: Feature = Feature {
-        name: FeatureName("com.delphix:split_index".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref INDEXVALUE16: Feature = Feature {
-        name: FeatureName("com.delphix:indexvalue16".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref POOLGUIDTABLE: Feature = Feature {
-        name: FeatureName("com.delphix:poolguidtable".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref INDEX_ENTERY_SERDE: Feature = Feature {
-        name: FeatureName("com.delphix:index_entry_serde".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
-    pub static ref GHOST_HITS_HISTOGRAM: Feature = Feature {
-        name: FeatureName("com.delphix:ghost_hits_histogram".to_string()),
-        info: FeatureType::NonUpgradeable
-    };
+    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = []
+        .map(|feature: Feature| (feature.name, feature.info))
+        .into_iter()
+        .collect();
 }
 
 #[derive(Debug)]
