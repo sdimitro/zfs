@@ -56,6 +56,7 @@ lazy_static! {
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
     pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
     pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
+    pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(get_tunable("per_request_timeout_secs", 2));
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
@@ -272,7 +273,11 @@ impl<E> From<RusotoError<E>> for OAError<E> {
     }
 }
 
-async fn retry_impl<F, O, E>(msg: &str, f: impl Fn() -> F) -> Result<O, OAError<E>>
+async fn retry_impl<F, O, E>(
+    msg: &str,
+    timeout_opt: Option<Duration>,
+    f: impl Fn() -> F,
+) -> Result<O, OAError<E>>
 where
     E: core::fmt::Debug,
     F: Future<Output = Result<O, OAError<E>>>,
@@ -282,7 +287,14 @@ where
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
     loop {
         let begin = Instant::now();
-        match f().await {
+        let result = match timeout_opt {
+            Some(timeout) => match tokio::time::timeout(timeout, f()).await {
+                Err(e) => Err(OAError::TimeoutError(e)),
+                Ok(res2) => res2,
+            },
+            None => f().await,
+        };
+        match result {
             res @ Ok(_) => return res,
             res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
             res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
@@ -351,6 +363,16 @@ where
     }
 }
 
+/// `timeout_opt` controls whether the overall request will be
+/// cancelled after a certain amount of time. This is useful
+/// for requests that have complex retry logic or need to
+/// complete quickly for correctness reasons.
+/// If a timeout is not specified, a default per-request timeout
+/// will be used. This helps avoid problems where the object
+/// store backend drops some requests on the floor. This
+/// per-request timeout will be retried indefinitely, so
+/// Err(TimeoutError) doesn't need to be handled gracefully
+/// unless `timeout_opt` is specified.
 async fn retry<F, O, E>(
     msg: &str,
     timeout_opt: Option<Duration>,
@@ -362,12 +384,16 @@ where
 {
     trace!("{}: begin", msg);
     let begin = Instant::now();
+    // Because of the `xor` here, exactly one of timeout_opt and retry_timeout_opt will be None and the other will be Some.
+    let retry_timeout_opt = timeout_opt.xor(Some(*PER_REQUEST_TIMEOUT));
     let result = match timeout_opt {
-        Some(timeout) => match tokio::time::timeout(timeout, retry_impl(msg, f)).await {
-            Err(e) => Err(OAError::TimeoutError(e)),
-            Ok(res2) => res2,
-        },
-        None => retry_impl(msg, f).await,
+        Some(timeout) => {
+            match tokio::time::timeout(timeout, retry_impl(msg, retry_timeout_opt, f)).await {
+                Err(e) => Err(OAError::TimeoutError(e)),
+                Ok(res2) => res2,
+            }
+        }
+        None => retry_impl(msg, retry_timeout_opt, f).await,
     };
     let elapsed = begin.elapsed();
     trace!("{}: returned in {}ms", msg, elapsed.as_millis());
