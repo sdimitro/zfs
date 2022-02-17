@@ -67,20 +67,46 @@ use uuid::Uuid;
 
 lazy_static! {
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
-    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 15.0); // Can lower this to test forced eviction.
-    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 2.0);
+
+    // Assuming a worst case of a 2K average block size, the index should stay within about 1% of
+    // the total cache size. As long as the ghost entry "addition" is reasonable (say < 2x) then
+    // we should be able to stay within 6% space utilization. An additional 4% is reserved for
+    // the meta data for block storage (the block allocator's space maps).
+    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 10.0);
+    // This value needs to stay < 200 to safely avoid using up all available meta data space in the cache
+    static ref GHOST_CACHE_SIZE_PCT: u64 = std::cmp::min(get_tunable("ghost_cache_size_pct", 100), 200);
+
+    // In order to keep enough free space available in the cache to ingest data during a merge,
+    // keep at least 2% of the cache "free". Set the target at 97% and trigger eviction if we
+    // are over 98% full. Note that the target size is about 3x larger than our "worst case" ingest
+    // rate of a 1% cache size increase during merges. We need to have slop for the rabalance code
+    // to be able to consolidate slabs (to create empty slabs) to accomodate block size changes in
+    // the workload.
+    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 97);
+    static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 98);
+
+    // Keep the total footprint for the pending changes and index cache data at about 12% of total memory.
+    // The above tuning for eviction provides a 1TB "buffer" for insertions (on a 100TB config) during a
+    // merge. Using 5% for pending changes provides sufficient memory to absorb the same 1TB of insertions
+    // (on a 128GB config).
+    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 5.0);
+    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 7);
+
     static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
-    static ref MERGE_PROGRESS_MESSAGE_INTERVAL: Duration = Duration::from_millis(get_tunable("merge_progress_message_interval_ms", 1000));
+
     static ref MERGE_PROGRESS_CHUNK: usize = get_tunable("merge_progress_chunk", 1_000_000);
-    static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
-    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
-    static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
-    static ref GHOST_CACHE_SIZE_PCT: u64 = get_tunable("ghost_cache_size_pct", 100);
+
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
+
+    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The "speculative"
+    // buffer is for blocks being written. Note that ingesting a single block from an object can result
+    // in "inflation" since the entire object must be held in memory. But this is mitigated by the fact
+    // that we typically ingest the entire object on writes, and make a copy of the block to ingest on
+    // read (so we don't hold the object).
     static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_WAIT_INSERT: bool = get_tunable("cache_wait_insert", false);
-    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
+
     static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
 
     // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size instances/disks on gp3; because gp3 has ~1ms latency for each operation,
