@@ -37,7 +37,18 @@ use util::From64;
 use util::LockSet;
 
 lazy_static! {
-    static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 200);
+    // ENTRIES_PER_CHUNK is chosen so that chunks of the Index will be 8KB on disk, with a
+    // minimum of padding.  The size in bytes of each field is:
+    // chunk_to_raw(BlockBasedLogChunkBorrowed<IndexEntry>):
+    //   51: BlockHeader (JSON)
+    //    1: NULL byte to terminate JSON string
+    // BlockBasedLogChunkBorrowed:
+    //  <=9: id: ChunkId(u64), varint
+    //  <=9: offset: LogOffset(u64), varint
+    //    3: entries slice length
+    // 8048: = 337 * (1+23): slice of slices (1=slice len, 23 = size_of<IndexEntryPhys>)
+    // >=23: padding.  Typically, 35 bytes of padding is observed.
+    static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 337);
     // Note: kernel sends writes to disk in at most 256K chunks (at least with nvme driver)
     static ref WRITE_AGGREGATION_SIZE: usize = get_tunable("write_aggregation_size", 256 * 1024);
     // We primarily use the chunk cache to ensure that when looking up all the

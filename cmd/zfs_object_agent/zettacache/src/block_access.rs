@@ -43,9 +43,17 @@ lazy_static! {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BlockHeader {
+    #[serde(rename = "p")]
+    #[serde(alias = "payload_size")]
     payload_size: usize,
+    #[serde(rename = "e")]
+    #[serde(alias = "encoding")]
     encoding: EncodeType,
+    #[serde(rename = "c")]
+    #[serde(alias = "compression")]
     compression: CompressType,
+    #[serde(rename = "k")]
+    #[serde(alias = "checksum")]
     checksum: u64,
 }
 
@@ -128,14 +136,24 @@ pub struct Disk {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum CompressType {
+    #[serde(rename = "N")]
+    #[serde(alias = "None")]
     None,
+    #[serde(rename = "4")]
+    #[serde(alias = "Lz4")]
     Lz4,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum EncodeType {
+    #[serde(rename = "J")]
+    #[serde(alias = "Json")]
     Json,
+    #[serde(rename = "B")]
+    #[serde(alias = "Bincode")]
     Bincode,
+    #[serde(rename = "F")]
+    #[serde(alias = "BincodeFixint")]
     BincodeFixint,
 }
 
