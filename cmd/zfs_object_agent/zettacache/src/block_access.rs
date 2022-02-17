@@ -207,14 +207,17 @@ impl Disk {
 
         for _ in 0..*DISK_READ_MAX_QUEUE_DEPTH {
             let rx = reader_rx.clone();
-            tokio::task::spawn_blocking(move || {
+            // note, we want to use a "std" thread here rather than
+            // tokio::task::spawn_blocking() because the latter has a limit of how many
+            // threads it will create (default 512)
+            std::thread::spawn(move || {
                 Self::reader_thread(file, sector_size, rx);
             });
         }
         if !readonly {
             for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
                 let rx = writer_rx.clone();
-                tokio::task::spawn_blocking(move || {
+                std::thread::spawn(move || {
                     Self::writer_thread(file, sector_size, rx);
                 });
             }
