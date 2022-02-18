@@ -193,7 +193,7 @@ function configure_zettacache
 	typeset zcache_devices=$(echo $@ | tr ' ' ',')
 	stop_zfs_object_agent
 	# Truncate the zoa log to verify cache information
-	truncate -s 0 $(get_zoa_debug_log)
+	sudo truncate -s 0 $(get_zoa_debug_log)
 	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
 	sudo sh -c "echo ZETTACACHE_DEVICES=$zcache_devices >>$ZOA_CONF"
 

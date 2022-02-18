@@ -43,6 +43,10 @@
 # 3. Verify that the upgrade failed, and the pool version was still the original
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 function cleanup

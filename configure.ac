@@ -251,6 +251,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/arc/Makefile
 	tests/zfs-tests/tests/functional/atime/Makefile
 	tests/zfs-tests/tests/functional/bootfs/Makefile
+	tests/zfs-tests/tests/functional/background_freeing/Makefile
 	tests/zfs-tests/tests/functional/btree/Makefile
 	tests/zfs-tests/tests/functional/cache/Makefile
 	tests/zfs-tests/tests/functional/cachefile/Makefile

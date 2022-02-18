@@ -481,3 +481,19 @@ tests = ['zcache_slog_sharing_zpool_create_pos', 'zcache_slog_sharing_zpool_add_
 	'zcache_slog_sharing_import_pool_slog_missing_neg',
 	'zcache_slog_sharing_zoa_invalid_cache_device_neg']
 tags = ['functional', 'zcache_slog_sharing']
+
+[tests/functional/cli_root/zpool_upgrade]
+tests = ['zpool_upgrade_001_pos', 'zpool_upgrade_002_pos', 'zpool_upgrade_003_pos',
+	'zpool_upgrade_004_pos', 'zpool_upgrade_005_neg', 'zpool_upgrade_006_neg',
+	'zpool_upgrade_007_pos', 'zpool_upgrade_008_pos',
+	'zpool_upgrade_009_neg', 'zpool_upgrade_features_001_pos']
+tags = ['functional', 'cli_root', 'zpool_upgrade']
+
+[tests/functional/arc]
+tests = ['dbufstats_001_pos', 'dbufstats_002_pos', 'dbufstats_003_pos',
+	'arcstats_runtime_tuning']
+tags = ['functional', 'arc']
+
+[tests/functional/background_freeing]
+tests = ['default_free_space_reclaimation']
+tags = ['functional', 'background_freeing']

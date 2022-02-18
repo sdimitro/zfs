@@ -363,7 +363,22 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'log_spacemap/log_spacemap_import_logs': ['SKIP', object_store_skip],
         'zcache_slog_sharing/zcache_slog_sharing_slog_same_as_cache_neg':
             ['FAIL', 'DOSE-673'],
-
+        'cli_root/zpool_upgrade/zpool_upgrade_001_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_002_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_003_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_004_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_007_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_008_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_009_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_features_001_pos':
+            ['SKIP', object_store_skip],
     })
 else:
     known.update({
@@ -391,6 +406,8 @@ else:
         'zcache_slog_sharing/zcache_slog_sharing_zoa_invalid_cache_device_neg':
             ['SKIP', block_devices_skip],
         'zcache_slog_sharing/cleanup': ['SKIP', block_devices_skip],
+        'background_freeing/default_free_space_reclaimation':
+            ['SKIP', block_devices_skip],
     })
 
 #
@@ -496,6 +513,7 @@ elif sys.platform.startswith('linux'):
         'zvol/zvol_misc/zvol_misc_volmode': ['FAIL', known_reason],
         'zcache_slog_sharing/zcache_slog_sharing_multiple_pools_pos':
             ['SKIP', min_disk_required_reason],
+        'arc/dbufstats_001_pos': ['FAIL', 'QA-33190'],
     })
 
 if os.environ.get('ZTS_OBJECT_STORE') == 'true':

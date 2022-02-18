@@ -41,6 +41,10 @@
 # 2. Verify a 0 exit status
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 function cleanup

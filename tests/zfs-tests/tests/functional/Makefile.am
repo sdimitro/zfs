@@ -3,6 +3,7 @@ SUBDIRS = \
 	alloc_class \
 	arc \
 	atime \
+	background_freeing \
 	bootfs \
 	btree \
 	cache \
