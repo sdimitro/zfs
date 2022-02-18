@@ -369,12 +369,12 @@ impl SlabTrait for BitmapSlab {
     fn dump_info(&self) {
         let used_slots = self.total_slots - self.allocatable.len();
         writeln_stdout!(
-            "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {}%",
+            "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {:.1}%",
             self.location.offset(),
             nice_p2size(u64::from(self.slot_size)),
             used_slots,
             self.total_slots,
-            (used_slots * 100) / self.total_slots
+            (f64::from(used_slots) * 100.0) / f64::from(self.total_slots)
         );
         for (slot, run) in self.allocatable.iter_inverse_ranges(0, self.total_slots) {
             let first_location = self.slot_to_location(slot);
