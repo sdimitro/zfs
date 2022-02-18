@@ -251,6 +251,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/arc/Makefile
 	tests/zfs-tests/tests/functional/atime/Makefile
 	tests/zfs-tests/tests/functional/bootfs/Makefile
+	tests/zfs-tests/tests/functional/background_freeing/Makefile
 	tests/zfs-tests/tests/functional/btree/Makefile
 	tests/zfs-tests/tests/functional/cache/Makefile
 	tests/zfs-tests/tests/functional/cachefile/Makefile
@@ -406,6 +407,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/vdev_zaps/Makefile
 	tests/zfs-tests/tests/functional/write_dirs/Makefile
 	tests/zfs-tests/tests/functional/xattr/Makefile
+	tests/zfs-tests/tests/functional/zcache_slog_sharing/Makefile
 	tests/zfs-tests/tests/functional/zpool_influxdb/Makefile
 	tests/zfs-tests/tests/functional/zvol/Makefile
 	tests/zfs-tests/tests/functional/zvol/zvol_ENOSPC/Makefile

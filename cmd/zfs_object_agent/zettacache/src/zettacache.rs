@@ -55,6 +55,8 @@ use util::nice_p2size;
 use util::super_trace;
 use util::with_alloctag;
 use util::with_alloctag_hf;
+use util::writeln_stderr;
+use util::writeln_stdout;
 use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::*;
 use util::AlignedBytes;
@@ -65,20 +67,46 @@ use uuid::Uuid;
 
 lazy_static! {
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
-    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 15.0); // Can lower this to test forced eviction.
-    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 2.0);
+
+    // Assuming a worst case of a 2K average block size, the index should stay within about 1% of
+    // the total cache size. As long as the ghost entry "addition" is reasonable (say < 2x) then
+    // we should be able to stay within 6% space utilization. An additional 4% is reserved for
+    // the meta data for block storage (the block allocator's space maps).
+    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 10.0);
+    // This value needs to stay < 200 to safely avoid using up all available meta data space in the cache
+    static ref GHOST_CACHE_SIZE_PCT: u64 = std::cmp::min(get_tunable("ghost_cache_size_pct", 100), 200);
+
+    // In order to keep enough free space available in the cache to ingest data during a merge,
+    // keep at least 2% of the cache "free". Set the target at 97% and trigger eviction if we
+    // are over 98% full. Note that the target size is about 3x larger than our "worst case" ingest
+    // rate of a 1% cache size increase during merges. We need to have slop for the rabalance code
+    // to be able to consolidate slabs (to create empty slabs) to accomodate block size changes in
+    // the workload.
+    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 97);
+    static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 98);
+
+    // Keep the total footprint for the pending changes and index cache data at about 12% of total memory.
+    // The above tuning for eviction provides a 1TB "buffer" for insertions (on a 100TB config) during a
+    // merge. Using 5% for pending changes provides sufficient memory to absorb the same 1TB of insertions
+    // (on a 128GB config).
+    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 5.0);
+    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 7);
+
     static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
-    static ref MERGE_PROGRESS_MESSAGE_INTERVAL: Duration = Duration::from_millis(get_tunable("merge_progress_message_interval_ms", 1000));
+
     static ref MERGE_PROGRESS_CHUNK: usize = get_tunable("merge_progress_chunk", 1_000_000);
-    static ref MERGE_PROGRESS_CHECK_COUNT: u32 = get_tunable("merge_progress_check_count", 100);
-    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 80);
-    static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 82);
-    static ref GHOST_CACHE_SIZE_PCT: u64 = get_tunable("ghost_cache_size_pct", 100);
+
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
+
+    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The "speculative"
+    // buffer is for blocks being written. Note that ingesting a single block from an object can result
+    // in "inflation" since the entire object must be held in memory. But this is mitigated by the fact
+    // that we typically ingest the entire object on writes, and make a copy of the block to ingest on
+    // read (so we don't hold the object).
     static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_WAIT_INSERT: bool = get_tunable("cache_wait_insert", false);
-    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 10);
+
     static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
 
     // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size instances/disks on gp3; because gp3 has ~1ms latency for each operation,
@@ -193,7 +221,7 @@ struct IndexMessage {
     last_key: IndexKey,
     entries: Vec<IndexEntry>,
     frees: Vec<Extent>,
-    remaps: Vec<IndexEntry>,
+    cache_updates: Vec<IndexEntry>,
     obsoleted: AtimeHistogramPhys, // entries obsoleted from old index, since last MergeProgress
 }
 
@@ -203,7 +231,7 @@ struct MergeProgress {
     obsoleted: AtimeHistogramPhys,
     index_delta: IndexFlushDelta,
     frees: Vec<Extent>,
-    remaps: Vec<IndexEntry>,
+    cache_updates: Vec<IndexEntry>,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -217,26 +245,26 @@ impl MergeMessage {
     async fn new_progress(
         next_index: &mut IndexRun,
         frees: Vec<Extent>,
-        remaps: Vec<IndexEntry>,
+        cache_updates: Vec<IndexEntry>,
         obsoleted: AtimeHistogramPhys,
     ) -> Self {
         let timer = Instant::now();
         let free_count = frees.len();
-        let remap_count = remaps.len();
+        let cache_updates_count = cache_updates.len();
         let (new_index, index_delta) = next_index.flush().await;
         let message = MergeProgress {
             new_index,
             index_delta,
             obsoleted,
             frees,
-            remaps,
+            cache_updates,
         };
-        debug!("sending progress: index with {} entries ({}) last is {:?} flushed in {}ms, and {} frees, and {} remap requests",
+        debug!("sending progress: index with {} entries ({}) last is {:?} flushed in {}ms, and {} frees, and {} cache_updates.",
             next_index.len(),
             nice_p2size(next_index.num_bytes()),
             next_index.last_key(), timer.elapsed().as_millis(),
             free_count,
-            remap_count);
+            cache_updates_count);
         Self::Progress(message)
     }
 }
@@ -315,7 +343,7 @@ impl MergeState {
                     MergeMessage::new_progress(
                         next_index,
                         message.frees,
-                        message.remaps,
+                        message.cache_updates,
                         message.obsoleted,
                     )
                     .await,
@@ -359,10 +387,19 @@ impl MergeState {
             last_key: Option<IndexKey>,
             entries: Vec<IndexEntry>,
             frees: Vec<Extent>,
-            remaps: Vec<IndexEntry>,
+            // This contains a list of entries that will be used to update the index cache. These
+            // may originate from new updates (i.e. from the pending changes list), or from disk
+            // location changes (i.e. from a block allocator rebalance operation).
+            cache_updates: Vec<IndexEntry>,
             obsoleted: AtimeHistogramPhys,
             timer: Instant,
         }
+
+        enum IngestSource {
+            Index,
+            PendingChange,
+        }
+
         impl Progress {
             fn new(tx: mpsc::Sender<IndexMessage>, first_ghost: Atime, first_live: Atime) -> Self {
                 Self {
@@ -370,7 +407,7 @@ impl MergeState {
                     last_key: None,
                     entries: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                     frees: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
-                    remaps: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                    cache_updates: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                     obsoleted: AtimeHistogramPhys::new(first_ghost, first_live),
                     timer: Instant::now(),
                 }
@@ -390,7 +427,7 @@ impl MergeState {
                     self.frees.push(extent);
                     if self.entries.len() >= *MERGE_PROGRESS_CHUNK
                         || self.frees.len() >= *MERGE_PROGRESS_CHUNK
-                        || self.remaps.len() >= *MERGE_PROGRESS_CHUNK
+                        || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
                     {
                         self.report().await;
                     }
@@ -401,7 +438,12 @@ impl MergeState {
             /// 1. Added to the list of entries to be part of the new index, or
             /// 2. Added to the list of entries to be evicted from the cache, or
             /// 3. Dropped because it is an already evicted entry that is no longer being tracked.
-            async fn ingest(&mut self, state: &MergeState, mut entry: IndexEntry) {
+            async fn ingest(
+                &mut self,
+                state: &MergeState,
+                mut entry: IndexEntry,
+                source: IngestSource,
+            ) {
                 if let Some(extent) = entry.value.extent() {
                     if let Some(rebalance) = &state.rebalance {
                         let remapped_location = rebalance.remap(extent);
@@ -411,7 +453,7 @@ impl MergeState {
                             // was unable to move the data (evicting the entry instead) the new location
                             // will be None.
                             entry.value.set_location(remapped_location);
-                            self.remaps.push(entry);
+                            self.cache_updates.push(entry);
                         }
                     }
                 }
@@ -419,6 +461,10 @@ impl MergeState {
                     // If this entry was evicted during rebalance, don't put it in the new index
                     if entry.value.location().is_some() {
                         self.entries.push(entry);
+
+                        if matches!(source, IngestSource::PendingChange) {
+                            self.cache_updates.push(entry);
+                        }
                     }
                 } else {
                     if let Some(extent) = entry.value.extent() {
@@ -436,7 +482,7 @@ impl MergeState {
 
                 if self.entries.len() >= *MERGE_PROGRESS_CHUNK
                     || self.frees.len() >= *MERGE_PROGRESS_CHUNK
-                    || self.remaps.len() >= *MERGE_PROGRESS_CHUNK
+                    || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
                 {
                     self.report().await;
                 }
@@ -458,8 +504,8 @@ impl MergeState {
                                 &mut self.frees,
                                 Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                             ),
-                            remaps: mem::replace(
-                                &mut self.remaps,
+                            cache_updates: mem::replace(
+                                &mut self.cache_updates,
                                 Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
                             ),
                             obsoleted: self.obsoleted.take(),
@@ -543,6 +589,7 @@ impl MergeState {
                                 key: pc_key,
                                 value: pc_value,
                             },
+                            IngestSource::PendingChange,
                         )
                         .await;
                     pending_changes_iter.next();
@@ -558,7 +605,9 @@ impl MergeState {
                         // be a ghost entry being recached or perhaps a heal() of a bad entry.
                         if pc_key == entry.key {
                             // Replace the index entry with the newly inserted entry.
-                            debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                            if entry.value.location().is_some() {
+                                debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                            }
                             progress.evict(entry).await;
                             progress
                                 .ingest(
@@ -567,13 +616,14 @@ impl MergeState {
                                         key: pc_key,
                                         value: pc_value,
                                     },
+                                    IngestSource::PendingChange,
                                 )
                                 .await;
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
                             assert_gt!(pc_key, entry.key);
-                            progress.ingest(self, entry).await;
+                            progress.ingest(self, entry, IngestSource::Index).await;
                         }
                     }
                     Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
@@ -587,6 +637,7 @@ impl MergeState {
                                         key: pc_key,
                                         value: pc_value,
                                     },
+                                    IngestSource::PendingChange,
                                 )
                                 .await;
 
@@ -595,12 +646,12 @@ impl MergeState {
                         } else {
                             // We shouldn't have skipped any, because there has to be a corresponding Index entry
                             assert_gt!(pc_key, entry.key);
-                            progress.ingest(self, entry).await;
+                            progress.ingest(self, entry, IngestSource::Index).await;
                         }
                     }
                     None => {
                         // no more pending changes
-                        progress.ingest(self, entry).await;
+                        progress.ingest(self, entry, IngestSource::Index).await;
                     }
                 }
             }
@@ -614,6 +665,7 @@ impl MergeState {
                         key: pc_key,
                         value: pc_value,
                     },
+                    IngestSource::PendingChange,
                 )
                 .await;
             // Consume pending change.  We don't do that in the `while let`
@@ -1243,6 +1295,7 @@ impl ZettaCache {
         mut merging: Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)>,
     ) {
         let mut next_tick = tokio::time::Instant::now();
+        let mut completed_merge = false;
         loop {
             // if there is no current merging state, check to see if a merge should be started
             {
@@ -1256,57 +1309,68 @@ impl ZettaCache {
                 let begin = Instant::now();
                 let mut msg_count = 0;
                 let mut free_count = 0;
-                let mut remap_count = 0;
+                let mut cache_updates_count = 0;
+                let mut state_lock_held = Duration::ZERO;
                 // we have a channel to an active merge task, check it for messages
                 loop {
                     let result = timeout_at(next_tick, rx.recv()).await;
                     match result {
                         // capture merge progress: the current next index phys and eviction requests
-                        Ok(Some(MergeMessage::Progress(merge_progress))) => {
+                        Ok(Some(MergeMessage::Progress(progress))) => {
                             msg_count += 1;
-                            free_count += merge_progress.frees.len();
-                            remap_count += merge_progress.remaps.len();
+                            free_count += progress.frees.len();
+                            cache_updates_count += progress.cache_updates.len();
+
                             trace!(
-                                "merge checkpoint with {} free requests and {} remap requests",
-                                merge_progress.frees.len(),
-                                merge_progress.remaps.len()
+                                "merge message with {} frees and {} cache updates.",
+                                progress.frees.len(),
+                                progress.cache_updates.len(),
                             );
-                            super_trace!("eviction requested for {:?}", merge_progress.frees);
-                            super_trace!("remap requested for {:?}", merge_progress.remaps);
+
+                            super_trace!("eviction requested for {:?}", progress.frees);
+                            super_trace!(
+                                "cache updates requested for {:?}",
+                                progress.cache_updates
+                            );
+
                             {
                                 let mut state = self.state.lock().await;
+                                let begin = Instant::now();
 
                                 // free the extent ranges associated with the evicted blocks
-                                for extent in merge_progress.frees {
+                                for extent in progress.frees {
                                     state.block_allocator.free(extent);
                                 }
 
-                                // update any remapped (possibly evicted) locations in the index cache
-                                for entry in &merge_progress.remaps {
+                                // Here is where we populate the index cache to contain any new
+                                // keys that may have been inserted or updated, as well as ensure
+                                // any existing keys are consistent w.r.t. a remap (i.e. ensuring
+                                // the cache references the key's new/remapped location on disk).
+                                //
+                                // Note that keys that are already in the cache will have their
+                                // associated values updated, and keys that are not will be added
+                                // (with their values). Also note that any keys with no associated
+                                // values (ghost keys) will be removed from the index. This is
+                                // important for keys which may have been "valid", but were evicted
+                                // because they could not be remapped.
+                                for entry in progress.cache_updates.into_iter() {
                                     match entry.value.location() {
-                                        Some(location) => {
-                                            if let Some(value) =
-                                                state.index_cache.peek_mut(&entry.key)
-                                            {
-                                                value.set_location(Some(location));
-                                            }
-                                        }
-                                        None => {
-                                            state.index_cache.pop(&entry.key);
-                                        }
-                                    }
+                                        // It's possible the key wasn't already in the cache, so this may add or update the key.
+                                        Some(_) => state.index_cache.put(entry.key, entry.value),
+                                        // It's possible the key isn't in the cache; .pop() doesn't fail in that case.
+                                        None => state.index_cache.pop(&entry.key),
+                                    };
                                 }
+
+                                state_lock_held += begin.elapsed();
                             } // drop state lock
 
-                            *new_index_phys = merge_progress.new_index;
+                            *new_index_phys = progress.new_index;
                             let mut old_index = self.old_index.write().await;
                             let mut new_index_opt = self.new_index.write().await;
                             match &mut *new_index_opt {
                                 Some(new_index) => {
-                                    new_index.update(
-                                        new_index_phys.clone(),
-                                        &merge_progress.index_delta,
-                                    );
+                                    new_index.update(new_index_phys.clone(), &progress.index_delta);
                                 }
                                 None => {
                                     *new_index_opt = Some(
@@ -1319,7 +1383,7 @@ impl ZettaCache {
                                 }
                             }
                             if let Some(last_key) = new_index_phys.last_key() {
-                                old_index.trim(last_key, &merge_progress.obsoleted);
+                                old_index.trim(last_key, &progress.obsoleted);
                             }
                         }
                         // merge task complete, replace the current index with the new index
@@ -1332,6 +1396,7 @@ impl ZettaCache {
                             state.block_allocator.rebalance_fini();
                             *new_index_opt = None;
                             merging = None;
+                            completed_merge = true;
                             break;
                         }
                         Ok(None) => panic!("channel closed before Complete message received"),
@@ -1339,11 +1404,12 @@ impl ZettaCache {
                     }
                 }
                 debug!(
-                    "processed {} merge checkpoints with {} evictions and {} remaps in {}ms",
+                    "processed {} merge messages with {} frees and {} cache updates in {}ms (state lock held for {}ms)",
                     msg_count,
                     free_count,
-                    remap_count,
-                    begin.elapsed().as_millis()
+                    cache_updates_count,
+                    begin.elapsed().as_millis(),
+                    state_lock_held.as_millis(),
                 );
             }
 
@@ -1357,6 +1423,7 @@ impl ZettaCache {
                     .flush_checkpoint(
                         old_index_phys,
                         merging.as_mut().map(|(_, phys)| (phys.clone())),
+                        completed_merge,
                     )
                     .await;
             }
@@ -1364,6 +1431,7 @@ impl ZettaCache {
                 tokio::time::Instant::now(),
                 next_tick + *CHECKPOINT_INTERVAL,
             );
+            completed_merge = false;
         }
     }
 
@@ -1397,6 +1465,7 @@ impl ZettaCache {
             Some(bytes) => {
                 self.stats.track_bytes(LookupBytes, bytes.len() as u64);
                 super_trace!("cache hit for {:?}", key);
+                self.stats.track_count(CacheHit);
                 LookupResponse::Present((bytes, locked_key))
             }
             None => LookupResponse::Absent(locked_key),
@@ -1435,6 +1504,9 @@ impl ZettaCache {
                             let validated = state.validate(value);
                             // All entries in the pending changes should be valid
                             assert!(validated.is_some());
+                            if matches!(source, LookupSource::Read) {
+                                self.stats.track_count(IndexHitPendingChanges);
+                            }
                             Either::Left(f(&mut state, validated))
                         }
                     }
@@ -1447,6 +1519,9 @@ impl ZettaCache {
                                 | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
                                     state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
+                                    if matches!(source, LookupSource::Read) {
+                                        self.stats.track_count(IndexHitPendingChanges);
+                                    }
                                     Either::Left(f(&mut state, validated))
                                 }
                             }
@@ -1455,6 +1530,9 @@ impl ZettaCache {
                                 Some(&value) => {
                                     state.ghost_hit_check(value, source);
                                     let validated = state.validate(value);
+                                    if matches!(source, LookupSource::Read) {
+                                        self.stats.track_count(IndexHitIndexCache);
+                                    }
                                     Either::Left(f(&mut state, validated))
                                 }
                                 None => Either::Right(f),
@@ -1465,6 +1543,9 @@ impl ZettaCache {
                             Some(&value) => {
                                 state.ghost_hit_check(value, source);
                                 let validated = state.validate(value);
+                                if matches!(source, LookupSource::Read) {
+                                    self.stats.track_count(IndexHitIndexCache);
+                                }
                                 Either::Left(f(&mut state, validated))
                             }
                             None => Either::Right(f),
@@ -1479,17 +1560,11 @@ impl ZettaCache {
                 // Got the index entry from pending state or index cache and
                 // already called f().  Now that we've dropped the state lock,
                 // run the future that it returned.
-                let result = fut.await;
-                if matches!(source, LookupSource::Read) {
-                    self.stats.track_count(CacheHitWithoutIndexRead);
-                }
-                return result;
+                return fut.await;
             }
             Either::Right(f) => f,
         };
 
-        // TODO -- is CacheMissWithoutIndexRead possible anymore? See DOSE-939
-        // XXX - No, it is not possible (except with index chunk cache)
         super_trace!(
             "lookup has no pending_change for {:?} and it's absent from the index-cache; checking index",
             key
@@ -1504,44 +1579,39 @@ impl ZettaCache {
                 }
             }
         }
-        let entry_opt = match index {
+        let (entry_opt, chunk_cache_hit) = match index {
             Either::Left(index) => index.lookup(key).await,
             Either::Right(index) => index.lookup(key).await,
         };
-        let stat_counter;
+        if matches!(source, LookupSource::Read) {
+            if chunk_cache_hit {
+                self.stats.track_count(IndexHitChunkCache);
+            } else {
+                self.stats.track_count(IndexHitDisk);
+            }
+        }
         let fut = match entry_opt {
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
                 let mut state = lock_non_send(&self.state).await;
                 let value = state.lookup_with_value_from_index(&key, entry.value, source);
-                stat_counter = match value {
-                    Some(_) => CacheHitAfterIndexRead,
-                    None => {
-                        super_trace!(
-                            "cache miss after reading index for {:?}, invalid entry",
-                            key
-                        );
-                        CacheMissAfterIndexRead
-                    }
-                };
+                if value.is_none() {
+                    super_trace!(
+                        "cache miss after reading index for {:?}, invalid entry",
+                        key
+                    );
+                }
                 f(&mut state, value)
             }
             None => {
                 // key not in index
-                stat_counter = CacheMissAfterIndexRead;
                 super_trace!("cache miss after reading index for {:?}", key);
                 let mut state = lock_non_send(&self.state).await;
                 f(&mut state, None)
             }
         };
-        let result = fut.await;
-
-        // Update relevant stat after waiting
-        if matches!(source, LookupSource::Read) {
-            self.stats.track_count(stat_counter);
-        }
-        result
+        fut.await
     }
 
     async fn reserve_buffer_space(
@@ -1787,7 +1857,7 @@ impl ZCacheDBHandle {
         for path in paths {
             match Disk::new(path, true) {
                 Ok(disk) => disks.push(disk),
-                Err(err) => eprintln!("error: {}", err),
+                Err(err) => writeln_stderr!("error: {}", err),
             }
         }
         if disks.is_empty() {
@@ -1827,35 +1897,35 @@ impl ZCacheDBHandle {
     }
 
     pub async fn dump_free_space(&self) {
-        println!("Superblock");
-        println!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
-        println!();
+        writeln_stdout!("Superblock");
+        writeln_stdout!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
+        writeln_stdout!();
 
-        println!("Checkpoint Region");
-        println!("  {:?}", self.primary.checkpoint_capacity);
-        println!(
+        writeln_stdout!("Checkpoint Region");
+        writeln_stdout!("  {:?}", self.primary.checkpoint_capacity);
+        writeln_stdout!(
             "  checkpoint: {} used out of {} ({:.1}%, must be <50%)",
             nice_p2size(self.primary.checkpoint.size),
             nice_p2size(self.primary.checkpoint_capacity.size),
             self.primary.checkpoint.size as f64 * 100.0
                 / self.primary.checkpoint_capacity.size as f64
         );
-        println!();
+        writeln_stdout!();
 
-        println!("Old Checkpoint Regions");
+        writeln_stdout!("Old Checkpoint Regions");
         let mut unused_checkpoint_space = 0;
         for region in self.primary.old_checkpoint_capacity.iter() {
             unused_checkpoint_space += region.size;
-            println!("  {:?}", region);
+            writeln_stdout!("  {:?}", region);
         }
-        println!("  ----------------------");
-        println!("  total: {}", nice_p2size(unused_checkpoint_space));
-        println!();
+        writeln_stdout!("  ----------------------");
+        writeln_stdout!("  total: {}", nice_p2size(unused_checkpoint_space));
+        writeln_stdout!();
 
-        println!("Metadata Region");
+        writeln_stdout!("Metadata Region");
         let mut total_used_bytes = 0;
         let mut total_allocated_bytes = 0;
-        println!(
+        writeln_stdout!(
             "  {:>13} - {:>6} used out of {:>6} allocated",
             "operation log",
             nice_p2size(self.checkpoint.operation_log.bytes()),
@@ -1864,7 +1934,7 @@ impl ZCacheDBHandle {
         total_used_bytes += self.checkpoint.operation_log.bytes();
         total_allocated_bytes += self.checkpoint.operation_log.capacity_bytes();
 
-        println!(
+        writeln_stdout!(
             "  {:>13} - {:>6} used out of {:>6} allocated",
             "spacemap",
             nice_p2size(self.checkpoint.block_allocator.spacemap_bytes()),
@@ -1873,7 +1943,7 @@ impl ZCacheDBHandle {
         total_used_bytes += self.checkpoint.block_allocator.spacemap_bytes();
         total_allocated_bytes += self.checkpoint.block_allocator.spacemap_capacity_bytes();
 
-        println!(
+        writeln_stdout!(
             "  {:>13} - {:>6} used out of {:>6} allocated",
             "spacemap_next",
             nice_p2size(self.checkpoint.block_allocator.spacemap_next_bytes()),
@@ -1889,7 +1959,7 @@ impl ZCacheDBHandle {
             .block_allocator
             .spacemap_next_capacity_bytes();
 
-        println!(
+        writeln_stdout!(
             "  {:>13} - {:>6} used out of {:>6} allocated",
             "index log",
             nice_p2size(self.checkpoint.old_index.log_bytes()),
@@ -1899,7 +1969,7 @@ impl ZCacheDBHandle {
         total_allocated_bytes += self.checkpoint.old_index.log_capacity_bytes();
 
         if let Some(progress) = self.checkpoint.merge_progress.clone() {
-            println!(
+            writeln_stdout!(
                 "  {:>13} - {:>6} used out of {:>6} allocated",
                 "progress log",
                 nice_p2size(progress.operation_log.bytes()),
@@ -1907,7 +1977,7 @@ impl ZCacheDBHandle {
             );
             total_used_bytes += progress.operation_log.bytes();
             total_allocated_bytes += progress.operation_log.capacity_bytes();
-            println!(
+            writeln_stdout!(
                 "  {:>13} - {:>6} used out of {:>6} allocated",
                 "progress index",
                 nice_p2size(progress.new_index.log_bytes()),
@@ -1916,7 +1986,7 @@ impl ZCacheDBHandle {
             total_used_bytes += progress.new_index.log_bytes();
             total_allocated_bytes += progress.new_index.log_capacity_bytes();
         }
-        println!("  ----------------------");
+        writeln_stdout!("  ----------------------");
         let metadata_region_size = self
             .checkpoint
             .extent_allocator
@@ -1924,7 +1994,7 @@ impl ZCacheDBHandle {
             .iter()
             .map(|extent| extent.size)
             .sum();
-        println!(
+        writeln_stdout!(
             "  {:>13} - {} ({:.1}%) used, {} ({:.1}%) allocated out of {:>6} total",
             "total",
             nice_p2size(total_used_bytes),
@@ -1933,16 +2003,16 @@ impl ZCacheDBHandle {
             total_allocated_bytes as f64 * 100.0 / metadata_region_size as f64,
             nice_p2size(metadata_region_size)
         );
-        println!("  ----------------------");
+        writeln_stdout!("  ----------------------");
         for (disk, (used, total)) in self.extent_allocator.zcachedb_metadata_per_disk() {
-            println!(
+            writeln_stdout!(
                 "  {:?} - {:>6} allocated out of {:>6} total",
                 disk,
                 nice_p2size(used),
                 nice_p2size(total)
             );
         }
-        println!();
+        writeln_stdout!();
 
         let balloc_size = self
             .checkpoint
@@ -1951,22 +2021,22 @@ impl ZCacheDBHandle {
             .iter()
             .map(|extent| extent.size)
             .sum();
-        println!("{:>6} User Data Region", nice_p2size(balloc_size));
+        writeln_stdout!("{:>6} User Data Region", nice_p2size(balloc_size));
     }
 
     pub async fn dump_structures(&self, opts: DumpStructuresOptions) {
         if opts.dump_defaults {
-            println!("{:#?}", self.primary);
-            println!("{:#?}", self.checkpoint);
+            writeln_stdout!("{:#?}", self.primary);
+            writeln_stdout!("{:#?}", self.checkpoint);
         }
 
         if opts.dump_atime_histogram {
-            println!("DUMP INDEX ATIME HISTOGRAM");
-            println!("{}", self.checkpoint.old_index.atime_histogram());
+            writeln_stdout!("DUMP INDEX ATIME HISTOGRAM");
+            writeln_stdout!("{}", self.checkpoint.old_index.atime_histogram());
 
             if let Some(progress) = &self.checkpoint.merge_progress {
-                println!("DUMP MERGE INDEX ATIME HISTOGRAM");
-                println!("{}", progress.new_index.atime_histogram());
+                writeln_stdout!("DUMP MERGE INDEX ATIME HISTOGRAM");
+                writeln_stdout!("{}", progress.new_index.atime_histogram());
             }
         }
 
@@ -1984,15 +2054,15 @@ impl ZCacheDBHandle {
                 .operation_log
                 .iter_chunks(self.block_access.clone())
                 .for_each(|chunk| async move {
-                    println!("{:#?}", chunk);
+                    writeln_stdout!("{:#?}", chunk);
                 })
                 .await;
             if let Some(mpp) = &self.checkpoint.merge_progress {
-                println!("\nold operation log from MergeProgressPhys:");
+                writeln_stdout!("\nold operation log from MergeProgressPhys:");
                 mpp.operation_log
                     .iter_chunks(self.block_access.clone())
                     .for_each(|chunk| async move {
-                        println!("{:#?}", chunk);
+                        writeln_stdout!("{:#?}", chunk);
                     })
                     .await;
             }
@@ -2003,7 +2073,7 @@ impl ZCacheDBHandle {
                 .old_index
                 .iter_chunks(self.block_access.clone())
                 .for_each(|chunk| async move {
-                    println!("{:#?}", chunk);
+                    writeln_stdout!("{:#?}", chunk);
                 })
                 .await;
 
@@ -2011,22 +2081,22 @@ impl ZCacheDBHandle {
                 .old_index
                 .iter_summary_chunks(self.block_access.clone())
                 .for_each(|chunk| async move {
-                    println!("{:#?}", chunk);
+                    writeln_stdout!("{:#?}", chunk);
                 })
                 .await;
 
             if let Some(mpp) = &self.checkpoint.merge_progress {
-                println!("\nnew index from MergeProgressPhys:");
+                writeln_stdout!("\nnew index from MergeProgressPhys:");
                 mpp.new_index
                     .iter_chunks(self.block_access.clone())
                     .for_each(|chunk| async move {
-                        println!("{:#?}", chunk);
+                        writeln_stdout!("{:#?}", chunk);
                     })
                     .await;
                 mpp.new_index
                     .iter_summary_chunks(self.block_access.clone())
                     .for_each(|chunk| async move {
-                        println!("{:#?}", chunk);
+                        writeln_stdout!("{:#?}", chunk);
                     })
                     .await;
             }
@@ -2037,7 +2107,7 @@ impl ZCacheDBHandle {
                 if let Some(log) = progress.rebalance_log.as_ref() {
                     log.iter_chunks(self.block_access.clone())
                         .for_each(|chunk| async move {
-                            println!("{:#?}", chunk);
+                            writeln_stdout!("{:#?}", chunk);
                         })
                         .await;
                 }
@@ -2056,19 +2126,19 @@ impl ZCacheDBHandle {
     }
 
     pub async fn verify_index(&self) {
-        println!("iterating current (old) index to verify histogram...");
+        writeln_stdout!("iterating current (old) index to verify histogram...");
         self.checkpoint
             .old_index
             .verify_histogram(self.block_access.clone())
             .await;
 
         if let Some(mpp) = &self.checkpoint.merge_progress {
-            println!("iterating merge (new) index to verify histogram...");
+            writeln_stdout!("iterating merge (new) index to verify histogram...");
             mpp.new_index
                 .verify_histogram(self.block_access.clone())
                 .await;
         }
-        println!("histograms correct");
+        writeln_stdout!("histograms correct");
     }
 }
 
@@ -2344,7 +2414,12 @@ impl ZettaCacheState {
 
     /// Flush out the current set of pending index changes. This is a recovery point in case of
     /// a system crash between index rewrites.
-    async fn flush_checkpoint(&mut self, old_index: IndexRunPhys, new_index: Option<IndexRunPhys>) {
+    async fn flush_checkpoint(
+        &mut self,
+        old_index: IndexRunPhys,
+        new_index: Option<IndexRunPhys>,
+        completed_merge: bool,
+    ) {
         debug!(
             "flushing checkpoint {:?}",
             self.primary.checkpoint_id.next()
@@ -2416,7 +2491,7 @@ impl ZettaCacheState {
             old_index,
             operation_log: operation_log_phys,
             last_atime: self.atime,
-            block_allocator: self.block_allocator.flush().await,
+            block_allocator: self.block_allocator.flush(completed_merge).await,
             size_histogram: self.size_histogram.clone(),
             merge_progress: merge_progress_phys,
         };
@@ -2769,49 +2844,6 @@ impl ZettaCacheState {
             self.atime_histogram.first_ghost()
         );
         self.atime_histogram.reset_first_live(merge.eviction_cutoff);
-
-        let begin = Instant::now();
-
-        // Populate index_cache with old_pending_changes
-        for (key, pc) in &merge.old_pending_changes {
-            match pc {
-                PendingChange::Insert(value)
-                | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                    // For the "old pending changes" list, we need to not only do the remap for atime updates, but also
-                    // for inserts. This is because an insert could have occurred just prior to the merge starting, and
-                    // then the location for that new insert may have been rebalanced via the merge. In this case, we need
-                    // to ensure index cache is populated correctly with the new location(s).
-                    match self.validate(*value) {
-                        Some(_) => {
-                            let remapped = match merge.rebalance.as_ref() {
-                                Some(rebalance) => {
-                                    rebalance.remap(value.extent().unwrap()).map(|location| {
-                                        IndexValue::new(Some(location), value.size(), value.atime())
-                                    })
-                                }
-                                None => Some(*value),
-                            };
-
-                            match remapped {
-                                Some(value) => with_alloctag("ZettaCacheState.index_cache", || {
-                                    self.index_cache.put(*key, value);
-                                }),
-                                None => {
-                                    self.index_cache.pop(key);
-                                }
-                            }
-                        }
-                        None => continue,
-                    }
-                }
-            }
-        }
-
-        debug!(
-            "took {}ms to add old pending changes with {} entries to index cache",
-            begin.elapsed().as_millis(),
-            merge.old_pending_changes.len()
-        );
 
         if let Some(mut rebalance) = merge.rebalance {
             // Free up the extents that have been allocated for the cache rebalancing

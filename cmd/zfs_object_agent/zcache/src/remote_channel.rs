@@ -7,6 +7,7 @@ use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use util::message::MessageHeader;
+use util::message::{AGENT_REQUEST_TYPE, AGENT_RESPONSE_TYPE, TYPE_VERSION};
 use util::writeln_stderr;
 
 #[derive(Debug)]
@@ -86,11 +87,11 @@ impl RemoteChannel {
     /// Required after each open.
     async fn agent_version(stream: &mut UnixStream) -> Result<Version> {
         let mut vers_req_nvlist = NvList::new_unique_names();
-        vers_req_nvlist.insert("Type", "version")?;
+        vers_req_nvlist.insert(AGENT_REQUEST_TYPE, TYPE_VERSION)?;
         vers_req_nvlist.insert("version", "^1")?;
         Self::send(stream, vers_req_nvlist).await?;
         let response = Self::receive(stream).await?;
-        assert!(response.lookup_string("Type")?.to_str() == Ok("version"));
+        assert!(response.lookup_string(AGENT_RESPONSE_TYPE)?.to_str() == Ok(TYPE_VERSION));
         let vers_nvl = response.lookup_nvlist("version")?;
         Ok(Version::new(
             vers_nvl.lookup_uint64("major")?,
@@ -144,7 +145,7 @@ impl RemoteChannel {
         loop {
             // send request, retrying as needed
             let mut nvlist = args.clone().unwrap_or_else(NvList::new_unique_names);
-            nvlist.insert("Type", request).unwrap();
+            nvlist.insert(AGENT_REQUEST_TYPE, request).unwrap();
             match Self::send(&mut self.stream, nvlist).await {
                 Ok(_) => {}
                 Err(e) => {
@@ -168,7 +169,7 @@ impl RemoteChannel {
             };
             debug!("received response: {:?}", response);
 
-            let response_type = response.lookup_string("Type")?;
+            let response_type = response.lookup_string(AGENT_RESPONSE_TYPE)?;
             let response_type = response_type.to_str()?;
             if response_type != request {
                 return Err(RemoteError::Other(anyhow!(
@@ -178,16 +179,10 @@ impl RemoteChannel {
                 )));
             }
 
-            let result = response.lookup_string("result")?;
-            let result = result.to_str()?;
-            return match result {
-                "ok" => Ok(response),
-                "err" => Err(RemoteError::ResultError(response)),
-                _ => Err(RemoteError::Other(anyhow!(
-                    "expected \"ok\" or \"err\" for result, got \"{}\"",
-                    result
-                ))),
-            };
+            if response.exists("err") {
+                return Err(RemoteError::ResultError(response));
+            }
+            return Ok(response);
         }
     }
 }

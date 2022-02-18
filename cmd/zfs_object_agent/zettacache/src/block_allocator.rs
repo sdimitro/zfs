@@ -11,27 +11,31 @@ use more_asserts::*;
 use num_traits::cast::ToPrimitive;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, max, min};
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ops::{Add, Bound::*, Sub};
 use std::sync::Arc;
 use std::time::Instant;
 use std::{fmt, iter, mem};
 use util::get_tunable;
+use util::nice_number_count;
+use util::nice_p2size;
+use util::super_trace;
+use util::with_alloctag;
+use util::writeln_stdout;
+use util::BitRange;
+use util::From64;
 use util::RangeTree;
-use util::{nice_p2size, From64};
-use util::{super_trace, with_alloctag, BitmapRangeIterator};
 
 lazy_static! {
     static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =
         get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
 
-
     //
-    // The rate that we condense our slabs every checkpoint is guided by two factors:
+    // The rate that we condense our slabs every checkpoint is guided by three factors; we
+    // will condense the maximum calculated by each of these:
     //
     // [1] The Incoming Rate Heuristic
     //
@@ -55,13 +59,6 @@ lazy_static! {
     //   The problem with this measurement though is that it's trickier to tie back to the
     //   question of how many slabs we should condense this checkpoint (especially given our
     //   two spacemap scheme).
-    // * The SLAB_CONDENSE_RATE_FACTOR's current default is less than 1. This may seem
-    //   counter-intuitive as it implies that we are condensing at a rate that's slower
-    //   than the ingestion rate and our spacemaps could be growing without bounds. That
-    //   said, our experience so far (though limited) has shown that the coalescing of adjacent
-    //   bitmap-slots in ranges represented by spacemap entries can decrease the overall bytes
-    //   appended to a spacemap by a significant amount. Thus, we keep our tunable lower
-    //   than 1 for now.
     //
     // [2] The Minimum Tunable (SLAB_CONDENSE_MIN_PER_CHECKPOINT)
     //
@@ -76,14 +73,34 @@ lazy_static! {
     // that, our experience with spacemaps so far is that they are still relatively small
     // compared to other structures in the metadata space.
     //
-    static ref SLAB_CONDENSE_RATE_FACTOR: f64 = get_tunable("slab_condense_rate_factor", 0.5);
-    static ref SLAB_CONDENSE_MIN_PER_CHECKPOINT: u64 = get_tunable("slab_condense_min_per_checkpoint", 100);
+    // [3] The Maximum Badness Ratio
+    //
+    // This is based on the reasoning that we don't want the spacemaps to be a lot worse than
+    // what's "optimal".  The optimal size is set by the number of disjoint free segments at
+    // the time the last merge completed.  Between merges, allocations tend to fill in holes
+    // and decrease the number of segments, but we aren't really interested in capturing this
+    // potential improvement.  If the size of the old spacemap ever reaches >20x optimal, we
+    // will condense all slabs in one checkpoint.  Otherwise we condense a fraction of the
+    // slabs that's based on (badness / MAX_BADNESS).
+    //
+    // In practice, on demanding workloads, the Max Badness metric will dominate (i.e. tell us
+    // to condense more than the other metrics).
+    static ref SLAB_CONDENSE_RATE_FACTOR: f64 =
+        get_tunable("slab_condense_rate_factor", 2.0);
+    static ref SLAB_CONDENSE_MIN_PER_CHECKPOINT: u64 =
+        get_tunable("slab_condense_min_per_checkpoint", 1000);
+    static ref SLAB_CONDENSE_MAX_BADNESS_RATIO: f64 =
+        get_tunable("slab_condense_max_badness_ratio", 20.0);
+    static ref SLAB_CONDENSE_MIN_BADNESS_ENTRIES: u64 =
+        get_tunable("slab_condense_min_badness_entries", 1_000_000);
 
-    // The minimum amount of free space that should be contained in free slabs, as a percentage;
-    // i.e. at a minimum, 25% of all free space within the allocator, should be contained in free slabs.
-    // We use this to determine when to start a rebalance operation, such that we can get back to our
-    // target percentage. The special value of "0" can be used to diable rebalancing entirely.
-    static ref SLAB_REBALANCING_MIN_FREE_SLABS_PCT: u64 = get_tunable("slab_rebalancing_min_free_slabs_pct", 25);
+    // The minimum amount of free space that should be contained in free slabs, as a
+    // percentage; i.e. at a minimum, 25% of all free space within the allocator, should be
+    // contained in free slabs.  We use this to determine when to start a rebalance operation,
+    // such that we can get back to our target percentage. The special value of "0" can be
+    // used to diable rebalancing entirely.
+    static ref SLAB_REBALANCING_MIN_FREE_SLABS_PCT: u64 =
+        get_tunable("slab_rebalancing_min_free_slabs_pct", 25);
 
     // The target amount of free space that should be contained in free slabs, as a percentage;
     // i.e. 50% of all free space within the allocator, should be contained in free slabs.
@@ -144,11 +161,11 @@ trait SlabTrait {
 }
 
 struct BitmapSlab {
-    allocatable: RoaringBitmap,
-    allocating: RoaringBitmap,
-    freeing: RoaringBitmap,
+    allocatable: BitRange,
+    allocating: BitRange,
+    freeing: BitRange,
 
-    total_slots: u32,
+    total_slots: u16,
     slot_size: u32,
     location: DiskLocation,
 }
@@ -157,12 +174,12 @@ impl BitmapSlab {
     const ALLOCATABLE_TAG: &'static str = "BitmapSlab.allocatable";
 
     fn new_slab(id: SlabId, generation: SlabGeneration, extent: Extent, block_size: u32) -> Slab {
-        let slab_size: u32 = extent.size.try_into().unwrap();
-        let free_slots = slab_size / block_size;
-        let mut allocatable = RoaringBitmap::new();
+        let slab_size = u32::try_from(extent.size).unwrap();
+        let free_slots = u16::try_from(slab_size / block_size).unwrap();
+        let mut allocatable = BitRange::new();
 
-        allocatable.insert_range(0..free_slots.into());
-        assert_eq!(allocatable.len(), u64::from(free_slots));
+        allocatable.insert_range(0..free_slots);
+        assert_eq!(allocatable.len(), free_slots);
 
         Slab::new(
             id,
@@ -178,8 +195,8 @@ impl BitmapSlab {
         )
     }
 
-    fn slot_to_location(&self, slot: u32) -> DiskLocation {
-        self.location + u64::from(slot * self.slot_size)
+    fn slot_to_location(&self, slot: u16) -> DiskLocation {
+        self.location + u64::from(slot) * u64::from(self.slot_size)
     }
 
     fn slab_end(&self) -> DiskLocation {
@@ -198,34 +215,24 @@ impl BitmapSlab {
 
         let internal_offset = u32::try_from(extent.location - self.location).unwrap();
         assert_eq!(internal_offset % self.slot_size, 0);
-        let num_slots = u32::try_from(extent.size).unwrap() / self.slot_size;
+        let num_slots = u16::try_from(extent.size / u64::from(self.slot_size)).unwrap();
         assert_ge!(num_slots, 1);
 
-        let first_slot = internal_offset / self.slot_size;
+        let first_slot = u16::try_from(internal_offset / self.slot_size).unwrap();
         assert_le!(
             first_slot + num_slots,
             self.total_slots,
             "import range crosses the slab's end boundary"
         );
-        let slot_range = first_slot.into()..u64::from(first_slot + num_slots);
+        let slot_range = first_slot..(first_slot + num_slots);
         if is_alloc {
-            let removed = with_alloctag(Self::ALLOCATABLE_TAG, || {
+            with_alloctag(Self::ALLOCATABLE_TAG, || {
                 self.allocatable.remove_range(slot_range)
             });
-            assert_eq!(
-                removed,
-                u64::from(num_slots),
-                "double alloc detected during import"
-            );
         } else {
-            let inserted = with_alloctag(Self::ALLOCATABLE_TAG, || {
+            with_alloctag(Self::ALLOCATABLE_TAG, || {
                 self.allocatable.insert_range(slot_range)
             });
-            assert_eq!(
-                inserted,
-                u64::from(num_slots),
-                "double free detected during import"
-            );
         }
     }
 }
@@ -246,14 +253,12 @@ impl SlabTrait for BitmapSlab {
         }
 
         let slot = self.allocatable.min().unwrap();
-        let inserted = self.allocating.insert(slot);
-        assert!(inserted);
+        self.allocating.insert(slot);
         with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.remove(slot));
 
         // Cannot be allocating a block that's currently in the
         // middle of being freed.
         assert!(!self.freeing.contains(slot));
-
         Some(Extent {
             location: self.slot_to_location(slot),
             size: self.slot_size.into(),
@@ -266,7 +271,7 @@ impl SlabTrait for BitmapSlab {
         let internal_offset = u32::try_from(extent.location - self.location).unwrap();
         assert_eq!(internal_offset % self.slot_size, 0);
 
-        let slot = internal_offset / self.slot_size;
+        let slot = u16::try_from(internal_offset / self.slot_size).unwrap();
         assert!(
             !self.allocatable.contains(slot),
             "double free at slot {:?}",
@@ -275,11 +280,9 @@ impl SlabTrait for BitmapSlab {
 
         if self.allocating.contains(slot) {
             assert!(!self.freeing.contains(slot));
-            let removed = self.allocating.remove(slot);
-            assert!(removed);
+            self.allocating.remove(slot);
         } else {
-            let inserted = self.freeing.insert(slot);
-            assert!(inserted);
+            self.freeing.insert(slot);
         }
     }
 
@@ -290,26 +293,25 @@ impl SlabTrait for BitmapSlab {
         // `allocating` first, before `freeing`, on our spacemaps. Note that
         // segments cannot be freed and then allocated within the same
         // checkpoint period.
-        for (first, last) in self.allocating.iter_ranges() {
-            assert_ge!(last, first);
+        for (slot, run) in self.allocating.iter_ranges() {
             spacemap.alloc(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
         }
         self.allocating.clear();
 
-        for (first, last) in self.freeing.iter_ranges() {
-            assert_ge!(last, first);
+        for (slot, run) in self.freeing.iter_ranges() {
             spacemap.free(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
         }
         // Space freed during this checkpoint is now available for reallocation.
-        for slot in self.freeing.iter() {
-            let inserted = with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.insert(slot));
-            assert!(inserted);
+        for (slot, run) in self.freeing.iter_ranges() {
+            with_alloctag(Self::ALLOCATABLE_TAG, || {
+                self.allocatable.insert_range(slot..(slot + run))
+            });
         }
         self.freeing.clear();
     }
@@ -319,27 +321,23 @@ impl SlabTrait for BitmapSlab {
         //       RoaringBitmap as a first-class spacemap entry is more
         //       practical here.
         let mut written_slots = 0;
-        for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
-            assert_ge!(last, first);
+        for (slot, run) in self.allocatable.iter_inverse_ranges(0, self.total_slots) {
             spacemap.alloc(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
-            written_slots += u64::from(last - first + 1);
+            written_slots += run;
         }
-        assert_eq!(
-            written_slots,
-            u64::from(self.total_slots) - self.allocatable.len()
-        );
+        assert_eq!(written_slots, self.total_slots - self.allocatable.len());
 
         // In our attempt to make this independent of flush_to_spacemap(), we do
         // not mutate any of the in-memory data structures and mark all entries
         // from the allocating bitmap as free. The latter is because these
         // entries will be later marked as allocated in flush_to_spacemap().
-        for (first, last) in self.allocating.iter_ranges() {
+        for (slot, run) in self.allocating.iter_ranges() {
             spacemap.free(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
         }
     }
@@ -351,15 +349,15 @@ impl SlabTrait for BitmapSlab {
     fn capacity_bytes(&self) -> u64 {
         // Compute from slot size rather than return slab size since the slot size
         // may not evenly divide the slab size, so some slab space may not be available.
-        u64::from(self.total_slots * self.slot_size)
+        u64::from(self.total_slots) * u64::from(self.slot_size)
     }
 
     fn free_space(&self) -> u64 {
-        self.allocatable.len() * u64::from(self.slot_size)
+        u64::from(self.allocatable.len()) * u64::from(self.slot_size)
     }
 
     fn allocated_space(&self) -> u64 {
-        (u64::from(self.total_slots) - self.allocatable.len()) * u64::from(self.slot_size)
+        u64::from(self.total_slots - self.allocatable.len()) * u64::from(self.slot_size)
     }
 
     fn phys_type(&self) -> SlabPhysType {
@@ -369,54 +367,63 @@ impl SlabTrait for BitmapSlab {
     }
 
     fn dump_info(&self) {
-        let used_slots = self.total_slots - u32::try_from(self.allocatable.len()).unwrap();
-        println!(
-            "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {}%",
+        let used_slots = self.total_slots - self.allocatable.len();
+        writeln_stdout!(
+            "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {:.1}%",
             self.location.offset(),
             nice_p2size(u64::from(self.slot_size)),
             used_slots,
             self.total_slots,
-            (used_slots * 100) / self.total_slots
+            (f64::from(used_slots) * 100.0) / f64::from(self.total_slots)
         );
-        for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
-            let first_location = self.slot_to_location(first);
-            let last_location = self.slot_to_location(last + 1);
-            println!(
+        for (slot, run) in self.allocatable.iter_inverse_ranges(0, self.total_slots) {
+            let first_location = self.slot_to_location(slot);
+            let last_location = self.slot_to_location(slot + run);
+            writeln_stdout!(
                 "\tALLOC {:?} offset: [{}, {}) length: {} - slots: [{}, {}) count: {}",
                 first_location.disk(),
                 first_location.offset(),
                 last_location.offset(),
                 nice_p2size(last_location - first_location),
-                first,
-                last + 1,
-                last - first + 1
+                slot,
+                slot + run,
+                run
             );
         }
-        println!();
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
         self.allocatable
-            .iter_inverse_ranges(self.total_slots)
+            .iter_inverse_ranges(0, self.total_slots)
             .count() as u64
     }
 
     // Each extent may cover multiple adjacent allocated slots/blocks on disk. Additionally,
     // the list of extents are sorted in no particular order.
     fn allocated_extents(&self) -> Vec<Extent> {
-        let mut all = RoaringBitmap::new();
-        all.insert_range(0..u64::from(self.total_slots));
-        let allocated = all - &self.allocatable - &self.freeing;
+        let mut allocated = BitRange::new();
+
+        self.allocatable
+            .iter_inverse_ranges(0, self.total_slots)
+            .for_each(|(slot, run)| {
+                allocated.insert_range(slot..(slot + run));
+            });
+
+        // Due to how frees are not immediately reflected in "allocatable", we need to be careful
+        // to account for them seperately, here.
+        self.freeing.iter_ranges().for_each(|(slot, run)| {
+            allocated.remove_range(slot..(slot + run));
+        });
 
         allocated
             .iter_ranges()
-            .map(|(first, last)| {
-                let size = (last - first + 1) * self.slot_size;
-                let location = self.slot_to_location(first);
-                Extent {
-                    size: size.into(),
-                    location,
-                }
+            .map(|(slot, run)| {
+                Extent::new(
+                    self.location.disk(),
+                    self.slot_to_location(slot).offset(),
+                    u64::from(run) * u64::from(self.slot_size),
+                )
             })
             .collect()
     }
@@ -614,7 +621,7 @@ impl SlabTrait for ExtentSlab {
     }
 
     fn dump_info(&self) {
-        println!(
+        writeln_stdout!(
             "slab_offset: {} max_allowed_alloc_size: {} allocated_bytes: {} utilization: {}%",
             self.location.offset(),
             nice_p2size(u64::from(self.max_allowed_alloc_size)),
@@ -625,14 +632,14 @@ impl SlabTrait for ExtentSlab {
             .allocatable
             .iter_inverse(self.location.offset(), self.slab_end().offset())
         {
-            println!(
+            writeln_stdout!(
                 "\tALLOC offset: [{}  {}) length: {}",
                 offset,
                 offset + size,
                 nice_p2size(size),
             );
         }
-        println!();
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -726,8 +733,8 @@ impl SlabTrait for FreeSlab {
     }
 
     fn dump_info(&self) {
-        println!("{:?}", self.extent);
-        println!();
+        writeln_stdout!("{:?}", self.extent);
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -809,8 +816,8 @@ impl SlabTrait for EvacuatingSlab {
     }
 
     fn dump_info(&self) {
-        println!("{:?}", self.extent);
-        println!();
+        writeln_stdout!("{:?}", self.extent);
+        writeln_stdout!();
     }
 
     fn num_segments(&self) -> u64 {
@@ -864,6 +871,7 @@ struct Slab {
     generation: SlabGeneration,
     info: SlabType,
     is_dirty: bool,
+    is_allocd: bool, // used for logging
 }
 
 impl Slab {
@@ -873,6 +881,7 @@ impl Slab {
             generation,
             info,
             is_dirty: false,
+            is_allocd: false,
         }
     }
 
@@ -885,6 +894,7 @@ impl Slab {
     }
 
     fn allocate(&mut self, size: u32) -> Option<Extent> {
+        self.is_allocd = true;
         self.info.with_trait_mut(|t| t.allocate(size))
     }
 
@@ -895,6 +905,7 @@ impl Slab {
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
         self.info.with_trait_mut(|t| t.flush_to_spacemap(spacemap));
         self.is_dirty = false;
+        self.is_allocd = false;
     }
 
     fn condense_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
@@ -946,7 +957,7 @@ impl Slab {
     }
 
     fn dump_info(&self) {
-        println!("{:?} {:?}", self.id, self.generation);
+        writeln_stdout!("{:?} {:?}", self.id, self.generation);
         self.info.with_trait(|t| t.dump_info());
     }
 
@@ -1102,6 +1113,10 @@ impl Slabs {
         &mut self.0[id.as_index()]
     }
 
+    fn total_segments(&self) -> u64 {
+        self.0.iter().map(|slab| slab.num_segments()).sum()
+    }
+
     async fn open(
         capacity: &BiBTreeMap<SlabId, Extent>,
         spacemap: &SpaceMap,
@@ -1250,6 +1265,7 @@ pub struct BlockAllocator {
 
     // used only by incoming rate heuristic for condensing
     checkpoint_allocated_bytes: u64,
+    segments_at_last_merge: u64,
 
     block_access: Arc<BlockAccess>,
 }
@@ -1316,6 +1332,9 @@ impl BlockAllocator {
             spacemap,
             spacemap_next,
             next_slab_to_condense: phys.next_slab_to_condense,
+            segments_at_last_merge: phys
+                .segments_at_last_merge
+                .unwrap_or_else(|| slabs.total_segments()),
             slabs,
             dirty_slabs: Default::default(),
             free_slabs,
@@ -1721,20 +1740,65 @@ impl BlockAllocator {
         }
     }
 
-    pub async fn flush(&mut self) -> BlockAllocatorPhys {
-        let begin = Instant::now();
+    /// Return number of slabs to condense, based on the "spacemap badness" ratio.
+    /// Note that the largest of the 3 factors will be selected by condense().
+    /// See comment near SLAB_CONDENSE_MAX_BADNESS_RATIO for details.
+    fn spacemap_badness_heuristic(&self) -> u64 {
+        // If there's less than a million entries (~10MB on disk), it isn't that bad according
+        // to this metric.
+        if self.spacemap.total_entries() < *SLAB_CONDENSE_MIN_BADNESS_ENTRIES {
+            return 0;
+        }
+        let ratio = self.spacemap.total_entries() as f64 / self.segments_at_last_merge as f64;
 
-        // We first condense any slabs so later when we flush any of them that
-        // are dirty we've already migrated their entries of this checkpoint to
-        // spacemap_next.
-        let starting_slab = self.next_slab_to_condense;
+        const MIN_RATIO: f64 = 1.0;
+        let fraction = if ratio <= MIN_RATIO {
+            0.0
+        } else {
+            (ratio - MIN_RATIO) / (*SLAB_CONDENSE_MAX_BADNESS_RATIO - MIN_RATIO)
+        };
+        let slabs_to_condense = (self.slabs.0.len() as f64 * fraction).to_u64().unwrap();
+        debug!(
+            "{} segs at last merge, {} old sm ents, {:.2}x ratio, {} to condense ({:.1}%)",
+            nice_number_count(self.segments_at_last_merge as f64),
+            nice_number_count(self.spacemap.total_entries() as f64),
+            ratio,
+            slabs_to_condense,
+            fraction * 100.0,
+        );
+        slabs_to_condense
+    }
+
+    /// Return number of slabs to condense, based on the "incoming rate".
+    /// Note that the largest of the 3 factors will be selected by condense().
+    /// See comment near SLAB_CONDENSE_RATE_FACTOR for details.
+    fn incoming_rate_heuristic(&self) -> u64 {
         let incoming_rate_heuristic = (*SLAB_CONDENSE_RATE_FACTOR
             * (self.checkpoint_allocated_bytes as f64 / f64::from(self.slab_size)))
         .ceil()
         .to_u64()
         .unwrap();
+        debug!(
+            "incoming rate heuristic: {} allocated -> {} slabs",
+            nice_p2size(self.checkpoint_allocated_bytes),
+            incoming_rate_heuristic,
+        );
+        incoming_rate_heuristic
+    }
+
+    fn condense(&mut self) {
+        let begin = Instant::now();
+        let old_pending = self.spacemap_next.pending_len();
+        let starting_slab = self.next_slab_to_condense;
+
         let slabs_to_condense = min(
-            max(*SLAB_CONDENSE_MIN_PER_CHECKPOINT, incoming_rate_heuristic),
+            max(
+                *SLAB_CONDENSE_MIN_PER_CHECKPOINT,
+                max(
+                    self.incoming_rate_heuristic(),
+                    self.spacemap_badness_heuristic(),
+                ),
+            ),
             (self.slabs.0.len() - self.next_slab_to_condense.as_index()) as u64,
         );
         for _ in 0..slabs_to_condense {
@@ -1743,37 +1807,48 @@ impl BlockAllocator {
                 .condense_to_spacemap(&mut self.spacemap_next);
             self.next_slab_to_condense = self.next_slab_to_condense.next();
         }
-        let condensing_delta = self.spacemap_next.pending_bytes();
+        debug!(
+            "condensed {} slabs, {} entries starting from {:?} in {}ms",
+            slabs_to_condense,
+            nice_number_count((self.spacemap_next.pending_len() - old_pending) as f64),
+            starting_slab,
+            begin.elapsed().as_millis(),
+        );
+
         if self.next_slab_to_condense.as_index() == self.slabs.0.len() {
+            info!(
+                "finished condensing all {} slabs; deleting old spacemap ({}, {} entries)",
+                self.slabs.0.len(),
+                nice_p2size(self.spacemap.bytes()),
+                nice_number_count(self.spacemap.total_entries() as f64),
+            );
             self.next_slab_to_condense = SlabId(0);
             self.spacemap.clear();
             mem::swap(&mut self.spacemap_next, &mut self.spacemap);
         }
         assert_lt!(self.next_slab_to_condense.as_index(), self.slabs.0.len());
-        let condensing_duration = begin.elapsed();
-        debug!(
-            "condensed {} slabs (incoming heuristic: {} bytes -> {} slabs) starting from {:?} in {}ms ({} bytes appended to spacemap_next)",
-            slabs_to_condense,
-            self.checkpoint_allocated_bytes,
-            incoming_rate_heuristic,
-            starting_slab,
-            condensing_duration.as_millis(),
-            condensing_delta,
-        );
+    }
 
-        // Flush any dirty slabs. If any slab is completely empty mark it as free.
-        // Keep track of the buckets/SortedSlabs sets that these dirty slabs belong
-        // to so later we can update their slab order by freeness.
+    /// Flush any dirty slabs. If any slab is completely empty mark it as free.
+    fn flush_dirty(&mut self) {
+        let begin = Instant::now();
+        let old_pending = self.spacemap.pending_len() + self.spacemap_next.pending_len();
         let ndirty_slabs = self.dirty_slabs.len();
-        let mut dirty_buckets = HashSet::new();
+        let mut allocd_slabs = 0;
         for slab_id in std::mem::take(&mut self.dirty_slabs) {
             let slab = self.slabs.get_mut(slab_id);
 
-            // It's possible for a slab in the dirty list, to be converted to a different slab type, such that the actual
-            // slab object is no longer dirty, but the slab's id is still in the dirty list. For example, if an already dirtied
-            // slab is chosen to be rebalanced. Thus, prior to flushing the slab, we double check that the slab is still dirty.
+            // It's possible for a slab in the dirty list, to be converted to a different slab
+            // type, such that the actual slab object is no longer dirty, but the slab's id is
+            // still in the dirty list. For example, if an already dirtied slab is chosen to
+            // be rebalanced.  Thus, prior to flushing the slab, we double check that the slab
+            // is still dirty.
             if !slab.is_dirty {
                 continue;
+            }
+
+            if slab.is_allocd {
+                allocd_slabs += 1;
             }
 
             let target_spacemap = if self.next_slab_to_condense <= slab_id {
@@ -1782,40 +1857,24 @@ impl BlockAllocator {
                 &mut self.spacemap_next
             };
             slab.flush_to_spacemap(target_spacemap);
-            dirty_buckets.insert(slab.max_size());
         }
-        let slab_flushing_duration = begin.elapsed() - condensing_duration;
         debug!(
-            "flushed {} slabs in {}ms",
+            "flushed {} slabs ({} allocd), {} entries in {}ms",
             ndirty_slabs,
-            slab_flushing_duration.as_millis()
+            allocd_slabs,
+            nice_number_count(
+                (self.spacemap.pending_len() + self.spacemap_next.pending_len() - old_pending)
+                    as f64
+            ),
+            begin.elapsed().as_millis()
         );
+    }
 
-        let spacemap_appended_bytes = self.spacemap.pending_bytes();
-        let spacemap_next_appended_bytes = self.spacemap_next.pending_bytes();
-        let (spacemap, spacemap_next) =
-            futures::future::join(self.spacemap.flush(), self.spacemap_next.flush()).await;
-        let spacemap_flushing_duration =
-            begin.elapsed() - slab_flushing_duration - condensing_duration;
-        debug!(
-            "flushed {} bytes to the spacemaps in {}ms [sm: +{} bytes, now {}/{} allocs/total] [next: +{} bytes, now {}/{} allocs/total]",
-            spacemap_appended_bytes + spacemap_next_appended_bytes,
-            spacemap_flushing_duration.as_millis(),
-            spacemap_appended_bytes,
-            self.spacemap.alloc_entries(), self.spacemap.total_entries(),
-            spacemap_next_appended_bytes,
-            self.spacemap_next.alloc_entries(), self.spacemap_next.total_entries(),
-        );
-
-        // So that we'll hit multiple disks.
-        self.free_slabs.shuffle(&mut thread_rng());
-
-        // Update any buckets which we've performed any allocations/frees during
-        // this checkpoint by recreating their SortedSlabs (which in turn
-        // updates their order by freeness and also removes any empty slabs).
-        trace!("allocation buckets to be resorted: {:?}", dirty_buckets);
-        for bucket_size in dirty_buckets {
-            let bucket = self.slab_buckets.0.get_mut(&bucket_size).unwrap();
+    /// Update all buckets by recreating their SortedSlabs (which in turn updates their order
+    /// by freeness and also removes any empty slabs).
+    fn resort_buckets(&mut self) {
+        let begin = Instant::now();
+        for bucket in self.slab_buckets.0.values_mut() {
             let slabs = &mut self.slabs;
             let iter = bucket.by_freeness.iter().filter_map(|entry| {
                 let slab = slabs.get(entry.slab_id);
@@ -1827,16 +1886,73 @@ impl BlockAllocator {
             });
             *bucket = SortedSlabs::new(bucket.is_extent_based, iter);
         }
+        debug!("resorted buckets in {}ms", begin.elapsed().as_millis());
+    }
+
+    /// returns (old_spacemap, spacemap_next)
+    async fn flush_impl(&mut self) -> (SpaceMapPhys, SpaceMapPhys) {
+        let begin = Instant::now();
+        let old_space = self.spacemap.bytes() + self.spacemap_next.bytes();
+        let pending = self.spacemap.pending_len() + self.spacemap_next.pending_len();
+        let (spacemap, spacemap_next) =
+            futures::future::join(self.spacemap.flush(), self.spacemap_next.flush()).await;
+        debug!(
+            "wrote {}, {} entries to spacemaps in {}ms [sm: {}, {}% alloc] [next: {}, {}% alloc]",
+            nice_p2size(self.spacemap.bytes() + self.spacemap_next.bytes() - old_space),
+            nice_number_count(pending as f64),
+            begin.elapsed().as_millis(),
+            nice_number_count(self.spacemap.total_entries() as f64),
+            self.spacemap.alloc_entries() * 100 / (self.spacemap.total_entries() + 1),
+            nice_number_count(self.spacemap_next.total_entries() as f64),
+            self.spacemap_next.alloc_entries() * 100 / (self.spacemap_next.total_entries() + 1),
+        );
+        (spacemap, spacemap_next)
+    }
+
+    pub async fn flush(&mut self, completed_merge: bool) -> BlockAllocatorPhys {
+        let begin = Instant::now();
+
+        // We first condense any slabs so later when we flush any of them that
+        // are dirty we've already migrated their entries of this checkpoint to
+        // spacemap_next.
+        self.condense();
+        self.flush_dirty();
+        let (spacemap, spacemap_next) = self.flush_impl().await;
+        {
+            let begin = Instant::now();
+            // So that we'll hit multiple disks.
+            self.free_slabs.shuffle(&mut thread_rng());
+            trace!(
+                "shuffled {} slabs in {}ms",
+                self.free_slabs.len(),
+                begin.elapsed().as_millis()
+            );
+        }
+        self.resort_buckets();
+
         self.available_space += self.freeing_space;
         self.freeing_space = 0;
         self.checkpoint_allocated_bytes = 0;
 
+        if completed_merge {
+            let begin = Instant::now();
+            self.segments_at_last_merge = self.slabs.total_segments();
+            info!(
+                "merge frees completed; computed {} total segments (1/{}) in {}ms",
+                nice_number_count(self.segments_at_last_merge as f64),
+                nice_p2size((self.size() - self.free_slabs_size()) / self.segments_at_last_merge),
+                begin.elapsed().as_millis(),
+            )
+        }
+
+        let phys_begin = Instant::now();
         let phys = BlockAllocatorPhys {
             // BiBTreeMap::iter() is orderd by left value (SlabId), which we rely on here.
             capacity: self.capacity.iter().map(|(_, &extent)| extent).collect(),
             slab_size: self.slab_size,
             spacemap,
             spacemap_next,
+            segments_at_last_merge: Some(self.segments_at_last_merge),
             next_slab_to_condense: self.next_slab_to_condense,
             slabs: self.slabs.0.iter().map(|slab| slab.get_phys()).collect(),
             slab_buckets: SlabAllocationBucketsPhys {
@@ -1848,6 +1964,10 @@ impl BlockAllocator {
                     .collect(),
             },
         };
+        trace!(
+            "computed new BlockAllocatorPhys in {}ms",
+            phys_begin.elapsed().as_millis()
+        );
         debug!(
             "flushed BlockAllocator in {}ms",
             begin.elapsed().as_millis()
@@ -1892,7 +2012,7 @@ impl BlockAllocator {
         let slab_id = BlockAllocator::slab_id_from_extent_impl(&self.capacity, slab_size64, extent);
 
         assert_lt!(slab_id.0, self.slabs.0.len() as u64);
-        assert!(self.slab_extent_from_id(slab_id).contains(&extent));
+        debug_assert!(self.slab_extent_from_id(slab_id).contains(&extent));
 
         slab_id
     }
@@ -1959,6 +2079,9 @@ pub struct BlockAllocatorPhys {
     spacemap: SpaceMapPhys,
     spacemap_next: SpaceMapPhys,
     next_slab_to_condense: SlabId,
+    // XXX this doesn't really need to be optional, all customer systems will have it present
+    #[serde(default)]
+    segments_at_last_merge: Option<u64>,
 
     capacity: Vec<Extent>,
 
@@ -1981,6 +2104,7 @@ impl BlockAllocatorPhys {
             spacemap: SpaceMapPhys::new(),
             spacemap_next: SpaceMapPhys::new(),
             next_slab_to_condense: SlabId(0),
+            segments_at_last_merge: Some(0),
             capacity: Default::default(),
             slabs: Vec::new(),
             slab_buckets: DEFAULT_SLAB_BUCKETS.clone(),
@@ -2044,24 +2168,26 @@ pub async fn zcachedb_dump_spacemaps(
     block_access: Arc<BlockAccess>,
     extent_allocator: Arc<ExtentAllocator>,
 ) {
-    println!("DUMP SPACEMAP");
-    println!("{:?}", phys.spacemap);
+    writeln_stdout!("DUMP SPACEMAP");
+    writeln_stdout!("{:?}", phys.spacemap);
     let spacemap = SpaceMap::open(
         block_access.clone(),
         extent_allocator.clone(),
         phys.spacemap,
     );
-    spacemap.load(|entry| println!("{:?}", entry)).await;
-    println!();
+    spacemap.load(|entry| writeln_stdout!("{:?}", entry)).await;
+    writeln_stdout!();
 
-    println!("DUMP SPACEMAP_NEXT");
-    println!("{:?}", phys.spacemap_next);
+    writeln_stdout!("DUMP SPACEMAP_NEXT");
+    writeln_stdout!("{:?}", phys.spacemap_next);
     let spacemap_next = SpaceMap::open(
         block_access.clone(),
         extent_allocator.clone(),
         phys.spacemap_next,
     );
-    spacemap_next.load(|entry| println!("{:?}", entry)).await;
+    spacemap_next
+        .load(|entry| writeln_stdout!("{:?}", entry))
+        .await;
 }
 
 async fn zcachedb_load_slab_state(
@@ -2069,7 +2195,7 @@ async fn zcachedb_load_slab_state(
     extent_allocator: Arc<ExtentAllocator>,
     phys: BlockAllocatorPhys,
 ) -> Slabs {
-    println!(
+    writeln_stdout!(
         "reading {} of spacemaps...",
         nice_p2size(phys.spacemap.bytes() + phys.spacemap_next.bytes())
     );
@@ -2097,7 +2223,7 @@ async fn zcachedb_load_slab_state(
             .collect()
     };
     let slabs = Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await;
-    println!(
+    writeln_stdout!(
         "processed {} spacemap entries in {:.2} seconds",
         spacemap.total_entries() + spacemap_next.total_entries(),
         begin.elapsed().as_secs_f32()
@@ -2284,9 +2410,9 @@ impl SlabBucketsReport {
     }
 
     fn dump_report(&self, verbosity: u64) {
-        println!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
+        writeln_stdout!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
         for bucket in self.buckets.values() {
-            println!(
+            writeln_stdout!(
                 "{} {}",
                 bucket,
                 bucket.stats.stackgraph(self.hist_scaling_factor)
@@ -2314,49 +2440,49 @@ impl SlabBucketsReport {
                 let (perm_10_bytes, perm_10_perc) = bucket.allocated_quantile(10);
                 let (perm_100_bytes, perm_100_perc) = bucket.allocated_quantile(100);
 
-                println!("\t%CAP: NSLABS");
+                writeln_stdout!("\t%CAP: NSLABS");
                 for (idx, count) in cap_hist.iter().enumerate() {
-                    println!(
+                    writeln_stdout!(
                         "\t{:>4}: {} {}",
                         idx * CAP_BUCKET_PERCENTAGE_RANGE,
                         "*".repeat((usize::from64(*count) * REPORT_HISTOGRAM_WIDTH) / max_count),
                         *count
                     );
                 }
-                println!("\t-------------");
-                println!(
+                writeln_stdout!("\t-------------");
+                writeln_stdout!(
                     "\tallocated space in 0.1% of free-est slabs: {} ({:.1}%)",
                     nice_p2size(perm_1_bytes),
                     perm_1_perc * 100.0
                 );
-                println!(
+                writeln_stdout!(
                     "\tallocated space in   1% of free-est slabs: {} ({:.1}%)",
                     nice_p2size(perm_10_bytes),
                     perm_10_perc * 100.0
                 );
-                println!(
+                writeln_stdout!(
                     "\tallocated space in  10% of free-est slabs: {} ({:.1}%)",
                     nice_p2size(perm_100_bytes),
                     perm_100_perc * 100.0
                 );
-                println!("\t-------------");
+                writeln_stdout!("\t-------------");
             }
         }
     }
 }
 
 fn zcachedb_dump_slabs_print_legend() {
-    println!("============================================================");
-    println!("E: Extent-based");
-    println!("MAX_SIZE: largest allocation that can be made to these slabs");
-    println!("NSLAB: number of slabs");
-    println!("SIZE: total bytes in slabs (ALLOC + FREE)");
-    println!("ALLOC: allocated bytes in slabs");
-    println!("FREE: free (available) bytes in slabs");
-    println!("CAP: percent allocated (ALLOC / SIZE)");
-    println!("SEG/S: average number of disjoint free segments per slab");
-    println!("============================================================");
-    println!();
+    writeln_stdout!("============================================================");
+    writeln_stdout!("E: Extent-based");
+    writeln_stdout!("MAX_SIZE: largest allocation that can be made to these slabs");
+    writeln_stdout!("NSLAB: number of slabs");
+    writeln_stdout!("SIZE: total bytes in slabs (ALLOC + FREE)");
+    writeln_stdout!("ALLOC: allocated bytes in slabs");
+    writeln_stdout!("FREE: free (available) bytes in slabs");
+    writeln_stdout!("CAP: percent allocated (ALLOC / SIZE)");
+    writeln_stdout!("SEG/S: average number of disjoint free segments per slab");
+    writeln_stdout!("============================================================");
+    writeln_stdout!();
 }
 
 pub async fn zcachedb_dump_slabs(
@@ -2387,14 +2513,14 @@ pub async fn zcachedb_dump_slabs(
 
     zcachedb_dump_slabs_print_legend();
     for (disk, device_slabs) in slabs_per_device {
-        println!("============================================================");
-        println!("=                        {}", block_access.disk_path(disk));
-        println!("============================================================");
+        writeln_stdout!("============================================================");
+        writeln_stdout!("=                        {}", block_access.disk_path(disk));
+        writeln_stdout!("============================================================");
         zcachedb_dump_slabs_report(&device_slabs, slab_size, &buckets, &opts)
     }
-    println!("============================================================");
-    println!("=                        whole cache");
-    println!("============================================================");
+    writeln_stdout!("============================================================");
+    writeln_stdout!("=                        whole cache");
+    writeln_stdout!("============================================================");
     zcachedb_dump_slabs_report(&cache_slabs, slab_size, &buckets, &opts);
 }
 
@@ -2437,21 +2563,21 @@ fn zcachedb_dump_slabs_report(
     buckets_by_max_size.reset_hist_scaling_factor(max_scaling_factor);
 
     buckets_by_max_size.dump_report(opts.verbosity);
-    println!();
-    println!("~~~~~~~~~~~~~~~~~~~~~~~~  SUMMARY  ~~~~~~~~~~~~~~~~~~~~~~~~~");
+    writeln_stdout!();
+    writeln_stdout!("~~~~~~~~~~~~~~~~~~~~~~~~  SUMMARY  ~~~~~~~~~~~~~~~~~~~~~~~~~");
     bitmap_based_summary.dump_report(opts.verbosity);
-    println!("------------------------------------------------------------");
-    println!("    BITMAP: {}", bitmap_based_summary.total);
-    println!();
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("    BITMAP: {}", bitmap_based_summary.total);
+    writeln_stdout!();
     extent_based_summary.dump_report(opts.verbosity);
-    println!("------------------------------------------------------------");
-    println!("    EXTENT: {}", extent_based_summary.total);
-    println!("------------------------------------------------------------");
-    println!("     EMPTY: {}", empty_total);
-    println!("------------------------------------------------------------");
-    println!("EVACUATING: {}", evacuating_total);
-    println!("============================================================");
-    println!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
-    println!("     TOTAL: {}", buckets_by_max_size.total);
-    println!();
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("    EXTENT: {}", extent_based_summary.total);
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("     EMPTY: {}", empty_total);
+    writeln_stdout!("------------------------------------------------------------");
+    writeln_stdout!("EVACUATING: {}", evacuating_total);
+    writeln_stdout!("============================================================");
+    writeln_stdout!("E MAX_SIZE:  NSLAB    SIZE   ALLOC    FREE  CAP  SEG/S NSLAB");
+    writeln_stdout!("     TOTAL: {}", buckets_by_max_size.total);
+    writeln_stdout!();
 }

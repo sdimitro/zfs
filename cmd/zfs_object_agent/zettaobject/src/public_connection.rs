@@ -1,8 +1,9 @@
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::pool_destroy;
-use crate::server::handler_return_ok;
+use crate::server::return_result;
 use crate::server::ConnectionState;
+use crate::server::FailureMessage;
 use crate::server::{HandlerReturn, Server};
 use anyhow::Result;
 use futures::stream::StreamExt;
@@ -11,10 +12,12 @@ use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
 use semver::Version;
+use serde::Serialize;
 use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::message::*;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
@@ -65,16 +68,19 @@ impl PublicServerState {
 
 impl PublicConnectionState {
     fn register(server: &mut Server<PublicServerState, PublicConnectionState>) {
-        server.register_handler("get pools", Box::new(Self::get_pools));
-        server.register_handler("get destroying pools", Box::new(Self::get_destroying_pools));
+        server.register_handler(TYPE_GET_POOLS, Box::new(Self::get_pools));
         server.register_handler(
-            "clear destroyed pools",
+            TYPE_GET_DESTROYING_POOLS,
+            Box::new(Self::get_destroying_pools),
+        );
+        server.register_handler(
+            TYPE_CLEAR_DESTROYED_POOLS,
             Box::new(Self::clear_destroyed_pools),
         );
-        server.register_handler("report_hits", Box::new(Self::report_hits));
-        server.register_handler("list_devices", Box::new(Self::list_devices));
-        server.register_handler("zcache_iostat", Box::new(Self::zcache_iostat));
-        server.register_handler("zcache_stats", Box::new(Self::zcache_stats));
+        server.register_handler(TYPE_REPORT_HITS, Box::new(Self::report_hits));
+        server.register_handler(TYPE_LIST_DEVICES, Box::new(Self::list_devices));
+        server.register_handler(TYPE_ZCACHE_IOSTAT, Box::new(Self::zcache_iostat));
+        server.register_handler(TYPE_ZCACHE_STATS, Box::new(Self::zcache_stats));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -121,7 +127,7 @@ impl PublicConnectionState {
                 endpoint,
                 region_str,
             ));
-            let guid_result = nvl.lookup_uint64("GUID");
+            let guid_result = nvl.lookup_uint64("guid");
             if let Ok(guid) = guid_result {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {
                     continue;
@@ -183,7 +189,7 @@ impl PublicConnectionState {
 
             let mut response = NvList::new_unique_names();
             response
-                .insert("Type", "get destroying pools done")
+                .insert(AGENT_RESPONSE_TYPE, TYPE_GET_DESTROYING_POOLS)
                 .unwrap();
             response.insert("pools", pools.as_ref()).unwrap();
 
@@ -200,7 +206,7 @@ impl PublicConnectionState {
 
             let mut response = NvList::new_unique_names();
             response
-                .insert("Type", "clear destroying pools done")
+                .insert(AGENT_RESPONSE_TYPE, TYPE_CLEAR_DESTROYED_POOLS)
                 .unwrap();
 
             debug!("sending response: {:?}", response);
@@ -208,127 +214,94 @@ impl PublicConnectionState {
         }))
     }
 
-    fn report_hits(&mut self, nvl: NvList) -> HandlerReturn {
-        // XXX convert to use serde nvlist response
-        debug!("got request: {:?}", nvl);
-        let mut response = NvList::new_unique_names();
-        let cache = self.cache.as_ref().cloned();
-        match cache {
-            Some(zettacache) => Ok(Box::pin(async move {
-                response.insert("Type", "report_hits").unwrap();
-                let size_data = zettacache.hits_by_size_data().await;
-                response
-                    .insert("live_histogram", &size_data.live_histogram[..])
-                    .unwrap();
-                response
-                    .insert("ghost_histogram", &size_data.ghost_histogram[..])
-                    .unwrap();
-                response
-                    .insert("cache_capacity", &size_data.cache_capacity)
-                    .unwrap();
-                response
-                    .insert("bucket_size", &size_data.bucket_size)
-                    .unwrap();
-                response.insert("lookups", &size_data.lookups).unwrap();
-                let started = size_data
-                    .started()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_secs();
-                response.insert("started", &started).unwrap();
-                response.insert("result", "ok").unwrap();
-                debug!("sending response: {:?}", response);
-                Ok(Some(response))
-            })),
-            None => {
-                response.insert("Type", "report_hits").unwrap();
-                response.insert("result", "err").unwrap();
-                debug!("sending response: {:?}", response);
-                handler_return_ok(Some(response))
+    fn report_hits(&mut self, _: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        debug!("got ReportHitsRequest");
+        Ok(Box::pin(async move {
+            #[derive(Debug, Serialize)]
+            struct ReportHitsResponse {
+                started: u64,
+                lookups: u64,
+                cache_capacity: u64,
+                meta_overhead: u64,
+                bucket_size: u64,
+                live_histogram: Vec<u64>,
+                ghost_histogram: Vec<u64>,
             }
-        }
+
+            let response = match cache {
+                Some(cache) => {
+                    let phys = cache.hits_by_size_data().await;
+                    Ok(ReportHitsResponse {
+                        started: phys.started().duration_since(UNIX_EPOCH).unwrap().as_secs(),
+                        lookups: phys.lookups,
+                        cache_capacity: phys.cache_capacity,
+                        meta_overhead: phys.meta_overhead,
+                        bucket_size: phys.bucket_size,
+                        live_histogram: phys.live_histogram,
+                        ghost_histogram: phys.ghost_histogram,
+                    })
+                }
+                None => Err(FailureMessage::new("no zettacache present")),
+            };
+            return_result(TYPE_REPORT_HITS, (), response, true)
+        }))
     }
 
-    fn list_devices(&mut self, nvl: NvList) -> HandlerReturn {
-        // XXX convert to use serde nvlist response
-        debug!("got request: {:?}", nvl);
-        let mut response = NvList::new_unique_names();
-        let cache = self.cache.as_ref().cloned();
+    fn list_devices(&mut self, _: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        debug!("got ListDevicesRequest");
+        Ok(Box::pin(async move {
+            #[derive(Debug, Serialize)]
+            struct ListDevicesResponse {
+                devices_json: String,
+            }
 
-        if let Some(zettacache) = cache {
-            Ok(Box::pin(async move {
-                response.insert("Type", "list_devices").unwrap();
-                response.insert("result", "ok").unwrap();
-                response
-                    .insert("devices_json", zettacache.devices_as_json().as_str())
-                    .unwrap();
-
-                debug!("sending response: {:?}", response);
-                Ok(Some(response))
-            }))
-        } else {
-            Ok(Box::pin(async move {
-                response.insert("Type", "list_devices").unwrap();
-                response.insert("result", "err").unwrap();
-                debug!("sending response: {:?}", response);
-                Ok(Some(response))
-            }))
-        }
+            let response = match cache {
+                Some(cache) => Ok(ListDevicesResponse {
+                    devices_json: cache.devices_as_json(),
+                }),
+                None => Err(FailureMessage::new("no zettacache present")),
+            };
+            return_result(TYPE_LIST_DEVICES, (), response, true)
+        }))
     }
 
-    fn zcache_iostat(&mut self, nvl: NvList) -> HandlerReturn {
-        // XXX convert to use serde nvlist response
-        trace!("got request: {:?}", nvl);
-        let mut response = NvList::new_unique_names();
-        let cache = self.cache.as_ref().cloned();
+    fn zcache_iostat(&mut self, _: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        trace!("got ZcacheIostatRequest");
+        Ok(Box::pin(async move {
+            #[derive(Debug, Serialize)]
+            struct ZcacheIostatResponse {
+                iostats_json: String,
+            }
 
-        if let Some(zettacache) = cache {
-            Ok(Box::pin(async move {
-                let json_stats = zettacache.io_stats_as_json();
-
-                response
-                    .insert("iostats_json", &json_stats.as_str())
-                    .unwrap();
-                response.insert("Type", "zcache_iostat").unwrap();
-                response.insert("result", "ok").unwrap();
-
-                trace!("sending response: {:?}", response);
-                Ok(Some(response))
-            }))
-        } else {
-            Ok(Box::pin(async move {
-                response.insert("Type", "zcache_iostat").unwrap();
-                response.insert("result", "err").unwrap();
-                trace!("sending response: {:?}", response);
-                Ok(Some(response))
-            }))
-        }
+            let response = match cache {
+                Some(cache) => Ok(ZcacheIostatResponse {
+                    iostats_json: cache.io_stats_as_json(),
+                }),
+                None => Err(FailureMessage::new("no zettacache present")),
+            };
+            return_result(TYPE_ZCACHE_IOSTAT, (), response, false)
+        }))
     }
 
-    fn zcache_stats(&mut self, nvl: NvList) -> HandlerReturn {
-        // XXX convert to use serde nvlist response
-        trace!("got request: {:?}", nvl);
-        let mut response = NvList::new_unique_names();
-        let cache = self.cache.as_ref().cloned();
+    fn zcache_stats(&mut self, _: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        trace!("got ZcacheStatsRequest");
+        Ok(Box::pin(async move {
+            #[derive(Debug, Serialize)]
+            struct ZcacheStatsResponse {
+                stats_json: String,
+            }
 
-        if let Some(zettacache) = cache {
-            Ok(Box::pin(async move {
-                let json_stats = zettacache.stats_as_json().await;
-
-                response.insert("stats_json", &json_stats[..]).unwrap();
-                response.insert("Type", "zcache_stats").unwrap();
-                response.insert("result", "ok").unwrap();
-
-                trace!("sending response: {:?}", response);
-                Ok(Some(response))
-            }))
-        } else {
-            Ok(Box::pin(async move {
-                response.insert("Type", "zcache_stats").unwrap();
-                response.insert("result", "err").unwrap();
-                trace!("sending response: {:?}", response);
-                Ok(Some(response))
-            }))
-        }
+            let response = match cache {
+                Some(cache) => Ok(ZcacheStatsResponse {
+                    stats_json: cache.stats_as_json().await,
+                }),
+                None => Err(FailureMessage::new("no zettacache present")),
+            };
+            return_result(TYPE_ZCACHE_STATS, (), response, false)
+        }))
     }
 }

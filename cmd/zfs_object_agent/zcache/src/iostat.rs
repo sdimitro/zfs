@@ -13,12 +13,12 @@ use std::io::{self, Write};
 use std::sync::atomic::Ordering::Relaxed;
 use std::thread::sleep;
 use std::time::Duration;
+use util::message::TYPE_ZCACHE_IOSTAT;
 use util::zettacache_stats::*;
 use util::{nice_number_time, nice_p2size};
 use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "iostat";
-static REQUEST: &str = "zcache_iostat";
 
 struct IoStatDisplay {
     show_active: bool,
@@ -319,7 +319,7 @@ impl IoStatDisplay {
         let mut remote = RemoteChannel::new(false).await?;
 
         loop {
-            let latest = match remote.call(REQUEST, None).await {
+            let latest = match remote.call(TYPE_ZCACHE_IOSTAT, None).await {
                 Ok(response) => {
                     let io_stats_json = response.lookup_string("iostats_json")?;
                     let mut latest: IoStats = serde_json::from_str(io_stats_json.to_str()?)?;

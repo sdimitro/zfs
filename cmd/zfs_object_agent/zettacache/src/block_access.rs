@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use std::fmt::Debug;
 use std::fmt::Display;
+use std::fs::File;
 use std::io::Read;
 use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
@@ -24,10 +25,8 @@ use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
 use std::time::Instant;
-use tokio::fs::File;
-use tokio::sync::Semaphore;
+use tokio::sync::oneshot;
 use util::get_tunable;
-use util::super_trace;
 use util::with_alloctag;
 use util::zettacache_stats::*;
 use util::From64;
@@ -44,9 +43,17 @@ lazy_static! {
 
 #[derive(Serialize, Deserialize, Debug)]
 struct BlockHeader {
+    #[serde(rename = "p")]
+    #[serde(alias = "payload_size")]
     payload_size: usize,
+    #[serde(rename = "e")]
+    #[serde(alias = "encoding")]
     encoding: EncodeType,
+    #[serde(rename = "c")]
+    #[serde(alias = "compression")]
     compression: CompressType,
+    #[serde(rename = "k")]
+    #[serde(alias = "checksum")]
     checksum: u64,
 }
 
@@ -110,69 +117,87 @@ pub struct BlockAccess {
 
 #[derive(Debug)]
 pub struct Disk {
-    file: File,
+    // We want all the reader/writer_threads to share the same file descriptor,
+    // but we don't have a mechanism to ensure that they stop using the fd when
+    // the DiskStruct is dropped and the fd is closed.  To solve this we simply
+    // never close the fd.  The fd is owned by the File, and we leave a
+    // reference to it here to indicate that it's related to this Disk, even
+    // though it's only used via the reader/writer_threads.
+    #[allow(dead_code)]
+    file: &'static File,
+
     device_path: String,
     size: u64,
     sector_size: usize,
     io_stats: DiskIoStats,
-    outstanding_reads: Semaphore,
-    outstanding_writes: Semaphore,
+    reader_tx: flume::Sender<ReadMessage>,
+    writer_tx: flume::Sender<WriteMessage>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum CompressType {
+    #[serde(rename = "N")]
+    #[serde(alias = "None")]
     None,
+    #[serde(rename = "4")]
+    #[serde(alias = "Lz4")]
     Lz4,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 pub enum EncodeType {
+    #[serde(rename = "J")]
+    #[serde(alias = "Json")]
     Json,
+    #[serde(rename = "B")]
+    #[serde(alias = "Bincode")]
     Bincode,
+    #[serde(rename = "F")]
+    #[serde(alias = "BincodeFixint")]
     BincodeFixint,
 }
-
-// Generate ioctl function
-nix::ioctl_read!(ioctl_blkgetsize64, 0x12u8, 114u8, u64);
-nix::ioctl_read_bad!(ioctl_blksszget, 0x1268, usize);
 
 #[cfg(target_os = "linux")]
 const CUSTOM_OFLAGS: i32 = libc::O_DIRECT;
 #[cfg(not(target_os = "linux"))]
 const CUSTOM_OFLAGS: i32 = 0;
 
+struct ReadMessage {
+    offset: u64,
+    size: usize,
+    tx: oneshot::Sender<AlignedBytes>,
+}
+
+struct WriteMessage {
+    offset: u64,
+    bytes: AlignedBytes,
+    tx: oneshot::Sender<()>,
+}
+
 impl Disk {
     pub fn new(disk_path: &str, readonly: bool) -> Result<Disk> {
         // Note: using std file open so that this func can be non-async.
         // Although this is blocking from a tokio thread, it's used
-        // infrequently, and we're already blocking from the ioctls below.
-        let std_file = std::fs::OpenOptions::new()
+        // infrequently, and we're already blocking from the ioctls to get the
+        // disk size and block size.
+        let file = std::fs::OpenOptions::new()
             .read(true)
             .write(!readonly)
             .custom_flags(CUSTOM_OFLAGS)
             .open(disk_path)
             .with_context(|| format!("opening disk '{}'", disk_path))?;
-        let file = tokio::fs::File::from_std(std_file);
-        let stat = nix::sys::stat::fstat(file.as_raw_fd()).unwrap();
+        // see comment in `struct Disk`
+        let file: &'static File = Box::leak(Box::new(file));
+        let stat = nix::sys::stat::fstat(file.as_raw_fd())?;
         trace!("stat: {:?}", stat);
         let mode = SFlag::from_bits_truncate(stat.st_mode);
         let sector_size;
         let size;
         if mode.contains(SFlag::S_IFBLK) {
-            size = unsafe {
-                let mut cap: u64 = 0;
-                let cap_ptr = &mut cap as *mut u64;
-                ioctl_blkgetsize64(file.as_raw_fd(), cap_ptr).unwrap();
-                cap
-            };
-            sector_size = unsafe {
-                let mut ssz: usize = 0;
-                let ssz_ptr = &mut ssz as *mut usize;
-                ioctl_blksszget(file.as_raw_fd(), ssz_ptr).unwrap();
-                ssz
-            };
+            size = blkgetsize64(file)?;
+            sector_size = blksszget(file)?;
         } else if mode.contains(SFlag::S_IFREG) {
-            size = u64::try_from(stat.st_size).unwrap();
+            size = u64::try_from(stat.st_size)?;
             sector_size = *MIN_SECTOR_SIZE;
         } else {
             panic!("{}: invalid file type {:?}", disk_path, mode);
@@ -185,24 +210,111 @@ impl Disk {
             .unwrap()
             .to_owned();
 
+        let (reader_tx, reader_rx) = flume::unbounded();
+        let (writer_tx, writer_rx) = flume::unbounded();
+
         let this = Disk {
             file,
             device_path: disk_path.to_string(),
             size,
             sector_size,
             io_stats: DiskIoStats::new(device),
-            outstanding_reads: Semaphore::new(*DISK_READ_MAX_QUEUE_DEPTH),
-            outstanding_writes: Semaphore::new(*DISK_WRITE_MAX_QUEUE_DEPTH),
+            reader_tx,
+            writer_tx,
         };
+
+        for _ in 0..*DISK_READ_MAX_QUEUE_DEPTH {
+            let rx = reader_rx.clone();
+            // note, we want to use a "std" thread here rather than
+            // tokio::task::spawn_blocking() because the latter has a limit of how many
+            // threads it will create (default 512)
+            std::thread::spawn(move || {
+                Self::reader_thread(file, sector_size, rx);
+            });
+        }
+        if !readonly {
+            for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
+                let rx = writer_rx.clone();
+                std::thread::spawn(move || {
+                    Self::writer_thread(file, sector_size, rx);
+                });
+            }
+        }
         info!("opening cache file {}: {:?}", disk_path, this);
 
         Ok(this)
     }
+
+    fn reader_thread(file: &'static File, sector_size: usize, rx: flume::Receiver<ReadMessage>) {
+        while let Ok(message) = rx.recv() {
+            let vec = pread_aligned(
+                file,
+                message.offset.try_into().unwrap(),
+                message.size,
+                sector_size,
+            )
+            .unwrap();
+            assert_eq!(vec.len(), message.size);
+            message.tx.send(vec.into()).unwrap();
+        }
+    }
+
+    async fn read(&self, offset: u64, size: usize, io_type: DiskIoType) -> AlignedBytes {
+        self.verify_aligned(offset);
+        self.verify_aligned(size);
+
+        let op = OpInProgress::new(&self.io_stats.stats[io_type]);
+        let (tx, rx) = oneshot::channel();
+        let message = ReadMessage { offset, size, tx };
+
+        self.reader_tx.send_async(message).await.unwrap();
+        let bytes = rx.await.unwrap();
+        op.end(size as u64);
+        bytes
+    }
+
+    fn writer_thread(file: &'static File, sector_size: usize, rx: flume::Receiver<WriteMessage>) {
+        while let Ok(message) = rx.recv() {
+            let offset = i64::try_from(message.offset).unwrap();
+            // Directio requires the pointer to be sector-aligned.  The message
+            // sender aligned it for us if necessary.
+            assert_eq!(message.bytes.alignment() % sector_size, 0);
+            assert_eq!(message.bytes.as_ptr() as usize % sector_size, 0);
+            nix::sys::uio::pwrite(file.as_raw_fd(), &message.bytes, offset).unwrap();
+            message.tx.send(()).unwrap();
+        }
+    }
+
+    async fn write(&self, offset: u64, bytes: AlignedBytes, io_type: DiskIoType) {
+        self.verify_aligned(offset);
+        self.verify_aligned(bytes.len());
+        self.verify_aligned(bytes.alignment());
+
+        let op = OpInProgress::new(&self.io_stats.stats[io_type]);
+        let len = bytes.len();
+        let (tx, rx) = oneshot::channel();
+        let message = WriteMessage { offset, bytes, tx };
+
+        self.writer_tx.send_async(message).await.unwrap();
+        rx.await.unwrap();
+        op.end(len as u64);
+    }
+
+    fn verify_aligned<N: Num + NumCast + Copy + Debug + Display>(&self, n: N) {
+        let sector_size: N = NumCast::from(self.sector_size).unwrap();
+        assert_eq!(
+            n % sector_size,
+            N::zero(),
+            "{} is not sector-aligned ({})",
+            n,
+            sector_size
+        );
+    }
 }
 
-// XXX this is very thread intensive.  On Linux, we can use "glommio" to use
-// io_uring for much lower overheads.  Or SPDK (which can use io_uring or nvme
-// hardware directly).
+// pread/pwrite system calls are not very efficient.  In the future, on Linux,
+// we can use "glommio" to use io_uring for much lower overheads.  Or SPDK
+// (which can use io_uring or nvme hardware directly).
 impl BlockAccess {
     pub fn new(disks: Vec<Disk>, readonly: bool) -> Self {
         let sector_size = disks
@@ -258,48 +370,22 @@ impl BlockAccess {
         self.disks().map(|disk| self.disk_size(disk)).sum()
     }
 
-    // offset and length must be sector-aligned
+    /// The extent.location.offset() and extent.size must be sector-aligned.
+    /// The returned Bytes will also be sector-aligned.
     pub async fn read_raw(&self, extent: Extent, io_type: DiskIoType) -> AlignedBytes {
         self.verify_aligned(extent.location.offset());
         self.verify_aligned(extent.size);
-        let disk = self.disk(extent.location.disk());
-        let fd = disk.file.as_raw_fd();
-        let sector_size = self.sector_size;
-        let begin = Instant::now();
-        let _permit = disk.outstanding_reads.acquire().await.unwrap();
-        let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
-        let bytes: AlignedBytes = tokio::task::spawn_blocking(move || {
-            let mut v = with_alloctag("BlockAccess::raw_read()", || {
-                AlignedVec::with_capacity(usize::from64(extent.size), sector_size)
-            });
-            // By using the unsafe libc::pread() instead of
-            // nix::sys::uio::pread(), we avoid the cost of zeroing out the
-            // vec's buffer.
-            unsafe {
-                let res = libc::pread(
-                    fd,
-                    v.as_mut_ptr() as *mut c_void,
-                    extent.size.try_into().unwrap(),
-                    extent.location.offset().try_into().unwrap(),
-                );
-                let num_bytes_read = usize::try_from(Errno::result(res).unwrap()).unwrap();
-                v.set_len(num_bytes_read);
-            };
-            assert_eq!(v.len() as u64, extent.size);
-            v.into()
-        })
-        .await
-        .unwrap();
-        op.end(bytes.len() as u64);
-        super_trace!(
-            "read({:?}) returned in {}us",
-            extent,
-            begin.elapsed().as_micros()
-        );
-        bytes
+
+        self.disk(extent.location.disk())
+            .read(
+                extent.location.offset(),
+                usize::from64(extent.size),
+                io_type,
+            )
+            .await
     }
 
-    // location.offset and bytes.len() must be sector-aligned.  However,
+    // The location.offset() and bytes.len() must be sector-aligned.  However,
     // bytes.alignment() need not be the sector size (it will be copied if not).
     pub async fn write_raw(
         &self,
@@ -311,35 +397,15 @@ impl BlockAccess {
             !self.readonly,
             "attempting zettacache write in readonly mode"
         );
-        let disk = self.disk(location.disk());
-        let fd = disk.file.as_raw_fd();
-        let length = bytes.len();
-        let offset = location.offset();
-        let alignment = bytes.alignment();
-        self.verify_aligned(offset);
-        self.verify_aligned(length);
-
-        // directio requires the pointer to be sector-aligned
-        if alignment != self.round_up_to_sector(alignment) {
+        self.verify_aligned(location.offset());
+        self.verify_aligned(bytes.len());
+        if bytes.alignment() != self.round_up_to_sector(bytes.alignment()) {
             // XXX copying, this happens for AlignedBytes created from a plain Bytes
-            bytes = AlignedBytes::copy_from_slice(&bytes, self.sector_size)
-        }
-        assert_eq!(bytes.as_ptr() as usize % self.sector_size, 0);
-        let begin = Instant::now();
-        let _permit = disk.outstanding_writes.acquire().await.unwrap();
-        let op = OpInProgress::new(&disk.io_stats.stats[io_type]);
-        tokio::task::spawn_blocking(move || {
-            nix::sys::uio::pwrite(fd, &bytes, i64::try_from(offset).unwrap()).unwrap();
-            super_trace!(
-                "write({:?} len={}) returned in {}us",
-                location,
-                length,
-                begin.elapsed().as_micros()
-            );
-        })
-        .await
-        .unwrap();
-        op.end(length as u64);
+            bytes = AlignedBytes::copy_from_slice(&bytes, self.sector_size);
+        };
+        self.disk(location.disk())
+            .write(location.offset(), bytes, io_type)
+            .await
     }
 
     pub fn round_up_to_sector<N: Num + NumCast + Copy>(&self, n: N) -> N {
@@ -488,4 +554,37 @@ impl BlockAccess {
         })
         .unwrap()
     }
+}
+
+/// Get size of block device.
+fn blkgetsize64(file: &File) -> Result<u64> {
+    nix::ioctl_read!(ioctl_blkgetsize64, 0x12u8, 114u8, u64);
+    let mut cap: u64 = 0;
+    let cap_ptr = &mut cap as *mut u64;
+    unsafe { ioctl_blkgetsize64(file.as_raw_fd(), cap_ptr) }?;
+    Ok(cap)
+}
+
+/// Get sector size of block device.
+fn blksszget(file: &File) -> Result<usize> {
+    nix::ioctl_read_bad!(ioctl_blksszget, 0x1268, usize);
+    let mut ssz: usize = 0;
+    let ssz_ptr = &mut ssz as *mut usize;
+    unsafe { ioctl_blksszget(file.as_raw_fd(), ssz_ptr) }?;
+    Ok(ssz)
+}
+
+/// use pread() to read into an aligned vector
+fn pread_aligned(file: &File, offset: i64, len: usize, alignment: usize) -> Result<AlignedVec> {
+    let mut vec = with_alloctag("pread()", || AlignedVec::with_capacity(len, alignment));
+    let fd = file.as_raw_fd();
+    // By using the unsafe libc::pread() instead of nix::sys::uio::pread(), we
+    // avoid the cost of zeroing out the vec's buffer.  pread() will initialize
+    // up to `len` bytes, which the vec has capacity for.
+    unsafe {
+        let res = libc::pread(fd, vec.as_mut_ptr() as *mut c_void, len, offset);
+        let num_bytes_read = usize::try_from(Errno::result(res)?).unwrap();
+        vec.set_len(num_bytes_read);
+    };
+    Ok(vec)
 }

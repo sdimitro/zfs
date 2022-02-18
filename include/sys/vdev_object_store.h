@@ -13,7 +13,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2021 by Delphix. All rights reserved.
+ * Copyright (c) 2021, 2022 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -21,38 +21,32 @@
 /*
  * Possible keys in nvlist requests / responses to/from the Agent
  */
-#define	AGENT_TYPE			"Type"
+#define	AGENT_REQUEST_TYPE		"request_type"
+#define	AGENT_RESPONSE_TYPE		"response_type"
+
 #define	AGENT_TYPE_CREATE_POOL		"create pool"
-#define	AGENT_TYPE_CREATE_POOL_DONE	"pool create done"
 #define	AGENT_TYPE_OPEN_POOL		"open pool"
-#define	AGENT_TYPE_OPEN_POOL_DONE	"pool open done"
 #define	AGENT_TYPE_FREE_BLOCKS		"free blocks"
 #define	AGENT_TYPE_BEGIN_TXG		"begin txg"
 #define	AGENT_TYPE_RESUME_COMPLETE	"resume complete"
 #define	AGENT_TYPE_END_TXG		"end txg"
-#define	AGENT_TYPE_END_TXG_DONE		"end txg done"
 #define	AGENT_TYPE_FLUSH_WRITES		"flush writes"
 #define	AGENT_TYPE_GET_STATS		"get stats"
-#define	AGENT_TYPE_GET_STATS_DONE	"get stats done"
 #define	AGENT_TYPE_EXIT			"exit agent"
 #define	AGENT_TYPE_CLOSE_POOL		"close pool"
-#define	AGENT_TYPE_CLOSE_POOL_DONE	"pool close done"
 #define	AGENT_TYPE_ENABLE_FEATURE	"enable feature"
-#define	AGENT_TYPE_ENABLE_FEATURE_DONE	"enable feature done"
 #define	AGENT_TYPE_GET_POOLS		"get pools"
 #define	AGENT_TYPE_GET_DESTROYING_POOLS	"get destroying pools"
-#define	AGENT_TYPE_GET_DESTROYING_POOLS_DONE "get destroying pools done"
 #define	AGENT_TYPE_CLEAR_DESTROYED_POOLS "clear destroyed pools"
 #define	AGENT_TYPE_RESUME_DESTROY_POOL	"resume destroy pool"
-#define	AGENT_TYPE_RESUME_DESTROY_POOL_DONE "resume destroy pool done"
-#define	AGENT_TYPE_GET_POOL_PHYS	"get pool phys"
-#define	AGENT_TYPE_GET_UBERBLOCK_PHYS	"get uberblock phys"
-#define	AGENT_TYPE_VERSION		"version"
+#define	AGENT_TYPE_VERSION		"get version"
 
+#define	AGENT_ERR			"err"
+#define	AGENT_MESSAGE			"message"
 #define	AGENT_NAME			"name"
 #define	AGENT_SIZE			"size"
-#define	AGENT_TXG			"TXG"
-#define	AGENT_GUID			"GUID"
+#define	AGENT_TXG			"txg"
+#define	AGENT_GUID			"guid"
 #define	AGENT_BUCKET			"bucket"
 #define	AGENT_CRED_PROFILE		"credentials_profile"
 #define	AGENT_ENDPOINT			"endpoint"
@@ -64,22 +58,16 @@
 #define	AGENT_CONFIG			"config"
 #define	AGENT_NEXT_BLOCK		"next_block"
 #define	AGENT_TOKEN			"token"
-#define	AGENT_CAUSE			"cause"
-#define	AGENT_HOSTNAME			"hostname"
 #define	AGENT_READONLY			"readonly"
 #define	AGENT_SYNCING_TXG		"syncing_txg"
-#define	AGENT_HEAL			"heal"
 #define	AGENT_FEATURE			"feature"
 #define	AGENT_FEATURES			"features"
-#define	AGENT_REFCOUNT			"refcount"
-#define	AGENT_CAN_READONLY		"can_readonly"
 #define	AGENT_DESTROY			"destroy"
 #define	AGENT_DESTROY_DOMPLETED		"destroy_completed"
 #define	AGENT_START_TIME		"start_time"
 #define	AGENT_TOTAL_DATA_OBJECTS	"total_data_objects"
 #define	AGENT_DESTROYED_OBJECTS		"destroyed_objects"
 #define	AGENT_POOLS			"pools"
-#define	AGENT_MESSAGE			"message"
 #define	AGENT_CHECKPOINT		"checkpoint"
 #define	AGENT_ROLLBACK			"rollback"
 #define	AGENT_REISSUE			"reissue"

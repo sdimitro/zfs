@@ -135,7 +135,7 @@ impl DestroyingPoolsMap {
 
         for (guid, destroying_pool) in self.pools.iter() {
             let mut nvl_item = NvList::new_unique_names();
-            nvl_item.insert("GUID", &guid.0).unwrap();
+            nvl_item.insert("guid", &guid.0).unwrap();
             nvl_item
                 .insert("name", destroying_pool.cache_phys.name.as_str())
                 .unwrap();

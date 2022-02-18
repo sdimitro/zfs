@@ -5,7 +5,7 @@ use semver::Version;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
-use util::message::MessageHeader;
+use util::message::*;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;
 
@@ -24,11 +24,19 @@ impl Client {
         let (mut r, mut w) = s.into_split();
 
         let mut vers_req_nvlist = NvList::new_unique_names();
-        vers_req_nvlist.insert("Type", "version").unwrap();
+        vers_req_nvlist
+            .insert(AGENT_REQUEST_TYPE, TYPE_VERSION)
+            .unwrap();
         vers_req_nvlist.insert("version", "^1").unwrap();
         Self::send_request_impl(&mut w, vers_req_nvlist.as_ref()).await;
         let response = Self::get_next_response_impl(&mut r).await;
-        assert!(response.lookup_string("Type").unwrap().to_str() == Ok("version"));
+        assert!(
+            response
+                .lookup_string(AGENT_RESPONSE_TYPE)
+                .unwrap()
+                .to_str()
+                == Ok(TYPE_VERSION)
+        );
         let vers_nvl = response.lookup_nvlist("version").unwrap();
         let version = Version::new(
             vers_nvl.lookup_uint64("major").unwrap(),
@@ -99,11 +107,11 @@ impl Client {
     ) {
         let mut nvl = NvList::new_unique_names();
 
-        nvl.insert("Type", "create pool").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_CREATE_POOL).unwrap();
         nvl.insert("region", region).unwrap();
         nvl.insert("endpoint", endpoint).unwrap();
         nvl.insert("bucket", bucket_name).unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("name", name).unwrap();
 
         self.send_request(nvl.as_ref()).await;
@@ -118,60 +126,63 @@ impl Client {
     ) {
         let mut nvl = NvList::new_unique_names();
 
-        nvl.insert("Type", "open pool").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_OPEN_POOL).unwrap();
         nvl.insert("region", region).unwrap();
         nvl.insert("endpoint", endpoint).unwrap();
         nvl.insert("bucket", bucket_name).unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 
+    // XXX dead code?
     pub async fn read_block(&mut self, guid: PoolGuid, block: BlockId) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "read block").unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert("request_type", "read block").unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("block", &block.0).unwrap();
         nvl.insert("request_id", &1234u64).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 
+    // XXX dead code?
     pub async fn write_block(&mut self, guid: PoolGuid, block: BlockId, data: &[u8]) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "write block").unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert("request_type", "write block").unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("block", &block.0).unwrap();
         nvl.insert("data", data).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 
+    // XXX dead code?
     pub async fn free_block(&mut self, guid: PoolGuid, block: BlockId) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "free block").unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert("request_type", "free block").unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("block", &block.0).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 
     pub async fn begin_txg(&mut self, guid: PoolGuid, txg: Txg) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "begin txg").unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
-        nvl.insert("TXG", &txg.0).unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_BEGIN_TXG).unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
+        nvl.insert("txg", &txg.0).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 
     pub async fn end_txg(&mut self, guid: PoolGuid, uberblock: &[u8]) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "end txg").unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_END_TXG).unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("data", uberblock).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 
     pub async fn flush_writes(&mut self, guid: PoolGuid) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("Type", "flush writes").unwrap();
-        nvl.insert("GUID", &guid.0).unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_FLUSH_WRITES).unwrap();
+        nvl.insert("guid", &guid.0).unwrap();
         self.send_request(nvl.as_ref()).await;
     }
 }

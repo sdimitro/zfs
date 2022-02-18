@@ -3,9 +3,11 @@ use crate::subcommand::ZcacheSubCommand;
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::SubCommand;
+use util::message::TYPE_CLEAR_HIT_DATA;
 use util::writeln_stdout;
 
 static NAME: &str = "clear_hit_data";
+
 pub struct ClearHitData;
 
 #[async_trait]
@@ -20,7 +22,7 @@ impl ZcacheSubCommand for ClearHitData {
 
     async fn invoke(&mut self, _args: &clap::ArgMatches) -> Result<()> {
         let mut remote = RemoteChannel::new(true).await?;
-        let response = remote.call(NAME, None).await;
+        let response = remote.call(TYPE_CLEAR_HIT_DATA, None).await;
         match response {
             Ok(_) => {
                 writeln_stdout!("Hits-by-size data cleared");

@@ -13,13 +13,13 @@ use std::cmp::max;
 use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
+use util::message::TYPE_ZCACHE_STATS;
 use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::*;
 use util::{nice_number_count, nice_p2size};
 use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "stats";
-static REQUEST: &str = "zcache_stats";
 
 struct StatsDisplay {
     show_time: bool,
@@ -155,15 +155,17 @@ impl StatsDisplay {
 
         // Top headers is a vector of tuples: (header-title, column-count)
         let mut top_header: Vec<(&str, usize)> =
-            vec![("CACHE-LOOKUP", 2), ("CACHE-MISS", 2), ("CACHE-INSERT", 2)];
+            vec![("CACHE-LOOKUP", 2), ("CACHE-HITS", 2), ("CACHE-INSERT", 2)];
         // Bottom headers is a vector of: header-column-name
         let mut bottom_header = vec!["count", "bytes", "count", "ratio", "count", "bytes"];
 
         if self.show_lookup_detail {
             // Slot in right after "CACHE-LOOKUP" column
-            top_header.insert(1, ("HIT-READ-INDEX", 2));
-            bottom_header.insert(2, "sans");
-            bottom_header.insert(3, "after");
+            top_header.insert(1, ("--------INDEX-ACCESS--------", 4));
+            bottom_header.insert(2, "pendch");
+            bottom_header.insert(3, "entry$");
+            bottom_header.insert(4, "chunk$");
+            bottom_header.insert(5, "disk");
         }
 
         // the following optional headers are appended in the order presented here
@@ -203,36 +205,27 @@ impl StatsDisplay {
         }
 
         // LOOKUPS
-        let total_lookups =
-            (values.value(LookupForRead) + values.value(LookupForWrite)) as f64 * scale;
+        let write_lookups = values.value(LookupForWrite) as f64 * scale;
+        let read_lookups = values.value(LookupForRead) as f64 * scale;
+        let pending_changes_hits = values.value(IndexHitPendingChanges) as f64 * scale;
+        let index_cache_hits = values.value(IndexHitIndexCache) as f64 * scale;
+        let chunk_cache_hits = values.value(IndexHitChunkCache) as f64 * scale;
+        let disk_hits = values.value(IndexHitDisk) as f64 * scale;
+        let hits = values.value(CacheHit) as f64 * scale;
+        let total_lookups = read_lookups + write_lookups;
+
         self.display_count(total_lookups);
         self.display_bytes(values.value(LookupBytes) as f64 * scale);
-
-        // LOOKUP DETAILS (optional)
         if self.show_lookup_detail {
-            let total_hits = (values.value(CacheHitWithoutIndexRead)
-                + values.value(CacheHitAfterIndexRead)) as f64
-                * scale;
-            self.display_percent(
-                values.value(CacheHitWithoutIndexRead) as f64 * scale,
-                total_hits,
-            );
-            self.display_percent(
-                values.value(CacheHitAfterIndexRead) as f64 * scale,
-                total_hits,
-            );
+            // LOOKUP DETAILS (optional)
+            self.display_percent(pending_changes_hits, read_lookups);
+            self.display_percent(index_cache_hits, read_lookups);
+            self.display_percent(chunk_cache_hits, read_lookups);
+            self.display_percent(disk_hits, read_lookups);
         }
-
-        // MISSES
-        let hits = (values.value(CacheHitWithoutIndexRead) + values.value(CacheHitAfterIndexRead))
-            as f64
-            * scale;
-        let misses = (values.value(CacheMissAfterIndexRead)
-            + values.value(CacheMissForcedEviction)
-            + values.value(CacheMissWithoutIndexRead)) as f64
-            * scale;
-        self.display_count(misses);
-        self.display_percent(misses, hits + misses);
+        // HITS
+        self.display_count(hits);
+        self.display_percent(hits, read_lookups);
 
         // INSERTS
         let inserts = (values.value(InsertForRead)
@@ -289,7 +282,7 @@ impl StatsDisplay {
         loop {
             let latest: CacheStats;
 
-            match remote.call(REQUEST, None).await {
+            match remote.call(TYPE_ZCACHE_STATS, None).await {
                 Ok(response) => {
                     let stats_json = response.lookup_string("stats_json").unwrap();
                     latest = serde_json::from_str(stats_json.to_str()?).unwrap();
@@ -371,6 +364,20 @@ impl ZcacheSubCommand for Stats {
 
         SubCommand::with_name(NAME)
             .about("Display cache statistics.")
+            .after_help(
+                "TERMINOLOGY:\n\
+                When we look for a block in the zettacache, we must first look\n\
+                in the index to determine if it's present and if so where it is\n\
+                on disk.  The following layers of caching are checked in order:\n\
+                \n\
+                pendch: index entry found in pending changes (new blocks or atime \
+                        updates not yet reflected in main on-disk index)\n\
+                entry$: index entry found in the entry cache\n\
+                chunk$: entry (or lack thereof) found in chunk cache\n\
+                  disk: a chunk of the main index was read from disk to find this \
+                        entry (or lack thereof)\n\
+                ",
+            )
             .arg(
                 Arg::with_name("timestamp")
                     .long("timestamp")

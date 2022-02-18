@@ -98,3 +98,32 @@ pub fn slice_to_struct<T: ReprC>(slice: &[u8]) -> T {
     assert_eq!(slice.len(), size_of::<T>());
     unsafe { ptr::read_unaligned(slice.as_ptr() as *const _) }
 }
+
+// object agent connection API request/response types
+pub const AGENT_REQUEST_TYPE: &str = "request_type";
+pub const AGENT_RESPONSE_TYPE: &str = "response_type";
+
+// kernel/agent message types
+pub const TYPE_CREATE_POOL: &str = "create pool";
+pub const TYPE_OPEN_POOL: &str = "open pool";
+pub const TYPE_CLOSE_POOL: &str = "close pool";
+pub const TYPE_GET_POOLS: &str = "get pools";
+pub const TYPE_GET_DESTROYING_POOLS: &str = "get destroying pools";
+pub const TYPE_CLEAR_DESTROYED_POOLS: &str = "clear destroyed pools";
+pub const TYPE_RESUME_DESTROY_POOL: &str = "resume destroy pool";
+pub const TYPE_BEGIN_TXG: &str = "begin txg";
+pub const TYPE_END_TXG: &str = "end txg";
+pub const TYPE_RESUME_COMPLETE: &str = "resume complete";
+pub const TYPE_FLUSH_WRITES: &str = "flush writes";
+pub const TYPE_FREE_BLOCKS: &str = "free blocks";
+pub const TYPE_GET_STATS: &str = "get stats";
+pub const TYPE_EXIT_AGENT: &str = "exit agent";
+pub const TYPE_ENABLE_FEATURE: &str = "enable feature";
+pub const TYPE_VERSION: &str = "get version";
+
+// zcache/agent message types
+pub const TYPE_CLEAR_HIT_DATA: &str = "clear hit data";
+pub const TYPE_REPORT_HITS: &str = "report hits";
+pub const TYPE_LIST_DEVICES: &str = "list devices";
+pub const TYPE_ZCACHE_IOSTAT: &str = "zcache iostat";
+pub const TYPE_ZCACHE_STATS: &str = "zcache stats";

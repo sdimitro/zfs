@@ -18,6 +18,7 @@ use std::num::NonZeroU64;
 use std::sync::Arc;
 use util::message::slice_to_struct;
 use util::message::struct_to_slice;
+use util::writeln_stdout;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[repr(packed)]
@@ -236,7 +237,7 @@ impl IndexRunPhys {
             })
             .await;
         histogram.assert_eq(&self.atime_histogram_phys);
-        println!("Verified index histogram: {}", histogram);
+        writeln_stdout!("Verified index histogram: {}", histogram);
     }
 }
 
@@ -367,7 +368,13 @@ impl IndexRun {
         self.last_key
     }
 
-    pub async fn lookup(&self, key: IndexKey) -> Option<BlockBasedLogValueGuard<'_, IndexEntry>> {
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
+    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
+    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    pub async fn lookup(
+        &self,
+        key: IndexKey,
+    ) -> (Option<BlockBasedLogValueGuard<'_, IndexEntry>>, bool) {
         if let Some(trim_key) = self.trim_key {
             assert_gt!(key, trim_key);
         }
@@ -395,7 +402,13 @@ impl ReadOnlyIndexRun {
         self.last_key
     }
 
-    pub async fn lookup(&self, key: IndexKey) -> Option<BlockBasedLogValueGuard<'_, IndexEntry>> {
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
+    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
+    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    pub async fn lookup(
+        &self,
+        key: IndexKey,
+    ) -> (Option<BlockBasedLogValueGuard<'_, IndexEntry>>, bool) {
         if let Some(trim_key) = self.trim_key {
             assert_gt!(key, trim_key);
         }

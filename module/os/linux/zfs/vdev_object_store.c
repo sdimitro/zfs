@@ -13,7 +13,7 @@
  * CDDL HEADER END
  */
 /*
- * Copyright (c) 2021 by Delphix. All rights reserved.
+ * Copyright (c) 2021, 2022 by Delphix. All rights reserved.
  */
 
 #include <sys/zfs_context.h>
@@ -136,6 +136,7 @@ typedef struct vdev_object_store {
 	boolean_t vos_serial_done[VOS_SERIAL_TYPES];
 	vos_serial_flag_t vos_send_txg_selector;
 	boolean_t vos_open_completed;
+	boolean_t vos_create_completed;
 	const char *vos_feature_enable;
 	uint64_t vos_result;
 
@@ -479,12 +480,12 @@ static int
 agent_request_nv(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 {
 	size_t payload_len;
+	void *payload_buf = fnvlist_pack(nv, &payload_len);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("sending %llu-byte request to agent nvlist type=%s",
 		    (u_longlong_t)payload_len,
-		    fnvlist_lookup_string(nv, AGENT_TYPE));
+		    fnvlist_lookup_string(nv, AGENT_REQUEST_TYPE));
 	}
-	void *payload_buf = fnvlist_pack(nv, &payload_len);
 	int err = agent_request(vos, MESSAGE_NVLIST, NULL, 0,
 	    payload_buf, payload_len, tag);
 	fnvlist_pack_free(payload_buf, payload_len);
@@ -548,7 +549,7 @@ zfs_object_store_open(vdev_object_store_t *vos)
 
 	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
 	nvlist_t *request = fnvlist_alloc();
-	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_VERSION);
+	fnvlist_add_string(request, AGENT_REQUEST_TYPE, AGENT_TYPE_VERSION);
 
 	/*
 	 * This specifies that the kernel supports all 1.X.Y versions of the
@@ -570,7 +571,7 @@ zfs_object_store_open(vdev_object_store_t *vos)
 		return (ENOTSUP);
 	}
 	char *type = NULL;
-	rc = nvlist_lookup_string(response, AGENT_TYPE, &type);
+	rc = nvlist_lookup_string(response, AGENT_RESPONSE_TYPE, &type);
 	if (rc != 0 || strcmp(type, AGENT_TYPE_VERSION) != 0) {
 		zfs_dbgmsg("zfs_object_store_open received unexpected message "
 		    "during negotiation: %d \"%s\"", rc,
@@ -694,7 +695,7 @@ agent_free_blocks_impl(vdev_object_store_t *vos,
     uint64_t *blkids, uint32_t *sizes, int num)
 {
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FREE_BLOCKS);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_FREE_BLOCKS);
 	fnvlist_add_uint64_array(nv, AGENT_BLOCK, blkids, num);
 	fnvlist_add_uint32_array(nv, AGENT_SIZE, sizes, num);
 	int err = agent_request_nv(vos, nv, FTAG);
@@ -757,7 +758,7 @@ static void
 agent_close_pool(vdev_object_store_t *vos, boolean_t destroy)
 {
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CLOSE_POOL);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_CLOSE_POOL);
 	fnvlist_add_boolean_value(nv, AGENT_DESTROY, destroy);
 	agent_request_serial(vos, nv, FTAG, VOS_SERIAL_CLOSE_POOL);
 	vos->vos_closing = B_TRUE;
@@ -777,7 +778,7 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_CREATE_POOL);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_CREATE_POOL);
 	fnvlist_add_string(nv, AGENT_NAME, spa_name(vd->vdev_spa));
 	fnvlist_add_uint64(nv, AGENT_GUID, spa_guid(vd->vdev_spa));
 	if (vos->vos_cred_profile != NULL) {
@@ -809,7 +810,7 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_OPEN_POOL);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_OPEN_POOL);
 	fnvlist_add_uint64(nv, AGENT_GUID, spa_guid(vd->vdev_spa));
 	if (vos->vos_cred_profile != NULL) {
 		fnvlist_add_string(nv, AGENT_CRED_PROFILE,
@@ -864,7 +865,7 @@ agent_begin_txg(vdev_object_store_t *vos, uint64_t txg)
 	zfs_object_store_wait(vos, VOS_SOCK_READY);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_BEGIN_TXG);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_BEGIN_TXG);
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 	zfs_dbgmsg("agent_begin_txg(%llu)",
 	    (u_longlong_t)txg);
@@ -880,7 +881,7 @@ agent_resume_complete(vdev_object_store_t *vos)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_RESUME_COMPLETE);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_RESUME_COMPLETE);
 
 	zfs_dbgmsg("agent_resume_complete()");
 	agent_request_nv(vos, nv, FTAG);
@@ -900,7 +901,7 @@ agent_end_txg(vdev_object_store_t *vos, uint64_t txg, void *ub_buf,
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_END_TXG);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_END_TXG);
 	fnvlist_add_uint64(nv, AGENT_TXG, txg);
 	fnvlist_add_uint8_array(nv, AGENT_UBERBLOCK, ub_buf, ub_len);
 	fnvlist_add_uint8_array(nv, AGENT_CONFIG, config_buf, config_len);
@@ -921,7 +922,7 @@ agent_flush_writes(vdev_object_store_t *vos, uint64_t blockid)
 	zfs_object_store_wait(vos, VOS_SOCK_READY);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_FLUSH_WRITES);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_FLUSH_WRITES);
 	fnvlist_add_uint64(nv, AGENT_BLOCK, blockid);
 	zfs_dbgmsg("agent_flush: blockid %llu", (u_longlong_t)blockid);
 
@@ -937,7 +938,7 @@ agent_set_feature(vdev_object_store_t *vos, const char *guid)
 	zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
 	nvlist_t *nv = fnvlist_alloc();
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_ENABLE_FEATURE);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_ENABLE_FEATURE);
 	fnvlist_add_string(nv, AGENT_FEATURE, guid);
 	zfs_dbgmsg("agent_set_feature: feature %s", guid);
 
@@ -971,7 +972,7 @@ object_store_restart_agent(vdev_t *vd)
 	 * close the connection.  We could just as easily close the connection
 	 * ourself.  Or change the agent code to actually exit.
 	 */
-	fnvlist_add_string(nv, AGENT_TYPE, AGENT_TYPE_EXIT);
+	fnvlist_add_string(nv, AGENT_REQUEST_TYPE, AGENT_TYPE_EXIT);
 	agent_request_nv(vos, nv, FTAG);
 	fnvlist_free(nv);
 }
@@ -1105,7 +1106,8 @@ agent_resume_reissue(vdev_object_store_t *vos, vdev_t *vd)
 	    caller = AVL_NEXT(&vos->vos_pending_stats_tree, caller)) {
 		nvlist_t *request = fnvlist_alloc();
 
-		fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_GET_STATS);
+		fnvlist_add_string(request, AGENT_REQUEST_TYPE,
+		    AGENT_TYPE_GET_STATS);
 		fnvlist_add_uint64(request, AGENT_TOKEN, caller->oss_owner);
 
 		zfs_dbgmsg("reissue ovdev_object_store_stats_generate, owner "
@@ -1185,7 +1187,7 @@ agent_resume(void *arg)
 		mutex_enter(&vos->vos_sock_lock);
 		zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
-		if (spa->spa_load_state == SPA_LOAD_CREATE) {
+		if (!vos->vos_create_completed) {
 			/*
 			 * Since we're resuming a pool creation, just
 			 * replay the message but don't wait for the completion.
@@ -1220,9 +1222,29 @@ agent_resume(void *arg)
 			}
 			if (result != 0) {
 				zfs_dbgmsg("agent_resume: pool open failed, "
-				"err %llu", (u_longlong_t)result);
+				    "err %llu", (u_longlong_t)result);
+				/*
+				 * It's possible we're getting an
+				 * I/O error because the credentials
+				 * have changed. Just retry the operation
+				 * when the agent restarts so the user does
+				 * not have to perform any administrative
+				 * operations.
+				 */
+				if (result == EIO || result == ENOENT)
+					continue;
+
+				/*
+				 * Other errors will result in the
+				 * closing of the vdev which is fine.
+				 * For example, an EREMOTEIO error
+				 * indicates we're racing with another
+				 * import and MMP has told us to shut
+				 * ourselves down.
+				 */
 				vdev_set_state(vd, B_FALSE,
-				    VDEV_STATE_CANT_OPEN, VDEV_AUX_OPEN_FAILED);
+				    VDEV_STATE_CANT_OPEN,
+				    VDEV_AUX_OPEN_FAILED);
 				vos->vos_agent_thread_exit = B_TRUE;
 				break;
 			}
@@ -1425,7 +1447,7 @@ vdev_object_store_stats_generate(vdev_t *vd, nvlist_t *nv)
 	mutex_exit(&vos->vos_stats_lock);
 
 	nvlist_t *request = fnvlist_alloc();
-	fnvlist_add_string(request, AGENT_TYPE, AGENT_TYPE_GET_STATS);
+	fnvlist_add_string(request, AGENT_REQUEST_TYPE, AGENT_TYPE_GET_STATS);
 	fnvlist_add_uint64(request, AGENT_TOKEN, stats_call.oss_owner);
 
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
@@ -1467,19 +1489,21 @@ update_features(spa_t *spa, nvlist_t *nv)
 static void
 agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 {
-	char *cause = NULL;
-	const char *type = fnvlist_lookup_string(nv, AGENT_TYPE);
+	const char *type = fnvlist_lookup_string(nv, AGENT_RESPONSE_TYPE);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("got response from agent type=%s", type);
 	}
 	vos->vos_result = 0;
-	if (strcmp(type, AGENT_TYPE_CREATE_POOL_DONE) == 0) {
-		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
-			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
+	if (strcmp(type, AGENT_TYPE_CREATE_POOL) == 0) {
+		char *error = NULL;
+		if (nvlist_lookup_string(nv, AGENT_ERR, &error) == 0) {
+			zfs_dbgmsg("got %s err=%s msg=%s", type, error,
+			    fnvlist_lookup_string(nv, AGENT_MESSAGE));
 			vos->vos_result = SET_ERROR(EACCES);
 		}
+		vos->vos_create_completed = B_TRUE;
 		agent_serial_done(vos, VOS_SERIAL_CREATE_POOL);
-	} else if (strcmp(type, AGENT_TYPE_END_TXG_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_END_TXG) == 0) {
 		mutex_enter(&vos->vos_stats_lock);
 		vos->vos_stats.voss_blocks_count =
 		    fnvlist_lookup_uint64(nv, "blocks_count");
@@ -1504,40 +1528,42 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 		    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
 
 		agent_serial_done(vos, VOS_SERIAL_END_TXG);
-	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_DONE) == 0) {
-		if (nvlist_lookup_string(nv, AGENT_CAUSE, &cause) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL) == 0) {
+		char *error = NULL;
+		if (nvlist_lookup_string(nv, AGENT_ERR, &error) == 0) {
 			spa_t *spa = vos->vos_vdev->vdev_spa;
-			zfs_dbgmsg("got %s cause=\"%s\"", type, cause);
-			if (strcmp(cause, "MMP") == 0) {
+			zfs_dbgmsg("got %s err=%s", type, error);
+			if (strcmp(error, "Mmp") == 0) {
 				fnvlist_add_string(spa->spa_load_info,
 				    ZPOOL_CONFIG_MMP_HOSTNAME,
-				    fnvlist_lookup_string(nv, AGENT_HOSTNAME));
+				    fnvlist_lookup_string(nv, "hostname"));
 				fnvlist_add_uint64(spa->spa_load_info,
 				    ZPOOL_CONFIG_MMP_STATE, MMP_STATE_ACTIVE);
 				fnvlist_add_uint64(spa->spa_load_info,
 				    ZPOOL_CONFIG_MMP_TXG, 0);
 				vos->vos_result = SET_ERROR(EREMOTEIO);
-			} else if (strcmp(cause, "IO") == 0) {
+			} else if (strcmp(error, "Io") == 0) {
 				char *message = fnvlist_lookup_string(nv,
-				    AGENT_MESSAGE);
+				    "message");
 				zfs_dbgmsg("message=\"%s\"", message);
 				if (strstr(message, "does not exist") != NULL) {
 					vos->vos_result = SET_ERROR(ENOENT);
 				} else {
 					vos->vos_result = SET_ERROR(EIO);
 				}
-			} else if (strcmp(cause, "checkpoint") == 0) {
+			} else if (strcmp(error, "Checkpoint") == 0) {
 				zfs_dbgmsg("Failed to find checkpoint when "
 				    "attempting to rewind pool");
 				vos->vos_result =
 				    SET_ERROR(ZFS_ERR_NO_CHECKPOINT);
 			} else {
-				ASSERT0(strcmp(cause, "feature"));
+				ASSERT0(strcmp(error, "Feature"));
 				fnvlist_add_nvlist(spa->spa_load_info,
 				    ZPOOL_CONFIG_UNSUP_FEAT,
-				    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
+				    fnvlist_lookup_nvlist(nv,
+				    "invalid_features"));
 				if (fnvlist_lookup_boolean_value(nv,
-				    AGENT_CAN_READONLY)) {
+				    "can_readonly")) {
 					fnvlist_add_boolean(spa->spa_load_info,
 					    ZPOOL_CONFIG_CAN_RDONLY);
 				}
@@ -1581,16 +1607,16 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 		}
 		vos->vos_open_completed = B_TRUE;
 		agent_serial_done(vos, VOS_SERIAL_OPEN_POOL);
-	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL) == 0) {
 		zfs_dbgmsg("got %s", type);
 		agent_serial_done(vos, VOS_SERIAL_CLOSE_POOL);
 		mutex_enter(&vos->vos_lock);
 		vos->vos_agent_thread_exit = B_TRUE;
 		mutex_exit(&vos->vos_lock);
-	} else if (strcmp(type, AGENT_TYPE_ENABLE_FEATURE_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_ENABLE_FEATURE) == 0) {
 		vos->vos_feature_enable = NULL;
 		agent_serial_done(vos, VOS_SERIAL_ENABLE_FEATURE);
-	} else if (strcmp(type, AGENT_TYPE_GET_STATS_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_GET_STATS) == 0) {
 		object_store_stats_call_t *caller, search;
 
 		nvlist_t *stats = fnvlist_lookup_nvlist(nv, AGENT_STATS);
@@ -2020,20 +2046,20 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	    vd, 0, &p0, TS_RUN, defclsyspri);
 
 	if (vd->vdev_spa->spa_load_state == SPA_LOAD_CREATE) {
+		vos->vos_create_completed = B_FALSE;
 		error = object_store_create_pool(vd);
 		if (error != 0) {
 			zfs_dbgmsg("agent_create_pool failed with %d", error);
-			goto sock_ready;
 		}
-	}
-	error = agent_open_pool(vd, vos,
-	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_FALSE);
-	if (error != 0) {
-		ASSERT3U(vd->vdev_spa->spa_load_state, !=, SPA_LOAD_CREATE);
-		goto sock_ready;
+	} else {
+		vos->vos_create_completed = B_TRUE;
 	}
 
-sock_ready:
+	if (error == 0) {
+		error = agent_open_pool(vd, vos,
+		    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)),
+		    B_FALSE);
+	}
 
 	/*
 	 * Socket is now ready for communication, wake up

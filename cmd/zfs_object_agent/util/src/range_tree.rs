@@ -47,6 +47,7 @@ impl RangeTree {
         };
 
         if merge_before && merge_after {
+            //inserted range joins before and after extents
             let &before_start = before.unwrap().0;
             let (&after_start, &after_size) = after.unwrap();
             self.tree
@@ -54,16 +55,19 @@ impl RangeTree {
                 .and_modify(|before_size| *before_size += size + after_size);
             self.tree.remove(&after_start);
         } else if merge_before {
+            // inserted range extends before extent
             let before_start = *before.unwrap().0;
             self.tree
                 .entry(before_start)
                 .and_modify(|before_size| *before_size += size);
         } else if merge_after {
+            // inserted range extends after extent
             let after_start = *after.unwrap().0;
             let after_size = *after.unwrap().1;
             self.tree.remove(&after_start);
             self.tree.insert(start, size + after_size);
         } else {
+            // inserted range is new extent
             self.tree.insert(start, size);
         }
         self.space += size;

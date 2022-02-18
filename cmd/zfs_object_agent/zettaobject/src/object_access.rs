@@ -28,13 +28,14 @@ use std::sync::Arc;
 use std::time::Instant;
 use std::{collections::HashMap, fmt::Display};
 use tokio::sync::Semaphore;
-use tokio::{sync::watch, time::error::Elapsed};
-use util::{get_tunable, super_trace, with_alloctag};
+use tokio::time::error::Elapsed;
+use util::{get_tunable, super_trace, watch_once, with_alloctag};
 
 struct ObjectCache {
     // XXX cache key should include Bucket
     cache: LruCache<String, Bytes>,
-    reading: HashMap<String, watch::Receiver<Option<Bytes>>>,
+    // key -> (cacheable, Receiver<value>)
+    reading: HashMap<String, (bool, watch_once::Receiver<Bytes>)>,
 }
 
 lazy_static! {
@@ -56,6 +57,7 @@ lazy_static! {
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
     pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
     pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
+    pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(get_tunable("per_request_timeout_secs", 2));
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
@@ -272,7 +274,11 @@ impl<E> From<RusotoError<E>> for OAError<E> {
     }
 }
 
-async fn retry_impl<F, O, E>(msg: &str, f: impl Fn() -> F) -> Result<O, OAError<E>>
+async fn retry_impl<F, O, E>(
+    msg: &str,
+    timeout_opt: Option<Duration>,
+    f: impl Fn() -> F,
+) -> Result<O, OAError<E>>
 where
     E: core::fmt::Debug,
     F: Future<Output = Result<O, OAError<E>>>,
@@ -282,7 +288,14 @@ where
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
     loop {
         let begin = Instant::now();
-        match f().await {
+        let result = match timeout_opt {
+            Some(timeout) => match tokio::time::timeout(timeout, f()).await {
+                Err(e) => Err(OAError::TimeoutError(e)),
+                Ok(res2) => res2,
+            },
+            None => f().await,
+        };
+        match result {
             res @ Ok(_) => return res,
             res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
             res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
@@ -351,6 +364,16 @@ where
     }
 }
 
+/// `timeout_opt` controls whether the overall request will be
+/// cancelled after a certain amount of time. This is useful
+/// for requests that have complex retry logic or need to
+/// complete quickly for correctness reasons.
+/// If a timeout is not specified, a default per-request timeout
+/// will be used. This helps avoid problems where the object
+/// store backend drops some requests on the floor. This
+/// per-request timeout will be retried indefinitely, so
+/// Err(TimeoutError) doesn't need to be handled gracefully
+/// unless `timeout_opt` is specified.
 async fn retry<F, O, E>(
     msg: &str,
     timeout_opt: Option<Duration>,
@@ -362,12 +385,16 @@ where
 {
     trace!("{}: begin", msg);
     let begin = Instant::now();
+    // Because of the `xor` here, exactly one of timeout_opt and retry_timeout_opt will be None and the other will be Some.
+    let retry_timeout_opt = timeout_opt.xor(Some(*PER_REQUEST_TIMEOUT));
     let result = match timeout_opt {
-        Some(timeout) => match tokio::time::timeout(timeout, retry_impl(msg, f)).await {
-            Err(e) => Err(OAError::TimeoutError(e)),
-            Ok(res2) => res2,
-        },
-        None => retry_impl(msg, f).await,
+        Some(timeout) => {
+            match tokio::time::timeout(timeout, retry_impl(msg, retry_timeout_opt, f)).await {
+                Err(e) => Err(OAError::TimeoutError(e)),
+                Ok(res2) => res2,
+            }
+        }
+        None => retry_impl(msg, retry_timeout_opt, f).await,
     };
     let elapsed = begin.elapsed();
     trace!("{}: returned in {}ms", msg, elapsed.as_millis());
@@ -492,7 +519,7 @@ impl ObjectAccess {
         })
     }
 
-    pub async fn get_object_impl(
+    pub async fn get_object_from_s3(
         &self,
         key: String,
         stat_type: ObjectAccessOpType,
@@ -557,7 +584,9 @@ impl ObjectAccess {
         stat_type: ObjectAccessOpType,
     ) -> Result<Bytes> {
         if *OBJECT_CACHE_IS_BYPASSABLE {
-            let bytes = self.get_object_impl(key.clone(), stat_type, None).await?;
+            let bytes = self
+                .get_object_from_s3(key.clone(), stat_type, None)
+                .await?;
             // Note: we *should* have the same data from S3 (in the `vec`) and in
             // the cache, so this invalidation is normally not necessary.  However,
             // in case a bug (or undetected RAM error) resulted in incorrect cached
@@ -571,67 +600,99 @@ impl ObjectAccess {
     }
 
     pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
+        // Recursive async functions require Box-ing their future, even if we
+        // "tail call".  Use a loop to retry instead.
+        loop {
+            // XXX copying key
+            if let Some(result) = self.get_object_cached(key.clone(), stat_type).await {
+                return result;
+            }
+        }
+    }
+
+    // None means we need to retry.  Some(Err) means that S3 returned a non-retryable error (e.g.
+    // object does not exist).
+    async fn get_object_cached(
+        &self,
+        key: String,
+        stat_type: ObjectAccessOpType,
+    ) -> Option<Result<Bytes>> {
         let either = {
             // need this block separate so that we can drop the mutex before the .await
             let mut c = CACHE.lock().unwrap();
             match c.cache.get(&key) {
-                Some(v) => {
+                Some(bytes) => {
                     super_trace!("found {} in cache", key);
-                    return Ok(v.clone());
+                    return Some(Ok(bytes.clone()));
                 }
                 None => match c.reading.get(&key) {
                     None => {
-                        let (tx, rx) = watch::channel::<Option<Bytes>>(None);
-                        c.reading.insert(key.clone(), rx);
+                        let (tx, rx) = watch_once::channel::<Bytes>();
+                        c.reading.insert(key.clone(), (true, rx));
                         Either::Left(async move {
-                            let v = self.get_object_impl(key.clone(), stat_type, None).await?;
+                            let bytes =
+                                match self.get_object_from_s3(key.clone(), stat_type, None).await {
+                                    Ok(bytes) => bytes,
+                                    Err(e) => return Some(Err(e)),
+                                };
 
-                            // If the key was removed, there may be no more
-                            // receivers, so we can't unwrap().
-                            tx.send(Some(v.clone())).ok();
+                            // This GET may have been marked non-cacheable by invalidate_cache().
+                            // In that case, value has been changed by a concurrent PUT, but
+                            // since we initiated our GET before the PUT, the old value is
+                            // sufficient for us.  But we don't want other GET's to see the
+                            // potentially-old value that we got, so we don't add it to the cache
+                            // or send it to other waiting GET's.
+                            let cacheable = {
+                                let mut myc = CACHE.lock().unwrap();
+                                let (cacheable, _) = myc.reading.remove(&key).unwrap();
+                                if cacheable {
+                                    myc.cache.put(key, bytes.clone());
+                                }
+                                cacheable
+                            };
 
-                            // If the entry was already removed from the
-                            // hashtable, that indicates that a put_object() has
-                            // invalidated this cache entry, so we don't want to
-                            // add this potentially-stale value to the cache.
-                            // See invalidate_cache() for details.
-                            let mut myc = CACHE.lock().unwrap();
-                            if myc.reading.remove(&key).is_some() {
-                                myc.cache.put(key.to_string(), v.clone());
+                            if cacheable {
+                                // We removed and dropped the rx, so there may be no more
+                                // receivers, so we can't unwrap().
+                                tx.send(bytes.clone()).ok();
                             }
-                            Ok(v)
+
+                            Some(Ok(bytes))
                         })
                     }
-                    Some(rx) => {
-                        super_trace!("found {} read in progress", key);
-                        let mut myrx = rx.clone();
+                    // If the in-progress GET is not cacheable, it won't send us the value.
+                    // However, there can be only one (potentially-cacheable) GET in progress at
+                    // a time, so we can't start another one until it completes.
+                    Some((_, rx)) => {
+                        trace!("{}: found GET in progress, waiting", key);
+                        let rx = rx.clone();
                         Either::Right(async move {
-                            if let Some(vec) = myrx.borrow().as_ref() {
-                                return Ok(vec.clone());
+                            match rx.recv().await {
+                                Ok(bytes) => Some(Ok(bytes)),
+                                // Sender doesn't have a value for us. The caller will retry.
+                                Err(_) => {
+                                    trace!("{}: waited for failed GET, retrying", key);
+                                    None
+                                }
                             }
-                            // Note: "else" or "match" statement not allowed
-                            // here because the .borrow()'ed Ref is not dropped
-                            // until the end of the else/match
-
-                            // XXX if the sender drops due to
-                            // get_object_impl() failing, we don't get a
-                            // very good error message, but maybe that
-                            // doesn't matter since the behavior is
-                            // otherwise correct (we return an Error)
-                            // XXX should we make a wrapper around the
-                            // watch::channel that has borrow() wait until the
-                            // first value is sent?
-                            myrx.changed().await?;
-                            let b = myrx.borrow();
-                            // Note: we assume that the once it's changed, it
-                            // has to be Some()
-                            Ok(b.as_ref().unwrap().clone())
                         })
                     }
                 },
             }
         };
         either.await
+    }
+
+    fn invalidate_cache(key: String) {
+        let mut cache = CACHE.lock().unwrap();
+        cache.cache.pop(&key);
+        // If there's a concurrent GET going on, it may see the old value, which is fine.  But we
+        // can't allow new readers to see the old value, either via the watch channel or by
+        // finding it in the cache later.  We mark the in-progress GET as non-cacheable so that
+        // the getter will not send the stale value or add it to the cache.
+        if let Some((cacheable, _)) = cache.reading.get_mut(&key) {
+            *cacheable = false;
+        }
     }
 
     fn list_impl(
@@ -797,17 +858,6 @@ impl ObjectAccess {
             timeout,
         )
         .await
-    }
-
-    fn invalidate_cache(key: String) {
-        let mut cache = CACHE.lock().unwrap();
-        cache.cache.pop(&key);
-        // If there's a concurrent read going on, it may get the old value,
-        // which is fine.  But we can't allow new readers to see the old value,
-        // so don't allow them to receive the value from an in-progress read.
-        // Removing the key here (if present) also informs the in-progress
-        // reader to not add the potentially-stale value to the cache.
-        cache.reading.remove(&key);
     }
 
     pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessOpType) {

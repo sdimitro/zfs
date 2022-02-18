@@ -21,7 +21,7 @@
 /*
  * Copyright 2015 Nexenta Systems, Inc. All rights reserved.
  * Copyright (c) 2005, 2010, Oracle and/or its affiliates. All rights reserved.
- * Copyright (c) 2012, 2018 by Delphix. All rights reserved.
+ * Copyright (c) 2012, 2022 by Delphix. All rights reserved.
  * Copyright 2015 RackTop Systems.
  * Copyright (c) 2016, Intel Corporation.
  * Copyright (c) 2021, Colm Buckley <colm@tuatha.org>
@@ -1888,7 +1888,7 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 	    &profile);
 
 	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_GET_POOLS);
+	fnvlist_add_string(msg, AGENT_REQUEST_TYPE, AGENT_TYPE_GET_POOLS);
 	if (bucket != NULL)
 		fnvlist_add_string(msg, AGENT_BUCKET, bucket);
 	fnvlist_add_string(msg, AGENT_REGION, region);
@@ -2186,7 +2186,8 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 
 	// Resume destroy
 	nvlist_t *msg = fnvlist_alloc();
-	fnvlist_add_string(msg, AGENT_TYPE, AGENT_TYPE_RESUME_DESTROY_POOL);
+	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
+	    AGENT_TYPE_RESUME_DESTROY_POOL);
 	fnvlist_add_string(msg, AGENT_BUCKET, bucket);
 	fnvlist_add_string(msg, AGENT_REGION, region);
 	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
@@ -2203,10 +2204,13 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 	if (resp == NULL)
 		return (-1);
 
-	const char *type = fnvlist_lookup_string(resp, AGENT_TYPE);
-	if (strcmp(type, AGENT_TYPE_RESUME_DESTROY_POOL_DONE) == 0) {
-		return (0);
+	if (strcmp(fnvlist_lookup_string(resp, AGENT_RESPONSE_TYPE),
+	    AGENT_TYPE_RESUME_DESTROY_POOL) != 0) {
+		return (-1);
+	}
+	if (nvlist_exists(resp, AGENT_ERR)) {
+		return (-1);
 	}
 
-	return (-1);
+	return (0);
 }

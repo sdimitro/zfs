@@ -46,6 +46,10 @@
 # 3. Verify the commands related to 'zfs upgrade' succeed as expected.
 #
 
+if use_object_store; then
+	log_unsupported "Not supported for object store run"
+fi
+
 verify_runnable "global"
 
 function cleanup

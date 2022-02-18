@@ -3,6 +3,7 @@ SUBDIRS = \
 	alloc_class \
 	arc \
 	atime \
+	background_freeing \
 	bootfs \
 	btree \
 	cache \
@@ -84,6 +85,7 @@ SUBDIRS = \
 	vdev_zaps \
 	write_dirs \
 	xattr \
+	zcache_slog_sharing \
 	zpool_influxdb \
 	zvol
 

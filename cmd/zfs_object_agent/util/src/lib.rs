@@ -5,7 +5,7 @@
 
 mod alloc;
 mod binaryindextree;
-mod bitmap_range_iterator;
+mod bitrange;
 mod btreemap_ext;
 mod credentials;
 mod die;
@@ -18,6 +18,7 @@ mod nicenum;
 mod range_tree;
 mod tunable;
 mod vec_ext;
+pub mod watch_once;
 pub mod write_stdout;
 mod zcache_devices;
 pub mod zettacache_stats;
@@ -26,7 +27,7 @@ pub use alloc::with_alloctag;
 pub use alloc::with_alloctag_hf;
 pub use alloc::TrackingAllocator;
 pub use binaryindextree::BinaryIndexTree;
-pub use bitmap_range_iterator::BitmapRangeIterator;
+pub use bitrange::BitRange;
 pub use btreemap_ext::iter_wrapping;
 pub use credentials::ResilientCredentialsProvider;
 pub use die::maybe_die_with;

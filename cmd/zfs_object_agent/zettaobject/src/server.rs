@@ -17,6 +17,7 @@ use nvpair::{NvEncoding, NvList};
 use safer_ffi::prelude::*;
 use semver::Version;
 use semver::VersionReq;
+use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
@@ -30,10 +31,8 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use util::get_tunable;
-use util::message::struct_to_slice;
-use util::message::MessageHeader;
-use util::message::MessageType;
-use util::message::MAX_STRUCT_LEN;
+use util::maybe_die_with;
+use util::message::*;
 use util::super_trace;
 use util::with_alloctag_hf;
 use util::AlignedVec;
@@ -103,7 +102,7 @@ where
     }
 
     /// Register a function to be called for a regular, concurrent operation.
-    /// When a connection receives a request with "Type" = request_type, the
+    /// When a connection receives a request with "request_type" = request_type, the
     /// Handler will be called.  The Handler returns a Future, which the server
     /// will run in a new task.  If either the Handler or its returned Future
     /// return an Err, the connection will be closed.  This should primarily be
@@ -247,9 +246,9 @@ where
 
         assert_eq!(struct_len, 0);
         let nvl = NvList::try_unpack(payload_vec.as_slice()).unwrap();
-        let request_type_cstr = nvl.lookup_string("Type")?;
+        let request_type_cstr = nvl.lookup_string(AGENT_REQUEST_TYPE)?;
         let request_type = request_type_cstr.to_str()?;
-        if request_type != "version" {
+        if request_type != TYPE_VERSION {
             return Err(anyhow!("Negotiation failed, no version request received"));
         }
         let version_req_string = nvl.lookup_string("version")?.into_string()?;
@@ -257,7 +256,7 @@ where
         for version in versions.iter().rev() {
             if version_req.matches(version) {
                 let mut response = NvList::new_unique_names();
-                response.insert("Type", "version")?;
+                response.insert(AGENT_RESPONSE_TYPE, TYPE_VERSION)?;
                 response.insert("version", Self::version_to_nvlist(version).as_ref())?;
                 responder.respond_with_nvlist(response);
                 return Ok(version.clone());
@@ -298,7 +297,7 @@ where
                 super_trace!("got nvlist request {:?}", nvl);
                 let request_type_cstr =
                     with_alloctag_hf("Server::start_connection() NvList::lookup_string()", || {
-                        nvl.lookup_string("Type")
+                        nvl.lookup_string(AGENT_REQUEST_TYPE)
                     })?;
                 let request_type = request_type_cstr.to_str()?;
                 match self.nvlist_handlers.get(request_type) {
@@ -439,4 +438,91 @@ impl Responder {
 /// that does not need to do any async work.
 pub fn handler_return_ok(response: Option<NvList>) -> HandlerReturn {
     Ok(Box::pin(future::ready(Ok(response))))
+}
+
+#[derive(Debug, Serialize)]
+#[serde(tag = "err")]
+pub enum FailureMessage {
+    Other { message: String },
+}
+impl FailureMessage {
+    pub fn new<T: ToString>(message: T) -> Self {
+        FailureMessage::Other {
+            message: message.to_string(),
+        }
+    }
+}
+
+/// Create and return an NvList appropriate to use as a response to the client.
+///
+/// For extensibility and consistency, E should be an enum with `#[serde(tag =
+/// "err")]`.  This way all failure responses will have a pair "err" ->
+/// "EnumVariantName".  All variants of E should be struct-like or unit-like
+/// (not tuple-like).  FailureMessage is an example.
+///
+/// The response nvlist will have the following nvpairs:
+/// * "response_type" -> response_type (string)
+/// * fields from R
+/// * if result.is_ok(), fields from O
+/// * if result.is_err(), "err" -> EnumVariantName (string)
+/// * if result.is_err(), fields from the varant of E
+pub fn return_result<R, O, E>(
+    response_type: &str,
+    request_id: R,
+    result: Result<O, E>,
+    debug: bool,
+) -> Result<Option<NvList>>
+where
+    R: Debug + Serialize,
+    O: Debug + Serialize,
+    E: Debug + Serialize,
+{
+    #[derive(Debug, Serialize)]
+    struct Response<'a, R, O, E> {
+        response_type: &'a str,
+        #[serde(flatten)]
+        request: R,
+        #[serde(flatten)]
+        ok: Option<O>,
+        #[serde(flatten)]
+        err: Option<E>,
+    }
+
+    if let Err(e) = &result {
+        error!("sending failure: {:?}", e);
+    }
+
+    let (ok, err) = match result {
+        Ok(o) => (Some(o), None),
+        Err(e) => (None, Some(e)),
+    };
+
+    let response = Response {
+        response_type,
+        request: request_id,
+        ok,
+        err,
+    };
+
+    if debug {
+        trace!("sending response: {:?}", response);
+    } else {
+        super_trace!("sending response: {:?}", response);
+    }
+
+    let nvl = nvpair::to_nvlist(&response)?;
+
+    // The type E should be an enum with `#[serde(tag = "err")]`.
+    // This ensures that all failures have the "err" nvpair present.
+    if response.err.is_some() {
+        assert!(nvl.exists("err"));
+    }
+
+    if debug {
+        maybe_die_with(|| format!("before sending response: {:?}", nvl));
+        debug!("sending response nvl: {:?}", nvl);
+    } else {
+        super_trace!("sending response nvl: {:?}", nvl);
+    }
+    Ok(Some(nvl))
 }

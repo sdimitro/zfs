@@ -154,6 +154,19 @@ object_store_skip = "Not applicable for object_store"
 block_devices_skip = "Not applicable for block devices"
 
 #
+# Some tests require that there are atleast 2 disks for running the test.
+# Any tests which are skipped for this reason will be suppressed in the
+# final analysis output
+#
+min_disk_required_reason = "Minimum 2 disks are required"
+
+#
+# Some tests require presence of external available disks for the test.
+# Any tests which are skipped for this reason will be suppressed in the
+# final analysis output
+#
+devices_not_available_reason = "Tests require additional disks. None found"
+#
 # Some test cases doesn't have all requirements to run on Github actions CI.
 #
 ci_reason = 'CI runner doesn\'t have all requirements'
@@ -348,7 +361,24 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'inuse/inuse_008_pos': ['SKIP', object_store_skip],
         'inuse/inuse_009_pos': ['SKIP', object_store_skip],
         'log_spacemap/log_spacemap_import_logs': ['SKIP', object_store_skip],
-
+        'zcache_slog_sharing/zcache_slog_sharing_slog_same_as_cache_neg':
+            ['FAIL', 'DOSE-673'],
+        'cli_root/zpool_upgrade/zpool_upgrade_001_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_002_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_003_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_004_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_007_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_008_pos':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_009_neg':
+            ['SKIP', object_store_skip],
+        'cli_root/zpool_upgrade/zpool_upgrade_features_001_pos':
+            ['SKIP', object_store_skip],
     })
 else:
     known.update({
@@ -357,6 +387,26 @@ else:
         'cli_root/zpool_destroy/zpool_resume_destroy_object_store':
             ['SKIP', block_devices_skip],
         'cli_root/zpool_destroy/zpool_resume_destroy_on_import_object_store':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/setup': ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_zpool_create_pos':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_zpool_add_pos':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_zpool_import_pos':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_multiple_pools_pos':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_without_cache_inuse_pos':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_slog_same_as_cache_neg':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_import_pool_slog_missing_neg':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/zcache_slog_sharing_zoa_invalid_cache_device_neg':
+            ['SKIP', block_devices_skip],
+        'zcache_slog_sharing/cleanup': ['SKIP', block_devices_skip],
+        'background_freeing/default_free_space_reclaimation':
             ['SKIP', block_devices_skip],
     })
 
@@ -461,6 +511,9 @@ elif sys.platform.startswith('linux'):
         'mmp/mmp_inactive_import': ['FAIL', known_reason],
         'zvol/zvol_misc/zvol_misc_snapdev': ['FAIL', '12621'],
         'zvol/zvol_misc/zvol_misc_volmode': ['FAIL', known_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_multiple_pools_pos':
+            ['SKIP', min_disk_required_reason],
+        'arc/dbufstats_001_pos': ['FAIL', 'QA-33190'],
     })
 
 if os.environ.get('ZTS_OBJECT_STORE') == 'true':
@@ -471,6 +524,24 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
         'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
         'cli_root/zdb/zdb_objset_id': ['FAIL', 'DOSE-915'],
+        'zcache_slog_sharing/setup': ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_zpool_create_pos':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_zpool_add_pos':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_zpool_import_pos':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_multiple_pools_pos':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_without_cache_inuse_pos':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_slog_same_as_cache_neg':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_import_pool_slog_missing_neg':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/zcache_slog_sharing_zoa_invalid_cache_device_neg':
+            ['SKIP', devices_not_available_reason],
+        'zcache_slog_sharing/cleanup': ['SKIP', devices_not_available_reason],
     })
 
 # Not all Github actions runners have scsi_debug module, so we may skip

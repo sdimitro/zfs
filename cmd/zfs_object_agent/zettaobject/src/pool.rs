@@ -131,7 +131,7 @@ impl PoolOwnerPhys {
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_impl(Self::key(id), ObjectAccessOpType::MetadataGet, None)
+            .get_object_from_s3(Self::key(id), ObjectAccessOpType::MetadataGet, None)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -868,7 +868,7 @@ impl Pool {
             assert_ge!(resume_txg, phys.txg);
             if resume_txg == phys.txg {
                 // The TXG that we're resuming was already synced.  The agent
-                // must have died before the "end txg done" message got to the
+                // must have died before the "end txg" response got to the
                 // kernel.  To ensure that the next message is "end txg" (not
                 // "write block"), we set the syncing_txg to None.  See
                 // end_txg() for details.
@@ -1314,7 +1314,7 @@ impl Pool {
 
         if syncing_state.syncing_txg.is_none() {
             // Note: if we died after writing the super object but before the
-            // kernel got the "end txg done" response, it will resume the last
+            // kernel got the "end txg" response, it will resume the last
             // completed txg.  In this case we're syncing the last txg again.
             // This should be a no-op.
             let phys = UberblockPhys::get(
@@ -1373,10 +1373,7 @@ impl Pool {
                 checkpoint_txg,
                 syncing_state.syncing_txg.unwrap().checked_sub(1)
             );
-            syncing_state.feature_increment_refcount(&features::CHECKPOINT);
-        } else if syncing_state.checkpoint_txg.is_some() && checkpoint_txg.is_none() {
-            syncing_state.feature_decrement_refcount(&features::CHECKPOINT);
-        } else {
+        } else if syncing_state.checkpoint_txg.is_none() == checkpoint_txg.is_none() {
             // Either there's no checkpoint now or before, or there should be the same checkpoint
             // txg in both this txg and the previous one.
             assert_eq!(syncing_state.checkpoint_txg, checkpoint_txg);
@@ -1651,36 +1648,72 @@ impl Pool {
     }
 
     async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {
-        let object = self.state.object_block_map.block_to_object(block);
+        let mut object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
-
-        trace!("reading {:?} for {:?}", object, block);
-        DataObject::get(
-            &shared_state.object_access,
-            shared_state.guid,
-            object,
-            ObjectAccessOpType::ReadsGet,
-            bypass_cache,
-        )
-        .await
-        .unwrap()
+        loop {
+            trace!("reading {:?} for {:?}", object, block);
+            match DataObject::get(
+                &shared_state.object_access,
+                shared_state.guid,
+                object,
+                ObjectAccessOpType::ReadsGet,
+                bypass_cache,
+            )
+            .await
+            {
+                Ok(object) => return object,
+                Err(e) => {
+                    // We may have failed due to the object not existing, due to the
+                    // object/block map changing out from under us, and then the object being
+                    // freed.  If the OBM has changed, retry reading the new object.
+                    let new_object = self.state.object_block_map.block_to_object(block);
+                    if new_object != object {
+                        debug!(
+                            "got {} while reading {:?} for {:?}, retrying with new {:?}",
+                            e, object, block, new_object
+                        );
+                        object = new_object;
+                    } else {
+                        panic!("got {} while reading {:?} for {:?}", e, object, block);
+                    }
+                }
+            }
+        }
     }
 
     async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Bytes {
-        let object = self.state.object_block_map.block_to_object(block);
+        let mut object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
-
-        super_trace!("reading {:?} for {:?}", object, block);
-        DataObject::get_block(
-            &shared_state.object_access,
-            shared_state.guid,
-            object,
-            block,
-            ObjectAccessOpType::ReadsGet,
-            bypass_cache,
-        )
-        .await
-        .unwrap()
+        loop {
+            super_trace!("reading {:?} for {:?}", object, block);
+            match DataObject::get_block(
+                &shared_state.object_access,
+                shared_state.guid,
+                object,
+                block,
+                ObjectAccessOpType::ReadsGet,
+                bypass_cache,
+            )
+            .await
+            {
+                Ok(object) => return object,
+                Err(e) => {
+                    // We may have failed due to the object not existing, due to the
+                    // object/block map changing out from under us, and then the object being
+                    // freed.  If the OBM has changed, retry reading the new object.
+                    let new_object = self.state.object_block_map.block_to_object(block);
+                    if new_object != object {
+                        debug!(
+                            "got {} while reading {:?} for {:?}, retrying with new {:?}",
+                            e, object, block, new_object
+                        );
+                        object = new_object;
+                    } else {
+                        panic!("got {} while reading {:?} for {:?}", e, object, block);
+                    }
+                }
+            }
+        }
     }
 
     pub async fn read_block(&self, block: BlockId, heal: bool) -> Bytes {
