@@ -125,8 +125,8 @@ impl SpaceMap {
         self.alloc_entries
     }
 
-    pub fn pending_bytes(&self) -> u64 {
-        self.log.pending_bytes()
+    pub fn pending_len(&self) -> u64 {
+        self.log.pending_len()
     }
 
     pub fn bytes(&self) -> u64 {

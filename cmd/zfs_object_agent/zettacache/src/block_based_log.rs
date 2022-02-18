@@ -19,7 +19,6 @@ use std::cmp::min;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::mem;
 use std::ops::Add;
 use std::ops::Bound::*;
 use std::ops::Sub;
@@ -325,10 +324,6 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
 
     pub fn pending_len(&self) -> u64 {
         self.pending_entries.len() as u64
-    }
-
-    pub fn pending_bytes(&self) -> u64 {
-        self.pending_len() * mem::size_of::<T>() as u64
     }
 
     pub fn push(&mut self, entry: T) {

@@ -1295,6 +1295,7 @@ impl ZettaCache {
         mut merging: Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)>,
     ) {
         let mut next_tick = tokio::time::Instant::now();
+        let mut completed_merge = false;
         loop {
             // if there is no current merging state, check to see if a merge should be started
             {
@@ -1395,6 +1396,7 @@ impl ZettaCache {
                             state.block_allocator.rebalance_fini();
                             *new_index_opt = None;
                             merging = None;
+                            completed_merge = true;
                             break;
                         }
                         Ok(None) => panic!("channel closed before Complete message received"),
@@ -1421,6 +1423,7 @@ impl ZettaCache {
                     .flush_checkpoint(
                         old_index_phys,
                         merging.as_mut().map(|(_, phys)| (phys.clone())),
+                        completed_merge,
                     )
                     .await;
             }
@@ -1428,6 +1431,7 @@ impl ZettaCache {
                 tokio::time::Instant::now(),
                 next_tick + *CHECKPOINT_INTERVAL,
             );
+            completed_merge = false;
         }
     }
 
@@ -2410,7 +2414,12 @@ impl ZettaCacheState {
 
     /// Flush out the current set of pending index changes. This is a recovery point in case of
     /// a system crash between index rewrites.
-    async fn flush_checkpoint(&mut self, old_index: IndexRunPhys, new_index: Option<IndexRunPhys>) {
+    async fn flush_checkpoint(
+        &mut self,
+        old_index: IndexRunPhys,
+        new_index: Option<IndexRunPhys>,
+        completed_merge: bool,
+    ) {
         debug!(
             "flushing checkpoint {:?}",
             self.primary.checkpoint_id.next()
@@ -2482,7 +2491,7 @@ impl ZettaCacheState {
             old_index,
             operation_log: operation_log_phys,
             last_atime: self.atime,
-            block_allocator: self.block_allocator.flush().await,
+            block_allocator: self.block_allocator.flush(completed_merge).await,
             size_histogram: self.size_histogram.clone(),
             merge_progress: merge_progress_phys,
         };
