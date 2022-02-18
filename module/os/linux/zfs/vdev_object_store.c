@@ -136,6 +136,7 @@ typedef struct vdev_object_store {
 	boolean_t vos_serial_done[VOS_SERIAL_TYPES];
 	vos_serial_flag_t vos_send_txg_selector;
 	boolean_t vos_open_completed;
+	boolean_t vos_create_completed;
 	const char *vos_feature_enable;
 	uint64_t vos_result;
 
@@ -1186,7 +1187,7 @@ agent_resume(void *arg)
 		mutex_enter(&vos->vos_sock_lock);
 		zfs_object_store_wait(vos, VOS_SOCK_OPEN);
 
-		if (spa->spa_load_state == SPA_LOAD_CREATE) {
+		if (!vos->vos_create_completed) {
 			/*
 			 * Since we're resuming a pool creation, just
 			 * replay the message but don't wait for the completion.
@@ -1221,9 +1222,29 @@ agent_resume(void *arg)
 			}
 			if (result != 0) {
 				zfs_dbgmsg("agent_resume: pool open failed, "
-				"err %llu", (u_longlong_t)result);
+				    "err %llu", (u_longlong_t)result);
+				/*
+				 * It's possible we're getting an
+				 * I/O error because the credentials
+				 * have changed. Just retry the operation
+				 * when the agent restarts so the user does
+				 * not have to perform any administrative
+				 * operations.
+				 */
+				if (result == EIO || result == ENOENT)
+					continue;
+
+				/*
+				 * Other errors will result in the
+				 * closing of the vdev which is fine.
+				 * For example, an EREMOTEIO error
+				 * indicates we're racing with another
+				 * import and MMP has told us to shut
+				 * ourselves down.
+				 */
 				vdev_set_state(vd, B_FALSE,
-				    VDEV_STATE_CANT_OPEN, VDEV_AUX_OPEN_FAILED);
+				    VDEV_STATE_CANT_OPEN,
+				    VDEV_AUX_OPEN_FAILED);
 				vos->vos_agent_thread_exit = B_TRUE;
 				break;
 			}
@@ -1480,6 +1501,7 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 			    fnvlist_lookup_string(nv, AGENT_MESSAGE));
 			vos->vos_result = SET_ERROR(EACCES);
 		}
+		vos->vos_create_completed = B_TRUE;
 		agent_serial_done(vos, VOS_SERIAL_CREATE_POOL);
 	} else if (strcmp(type, AGENT_TYPE_END_TXG) == 0) {
 		mutex_enter(&vos->vos_stats_lock);
@@ -2024,20 +2046,20 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	    vd, 0, &p0, TS_RUN, defclsyspri);
 
 	if (vd->vdev_spa->spa_load_state == SPA_LOAD_CREATE) {
+		vos->vos_create_completed = B_FALSE;
 		error = object_store_create_pool(vd);
 		if (error != 0) {
 			zfs_dbgmsg("agent_create_pool failed with %d", error);
-			goto sock_ready;
 		}
-	}
-	error = agent_open_pool(vd, vos,
-	    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)), B_FALSE);
-	if (error != 0) {
-		ASSERT3U(vd->vdev_spa->spa_load_state, !=, SPA_LOAD_CREATE);
-		goto sock_ready;
+	} else {
+		vos->vos_create_completed = B_TRUE;
 	}
 
-sock_ready:
+	if (error == 0) {
+		error = agent_open_pool(vd, vos,
+		    vdev_object_store_open_mode(spa_mode(vd->vdev_spa)),
+		    B_FALSE);
+	}
 
 	/*
 	 * Socket is now ready for communication, wake up
