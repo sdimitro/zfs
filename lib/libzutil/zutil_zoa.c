@@ -335,7 +335,7 @@ zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 		return;
 
 	const char *type = fnvlist_lookup_string(resp, AGENT_RESPONSE_TYPE);
-	VERIFY0(strcmp(type, AGENT_TYPE_GET_DESTROYING_POOLS_DONE));
+	VERIFY0(strcmp(type, AGENT_TYPE_GET_DESTROYING_POOLS));
 
 	nvlist_t *nvpools = NULL;
 	(void) nvlist_lookup_nvlist(resp, AGENT_POOLS, &nvpools);

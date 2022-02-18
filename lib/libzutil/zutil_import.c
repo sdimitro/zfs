@@ -2205,7 +2205,7 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 		return (-1);
 
 	if (strcmp(fnvlist_lookup_string(resp, AGENT_RESPONSE_TYPE),
-	    AGENT_TYPE_RESUME_DESTROY_POOL_DONE) != 0) {
+	    AGENT_TYPE_RESUME_DESTROY_POOL) != 0) {
 		return (-1);
 	}
 	if (nvlist_exists(resp, AGENT_ERR)) {

@@ -5,7 +5,7 @@ use semver::Version;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::task::JoinHandle;
-use util::message::MessageHeader;
+use util::message::*;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;
 
@@ -24,11 +24,19 @@ impl Client {
         let (mut r, mut w) = s.into_split();
 
         let mut vers_req_nvlist = NvList::new_unique_names();
-        vers_req_nvlist.insert("request_type", "version").unwrap();
+        vers_req_nvlist
+            .insert(AGENT_REQUEST_TYPE, TYPE_VERSION)
+            .unwrap();
         vers_req_nvlist.insert("version", "^1").unwrap();
         Self::send_request_impl(&mut w, vers_req_nvlist.as_ref()).await;
         let response = Self::get_next_response_impl(&mut r).await;
-        assert!(response.lookup_string("response_type").unwrap().to_str() == Ok("version"));
+        assert!(
+            response
+                .lookup_string(AGENT_RESPONSE_TYPE)
+                .unwrap()
+                .to_str()
+                == Ok(TYPE_VERSION)
+        );
         let vers_nvl = response.lookup_nvlist("version").unwrap();
         let version = Version::new(
             vers_nvl.lookup_uint64("major").unwrap(),
@@ -99,7 +107,7 @@ impl Client {
     ) {
         let mut nvl = NvList::new_unique_names();
 
-        nvl.insert("request_type", "create pool").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_CREATE_POOL).unwrap();
         nvl.insert("region", region).unwrap();
         nvl.insert("endpoint", endpoint).unwrap();
         nvl.insert("bucket", bucket_name).unwrap();
@@ -118,7 +126,7 @@ impl Client {
     ) {
         let mut nvl = NvList::new_unique_names();
 
-        nvl.insert("request_type", "open pool").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_OPEN_POOL).unwrap();
         nvl.insert("region", region).unwrap();
         nvl.insert("endpoint", endpoint).unwrap();
         nvl.insert("bucket", bucket_name).unwrap();
@@ -126,6 +134,7 @@ impl Client {
         self.send_request(nvl.as_ref()).await;
     }
 
+    // XXX dead code?
     pub async fn read_block(&mut self, guid: PoolGuid, block: BlockId) {
         let mut nvl = NvList::new_unique_names();
         nvl.insert("request_type", "read block").unwrap();
@@ -135,6 +144,7 @@ impl Client {
         self.send_request(nvl.as_ref()).await;
     }
 
+    // XXX dead code?
     pub async fn write_block(&mut self, guid: PoolGuid, block: BlockId, data: &[u8]) {
         let mut nvl = NvList::new_unique_names();
         nvl.insert("request_type", "write block").unwrap();
@@ -144,6 +154,7 @@ impl Client {
         self.send_request(nvl.as_ref()).await;
     }
 
+    // XXX dead code?
     pub async fn free_block(&mut self, guid: PoolGuid, block: BlockId) {
         let mut nvl = NvList::new_unique_names();
         nvl.insert("request_type", "free block").unwrap();
@@ -154,7 +165,7 @@ impl Client {
 
     pub async fn begin_txg(&mut self, guid: PoolGuid, txg: Txg) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("request_type", "begin txg").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_BEGIN_TXG).unwrap();
         nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("txg", &txg.0).unwrap();
         self.send_request(nvl.as_ref()).await;
@@ -162,7 +173,7 @@ impl Client {
 
     pub async fn end_txg(&mut self, guid: PoolGuid, uberblock: &[u8]) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("request_type", "end txg").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_END_TXG).unwrap();
         nvl.insert("guid", &guid.0).unwrap();
         nvl.insert("data", uberblock).unwrap();
         self.send_request(nvl.as_ref()).await;
@@ -170,7 +181,7 @@ impl Client {
 
     pub async fn flush_writes(&mut self, guid: PoolGuid) {
         let mut nvl = NvList::new_unique_names();
-        nvl.insert("request_type", "flush writes").unwrap();
+        nvl.insert(AGENT_REQUEST_TYPE, TYPE_FLUSH_WRITES).unwrap();
         nvl.insert("guid", &guid.0).unwrap();
         self.send_request(nvl.as_ref()).await;
     }

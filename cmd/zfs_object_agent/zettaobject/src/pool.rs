@@ -868,7 +868,7 @@ impl Pool {
             assert_ge!(resume_txg, phys.txg);
             if resume_txg == phys.txg {
                 // The TXG that we're resuming was already synced.  The agent
-                // must have died before the "end txg done" message got to the
+                // must have died before the "end txg" response got to the
                 // kernel.  To ensure that the next message is "end txg" (not
                 // "write block"), we set the syncing_txg to None.  See
                 // end_txg() for details.
@@ -1314,7 +1314,7 @@ impl Pool {
 
         if syncing_state.syncing_txg.is_none() {
             // Note: if we died after writing the super object but before the
-            // kernel got the "end txg done" response, it will resume the last
+            // kernel got the "end txg" response, it will resume the last
             // completed txg.  In this case we're syncing the last txg again.
             // This should be a no-op.
             let phys = UberblockPhys::get(

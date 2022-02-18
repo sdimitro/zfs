@@ -17,6 +17,7 @@ use std::sync::{Arc, Mutex};
 use std::time::UNIX_EPOCH;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::message::*;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
@@ -67,16 +68,19 @@ impl PublicServerState {
 
 impl PublicConnectionState {
     fn register(server: &mut Server<PublicServerState, PublicConnectionState>) {
-        server.register_handler("get pools", Box::new(Self::get_pools));
-        server.register_handler("get destroying pools", Box::new(Self::get_destroying_pools));
+        server.register_handler(TYPE_GET_POOLS, Box::new(Self::get_pools));
         server.register_handler(
-            "clear destroyed pools",
+            TYPE_GET_DESTROYING_POOLS,
+            Box::new(Self::get_destroying_pools),
+        );
+        server.register_handler(
+            TYPE_CLEAR_DESTROYED_POOLS,
             Box::new(Self::clear_destroyed_pools),
         );
-        server.register_handler("report_hits", Box::new(Self::report_hits));
-        server.register_handler("list_devices", Box::new(Self::list_devices));
-        server.register_handler("zcache_iostat", Box::new(Self::zcache_iostat));
-        server.register_handler("zcache_stats", Box::new(Self::zcache_stats));
+        server.register_handler(TYPE_REPORT_HITS, Box::new(Self::report_hits));
+        server.register_handler(TYPE_LIST_DEVICES, Box::new(Self::list_devices));
+        server.register_handler(TYPE_ZCACHE_IOSTAT, Box::new(Self::zcache_iostat));
+        server.register_handler(TYPE_ZCACHE_STATS, Box::new(Self::zcache_stats));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -185,7 +189,7 @@ impl PublicConnectionState {
 
             let mut response = NvList::new_unique_names();
             response
-                .insert("response_type", "get destroying pools done")
+                .insert(AGENT_RESPONSE_TYPE, TYPE_GET_DESTROYING_POOLS)
                 .unwrap();
             response.insert("pools", pools.as_ref()).unwrap();
 
@@ -202,7 +206,7 @@ impl PublicConnectionState {
 
             let mut response = NvList::new_unique_names();
             response
-                .insert("response_type", "clear destroying pools done")
+                .insert(AGENT_RESPONSE_TYPE, TYPE_CLEAR_DESTROYED_POOLS)
                 .unwrap();
 
             debug!("sending response: {:?}", response);
@@ -240,7 +244,7 @@ impl PublicConnectionState {
                 }
                 None => Err(FailureMessage::new("no zettacache present")),
             };
-            return_result("report_hits", (), response, true)
+            return_result(TYPE_REPORT_HITS, (), response, true)
         }))
     }
 
@@ -259,7 +263,7 @@ impl PublicConnectionState {
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };
-            return_result("list_devices", (), response, true)
+            return_result(TYPE_LIST_DEVICES, (), response, true)
         }))
     }
 
@@ -278,7 +282,7 @@ impl PublicConnectionState {
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };
-            return_result("zcache_iostat", (), response, false)
+            return_result(TYPE_ZCACHE_IOSTAT, (), response, false)
         }))
     }
 
@@ -297,7 +301,7 @@ impl PublicConnectionState {
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };
-            return_result("zcache_stats", (), response, false)
+            return_result(TYPE_ZCACHE_STATS, (), response, false)
         }))
     }
 }

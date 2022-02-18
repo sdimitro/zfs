@@ -32,10 +32,7 @@ use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use util::get_tunable;
 use util::maybe_die_with;
-use util::message::struct_to_slice;
-use util::message::MessageHeader;
-use util::message::MessageType;
-use util::message::MAX_STRUCT_LEN;
+use util::message::*;
 use util::super_trace;
 use util::with_alloctag_hf;
 use util::AlignedVec;
@@ -249,9 +246,9 @@ where
 
         assert_eq!(struct_len, 0);
         let nvl = NvList::try_unpack(payload_vec.as_slice()).unwrap();
-        let request_type_cstr = nvl.lookup_string("request_type")?;
+        let request_type_cstr = nvl.lookup_string(AGENT_REQUEST_TYPE)?;
         let request_type = request_type_cstr.to_str()?;
-        if request_type != "version" {
+        if request_type != TYPE_VERSION {
             return Err(anyhow!("Negotiation failed, no version request received"));
         }
         let version_req_string = nvl.lookup_string("version")?.into_string()?;
@@ -259,7 +256,7 @@ where
         for version in versions.iter().rev() {
             if version_req.matches(version) {
                 let mut response = NvList::new_unique_names();
-                response.insert("response_type", "version")?;
+                response.insert(AGENT_RESPONSE_TYPE, TYPE_VERSION)?;
                 response.insert("version", Self::version_to_nvlist(version).as_ref())?;
                 responder.respond_with_nvlist(response);
                 return Ok(version.clone());
@@ -300,7 +297,7 @@ where
                 super_trace!("got nvlist request {:?}", nvl);
                 let request_type_cstr =
                     with_alloctag_hf("Server::start_connection() NvList::lookup_string()", || {
-                        nvl.lookup_string("request_type")
+                        nvl.lookup_string(AGENT_REQUEST_TYPE)
                     })?;
                 let request_type = request_type_cstr.to_str()?;
                 match self.nvlist_handlers.get(request_type) {

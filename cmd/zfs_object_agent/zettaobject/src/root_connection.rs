@@ -103,20 +103,22 @@ impl ObjectAccessRequest {
 
 impl RootConnectionState {
     fn register(server: &mut Server<RootServerState, RootConnectionState>) {
-        server.register_serial_handler("create pool", Box::new(Self::create_pool));
-        server.register_serial_handler("open pool", Box::new(Self::open_pool));
-        server.register_serial_handler("resume complete", Box::new(Self::resume_complete));
-        server.register_handler("begin txg", Box::new(Self::begin_txg));
-        server.register_handler("flush writes", Box::new(Self::flush_writes));
-        server.register_handler("end txg", Box::new(Self::end_txg));
-        server.register_handler("free blocks", Box::new(Self::free_blocks));
-        server.register_handler("get stats", Box::new(Self::get_stats));
-        server.register_handler("close pool", Box::new(Self::close_pool));
-        server.register_handler("exit agent", Box::new(Self::exit_agent));
-        server.register_handler("enable feature", Box::new(Self::enable_feature));
-        server.register_handler("resume destroy pool", Box::new(Self::resume_destroy_pool));
-        // XXX use space separated request type like the others
-        server.register_handler("clear_hit_data", Box::new(Self::clear_hit_data));
+        server.register_serial_handler(TYPE_CREATE_POOL, Box::new(Self::create_pool));
+        server.register_serial_handler(TYPE_OPEN_POOL, Box::new(Self::open_pool));
+        server.register_serial_handler(TYPE_RESUME_COMPLETE, Box::new(Self::resume_complete));
+        server.register_handler(TYPE_BEGIN_TXG, Box::new(Self::begin_txg));
+        server.register_handler(TYPE_FLUSH_WRITES, Box::new(Self::flush_writes));
+        server.register_handler(TYPE_END_TXG, Box::new(Self::end_txg));
+        server.register_handler(TYPE_FREE_BLOCKS, Box::new(Self::free_blocks));
+        server.register_handler(TYPE_GET_STATS, Box::new(Self::get_stats));
+        server.register_handler(TYPE_CLOSE_POOL, Box::new(Self::close_pool));
+        server.register_handler(TYPE_EXIT_AGENT, Box::new(Self::exit_agent));
+        server.register_handler(TYPE_ENABLE_FEATURE, Box::new(Self::enable_feature));
+        server.register_handler(
+            TYPE_RESUME_DESTROY_POOL,
+            Box::new(Self::resume_destroy_pool),
+        );
+        server.register_handler(TYPE_CLEAR_HIT_DATA, Box::new(Self::clear_hit_data));
         server.register_struct_handler(MessageType::ReadBlock, Box::new(Self::read_block));
         server.register_struct_handler(MessageType::WriteBlock, Box::new(Self::write_block));
     }
@@ -150,7 +152,7 @@ impl RootConnectionState {
                 Err(e) => Err(FailureMessage::new(e)),
             };
 
-            return_result("pool create done", request.id, result, true)
+            return_result(TYPE_CREATE_POOL, request.id, result, true)
         })
     }
 
@@ -264,7 +266,7 @@ impl RootConnectionState {
                     })
                 }
             };
-            return_result("pool open done", request.id, result, true)
+            return_result(TYPE_OPEN_POOL, request.id, result, true)
         })
     }
 
@@ -349,7 +351,7 @@ impl RootConnectionState {
                 features: HashMap<String, u64>,
             }
             let response = EndTxgResponse {
-                response_type: "end txg done",
+                response_type: TYPE_END_TXG,
                 stats,
                 features: features
                     .into_iter()
@@ -479,7 +481,7 @@ impl RootConnectionState {
         }
 
         let mut response = NvList::new_unique_names();
-        response.insert("response_type", "get stats done").unwrap();
+        response.insert("response_type", TYPE_GET_STATS).unwrap();
         response.insert("token", &request.token).unwrap();
         response.insert("stats", nvl.as_ref()).unwrap();
 
@@ -511,7 +513,7 @@ impl RootConnectionState {
                 response_type: &'static str,
             }
             let response = ClosePoolResponse {
-                response_type: "pool close done",
+                response_type: TYPE_CLOSE_POOL,
             };
             return_struct(response, true)
         }))
@@ -545,7 +547,7 @@ impl RootConnectionState {
             feature: String,
         }
         let response = EnableFeatureResponse {
-            response_type: "enable feature done",
+            response_type: TYPE_ENABLE_FEATURE,
             feature: request.feature,
         };
         handler_return_struct(response, true)
@@ -566,7 +568,7 @@ impl RootConnectionState {
                 pool_destroy::resume_destroy(request.object_access.object_access(), request.guid)
                     .await
                     .map_err(FailureMessage::new);
-            return_result("resume destroy pool done", (), result, true)
+            return_result(TYPE_RESUME_DESTROY_POOL, (), result, true)
         }))
     }
 
@@ -591,7 +593,7 @@ impl RootConnectionState {
                 }
             };
             // XXX standardize on if response has the same type as request, or with "done" appended
-            return_result("clear_hit_data", (), result, true)
+            return_result(TYPE_CLEAR_HIT_DATA, (), result, true)
         }))
     }
 }

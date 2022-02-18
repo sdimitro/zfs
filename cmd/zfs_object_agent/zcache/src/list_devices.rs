@@ -7,6 +7,7 @@ use async_trait::async_trait;
 use clap::{Arg, SubCommand};
 use std::fs;
 use std::path::{Path, PathBuf};
+use util::message::TYPE_LIST_DEVICES;
 use util::{nice_p2size, DeviceEntry, DeviceList};
 use util::{write_stdout, writeln_stdout};
 
@@ -64,7 +65,7 @@ impl DeviceDisplay {
     async fn list_devices(&self) -> Result<()> {
         let mut remote = RemoteChannel::new(false).await?;
 
-        match remote.call(NAME, None).await {
+        match remote.call(TYPE_LIST_DEVICES, None).await {
             Ok(response) => {
                 let devices_json = response.lookup_string("devices_json")?;
                 let devices: DeviceList = serde_json::from_str(devices_json.to_str()?)?;

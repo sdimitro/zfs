@@ -8,6 +8,7 @@ use clap::Arg;
 use clap::SubCommand;
 use num_traits::cast::ToPrimitive;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use util::message::TYPE_REPORT_HITS;
 use util::nice_p2size;
 use util::From64;
 use util::{write_stdout, writeln_stdout};
@@ -200,7 +201,7 @@ impl ZcacheSubCommand for ReportHits {
         let ghost = !args.is_present("only-live-hits");
 
         let mut remote = RemoteChannel::new(false).await?;
-        match remote.call(NAME, None).await {
+        match remote.call(TYPE_REPORT_HITS, None).await {
             Ok(response) => {
                 let hits_by_size = SizeHistogram {
                     start: UNIX_EPOCH + Duration::new(response.lookup_uint64("started")?, 0),

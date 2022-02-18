@@ -479,12 +479,12 @@ static int
 agent_request_nv(vdev_object_store_t *vos, nvlist_t *nv, char *tag)
 {
 	size_t payload_len;
+	void *payload_buf = fnvlist_pack(nv, &payload_len);
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE) {
 		zfs_dbgmsg("sending %llu-byte request to agent nvlist type=%s",
 		    (u_longlong_t)payload_len,
 		    fnvlist_lookup_string(nv, AGENT_REQUEST_TYPE));
 	}
-	void *payload_buf = fnvlist_pack(nv, &payload_len);
 	int err = agent_request(vos, MESSAGE_NVLIST, NULL, 0,
 	    payload_buf, payload_len, tag);
 	fnvlist_pack_free(payload_buf, payload_len);
@@ -1473,7 +1473,7 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 		zfs_dbgmsg("got response from agent type=%s", type);
 	}
 	vos->vos_result = 0;
-	if (strcmp(type, AGENT_TYPE_CREATE_POOL_DONE) == 0) {
+	if (strcmp(type, AGENT_TYPE_CREATE_POOL) == 0) {
 		char *error = NULL;
 		if (nvlist_lookup_string(nv, AGENT_ERR, &error) == 0) {
 			zfs_dbgmsg("got %s err=%s msg=%s", type, error,
@@ -1481,7 +1481,7 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 			vos->vos_result = SET_ERROR(EACCES);
 		}
 		agent_serial_done(vos, VOS_SERIAL_CREATE_POOL);
-	} else if (strcmp(type, AGENT_TYPE_END_TXG_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_END_TXG) == 0) {
 		mutex_enter(&vos->vos_stats_lock);
 		vos->vos_stats.voss_blocks_count =
 		    fnvlist_lookup_uint64(nv, "blocks_count");
@@ -1506,7 +1506,7 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 		    fnvlist_lookup_nvlist(nv, AGENT_FEATURES));
 
 		agent_serial_done(vos, VOS_SERIAL_END_TXG);
-	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_OPEN_POOL) == 0) {
 		char *error = NULL;
 		if (nvlist_lookup_string(nv, AGENT_ERR, &error) == 0) {
 			spa_t *spa = vos->vos_vdev->vdev_spa;
@@ -1585,16 +1585,16 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 		}
 		vos->vos_open_completed = B_TRUE;
 		agent_serial_done(vos, VOS_SERIAL_OPEN_POOL);
-	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_CLOSE_POOL) == 0) {
 		zfs_dbgmsg("got %s", type);
 		agent_serial_done(vos, VOS_SERIAL_CLOSE_POOL);
 		mutex_enter(&vos->vos_lock);
 		vos->vos_agent_thread_exit = B_TRUE;
 		mutex_exit(&vos->vos_lock);
-	} else if (strcmp(type, AGENT_TYPE_ENABLE_FEATURE_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_ENABLE_FEATURE) == 0) {
 		vos->vos_feature_enable = NULL;
 		agent_serial_done(vos, VOS_SERIAL_ENABLE_FEATURE);
-	} else if (strcmp(type, AGENT_TYPE_GET_STATS_DONE) == 0) {
+	} else if (strcmp(type, AGENT_TYPE_GET_STATS) == 0) {
 		object_store_stats_call_t *caller, search;
 
 		nvlist_t *stats = fnvlist_lookup_nvlist(nv, AGENT_STATS);

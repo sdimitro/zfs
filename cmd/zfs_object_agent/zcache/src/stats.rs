@@ -13,13 +13,13 @@ use std::cmp::max;
 use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
+use util::message::TYPE_ZCACHE_STATS;
 use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::*;
 use util::{nice_number_count, nice_p2size};
 use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "stats";
-static REQUEST: &str = "zcache_stats";
 
 struct StatsDisplay {
     show_time: bool,
@@ -282,7 +282,7 @@ impl StatsDisplay {
         loop {
             let latest: CacheStats;
 
-            match remote.call(REQUEST, None).await {
+            match remote.call(TYPE_ZCACHE_STATS, None).await {
                 Ok(response) => {
                     let stats_json = response.lookup_string("stats_json").unwrap();
                     latest = serde_json::from_str(stats_json.to_str()?).unwrap();
