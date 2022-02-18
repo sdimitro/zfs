@@ -14,6 +14,7 @@ chrono = "0.4.19"
 clap = "2"
 futures = "0.3.13"
 git-version = "0.3.5"
+itertools = "0.10.3"
 lazy_static = "1.4.0"
 nvpair = { git = "https://github.com/delphix/rust-libzfs"}
 rand = "0.8.3"

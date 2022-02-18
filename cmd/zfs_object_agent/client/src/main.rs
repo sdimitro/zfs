@@ -1,3 +1,5 @@
+use ::util::writeln_stderr;
+use ::util::writeln_stdout;
 use chrono::prelude::*;
 use chrono::DateTime;
 use clap::Arg;
@@ -26,9 +28,12 @@ use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;
+use zettaobject::data_object::DataObject;
 use zettaobject::ObjectAccess;
+use zettaobject::ObjectAccessOpType;
 use zettaobject::Pool;
 mod client;
+use itertools::Itertools;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
@@ -463,6 +468,13 @@ async fn main() {
                 .takes_value(true)
                 .help("AWS secret access key"),
         )
+        .arg(
+            Arg::with_name("verbosity")
+                .short("v")
+                .long("verbose")
+                .help("verbosity")
+                .multiple(true),
+        )
         .subcommand(SubCommand::with_name("s3").about("s3 test"))
         .subcommand(SubCommand::with_name("s3_rusoto").about("s3 rusoto test"))
         .subcommand(SubCommand::with_name("create").about("create test "))
@@ -486,6 +498,26 @@ async fn main() {
                         .help("number of days"),
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("dump_object")
+                .about("dump data object")
+                .arg(
+                    Arg::with_name("pool_guid")
+                        .short("p")
+                        .long("pool_guid")
+                        .required(true)
+                        .takes_value(true)
+                        .help("guid of pool to retrieve object from"),
+                )
+                .arg(
+                    Arg::with_name("object_id")
+                        .short("o")
+                        .long("object_id")
+                        .required(true)
+                        .takes_value(true)
+                        .help("id of object to retreive"),
+                ),
+        )
         .get_matches();
 
     // Command line parameters
@@ -495,16 +527,19 @@ async fn main() {
     let profile = matches.value_of("profile").unwrap();
     let aws_access_key_id = matches.value_of("aws_access_key_id");
     let aws_secret_access_key = matches.value_of("aws_secret_access_key");
+    let verbosity = matches.occurrences_of("verbosity");
 
     if aws_access_key_id.is_some() != aws_secret_access_key.is_some() {
         matches.usage();
         panic!("Error: Both aws_access_key_id and aws_secret_access_key should be specified.");
     }
 
-    println!(
-        "endpoint: {}, region: {}, bucket: {} profile: {} access_id: {:?}, secret_key: {:?}",
-        endpoint, region_str, bucket_name, profile, aws_access_key_id, aws_secret_access_key
-    );
+    if verbosity > 0 || matches.subcommand_name().is_none() {
+        println!(
+            "endpoint: {}, region: {}, bucket: {} profile: {} access_id: {:?}, secret_key: {:?}",
+            endpoint, region_str, bucket_name, profile, aws_access_key_id, aws_secret_access_key
+        );
+    }
 
     let object_access = get_object_access(
         endpoint,
@@ -551,6 +586,55 @@ async fn main() {
             let min_age = Duration::from_secs(age_str.parse::<u64>().unwrap() * 60 * 60 * 24);
 
             do_destroy_old_pools(&object_access, min_age).await.unwrap();
+        }
+        ("dump_object", Some(dump_matches)) => {
+            let pool_guid = match str::parse::<u64>(dump_matches.value_of("pool_guid").unwrap()) {
+                Ok(value) => PoolGuid(value),
+                Err(_e) => {
+                    writeln_stderr!("Failed to parse pool guid");
+                    return;
+                }
+            };
+            let object = match str::parse::<u64>(dump_matches.value_of("object_id").unwrap()) {
+                Ok(value) => ObjectId::new(BlockId(value)),
+                Err(_e) => {
+                    writeln_stderr!("Failed to parse object id");
+                    return;
+                }
+            };
+            match DataObject::get(
+                &object_access,
+                pool_guid,
+                object,
+                ObjectAccessOpType::ReadsGet,
+                true,
+            )
+            .await
+            {
+                Ok(obj) => {
+                    writeln_stdout!("Data object header: {}", obj);
+                    for (k, v) in obj.blocks.iter().sorted() {
+                        if verbosity < 2 {
+                            writeln_stdout!(
+                                "Block id: {}, Length: {}, Contents: {:?}...",
+                                k,
+                                v.len(),
+                                v.slice(0..8)
+                            );
+                        } else {
+                            writeln_stdout!(
+                                "Block id: {}, Length: {}, Contents: {:?}",
+                                k,
+                                v.len(),
+                                v
+                            );
+                        }
+                    }
+                }
+                Err(e) => {
+                    writeln_stderr!("Failed to access DataObject: {:?}", e);
+                }
+            };
         }
         _ => {
             matches.usage();

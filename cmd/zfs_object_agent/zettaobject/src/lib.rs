@@ -6,7 +6,7 @@
 #![deny(clippy::print_stderr)]
 
 pub mod base_types;
-mod data_object;
+pub mod data_object;
 pub mod debug;
 mod features;
 mod heartbeat;
