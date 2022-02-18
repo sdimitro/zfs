@@ -11,7 +11,6 @@ use more_asserts::*;
 use num_traits::cast::ToPrimitive;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use roaring::RoaringBitmap;
 use serde::{Deserialize, Serialize};
 use std::cmp::{self, max, min};
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -25,7 +24,7 @@ use util::nice_p2size;
 use util::super_trace;
 use util::with_alloctag;
 use util::writeln_stdout;
-use util::BitmapRangeIterator;
+use util::BitRange;
 use util::From64;
 use util::RangeTree;
 
@@ -162,11 +161,11 @@ trait SlabTrait {
 }
 
 struct BitmapSlab {
-    allocatable: RoaringBitmap,
-    allocating: RoaringBitmap,
-    freeing: RoaringBitmap,
+    allocatable: BitRange,
+    allocating: BitRange,
+    freeing: BitRange,
 
-    total_slots: u32,
+    total_slots: u16,
     slot_size: u32,
     location: DiskLocation,
 }
@@ -175,12 +174,12 @@ impl BitmapSlab {
     const ALLOCATABLE_TAG: &'static str = "BitmapSlab.allocatable";
 
     fn new_slab(id: SlabId, generation: SlabGeneration, extent: Extent, block_size: u32) -> Slab {
-        let slab_size: u32 = extent.size.try_into().unwrap();
-        let free_slots = slab_size / block_size;
-        let mut allocatable = RoaringBitmap::new();
+        let slab_size = u32::try_from(extent.size).unwrap();
+        let free_slots = u16::try_from(slab_size / block_size).unwrap();
+        let mut allocatable = BitRange::new();
 
-        allocatable.insert_range(0..free_slots.into());
-        assert_eq!(allocatable.len(), u64::from(free_slots));
+        allocatable.insert_range(0..free_slots);
+        assert_eq!(allocatable.len(), free_slots);
 
         Slab::new(
             id,
@@ -196,8 +195,8 @@ impl BitmapSlab {
         )
     }
 
-    fn slot_to_location(&self, slot: u32) -> DiskLocation {
-        self.location + u64::from(slot * self.slot_size)
+    fn slot_to_location(&self, slot: u16) -> DiskLocation {
+        self.location + u64::from(slot) * u64::from(self.slot_size)
     }
 
     fn slab_end(&self) -> DiskLocation {
@@ -216,34 +215,24 @@ impl BitmapSlab {
 
         let internal_offset = u32::try_from(extent.location - self.location).unwrap();
         assert_eq!(internal_offset % self.slot_size, 0);
-        let num_slots = u32::try_from(extent.size).unwrap() / self.slot_size;
+        let num_slots = u16::try_from(extent.size / u64::from(self.slot_size)).unwrap();
         assert_ge!(num_slots, 1);
 
-        let first_slot = internal_offset / self.slot_size;
+        let first_slot = u16::try_from(internal_offset / self.slot_size).unwrap();
         assert_le!(
             first_slot + num_slots,
             self.total_slots,
             "import range crosses the slab's end boundary"
         );
-        let slot_range = first_slot.into()..u64::from(first_slot + num_slots);
+        let slot_range = first_slot..(first_slot + num_slots);
         if is_alloc {
-            let removed = with_alloctag(Self::ALLOCATABLE_TAG, || {
+            with_alloctag(Self::ALLOCATABLE_TAG, || {
                 self.allocatable.remove_range(slot_range)
             });
-            assert_eq!(
-                removed,
-                u64::from(num_slots),
-                "double alloc detected during import"
-            );
         } else {
-            let inserted = with_alloctag(Self::ALLOCATABLE_TAG, || {
+            with_alloctag(Self::ALLOCATABLE_TAG, || {
                 self.allocatable.insert_range(slot_range)
             });
-            assert_eq!(
-                inserted,
-                u64::from(num_slots),
-                "double free detected during import"
-            );
         }
     }
 }
@@ -264,14 +253,12 @@ impl SlabTrait for BitmapSlab {
         }
 
         let slot = self.allocatable.min().unwrap();
-        let inserted = self.allocating.insert(slot);
-        assert!(inserted);
+        self.allocating.insert(slot);
         with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.remove(slot));
 
         // Cannot be allocating a block that's currently in the
         // middle of being freed.
         assert!(!self.freeing.contains(slot));
-
         Some(Extent {
             location: self.slot_to_location(slot),
             size: self.slot_size.into(),
@@ -284,7 +271,7 @@ impl SlabTrait for BitmapSlab {
         let internal_offset = u32::try_from(extent.location - self.location).unwrap();
         assert_eq!(internal_offset % self.slot_size, 0);
 
-        let slot = internal_offset / self.slot_size;
+        let slot = u16::try_from(internal_offset / self.slot_size).unwrap();
         assert!(
             !self.allocatable.contains(slot),
             "double free at slot {:?}",
@@ -293,11 +280,9 @@ impl SlabTrait for BitmapSlab {
 
         if self.allocating.contains(slot) {
             assert!(!self.freeing.contains(slot));
-            let removed = self.allocating.remove(slot);
-            assert!(removed);
+            self.allocating.remove(slot);
         } else {
-            let inserted = self.freeing.insert(slot);
-            assert!(inserted);
+            self.freeing.insert(slot);
         }
     }
 
@@ -308,26 +293,25 @@ impl SlabTrait for BitmapSlab {
         // `allocating` first, before `freeing`, on our spacemaps. Note that
         // segments cannot be freed and then allocated within the same
         // checkpoint period.
-        for (first, last) in self.allocating.iter_ranges() {
-            assert_ge!(last, first);
+        for (slot, run) in self.allocating.iter_ranges() {
             spacemap.alloc(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
         }
         self.allocating.clear();
 
-        for (first, last) in self.freeing.iter_ranges() {
-            assert_ge!(last, first);
+        for (slot, run) in self.freeing.iter_ranges() {
             spacemap.free(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
         }
         // Space freed during this checkpoint is now available for reallocation.
-        for slot in self.freeing.iter() {
-            let inserted = with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.insert(slot));
-            assert!(inserted);
+        for (slot, run) in self.freeing.iter_ranges() {
+            with_alloctag(Self::ALLOCATABLE_TAG, || {
+                self.allocatable.insert_range(slot..(slot + run))
+            });
         }
         self.freeing.clear();
     }
@@ -337,27 +321,23 @@ impl SlabTrait for BitmapSlab {
         //       RoaringBitmap as a first-class spacemap entry is more
         //       practical here.
         let mut written_slots = 0;
-        for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
-            assert_ge!(last, first);
+        for (slot, run) in self.allocatable.iter_inverse_ranges(0, self.total_slots) {
             spacemap.alloc(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
-            written_slots += u64::from(last - first + 1);
+            written_slots += run;
         }
-        assert_eq!(
-            written_slots,
-            u64::from(self.total_slots) - self.allocatable.len()
-        );
+        assert_eq!(written_slots, self.total_slots - self.allocatable.len());
 
         // In our attempt to make this independent of flush_to_spacemap(), we do
         // not mutate any of the in-memory data structures and mark all entries
         // from the allocating bitmap as free. The latter is because these
         // entries will be later marked as allocated in flush_to_spacemap().
-        for (first, last) in self.allocating.iter_ranges() {
+        for (slot, run) in self.allocating.iter_ranges() {
             spacemap.free(Extent {
-                location: self.slot_to_location(first),
-                size: u64::from((last - first + 1) * self.slot_size),
+                location: self.slot_to_location(slot),
+                size: u64::from(run) * u64::from(self.slot_size),
             });
         }
     }
@@ -369,15 +349,15 @@ impl SlabTrait for BitmapSlab {
     fn capacity_bytes(&self) -> u64 {
         // Compute from slot size rather than return slab size since the slot size
         // may not evenly divide the slab size, so some slab space may not be available.
-        u64::from(self.total_slots * self.slot_size)
+        u64::from(self.total_slots) * u64::from(self.slot_size)
     }
 
     fn free_space(&self) -> u64 {
-        self.allocatable.len() * u64::from(self.slot_size)
+        u64::from(self.allocatable.len()) * u64::from(self.slot_size)
     }
 
     fn allocated_space(&self) -> u64 {
-        (u64::from(self.total_slots) - self.allocatable.len()) * u64::from(self.slot_size)
+        u64::from(self.total_slots - self.allocatable.len()) * u64::from(self.slot_size)
     }
 
     fn phys_type(&self) -> SlabPhysType {
@@ -387,7 +367,7 @@ impl SlabTrait for BitmapSlab {
     }
 
     fn dump_info(&self) {
-        let used_slots = self.total_slots - u32::try_from(self.allocatable.len()).unwrap();
+        let used_slots = self.total_slots - self.allocatable.len();
         writeln_stdout!(
             "slab_offset: {} slot_size: {} slots_used: {}/{} utilization: {}%",
             self.location.offset(),
@@ -396,18 +376,18 @@ impl SlabTrait for BitmapSlab {
             self.total_slots,
             (used_slots * 100) / self.total_slots
         );
-        for (first, last) in self.allocatable.iter_inverse_ranges(self.total_slots) {
-            let first_location = self.slot_to_location(first);
-            let last_location = self.slot_to_location(last + 1);
+        for (slot, run) in self.allocatable.iter_inverse_ranges(0, self.total_slots) {
+            let first_location = self.slot_to_location(slot);
+            let last_location = self.slot_to_location(slot + run);
             writeln_stdout!(
                 "\tALLOC {:?} offset: [{}, {}) length: {} - slots: [{}, {}) count: {}",
                 first_location.disk(),
                 first_location.offset(),
                 last_location.offset(),
                 nice_p2size(last_location - first_location),
-                first,
-                last + 1,
-                last - first + 1
+                slot,
+                slot + run,
+                run
             );
         }
         writeln_stdout!();
@@ -415,26 +395,35 @@ impl SlabTrait for BitmapSlab {
 
     fn num_segments(&self) -> u64 {
         self.allocatable
-            .iter_inverse_ranges(self.total_slots)
+            .iter_inverse_ranges(0, self.total_slots)
             .count() as u64
     }
 
     // Each extent may cover multiple adjacent allocated slots/blocks on disk. Additionally,
     // the list of extents are sorted in no particular order.
     fn allocated_extents(&self) -> Vec<Extent> {
-        let mut all = RoaringBitmap::new();
-        all.insert_range(0..u64::from(self.total_slots));
-        let allocated = all - &self.allocatable - &self.freeing;
+        let mut allocated = BitRange::new();
+
+        self.allocatable
+            .iter_inverse_ranges(0, self.total_slots)
+            .for_each(|(slot, run)| {
+                allocated.insert_range(slot..(slot + run));
+            });
+
+        // Due to how frees are not immediately reflected in "allocatable", we need to be careful
+        // to account for them seperately, here.
+        self.freeing.iter_ranges().for_each(|(slot, run)| {
+            allocated.remove_range(slot..(slot + run));
+        });
 
         allocated
             .iter_ranges()
-            .map(|(first, last)| {
-                let size = (last - first + 1) * self.slot_size;
-                let location = self.slot_to_location(first);
-                Extent {
-                    size: size.into(),
-                    location,
-                }
+            .map(|(slot, run)| {
+                Extent::new(
+                    self.location.disk(),
+                    self.slot_to_location(slot).offset(),
+                    u64::from(run) * u64::from(self.slot_size),
+                )
             })
             .collect()
     }

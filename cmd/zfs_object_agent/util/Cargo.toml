@@ -22,7 +22,6 @@ log4rs = "1.0.0"
 more-asserts = "0.2.1"
 num-traits = "0.2.14"
 rand = "0.8.3"
-roaring = "0.7.0"
 rusoto_credential = "0.47.0"
 safer-ffi = { version = "0.0.6", features = ["proc_macros"] }
 serde = { version = "1.0.125", features = ["derive"] }

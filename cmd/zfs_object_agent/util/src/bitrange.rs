@@ -3,25 +3,54 @@ use std::{
     cmp::Ordering,
     collections::{btree_map::Iter, BTreeMap},
     iter::Fuse,
-    ops::RangeBounds,
+    ops::Range,
 };
 
 #[derive(Default)]
-pub struct RangeTree {
-    tree: BTreeMap<u64, u64>, // start -> size
-    space: u64,
+pub struct BitRange {
+    tree: BTreeMap<u16, u16>, // start -> size
+    set_bits: u16,
 }
 
-impl RangeTree {
-    pub fn new() -> RangeTree {
-        RangeTree {
-            tree: BTreeMap::new(),
-            space: 0,
-        }
+impl BitRange {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    pub fn insert(&mut self, slot: u16) {
+        self.insert_impl(slot, 1)
+    }
+
+    pub fn remove(&mut self, slot: u16) {
+        self.remove_impl(slot, 1)
+    }
+
+    pub fn insert_range(&mut self, range: Range<u16>) {
+        self.insert_impl(range.start, range.end - range.start)
+    }
+
+    pub fn remove_range(&mut self, range: Range<u16>) {
+        self.remove_impl(range.start, range.end - range.start)
+    }
+
+    pub fn min(&self) -> Option<u16> {
+        self.tree.keys().next().copied()
+    }
+
+    pub fn len(&self) -> u16 {
+        self.set_bits
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn contains(&self, slot: u16) -> bool {
+        self.overlap(slot, 1).is_some()
     }
 
     // panics if already present
-    pub fn add(&mut self, start: u64, size: u64) {
+    fn insert_impl(&mut self, start: u16, size: u16) {
         if size == 0 {
             return;
         }
@@ -47,7 +76,6 @@ impl RangeTree {
         };
 
         if merge_before && merge_after {
-            //inserted range joins before and after extents
             let &before_start = before.unwrap().0;
             let (&after_start, &after_size) = after.unwrap();
             self.tree
@@ -55,26 +83,23 @@ impl RangeTree {
                 .and_modify(|before_size| *before_size += size + after_size);
             self.tree.remove(&after_start);
         } else if merge_before {
-            // inserted range extends before extent
             let before_start = *before.unwrap().0;
             self.tree
                 .entry(before_start)
                 .and_modify(|before_size| *before_size += size);
         } else if merge_after {
-            // inserted range extends after extent
             let after_start = *after.unwrap().0;
             let after_size = *after.unwrap().1;
             self.tree.remove(&after_start);
             self.tree.insert(start, size + after_size);
         } else {
-            // inserted range is new extent
             self.tree.insert(start, size);
         }
-        self.space += size;
+        self.set_bits += size;
     }
 
     // panics if not present
-    pub fn remove(&mut self, start: u64, size: u64) {
+    fn remove_impl(&mut self, start: u16, size: u16) {
         assert_ne!(size, 0);
 
         let end = start + size;
@@ -96,10 +121,10 @@ impl RangeTree {
         } else {
             self.tree.remove(&start);
         }
-        self.space -= size;
+        self.set_bits -= size;
     }
 
-    pub fn overlap(&self, start: u64, size: u64) -> Option<(u64, u64)> {
+    fn overlap(&self, start: u16, size: u16) -> Option<(u16, u16)> {
         assert_ne!(size, 0);
 
         let end = start + size;
@@ -113,69 +138,43 @@ impl RangeTree {
         None
     }
 
-    pub fn verify_absent(&self, start: u64, size: u64) {
-        if let Some((existing_start, existing_size)) = self.overlap(start, size) {
-            panic!(
-                "range_tree segment [{}, {}) is not absent (overlaps with segment [{}, {}))",
-                start,
-                start + size,
-                existing_start,
-                existing_start + existing_size
-            );
-        }
+    /// Returns ranges of set slots as (first slot set, # of slots in range)
+    pub fn iter_ranges(&self) -> impl Iterator<Item = (u16, u16)> + '_ {
+        self.tree.iter().map(|(x, y)| (*x, *y))
     }
 
-    /// Returns Iter<start, size>
-    pub fn iter(&self) -> std::collections::btree_map::Iter<u64, u64> {
-        self.tree.iter()
-    }
-
-    pub fn iter_inverse(&self, start: u64, end: u64) -> RangeTreeInverseIter {
-        RangeTreeInverseIter::new(self, start, end)
-    }
-
-    pub fn range<R>(&self, range: R) -> std::collections::btree_map::Range<'_, u64, u64>
-    where
-        R: RangeBounds<u64>,
-    {
-        self.tree.range(range)
+    /// Returns ranges of unset slots as (first slot set, # of slots in range)
+    pub fn iter_inverse_ranges(&self, start: u16, end: u16) -> BitRangeInverseIter {
+        BitRangeInverseIter::new(self, start, end)
     }
 
     pub fn clear(&mut self) {
         self.tree.clear();
-        self.space = 0;
-    }
-
-    pub fn space(&self) -> u64 {
-        self.space
-    }
-
-    pub fn verify_space(&self) {
-        assert_eq!(self.space, self.tree.values().sum::<u64>())
+        self.set_bits = 0;
     }
 }
 
-pub struct RangeTreeInverseIter<'a> {
-    rt_iter: Fuse<Iter<'a, u64, u64>>,
-    iter_end: u64,
-    cursor: u64,
+pub struct BitRangeInverseIter<'a> {
+    rt_iter: Fuse<Iter<'a, u16, u16>>,
+    iter_end: u16,
+    cursor: u16,
 }
 
-impl<'a> RangeTreeInverseIter<'a> {
-    fn new(rtree: &RangeTree, start: u64, end: u64) -> RangeTreeInverseIter {
+impl<'a> BitRangeInverseIter<'a> {
+    fn new(rtree: &BitRange, start: u16, end: u16) -> BitRangeInverseIter {
         assert_ge!(end, start);
-        RangeTreeInverseIter {
-            rt_iter: rtree.iter().fuse(),
+        BitRangeInverseIter {
+            rt_iter: rtree.tree.iter().fuse(),
             iter_end: end,
             cursor: start,
         }
     }
 }
 
-impl<'a> Iterator for RangeTreeInverseIter<'a> {
-    type Item = (u64, u64);
+impl<'a> Iterator for BitRangeInverseIter<'a> {
+    type Item = (u16, u16);
 
-    fn next(&mut self) -> Option<(u64, u64)> {
+    fn next(&mut self) -> Option<(u16, u16)> {
         loop {
             if self.cursor >= self.iter_end {
                 return None;
@@ -230,15 +229,15 @@ mod test_iter_inverse {
     use super::*;
 
     fn validate_iter_inverse_ranges(
-        a: &RangeTree,
-        start: u64,
-        end: u64,
-        expected_space: u64,
-        expected_nsegments: u64,
+        a: &BitRange,
+        start: u16,
+        end: u16,
+        expected_space: u16,
+        expected_nsegments: u16,
     ) {
         let mut total_segments = 0;
         let mut total_space = 0;
-        for (_, size) in a.iter_inverse(start, end) {
+        for (_, size) in a.iter_inverse_ranges(start, end) {
             total_segments += 1;
             total_space += size;
         }
@@ -248,7 +247,7 @@ mod test_iter_inverse {
 
     #[test]
     fn test_empty() {
-        let a = RangeTree::new();
+        let a = BitRange::new();
         validate_iter_inverse_ranges(&a, 0, 0, 0, 0);
         validate_iter_inverse_ranges(&a, 0, 1, 1, 1);
         validate_iter_inverse_ranges(&a, 0, 2, 2, 1);
@@ -258,8 +257,8 @@ mod test_iter_inverse {
 
     #[test]
     fn test_single_start_unit_segment() {
-        let mut a = RangeTree::new();
-        a.add(0, 1);
+        let mut a = BitRange::new();
+        a.insert_impl(0, 1);
         validate_iter_inverse_ranges(&a, 0, 0, 0, 0);
         validate_iter_inverse_ranges(&a, 0, 1, 0, 0);
         validate_iter_inverse_ranges(&a, 0, 2, 1, 1);
@@ -270,8 +269,8 @@ mod test_iter_inverse {
 
     #[test]
     fn test_single_start_range() {
-        let mut a = RangeTree::new();
-        a.add(0, 5);
+        let mut a = BitRange::new();
+        a.insert_impl(0, 5);
         validate_iter_inverse_ranges(&a, 0, 0, 0, 0);
         validate_iter_inverse_ranges(&a, 0, 5, 0, 0);
         validate_iter_inverse_ranges(&a, 1, 2, 0, 0);
@@ -282,8 +281,8 @@ mod test_iter_inverse {
 
     #[test]
     fn test_single_middle_range() {
-        let mut a = RangeTree::new();
-        a.add(5, 3);
+        let mut a = BitRange::new();
+        a.insert_impl(5, 3);
         validate_iter_inverse_ranges(&a, 0, 4, 4, 1);
         validate_iter_inverse_ranges(&a, 0, 5, 5, 1);
         validate_iter_inverse_ranges(&a, 0, 7, 5, 1);
@@ -307,9 +306,9 @@ mod test_iter_inverse {
 
     #[test]
     fn test_two_ranges_start_end() {
-        let mut a = RangeTree::new();
-        a.add(0, 1);
-        a.add(9, 1);
+        let mut a = BitRange::new();
+        a.insert_impl(0, 1);
+        a.insert_impl(9, 1);
         validate_iter_inverse_ranges(&a, 0, 1, 0, 0);
         validate_iter_inverse_ranges(&a, 0, 2, 1, 1);
         validate_iter_inverse_ranges(&a, 0, 9, 8, 1);
@@ -329,9 +328,9 @@ mod test_iter_inverse {
 
     #[test]
     fn test_two_ranges_middle_end() {
-        let mut a = RangeTree::new();
-        a.add(5, 1);
-        a.add(9, 1);
+        let mut a = BitRange::new();
+        a.insert_impl(5, 1);
+        a.insert_impl(9, 1);
         validate_iter_inverse_ranges(&a, 0, 1, 1, 1);
         validate_iter_inverse_ranges(&a, 0, 5, 5, 1);
         validate_iter_inverse_ranges(&a, 0, 6, 5, 1);

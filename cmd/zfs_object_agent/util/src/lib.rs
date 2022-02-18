@@ -5,7 +5,7 @@
 
 mod alloc;
 mod binaryindextree;
-mod bitmap_range_iterator;
+mod bitrange;
 mod btreemap_ext;
 mod credentials;
 mod die;
@@ -26,7 +26,7 @@ pub use alloc::with_alloctag;
 pub use alloc::with_alloctag_hf;
 pub use alloc::TrackingAllocator;
 pub use binaryindextree::BinaryIndexTree;
-pub use bitmap_range_iterator::BitmapRangeIterator;
+pub use bitrange::BitRange;
 pub use btreemap_ext::iter_wrapping;
 pub use credentials::ResilientCredentialsProvider;
 pub use die::maybe_die_with;
