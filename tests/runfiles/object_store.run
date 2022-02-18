@@ -472,3 +472,12 @@ tests = ['log_spacemap_import_logs']
 pre =
 post =
 tags = ['functional', 'log_spacemap']
+
+[tests/functional/zcache_slog_sharing]
+tests = ['zcache_slog_sharing_zpool_create_pos', 'zcache_slog_sharing_zpool_add_pos',
+	'zcache_slog_sharing_zpool_import_pos', 'zcache_slog_sharing_multiple_pools_pos',
+	'zcache_slog_sharing_without_cache_inuse_pos',
+	'zcache_slog_sharing_slog_same_as_cache_neg',
+	'zcache_slog_sharing_import_pool_slog_missing_neg',
+	'zcache_slog_sharing_zoa_invalid_cache_device_neg']
+tags = ['functional', 'zcache_slog_sharing']

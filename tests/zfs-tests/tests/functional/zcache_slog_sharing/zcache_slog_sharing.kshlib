@@ -1,0 +1,85 @@
+#
+# CDDL HEADER START
+#
+# The contents of this file are subject to the terms of the
+# Common Development and Distribution License (the "License").
+# You may not use this file except in compliance with the License.
+#
+# You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
+# or http://www.opensolaris.org/os/licensing.
+# See the License for the specific language governing permissions
+# and limitations under the License.
+#
+# When distributing Covered Code, include this CDDL HEADER in each
+# file and include the License file at usr/src/OPENSOLARIS.LICENSE.
+# If applicable, add the following below this CDDL HEADER, with the
+# fields enclosed by brackets "[]" replaced with your own identifying
+# information: Portions Copyright [yyyy] [name of copyright owner]
+#
+# CDDL HEADER END
+#
+
+#
+# Copyright (c) 2022 by Delphix. All rights reserved.
+#
+
+typeset available_devices=""
+typeset slog_devices=""
+typeset cache_devices=""
+
+[ -z $DISKS ] \
+    && available_devices="$(get_devices)" \
+    || available_devices="$DISKS"
+
+for device in $available_devices; do
+    slog_devices+=" $(get_slog_part $device)"
+    cache_devices+=" $(get_cache_part $device)"
+done
+
+# Export variables to be available and used in tests
+export AVAILABLE_DEVICES="$available_devices"
+export SLOG_DEVICES="$slog_devices"
+export CACHE_DEVICES="$cache_devices"
+
+#
+# Verifies that all the provided slog devices
+# were added to the pool and are online
+#
+function verify_slog_devices_are_online
+{
+    typeset poolname=$1
+    shift
+    typeset slog_devices="$@"
+
+    for slog_device in $slog_devices; do
+        log_must verify_slog_device $poolname $(basename $slog_device) "ONLINE"
+    done
+
+    return $?
+}
+
+#
+# Verifies that the zcache devices were added
+# and seen correctly from the agent log
+#
+function verify_zcache_devices_were_added
+{
+    typeset zcache_devices=$@
+
+    for cache_dev in $zcache_devices; do
+        log_must verify_zcache_added_from_logfile $cache_dev
+    done
+    return $?
+}
+
+#
+# Helper to invalidate all provided
+# zettacache devices
+#
+function invalidate_zettacache_devices
+{
+    typeset devices=$@
+    for cache_dev in $devices; do
+        invalidate_zcache_dev $cache_dev
+    done
+}

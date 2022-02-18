@@ -84,6 +84,7 @@ SUBDIRS = \
 	vdev_zaps \
 	write_dirs \
 	xattr \
+	zcache_slog_sharing \
 	zpool_influxdb \
 	zvol
 

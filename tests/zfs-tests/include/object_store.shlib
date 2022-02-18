@@ -174,4 +174,60 @@ function verify_destroyed_object_store_pool # pool guid
 	log_mustnot pool_exists_s3 $guid
 }
 
+#
+# Returns the path to the zoa debug log
+#
+function get_zoa_debug_log
+{
+	$HAS_ZOA_SERVICE && zoa_debug_log="/var/log/zoa/debug.log" \
+		|| zoa_debug_log=$ZOA_LOG
+	echo $zoa_debug_log
+}
 
+#
+# Takes a list of devices and configures it to be
+# used a zettacache
+#
+function configure_zettacache
+{
+	typeset zcache_devices=$(echo $@ | tr ' ' ',')
+	stop_zfs_object_agent
+	# Truncate the zoa log to verify cache information
+	truncate -s 0 $(get_zoa_debug_log)
+	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
+	sudo sh -c "echo ZETTACACHE_DEVICES=$zcache_devices >>$ZOA_CONF"
+
+	start_zfs_object_agent
+}
+
+#
+# Verify and return if the cache device added was effective
+# and being used by the object agent service
+#
+function verify_zcache_added_from_logfile
+{
+	typeset cache_device=$1
+	typeset retry_count=0
+	typeset max_retries=10
+
+	# The entries to the log may be delayed by some time
+	# So we retry for 10 time sleeping for 1 seconds
+	# after each retry
+	while [ $retry_count -lt $max_retries ]; do
+		grep -q "opening cache file ${cache_device}:" $(get_zoa_debug_log)
+		[ $? -eq 0 ] && return 0
+		sleep 1
+		retry_count=$((retry_count+1))
+	done
+	return 1
+}
+
+#
+# Reset the zettcache configuration and reload the
+# zfs object agent
+#
+function reset_zcache_configuration
+{
+    sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
+    restart_zfs_object_agent
+}

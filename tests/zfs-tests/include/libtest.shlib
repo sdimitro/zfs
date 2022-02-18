@@ -1762,6 +1762,96 @@ function verify_runnable # zone limit
 	return 0
 }
 
+#
+# Returns the list of device available in the system
+# excluding the disk used by rpool
+#
+function get_devices
+{
+	typeset all_disks root_disk ext_disk free_disks disk
+	typeset DISKS=""
+
+	all_disks=$(
+		for disk in $(ls -d /sys/block/sd[a-z] \
+			/sys/block/nvme[0-9]n1 2>/dev/null); do
+			echo $(basename $disk)
+		done
+	)
+
+	# Find the disk used by rpool and the ext4 filesystem mounted on
+	# /mnt in Azure VMs so we can filter them out.
+	root_disk=$(zpool list -Hv rpool 2>/dev/null | awk '/^\t/ {print $1}' |
+		sed -n 's/\(sd[a-z]\|nvme[0-9]n1\)[p0-9]*/\1/p')
+	ext_disk=$(mount | awk '/ ext4 / {print $1}' |
+		sed -n 's/\/dev\/\(sd[a-z]\|nvme[0-9]n1\)[p0-9]/\1/p')
+
+	# Find the disk that is being used as the linux file system
+	linux_filesystem_disk=$(sudo sfdisk -l | grep 'Linux filesystem' |
+		awk '{print $1}' | awk -F '/' '{print $NF}' |
+		sed -n 's/\(sd[a-z]\|nvme[0-9]n1\)[p0-9]*/\1/p')
+
+	for disk in $all_disks; do
+		[ "$disk" == "$root_disk" ] && continue
+		[ "$disk" == "$ext_disk" ] && continue
+		[ "$disk" == "$linux_filesystem_disk" ] && continue
+		[ -n "$DISKS" ] && DISKS+=" "
+		DISKS+="$disk"
+	done
+	echo $DISKS
+}
+
+#
+# Takes a device name and returns if it is partitioned
+# or not
+#
+function is_device_partitioned
+{
+	device="/dev/$1"
+	sudo sfdisk -l $device 2>/dev/null | grep -q "Device"
+}
+
+#
+# Delete all partitions
+#
+function destroy_partition
+{
+	device="/dev/$1"
+	# The partition number to destroy
+	partnum=$2
+	sudo sfdisk -q --delete $device $partnum
+}
+
+#
+# Partition a device into two parts to be used as
+# slog and zettacache
+#
+function create_slog_zcache_partition
+{
+	device="/dev/$1"
+
+	# Delete existing partition if any
+	is_device_partitioned "$1" && destroy_partition "$1"
+
+	# The size of log device to be created (Default 25% of total)
+	log_dev_size_in_pct=${2:-25}
+
+	# Get total available sectors in the device
+	available_sectors=$(blockdev --getsz $device)
+	# Calculate num of sectors required for slog
+	required_sectors_log_dev=$(bc <<< "$available_sectors * $log_dev_size_in_pct/100")
+
+	#
+	# For larger disk size cap the max slog device size to 8Gb
+	# Num sectors in 8GB = 8(in GB) * 1024 * 1024 * 2 = 1677216
+	#
+	if [ $required_sectors_log_dev -gt 16777216 ]; then
+		required_sectors_log_dev=1677216
+	fi
+
+	printf "size=$required_sectors_log_dev, bootable\n," | \
+		sudo sfdisk -q -X gpt --wipe always $device
+}
+
 # Take a Zettacache device as either an absolute or relative path and
 # return the corresponding slog partition.
 function get_slog_part
@@ -1863,6 +1953,15 @@ function stop_zfs_object_agent
 	fi
 }
 
+#
+# Restarts the zfs object agent
+#
+function restart_zfs_object_agent
+{
+	stop_zfs_object_agent
+	start_zfs_object_agent
+}
+
 # Add a tunable with name and value in the
 # /etc/zfs/zoa_config.toml
 function add_tunable
@@ -1962,6 +2061,13 @@ function create_pool
 
 	log_note $zpool_create_cmd
 	$zpool_create_cmd || return $?
+
+	# If the log options were specified during the
+	# pool creation, just return.
+	# Adding a slog device additionally may cause it to fail.
+	if [ -n "$log_options" ]; then
+		return 0
+	fi
 
 	# If Zettacache devices was specified, they have been partitioned to
 	# also contain a partition for a slog. Add the log devices  here.
