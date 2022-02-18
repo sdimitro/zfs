@@ -1,6 +1,6 @@
 use crate::base_types::*;
 use crate::object_access::{ObjectAccess, ObjectAccessOpType};
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use bytes::Bytes;
 use core::slice;
 use futures::stream;
@@ -225,7 +225,7 @@ impl DataObject {
         assert_lt!(block, phys.header.next_block);
         let index = arrays
             .binary_search(block)
-            .expect("expected BlockId not in DataObjectPhys"); // XXX return new error
+            .map_err(|_| anyhow!("expected {:?} not found in {:?}", block, object))?;
         let offset = arrays.offset(index);
         let next_offset = if index < arrays.len() - 1 {
             arrays.offset(index + 1)

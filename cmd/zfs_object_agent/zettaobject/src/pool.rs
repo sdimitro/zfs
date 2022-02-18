@@ -1648,36 +1648,72 @@ impl Pool {
     }
 
     async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {
-        let object = self.state.object_block_map.block_to_object(block);
+        let mut object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
-
-        trace!("reading {:?} for {:?}", object, block);
-        DataObject::get(
-            &shared_state.object_access,
-            shared_state.guid,
-            object,
-            ObjectAccessOpType::ReadsGet,
-            bypass_cache,
-        )
-        .await
-        .unwrap()
+        loop {
+            trace!("reading {:?} for {:?}", object, block);
+            match DataObject::get(
+                &shared_state.object_access,
+                shared_state.guid,
+                object,
+                ObjectAccessOpType::ReadsGet,
+                bypass_cache,
+            )
+            .await
+            {
+                Ok(object) => return object,
+                Err(e) => {
+                    // We may have failed due to the object not existing, due to the
+                    // object/block map changing out from under us, and then the object being
+                    // freed.  If the OBM has changed, retry reading the new object.
+                    let new_object = self.state.object_block_map.block_to_object(block);
+                    if new_object != object {
+                        debug!(
+                            "got {} while reading {:?} for {:?}, retrying with new {:?}",
+                            e, object, block, new_object
+                        );
+                        object = new_object;
+                    } else {
+                        panic!("got {} while reading {:?} for {:?}", e, object, block);
+                    }
+                }
+            }
+        }
     }
 
     async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Bytes {
-        let object = self.state.object_block_map.block_to_object(block);
+        let mut object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
-
-        super_trace!("reading {:?} for {:?}", object, block);
-        DataObject::get_block(
-            &shared_state.object_access,
-            shared_state.guid,
-            object,
-            block,
-            ObjectAccessOpType::ReadsGet,
-            bypass_cache,
-        )
-        .await
-        .unwrap()
+        loop {
+            super_trace!("reading {:?} for {:?}", object, block);
+            match DataObject::get_block(
+                &shared_state.object_access,
+                shared_state.guid,
+                object,
+                block,
+                ObjectAccessOpType::ReadsGet,
+                bypass_cache,
+            )
+            .await
+            {
+                Ok(object) => return object,
+                Err(e) => {
+                    // We may have failed due to the object not existing, due to the
+                    // object/block map changing out from under us, and then the object being
+                    // freed.  If the OBM has changed, retry reading the new object.
+                    let new_object = self.state.object_block_map.block_to_object(block);
+                    if new_object != object {
+                        debug!(
+                            "got {} while reading {:?} for {:?}, retrying with new {:?}",
+                            e, object, block, new_object
+                        );
+                        object = new_object;
+                    } else {
+                        panic!("got {} while reading {:?} for {:?}", e, object, block);
+                    }
+                }
+            }
+        }
     }
 
     pub async fn read_block(&self, block: BlockId, heal: bool) -> Bytes {
