@@ -1373,7 +1373,7 @@ impl Pool {
                 checkpoint_txg,
                 syncing_state.syncing_txg.unwrap().checked_sub(1)
             );
-        } else {
+        } else if syncing_state.checkpoint_txg.is_none() == checkpoint_txg.is_none() {
             // Either there's no checkpoint now or before, or there should be the same checkpoint
             // txg in both this txg and the previous one.
             assert_eq!(syncing_state.checkpoint_txg, checkpoint_txg);
