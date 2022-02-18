@@ -18,6 +18,7 @@ mod nicenum;
 mod range_tree;
 mod tunable;
 mod vec_ext;
+pub mod watch_once;
 pub mod write_stdout;
 mod zcache_devices;
 pub mod zettacache_stats;
