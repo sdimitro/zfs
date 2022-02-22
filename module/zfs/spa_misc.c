@@ -519,7 +519,7 @@ spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw)
  * will not check for any waiting writers and could lead to starvation.
  */
 void
-spa_config_enter_read_priority(spa_t *spa, int locks, const void *tag)
+spa_config_enter_read_priority(spa_t *spa, int locks)
 {
 	ASSERT3U(SCL_LOCKS, <, sizeof (int) * NBBY);
 

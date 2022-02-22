@@ -1894,6 +1894,7 @@ pending_stats_compare(const void *x1, const void *x2)
 static int
 vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 {
+	(void) spa;
 	vdev_object_store_t *vos;
 	char *val = NULL;
 
@@ -2174,10 +2175,10 @@ vdev_object_store_io_start(zio_t *zio)
 	mutex_exit(&vos->vos_sock_lock);
 }
 
-/* ARGSUSED */
 static void
 vdev_object_store_io_done(zio_t *zio)
 {
+	(void) zio;
 }
 
 static void
@@ -2202,6 +2203,7 @@ static void
 vdev_object_store_metaslab_init(vdev_t *vd, metaslab_t *msp,
     uint64_t *ms_start, uint64_t *ms_size)
 {
+	(void) ms_start, (void) ms_size;
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	msp->ms_lbas[0] = vos->vos_next_block;
 }

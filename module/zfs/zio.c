@@ -1808,7 +1808,13 @@ zio_write_compress(zio_t *zio)
 		    zio->io_abd, NULL, lsize, zp->zp_complevel);
 		if (psize == 0 || psize >= lsize)
 			compress = ZIO_COMPRESS_OFF;
-	} else if (zio->io_flags & ZIO_FLAG_RAW_COMPRESS) {
+	} else if (zio->io_flags & ZIO_FLAG_RAW_COMPRESS &&
+	    !(zio->io_flags & ZIO_FLAG_RAW_ENCRYPT)) {
+		/*
+		 * If we are raw receiving an encrypted dataset we should not
+		 * take this codepath because it will change the on-disk block
+		 * and decryption will fail.
+		 */
 		size_t rounded = MIN((size_t)roundup(psize,
 		    spa->spa_min_alloc), lsize);
 
@@ -3871,7 +3877,7 @@ zio_vdev_io_start(zio_t *zio)
 			if (zio->io_type == ZIO_TYPE_WRITE &&
 			    !mc->mc_ops->msop_block_based) {
 				spa_config_enter_read_priority(spa,
-				    SCL_ZIO, zio);
+				    SCL_ZIO);
 			} else {
 				spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
 			}
@@ -5194,7 +5200,6 @@ EXPORT_SYMBOL(zio_data_buf_alloc);
 EXPORT_SYMBOL(zio_buf_free);
 EXPORT_SYMBOL(zio_data_buf_free);
 
-/* BEGIN CSTYLED */
 ZFS_MODULE_PARAM(zfs_zio, zio_, slow_io_ms, INT, ZMOD_RW,
 	"Max I/O completion time (milliseconds) before marking it as slow");
 
@@ -5215,4 +5220,3 @@ ZFS_MODULE_PARAM(zfs_zio, zio_, dva_throttle_enabled, INT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zio, zio_, deadman_log_all, INT, ZMOD_RW,
 	"Log all slow ZIOs, not just those with vdevs");
-/* END CSTYLED */

@@ -1011,7 +1011,6 @@ dsl_pool_undirty_space(dsl_pool_t *dp, int64_t space, uint64_t txg)
 	mutex_exit(&dp->dp_lock);
 }
 
-/* ARGSUSED */
 static int
 upgrade_clones_cb(dsl_pool_t *dp, dsl_dataset_t *hds, void *arg)
 {
@@ -1102,7 +1101,6 @@ dsl_pool_upgrade_clones(dsl_pool_t *dp, dmu_tx_t *tx)
 	    tx, DS_FIND_CHILDREN | DS_FIND_SERIALIZE));
 }
 
-/* ARGSUSED */
 static int
 upgrade_dir_clones_cb(dsl_pool_t *dp, dsl_dataset_t *ds, void *arg)
 {
@@ -1511,7 +1509,6 @@ dsl_pool_config_held_writer(dsl_pool_t *dp)
 EXPORT_SYMBOL(dsl_pool_config_enter);
 EXPORT_SYMBOL(dsl_pool_config_exit);
 
-/* BEGIN CSTYLED */
 /* zfs_dirty_data_max_percent only applied at module load in arc_init(). */
 ZFS_MODULE_PARAM(zfs, zfs_, dirty_data_max_percent, INT, ZMOD_RD,
 	"Max percent of RAM allowed to be dirty");
@@ -1550,4 +1547,3 @@ ZFS_MODULE_PARAM(zfs_zil, zfs_zil_, clean_taskq_minalloc, INT, ZMOD_RW,
 
 ZFS_MODULE_PARAM(zfs_zil, zfs_zil_, clean_taskq_maxalloc, INT, ZMOD_RW,
 	"Max number of taskq entries that are cached");
-/* END CSTYLED */

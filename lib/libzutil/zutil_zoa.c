@@ -105,7 +105,7 @@ get_zfs_socket(zoa_socket_t zoa_sock)
 }
 
 static nvlist_t *
-zoa_send_recv_msg_impl(int sock, nvlist_t *msg, zoa_socket_t zoa_sock, int *err)
+zoa_send_recv_msg_impl(int sock, nvlist_t *msg, int *err)
 {
 	size_t len;
 	char *buf = fnvlist_pack(msg, &len);
@@ -208,8 +208,7 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock,
 	fnvlist_add_string(version_nvl, AGENT_REQUEST_TYPE, AGENT_TYPE_VERSION);
 	fnvlist_add_string(version_nvl, AGENT_VERSION, version_req_str);
 	int err;
-	nvlist_t *resp = zoa_send_recv_msg_impl(sock, version_nvl, zoa_sock,
-	    &err);
+	nvlist_t *resp = zoa_send_recv_msg_impl(sock, version_nvl, &err);
 	fnvlist_free(version_nvl);
 	if (resp == NULL) {
 		zutil_error_aux(hdl, "%s", strerror(err));
@@ -242,8 +241,7 @@ zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
 		}
 
 		int err = 0;
-		resp = zoa_send_recv_msg_impl(sock, msg, ZFS_PUBLIC_SOCKET,
-		    &err);
+		resp = zoa_send_recv_msg_impl(sock, msg, &err);
 		close(sock);
 		if (err == 0) {
 			break;

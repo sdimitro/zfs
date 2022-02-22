@@ -4746,9 +4746,7 @@ metaslab_active_mask_verify(metaslab_t *msp)
 }
 
 static uint64_t
-metaslab_group_alloc_object(metaslab_group_t *mg, zio_alloc_list_t *zal,
-    uint64_t asize, uint64_t txg, boolean_t want_unique, dva_t *dva, int d,
-    int allocator, boolean_t try_hard)
+metaslab_group_alloc_object(metaslab_group_t *mg, int allocator)
 {
 	metaslab_class_t *mc = mg->mg_class;
 
@@ -4772,7 +4770,6 @@ metaslab_group_alloc_object(metaslab_group_t *mg, zio_alloc_list_t *zal,
 	return (offset);
 }
 
-/* ARGSUSED */
 static uint64_t
 metaslab_group_alloc_normal(metaslab_group_t *mg, zio_alloc_list_t *zal,
     uint64_t asize, uint64_t txg, boolean_t want_unique, dva_t *dva, int d,
@@ -5088,8 +5085,7 @@ metaslab_group_alloc(metaslab_group_t *mg, zio_alloc_list_t *zal,
 	ASSERT(mg->mg_initialized);
 
 	if (vdev_is_object_based(mg->mg_vd)) {
-		offset = metaslab_group_alloc_object(mg, zal, asize, txg,
-		    want_unique, dva, d, allocator, try_hard);
+		offset = metaslab_group_alloc_object(mg, allocator);
 	} else {
 		offset = metaslab_group_alloc_normal(mg, zal, asize, txg,
 		    want_unique, dva, d, allocator, try_hard);
@@ -6292,12 +6288,13 @@ ZFS_MODULE_PARAM(zfs_mg, zfs_mg_, fragmentation_threshold, INT, ZMOD_RW,
 	"for allocations unless all metaslab groups within the metaslab class "
 	"have also crossed this threshold");
 
-ZFS_MODULE_PARAM(zfs_metaslab, zfs_metaslab_, fragmentation_threshold, INT,
-	 ZMOD_RW, "Fragmentation for metaslab to allow allocation");
-
-ZFS_MODULE_PARAM(zfs_metaslab, metaslab_, fragmentation_factor_enabled, INT, ZMOD_RW,
+ZFS_MODULE_PARAM(zfs_metaslab, metaslab_, fragmentation_factor_enabled, INT,
+	ZMOD_RW,
 	"Use the fragmentation metric to prefer less fragmented metaslabs");
 /* END CSTYLED */
+
+ZFS_MODULE_PARAM(zfs_metaslab, zfs_metaslab_, fragmentation_threshold, INT,
+	ZMOD_RW, "Fragmentation for metaslab to allow allocation");
 
 ZFS_MODULE_PARAM(zfs_metaslab, metaslab_, lba_weighting_enabled, INT, ZMOD_RW,
 	"Prefer metaslabs with lower LBAs");
