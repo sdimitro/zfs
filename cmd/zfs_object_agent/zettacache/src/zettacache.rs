@@ -2391,16 +2391,21 @@ impl ZettaCacheState {
         let write_permit = self.outstanding_writes.clone().try_read_owned().unwrap();
 
         let block_access = self.block_access.clone();
-        // Note: locked_key can be dropped before the i/o completes, since the
-        // changes to the State have already been made.
         future::Either::Right(async move {
             block_access
                 .write_raw(location, bytes, DiskIoType::WriteDataForInsert)
                 .await;
 
+            // We need to move the write_permit and locked_key guards into this closure so that
+            // the locks are held until the write completes. `drop()` serves to do this and
+            // indicate that they are moved here just to be dropped at the right time.
+
             // It's now OK for a checkpoint to complete, persisting the index
             // entry that references this block.
             drop(write_permit);
+
+            // It's now OK to read from this location.
+            drop(locked_key);
         })
     }
 
