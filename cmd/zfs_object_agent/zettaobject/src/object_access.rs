@@ -630,34 +630,32 @@ impl ObjectAccess {
                         let (tx, rx) = watch_once::channel::<Bytes>();
                         c.reading.insert(key.clone(), (true, rx));
                         Either::Left(async move {
-                            let bytes =
-                                match self.get_object_from_s3(key.clone(), stat_type, None).await {
-                                    Ok(bytes) => bytes,
-                                    Err(e) => return Some(Err(e)),
-                                };
+                            let result =
+                                self.get_object_from_s3(key.clone(), stat_type, None).await;
 
-                            // This GET may have been marked non-cacheable by invalidate_cache().
-                            // In that case, value has been changed by a concurrent PUT, but
-                            // since we initiated our GET before the PUT, the old value is
-                            // sufficient for us.  But we don't want other GET's to see the
-                            // potentially-old value that we got, so we don't add it to the cache
-                            // or send it to other waiting GET's.
-                            let cacheable = {
-                                let mut myc = CACHE.lock().unwrap();
-                                let (cacheable, _) = myc.reading.remove(&key).unwrap();
-                                if cacheable {
-                                    myc.cache.put(key, bytes.clone());
+                            // We need to remove the `reading` entry regardless of the result.
+                            let mut myc = CACHE.lock().unwrap();
+                            let (cacheable, _) = myc.reading.remove(&key).unwrap();
+                            match result {
+                                Ok(bytes) => {
+                                    // This GET may have been marked non-cacheable by
+                                    // invalidate_cache().  In that case, the object's contents
+                                    // have been changed by a concurrent PUT, but since we
+                                    // initiated our GET before the PUT, the old value is
+                                    // sufficient for us.  But we don't want other GET's (which
+                                    // may have been initiated after the PUT completed) to see
+                                    // the potentially-old value that we got, so we don't add it
+                                    // to the cache or send it to other waiting GET's.
+                                    if cacheable {
+                                        myc.cache.put(key, bytes.clone());
+                                        // We removed and dropped the rx, so there may be no more
+                                        // receivers, so we can't unwrap().
+                                        tx.send(bytes.clone()).ok();
+                                    }
+                                    Some(Ok(bytes))
                                 }
-                                cacheable
-                            };
-
-                            if cacheable {
-                                // We removed and dropped the rx, so there may be no more
-                                // receivers, so we can't unwrap().
-                                tx.send(bytes.clone()).ok();
+                                Err(e) => Some(Err(e)),
                             }
-
-                            Some(Ok(bytes))
                         })
                     }
                     // If the in-progress GET is not cacheable, it won't send us the value.
@@ -671,7 +669,7 @@ impl ObjectAccess {
                                 Ok(bytes) => Some(Ok(bytes)),
                                 // Sender doesn't have a value for us. The caller will retry.
                                 Err(_) => {
-                                    trace!("{}: waited for failed GET, retrying", key);
+                                    debug!("{}: waited for failed GET, retrying", key);
                                     None
                                 }
                             }
