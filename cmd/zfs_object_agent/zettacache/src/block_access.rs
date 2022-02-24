@@ -37,7 +37,7 @@ use uuid::Uuid;
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
     pub static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize =
-        get_tunable("disk_write_max_queue_depth", 128);
+        get_tunable("disk_write_max_queue_depth", 32);
     static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
 }
 
