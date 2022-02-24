@@ -2229,23 +2229,20 @@ impl ZettaCacheState {
         valid_value: ValidIndexValue,
         source: LookupSource,
     ) -> impl Future<Output = Option<AlignedBytes>> {
-        let mut value = valid_value.0;
         let key = locked_key.key();
-        super_trace!("cache hit: reading {:?} from {:?}", key, value);
+        let old_value = valid_value.0;
+        let old_atime = old_value.atime();
+        super_trace!("cache hit: reading {:?} from {:?}", key, old_value);
 
         if matches!(source, LookupSource::Read) {
             // Add an entry to the hit-by-size histogram
-            let size = self.atime_histogram.size_at(value.atime());
-            super_trace!("cache size {} at {:?}", size, value.atime());
+            let size = self.atime_histogram.size_at(old_atime);
+            super_trace!("cache size {} at {:?}", size, old_atime);
             self.size_histogram.live_hit(size);
         }
-        let original_atime = value.atime();
-        if original_atime != self.atime {
-            // Update the atime histogram
-            self.atime_histogram.remove(value);
-            value = IndexValue::new(value.location(), value.size(), self.atime);
-            self.atime_histogram.insert(value);
-        }
+
+        assert_le!(old_atime, self.atime);
+        let new_value = IndexValue::new(old_value.location(), old_value.size(), self.atime);
 
         let pending_len = self.pending_changes.len()
             + self
@@ -2253,32 +2250,42 @@ impl ZettaCacheState {
                 .as_ref()
                 .map(|ms| ms.old_pending_changes.len())
                 .unwrap_or_default();
+
         // XXX looking up again.  But can't pass in both &mut self and &mut PendingChange
         match self.pending_changes.entry(key) {
             btree_map::Entry::Vacant(ve) => {
                 // Only in Index, not pending_changes.
                 if pending_len < self.pending_changes_cap {
                     // Perserve the original atime (from the Index) in case we "replace" this block and
-                    // need to reset the histogram for the orignal block (i.e. when we find the old block
+                    // need to reset the histogram for the original block (i.e. when we find the old block
                     // during the merge, we can decrement the atime histogram)
                     super_trace!(
                         "adding PendingChanges::UpdateAtime({:?}) for {:?}",
-                        value,
+                        new_value,
                         key
                     );
                     with_alloctag(Self::PENDING_CHANGES_TAG, || {
                         ve.insert(PendingChange::UpdateAtime(UpdateAtime(
-                            value,
-                            original_atime,
+                            new_value, old_atime,
                         )))
                     });
+                    self.atime_histogram.remove(old_value);
+                    self.atime_histogram.insert(new_value);
                     self.update_pending_stats();
+                } else {
+                    trace!(
+                        "pending changes limit reached (now {}), refusing UpdateAtime for {:?}",
+                        pending_len,
+                        key,
+                    );
                 }
             }
             btree_map::Entry::Occupied(mut oe) => match oe.get_mut() {
                 PendingChange::Insert(value_ref)
                 | PendingChange::UpdateAtime(UpdateAtime(value_ref, _)) => {
-                    *value_ref = value;
+                    *value_ref = new_value;
+                    self.atime_histogram.remove(old_value);
+                    self.atime_histogram.insert(new_value);
                 }
             },
         }
