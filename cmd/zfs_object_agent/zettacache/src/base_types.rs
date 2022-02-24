@@ -53,7 +53,7 @@ impl DiskId {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 #[repr(packed)]
 pub struct DiskLocation(NonZeroU64);
 impl DiskLocation {
@@ -104,6 +104,14 @@ impl Sub<DiskLocation> for DiskLocation {
     fn sub(self, rhs: DiskLocation) -> Self::Output {
         assert_eq!(self.disk(), rhs.disk());
         self.offset() - rhs.offset()
+    }
+}
+impl Debug for DiskLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.debug_struct("DiskLocation")
+            .field("disk", &self.disk())
+            .field("offset", &self.offset())
+            .finish()
     }
 }
 

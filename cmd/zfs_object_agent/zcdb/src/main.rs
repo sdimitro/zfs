@@ -2,7 +2,6 @@ use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
 use git_version::git_version;
-use util::flush_stdout;
 use util::writeln_stdout;
 use zettacache::DumpSlabsOptions;
 use zettacache::DumpStructuresOptions;
@@ -95,7 +94,7 @@ async fn main() -> Result<(), anyhow::Error> {
         .get_matches();
 
     let cache_paths = matches.values_of("cache-device").unwrap().collect();
-    let res = match matches.subcommand() {
+    match matches.subcommand() {
         ("dump-structures", Some(subcommand_matches)) => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpStructures(
@@ -135,7 +134,5 @@ async fn main() -> Result<(), anyhow::Error> {
             writeln_stdout!("{}", matches.usage());
             std::process::exit(exitcode::USAGE);
         }
-    };
-    flush_stdout!();
-    res
+    }
 }

@@ -22,7 +22,6 @@ use log::*;
 use report_hits::ReportHits;
 use stats::Stats;
 use subcommand::ZcacheSubCommand;
-use util::flush_stdout;
 use util::writeln_stderr;
 
 fn main() -> Result<()> {
@@ -96,6 +95,5 @@ async fn async_main() -> Result<()> {
             std::process::exit(exitcode::USAGE);
         }
     }
-    flush_stdout!();
     Ok(())
 }
