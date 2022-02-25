@@ -422,9 +422,22 @@ impl MergeState {
             /// When an old index entry already exists for a newly inserted key, the new entry will
             /// replace the old, so "evict" the old entry: if the entry is a ghost, then there is
             /// nothing to do, otherwise, add the entry to the free list.
-            async fn evict(&mut self, entry: IndexEntry) {
+            async fn evict(&mut self, state: &MergeState, entry: IndexEntry) {
                 if let Some(extent) = entry.value.extent() {
-                    self.frees.push(extent);
+                    match &state.rebalance {
+                        Some(rebalance) => {
+                            // If remap() is None, the data was evicted by the rebalance, so there's
+                            // nothing to free here.
+                            if let Some(location) = rebalance.remap(extent) {
+                                self.frees.push(Extent {
+                                    location,
+                                    size: extent.size,
+                                });
+                            }
+                        }
+                        None => self.frees.push(extent),
+                    }
+
                     if self.entries.len() >= *MERGE_PROGRESS_CHUNK
                         || self.frees.len() >= *MERGE_PROGRESS_CHUNK
                         || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
@@ -608,7 +621,7 @@ impl MergeState {
                             if entry.value.location().is_some() {
                                 debug!("Insert of {:?} replaces {:?}", pc_value, entry);
                             }
-                            progress.evict(entry).await;
+                            progress.evict(self, entry).await;
                             progress
                                 .ingest(
                                     self,
