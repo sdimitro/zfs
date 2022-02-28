@@ -115,6 +115,12 @@ lazy_static! {
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
     static ref LOOKUP_FAIL_RANDOM: u32 = get_tunable("lookup_fail_random", 0);
+
+    // How many allocations we can have outstanding and not yet written (per disk).  This is a
+    // balance between higher ingest throughput, and longer time to wait for the
+    // outstanding_writes lock in flush_checkpoint() (with the state lock held).  Should be more
+    // than DISK_WRITE_MAX_QUEUE_DEPTH, otherwise we're leaving writer threads idle.
+    static ref OUTSTANDING_ALLOCATIONS_PER_DISK: usize = get_tunable("outstanding_allocations_per_disk", 500);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1215,7 +1221,7 @@ impl ZettaCache {
                 *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
             )),
             write_slots: Arc::new(Semaphore::new(
-                block_access.disks().count() * *DISK_WRITE_MAX_QUEUE_DEPTH,
+                block_access.disks().count() * *OUTSTANDING_ALLOCATIONS_PER_DISK,
             )),
             block_access,
             stats,
