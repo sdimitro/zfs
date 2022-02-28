@@ -40,7 +40,7 @@ struct ObjectCache {
 
 lazy_static! {
     static ref CACHE: std::sync::Mutex<ObjectCache> = std::sync::Mutex::new(ObjectCache {
-        cache: LruCache::new(100),
+        cache: LruCache::new(*OBJECT_CACHE_SIZE),
         reading: HashMap::new(),
     });
     static ref NON_RETRYABLE_ERRORS: Vec<StatusCode> = vec![
@@ -58,6 +58,7 @@ lazy_static! {
     pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
     pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
     pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(get_tunable("per_request_timeout_secs", 2));
+    static ref OBJECT_CACHE_SIZE: usize = get_tunable("object_cache_size", 100);
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
