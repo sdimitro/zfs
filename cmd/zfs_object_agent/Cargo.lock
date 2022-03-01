@@ -2005,6 +2005,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde-xml-rs"
+version = "0.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "65162e9059be2f6a3421ebbb4fef3e74b7d9e7c60c50a0e292c6239f19f1edfa"
+dependencies = [
+ "log",
+ "serde 1.0.133",
+ "thiserror",
+ "xml-rs",
+]
+
+[[package]]
 name = "serde_bytes"
 version = "0.11.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2758,6 +2770,7 @@ dependencies = [
  "safer-ffi",
  "semver",
  "serde 1.0.133",
+ "serde-xml-rs",
  "serde_bytes",
  "serde_json",
  "stream-reduce",
