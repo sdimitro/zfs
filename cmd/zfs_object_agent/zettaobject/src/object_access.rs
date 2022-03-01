@@ -663,7 +663,7 @@ impl ObjectAccess {
                     // However, there can be only one (potentially-cacheable) GET in progress at
                     // a time, so we can't start another one until it completes.
                     Some((_, rx)) => {
-                        trace!("{}: found GET in progress, waiting", key);
+                        super_trace!("{}: found GET in progress, waiting", key);
                         let rx = rx.clone();
                         Either::Right(async move {
                             match rx.recv().await {
