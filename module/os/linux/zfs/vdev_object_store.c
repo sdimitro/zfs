@@ -71,11 +71,10 @@ taskq_t *resume_taskq;
 typedef enum {
 	VOS_SOCK_UNINITIALIZED = 0,
 	VOS_SOCK_CLOSED = (1 << 0),
-	VOS_SOCK_SHUTTING_DOWN = (1 << 1),
-	VOS_SOCK_SHUTDOWN = (1 << 2),
-	VOS_SOCK_OPENING = (1 << 3),
-	VOS_SOCK_OPEN = (1 << 4),
-	VOS_SOCK_READY = (1 << 5)
+	VOS_SOCK_SHUTDOWN = (1 << 1),
+	VOS_SOCK_OPENING = (1 << 2),
+	VOS_SOCK_OPEN = (1 << 3),
+	VOS_SOCK_READY = (1 << 4)
 } socket_state_t;
 
 typedef enum {
@@ -125,11 +124,23 @@ typedef struct vdev_object_store {
 	vdev_object_store_stats_t vos_stats;
 	avl_tree_t vos_pending_stats_tree;
 
+	/*
+	 * The vos_sock_lock protects the vos_sock_state.
+	 * It is held when setting a new state or waiting
+	 * for a specific state to be present.
+	 */
 	kmutex_t vos_sock_lock;
-	kcondvar_t vos_sock_cv;
-	ksocket_t vos_sock;
 	socket_state_t vos_sock_state;
-	boolean_t vos_closing;
+	kcondvar_t vos_sock_cv;
+
+	/*
+	 * The vos_sock_rwlock must be held as READER when
+	 * issuing a request or shutting down the socket.
+	 * It must be held as WRITER when closing or opening
+	 * the socket.
+	 */
+	krwlock_t vos_sock_rwlock;
+	ksocket_t vos_sock;
 
 	kmutex_t vos_outstanding_lock;
 	kcondvar_t vos_outstanding_cv;
@@ -137,6 +148,7 @@ typedef struct vdev_object_store {
 	vos_serial_flag_t vos_send_txg_selector;
 	boolean_t vos_open_completed;
 	boolean_t vos_create_completed;
+	boolean_t vos_closing;
 	const char *vos_feature_enable;
 	uint64_t vos_result;
 
@@ -183,6 +195,12 @@ vdev_object_store_open_mode(spa_mode_t spa_mode)
 	return (mode);
 }
 
+/*
+ * Helper routines when manipulating the socket connection to the
+ * agent. The vos_sock_rwlock is held when using or manipulating the
+ * socket.
+ */
+
 static void
 zfs_object_store_wait(vdev_object_store_t *vos, socket_state_t state)
 {
@@ -197,14 +215,26 @@ static void
 zfs_object_store_shutdown(vdev_object_store_t *vos)
 {
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+
+	/*
+	 * We are disconnecting from the socket. We only
+	 * need to hold the lock as READER since the socket
+	 * is still valid and shutting it down will wakeup
+	 * any readers or writers currently using the socket.
+	 * Any thread that tries to use the socket after it is
+	 * shutdown will get an error.
+	 */
+	rw_enter(&vos->vos_sock_rwlock, RW_READER);
 	if (vos->vos_sock == INVALID_SOCKET) {
+		rw_exit(&vos->vos_sock_rwlock);
 		return;
 	}
-
-	zfs_dbgmsg("SOCKET SHUTTING DOWN(%px): " SOCK_FMT, curthread,
-	    vos->vos_sock);
-	vos->vos_sock_state = VOS_SOCK_SHUTTING_DOWN;
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE_SOCKET) {
+		zfs_dbgmsg("SOCKET SHUTTING DOWN(%px): " SOCK_FMT, curthread,
+		    vos->vos_sock);
+	}
 	ksock_shutdown(vos->vos_sock, SHUT_RDWR);
+	rw_exit(&vos->vos_sock_rwlock);
 	vos->vos_sock_state = VOS_SOCK_SHUTDOWN;
 }
 
@@ -212,14 +242,101 @@ static void
 zfs_object_store_close(vdev_object_store_t *vos)
 {
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
+	rw_enter(&vos->vos_sock_rwlock, RW_WRITER);
 	if (vos->vos_sock == INVALID_SOCKET) {
+		rw_exit(&vos->vos_sock_rwlock);
 		return;
 	}
 
-	zfs_dbgmsg("SOCKET CLOSING(%px): " SOCK_FMT, curthread, vos->vos_sock);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE_SOCKET) {
+		zfs_dbgmsg("SOCKET CLOSING(%px): " SOCK_FMT,
+		    curthread, vos->vos_sock);
+	}
 	ksock_close(vos->vos_sock);
 	vos->vos_sock = INVALID_SOCKET;
+	rw_exit(&vos->vos_sock_rwlock);
 	vos->vos_sock_state = VOS_SOCK_CLOSED;
+}
+
+static int
+zfs_object_store_open(vdev_object_store_t *vos)
+{
+	ksocket_t s = INVALID_SOCKET;
+
+	mutex_enter(&vos->vos_sock_lock);
+	vos->vos_sock_state = VOS_SOCK_OPENING;
+	mutex_exit(&vos->vos_sock_lock);
+	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open unable to create "
+		    "socket: %d", rc);
+		return (rc);
+	}
+
+	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
+	    sizeof (zfs_root_socket));
+	if (rc != 0) {
+		/*
+		 * We failed to connect probably because the agent
+		 * is restarting. We don't treat this as an error
+		 * since the caller will retry the operation if
+		 * it finds that the socket is still invalid.
+		 */
+		zfs_dbgmsg("zfs_object_store_open failed to "
+		    "connect: %d", rc);
+		ksock_close(s);
+		s = INVALID_SOCKET;
+	} else {
+		zfs_dbgmsg("zfs_object_store_open, socket connection "
+		    "ready, " SOCK_FMT, s);
+	}
+
+	rw_enter(&vos->vos_sock_rwlock, RW_WRITER);
+	VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
+	vos->vos_sock = s;
+	rw_exit(&vos->vos_sock_rwlock);
+
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE_SOCKET) {
+		zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread,
+		    vos->vos_sock);
+	}
+	return (0);
+}
+
+static ssize_t
+zfs_object_store_receive(vdev_object_store_t *vos, kvec_t *iov,
+    int iovcnt, int size, int flags)
+{
+	struct msghdr msg = {};
+	rw_enter(&vos->vos_sock_rwlock, RW_READER);
+	if (vos->vos_sock == INVALID_SOCKET) {
+		zfs_dbgmsg("(%px) zfs_object_store_receive socket closed",
+		    curthread);
+		rw_exit(&vos->vos_sock_rwlock);
+		return (SET_ERROR(ENOTCONN));
+	}
+
+	size_t recvd = ksock_receive(vos->vos_sock, &msg, iov, iovcnt,
+	    size, flags);
+	rw_exit(&vos->vos_sock_rwlock);
+	return (recvd);
+}
+
+static ssize_t
+zfs_object_store_send(vdev_object_store_t *vos, kvec_t *iov, int iovcnt,
+    int size)
+{
+	struct msghdr msg = {};
+	rw_enter(&vos->vos_sock_rwlock, RW_READER);
+	if (vos->vos_sock == INVALID_SOCKET) {
+		zfs_dbgmsg("(%px) zfs_object_store_send socket closed",
+		    curthread);
+		rw_exit(&vos->vos_sock_rwlock);
+		return (SET_ERROR(ENOTCONN));
+	}
+	ssize_t sent = ksock_send(vos->vos_sock, &msg, iov, iovcnt, size);
+	rw_exit(&vos->vos_sock_rwlock);
+	return (sent);
 }
 
 static int
@@ -229,7 +346,6 @@ agent_read_all(vdev_object_store_t *vos, void *buf,
 	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
 	size_t recvd_total = 0;
 	while (recvd_total < len) {
-		struct msghdr msg = {};
 		kvec_t iov = {};
 
 		iov.iov_base = buf + recvd_total;
@@ -249,8 +365,8 @@ agent_read_all(vdev_object_store_t *vos, void *buf,
 		if (!locked)
 			mutex_exit(&vos->vos_lock);
 
-		size_t recvd = ksock_receive(vos->vos_sock,
-		    &msg, &iov, 1, len - recvd_total, 0);
+		size_t recvd = zfs_object_store_receive(vos,
+		    &iov, 1, len - recvd_total, 0);
 		if (recvd > 0) {
 			recvd_total += recvd;
 			if (recvd_total < len &&
@@ -329,7 +445,6 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 
 	while (write_total < total_size) {
-		struct msghdr msg = {};
 		int iov_count;
 		if (write_total < sizeof (*header)) {
 			uint64_t already_written = write_total;
@@ -373,8 +488,8 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 
 		ssize_t sent;
 		do {
-			sent = ksock_send(vos->vos_sock, &msg, iov, iov_count,
-			    total_size - write_total);
+			sent = zfs_object_store_send(vos, iov,
+			    iov_count, total_size - write_total);
 			if (sent < 0) {
 				if (sent == -ERESTARTSYS) {
 					write_retry_counter++;
@@ -459,13 +574,11 @@ agent_request(vdev_object_store_t *vos, message_type_t message_type,
 		 * will shutdown the socket and allow the resume
 		 * logic to re-establish the connection and retry
 		 * any operations which were in flight prior to this
-		 * failure.
+		 * failure. We only shutdown the socket here and
+		 * allow the vdev_agent_thread to handle the closing
+		 * and reopening logic.
 		 */
 		zfs_object_store_shutdown(vos);
-		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_SHUTDOWN);
-		zfs_object_store_close(vos);
-		ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
-		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_CLOSED);
 	}
 
 	if (zio_injection_enabled) {
@@ -513,95 +626,6 @@ agent_request_write(vdev_object_store_t *vos, write_block_request_t *req,
 	}
 	return (agent_request(vos, MESSAGE_WRITE_BLOCK, req, sizeof (*req),
 	    buf, len, FTAG));
-}
-
-
-static int
-zfs_object_store_open(vdev_object_store_t *vos)
-{
-	ksocket_t s = INVALID_SOCKET;
-
-	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
-	vos->vos_sock_state = VOS_SOCK_OPENING;
-	int rc = ksock_create(PF_UNIX, SOCK_STREAM, 0, &s);
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open unable to create "
-		    "socket: %d", rc);
-		return (rc);
-	}
-
-	rc = ksock_connect(s, (struct sockaddr *)&zfs_root_socket,
-	    sizeof (zfs_root_socket));
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open failed to "
-		    "connect: %d", rc);
-		ksock_close(s);
-		s = INVALID_SOCKET;
-	} else {
-		zfs_dbgmsg("zfs_object_store_open, socket connection "
-		    "ready, " SOCK_FMT, s);
-	}
-
-	VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
-	vos->vos_sock = s;
-	if (vos->vos_sock == INVALID_SOCKET)
-		return (0);
-
-	zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread, vos->vos_sock);
-	nvlist_t *request = fnvlist_alloc();
-	fnvlist_add_string(request, AGENT_REQUEST_TYPE, AGENT_TYPE_VERSION);
-
-	/*
-	 * This specifies that the kernel supports all 1.X.Y versions of the
-	 * agent communication protocol. This should be updated as new
-	 * capabilities are added and supported or required.
-	 */
-	fnvlist_add_string(request, AGENT_VERSION, "^1");
-
-	VERIFY0(agent_request_nv(vos, request, FTAG));
-	fnvlist_free(request);
-
-	nvlist_t *response;
-	rc = agent_read_nvlist(vos, &response);
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open failed to receive version "
-		    "negotiation response: %d", rc);
-		vos->vos_sock = INVALID_SOCKET;
-		ksock_close(s);
-		return (ENOTSUP);
-	}
-	char *type = NULL;
-	rc = nvlist_lookup_string(response, AGENT_RESPONSE_TYPE, &type);
-	if (rc != 0 || strcmp(type, AGENT_TYPE_VERSION) != 0) {
-		zfs_dbgmsg("zfs_object_store_open received unexpected message "
-		    "during negotiation: %d \"%s\"", rc,
-		    type == NULL ? "" : type);
-		fnvlist_free(response);
-		vos->vos_sock = INVALID_SOCKET;
-		ksock_close(s);
-		return (ENOTSUP);
-	}
-	nvlist_t *version;
-	rc = nvlist_lookup_nvlist(response, AGENT_VERSION, &version);
-	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open did not receive version "
-		    "during negotiation: %d", rc);
-		fnvlist_free(response);
-		vos->vos_sock = INVALID_SOCKET;
-		ksock_close(s);
-		return (ENOTSUP);
-	}
-	vos->vos_version_major = fnvlist_lookup_uint64(version, "major");
-	vos->vos_version_minor = fnvlist_lookup_uint64(version, "minor");
-	vos->vos_version_patch = fnvlist_lookup_uint64(version, "patch");
-	zfs_dbgmsg("zfs_object_store_open: Selected %llu.%llu.%llu in "
-	    "negotiation", (u_longlong_t)vos->vos_version_major,
-	    (u_longlong_t)vos->vos_version_minor,
-	    (u_longlong_t)vos->vos_version_patch);
-	fnvlist_free(response);
-	vos->vos_sock_state = VOS_SOCK_OPEN;
-	cv_broadcast(&vos->vos_sock_cv);
-	return (0);
 }
 
 static int
@@ -1762,34 +1786,87 @@ vdev_object_store_socket_open(vdev_t *vd)
 {
 	vdev_object_store_t *vos = vd->vdev_tsd;
 
-	/*
-	 * XXX - We open the socket continuously waiting
-	 * for the agent to start accepting connections.
-	 * We may need to provide a mechanism to break out and
-	 * fail the import instead.
-	 */
 	while (!vos->vos_agent_thread_exit &&
 	    vos->vos_sock == INVALID_SOCKET) {
 
-		mutex_enter(&vos->vos_lock);
 		VERIFY3P(vos->vos_sock, ==, INVALID_SOCKET);
 
-		mutex_enter(&vos->vos_sock_lock);
 		int error = zfs_object_store_open(vos);
-		mutex_exit(&vos->vos_sock_lock);
 		if (error != 0) {
-			mutex_exit(&vos->vos_lock);
 			return (error);
 		}
 
 		if (vos->vos_sock == INVALID_SOCKET) {
 			delay(hz);
-		} else {
-			cv_broadcast(&vos->vos_cv);
 		}
-
-		mutex_exit(&vos->vos_lock);
 	}
+
+	mutex_enter(&vos->vos_sock_lock);
+	nvlist_t *request = fnvlist_alloc();
+	fnvlist_add_string(request, AGENT_REQUEST_TYPE, AGENT_TYPE_VERSION);
+
+	/*
+	 * This specifies that the kernel supports all 1.X.Y versions of the
+	 * agent communication protocol. This should be updated as new
+	 * capabilities are added and supported or required.
+	 */
+	fnvlist_add_string(request, AGENT_VERSION, "^1");
+	int rc = agent_request_nv(vos, request, FTAG);
+	fnvlist_free(request);
+
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open failed to requet version: "
+		    "%d", rc);
+		ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
+		mutex_exit(&vos->vos_sock_lock);
+		return (SET_ERROR(EINTR));
+	}
+
+	nvlist_t *response;
+	rc = agent_read_nvlist(vos, &response);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open failed to receive version "
+		    "negotiation response: %d", rc);
+		zfs_object_store_close(vos);
+		mutex_exit(&vos->vos_sock_lock);
+		return (SET_ERROR(ENOTSUP));
+	}
+	char *type = NULL;
+	rc = nvlist_lookup_string(response, AGENT_RESPONSE_TYPE, &type);
+	if (rc != 0 || strcmp(type, AGENT_TYPE_VERSION) != 0) {
+		zfs_dbgmsg("zfs_object_store_open received unexpected message "
+		    "during negotiation: %d \"%s\"", rc,
+		    type == NULL ? "" : type);
+		fnvlist_free(response);
+		zfs_object_store_close(vos);
+		mutex_exit(&vos->vos_sock_lock);
+		return (SET_ERROR(ENOTSUP));
+	}
+	nvlist_t *version;
+	rc = nvlist_lookup_nvlist(response, AGENT_VERSION, &version);
+	if (rc != 0) {
+		zfs_dbgmsg("zfs_object_store_open did not receive version "
+		    "during negotiation: %d", rc);
+		fnvlist_free(response);
+		zfs_object_store_close(vos);
+		mutex_exit(&vos->vos_sock_lock);
+		return (ENOTSUP);
+	}
+	vos->vos_version_major = fnvlist_lookup_uint64(version, "major");
+	vos->vos_version_minor = fnvlist_lookup_uint64(version, "minor");
+	vos->vos_version_patch = fnvlist_lookup_uint64(version, "patch");
+	zfs_dbgmsg("zfs_object_store_open: Selected %llu.%llu.%llu in "
+	    "negotiation", (u_longlong_t)vos->vos_version_major,
+	    (u_longlong_t)vos->vos_version_minor,
+	    (u_longlong_t)vos->vos_version_patch);
+	fnvlist_free(response);
+	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE_SOCKET) {
+		zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread,
+		    vos->vos_sock);
+	}
+	vos->vos_sock_state = VOS_SOCK_OPEN;
+	cv_broadcast(&vos->vos_sock_cv);
+	mutex_exit(&vos->vos_sock_lock);
 	return (0);
 }
 
@@ -1915,6 +1992,7 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	mutex_init(&vos->vos_sock_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_resume_lock, NULL, MUTEX_DEFAULT, NULL);
 	mutex_init(&vos->vos_outstanding_lock, NULL, MUTEX_DEFAULT, NULL);
+	rw_init(&vos->vos_sock_rwlock, NULL, RW_DEFAULT, NULL);
 	cv_init(&vos->vos_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_sock_cv, NULL, CV_DEFAULT, NULL);
 	cv_init(&vos->vos_resume_cv, NULL, CV_DEFAULT, NULL);
@@ -1960,6 +2038,7 @@ vdev_object_store_fini(vdev_t *vd)
 	mutex_destroy(&vos->vos_sock_lock);
 	mutex_destroy(&vos->vos_resume_lock);
 	mutex_destroy(&vos->vos_outstanding_lock);
+	rw_destroy(&vos->vos_sock_rwlock);
 	cv_destroy(&vos->vos_cv);
 	cv_destroy(&vos->vos_sock_cv);
 	cv_destroy(&vos->vos_resume_cv);
@@ -2035,8 +2114,6 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	ASSERT3P(vos->vos_agent_thread, ==, NULL);
 
 	error = vdev_object_store_socket_open(vd);
-
-	/* XXX - this can't happen today */
 	if (error) {
 		vd->vdev_stat.vs_aux = VDEV_AUX_OPEN_FAILED;
 		return (error);
