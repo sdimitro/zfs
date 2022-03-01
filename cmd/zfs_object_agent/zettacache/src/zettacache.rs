@@ -1680,18 +1680,30 @@ impl ZettaCache {
         }
     }
 
-    /// Initiates insertion of this block; doesn't wait for the write to disk.
-    pub async fn insert(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
+    /// Initiates insertion of this block; doesn't wait for the write to disk.  The `bytes_fn`
+    /// closure returns the AlignedBytes to insert.  This is useful if it's expensive to compute
+    /// (e.g. we need to memcpy() it), as we won't invoke it if the block is not actually
+    /// inserted due to the insertion buffer being full.
+    pub async fn insert<F: FnOnce() -> AlignedBytes>(
+        &self,
+        locked_key: LockedKey,
+        bytes_len: usize,
+        bytes_fn: F,
+        source: InsertSource,
+    ) {
         // This permit will be dropped when the write to disk completes.  It
         // serves to limit the number of insert()'s that we can buffer before
         // dropping (ignoring) insertion requests.
-        let insert_permit = match self.reserve_buffer_space(bytes.len(), source).await {
+        let insert_permit = match self.reserve_buffer_space(bytes_len, source).await {
             Some(permit) => permit,
             None => {
                 self.stats.track_count(InsertDropQueueFull);
                 return;
             }
         };
+
+        let bytes = bytes_fn();
+        assert_eq!(bytes.len(), bytes_len);
 
         self.stats.track_bytes(InsertBytes, bytes.len() as u64);
         self.stats.track_count(match source {
@@ -1827,8 +1839,13 @@ impl ZettaCache {
                 debug!("Healing cache: {:?}", locked_key.key());
                 // Note: this will result in a second insert for the same key in the index. This will be resolved either
                 // in the insert code (if the first insert is in pending_changes) or later during the next merge.
-                self.insert(locked_key, object_bytes, InsertSource::Heal)
-                    .await;
+                self.insert(
+                    locked_key,
+                    object_bytes.len(),
+                    || object_bytes,
+                    InsertSource::Heal,
+                )
+                .await;
             }
         }
     }

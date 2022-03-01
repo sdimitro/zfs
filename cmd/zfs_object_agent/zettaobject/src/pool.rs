@@ -1751,7 +1751,12 @@ impl Pool {
                             // end up actually writing it to disk.
                             let demand_insert = async {
                                 cache
-                                    .insert(key, bytes.clone().into(), InsertSource::Read)
+                                    .insert(
+                                        key,
+                                        bytes.len(),
+                                        || bytes.clone().into(),
+                                        InsertSource::Read,
+                                    )
                                     .await;
                             };
 
@@ -1769,18 +1774,18 @@ impl Pool {
                         } else {
                             let bytes = self.read_block_impl(block, heal).await;
 
-                            // We explicitly copy to a new buffer so that the
-                            // object buffer, which is much larger than this one
-                            // block, can be freed before the insert write
-                            // completes (assuming that we are not doing the
-                            // speculative ingestion).  By aligning the buffer
-                            // here, we avoid a copy to align it in
-                            // BlockAccess::write_raw(), so there's no
-                            // "additional" copy.
+                            // We explicitly copy to a new buffer so that the object buffer,
+                            // which is much larger than this one block, can be freed before the
+                            // insert write completes.  By aligning the buffer here, we avoid a
+                            // copy to align it in BlockAccess::write_raw(), so there's no
+                            // "additional" copy.  However, we don't want to copy it if we aren't
+                            // going to insert (due to the insertion buffer being full), so we do
+                            // the copy from the closure.
                             cache
                                 .insert(
                                     key,
-                                    AlignedBytes::copy_from_slice(&bytes, cache.sector_size()),
+                                    bytes.len(),
+                                    || AlignedBytes::copy_from_slice(&bytes, cache.sector_size()),
                                     InsertSource::Read,
                                 )
                                 .await;
