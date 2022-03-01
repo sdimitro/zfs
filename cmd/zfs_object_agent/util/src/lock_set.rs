@@ -1,17 +1,16 @@
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
 use log::*;
 use std::fmt::Debug;
-use std::{
-    collections::{hash_map, HashMap},
-    hash::Hash,
-    sync::{Arc, Mutex},
-};
+use std::hash::Hash;
+use std::sync::Arc;
 use tokio::sync::watch;
 
 use crate::super_trace;
 
 #[derive(Default, Debug, Clone)]
 pub struct LockSet<V: Hash + Eq + Copy + Debug> {
-    locks: Arc<Mutex<HashMap<V, watch::Receiver<()>>>>,
+    locks: Arc<DashMap<V, watch::Receiver<()>>>,
 }
 
 pub struct LockedItem<V: Hash + Eq + Copy + Debug> {
@@ -23,7 +22,7 @@ pub struct LockedItem<V: Hash + Eq + Copy + Debug> {
 impl<V: Hash + Eq + Copy + Debug> Drop for LockedItem<V> {
     fn drop(&mut self) {
         super_trace!("{:?}: removing lock", self.value);
-        let rx = self.set.locks.lock().unwrap().remove(&self.value);
+        let rx = self.set.locks.remove(&self.value);
         assert!(rx.is_some());
         // This unwrap can't fail because there is still a receiver, `rx`.
         self.tx.send(()).unwrap();
@@ -46,9 +45,9 @@ impl<V: Hash + Eq + Copy + Debug> LockSet<V> {
     pub async fn lock(&self, value: V) -> LockedItem<V> {
         let tx = loop {
             let mut rx = {
-                match self.locks.lock().unwrap().entry(value) {
-                    hash_map::Entry::Occupied(oe) => oe.get().clone(),
-                    hash_map::Entry::Vacant(ve) => {
+                match self.locks.entry(value) {
+                    Entry::Occupied(oe) => oe.get().clone(),
+                    Entry::Vacant(ve) => {
                         let (tx, rx) = watch::channel(());
                         ve.insert(rx);
                         break tx;
