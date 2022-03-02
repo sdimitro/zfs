@@ -1,31 +1,28 @@
+use crate::super_trace;
+use crate::watch_once;
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
 use log::*;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
-use tokio::sync::watch;
 
-use crate::super_trace;
-
-#[derive(Default, Debug, Clone)]
+#[derive(Default, Clone)]
 pub struct LockSet<V: Hash + Eq + Copy + Debug> {
-    locks: Arc<DashMap<V, watch::Receiver<()>>>,
+    locks: Arc<DashMap<V, watch_once::Receiver<()>>>,
 }
 
 pub struct LockedItem<V: Hash + Eq + Copy + Debug> {
     value: V,
-    tx: watch::Sender<()>,
+    _tx: watch_once::Sender<()>,
     set: LockSet<V>,
 }
 
 impl<V: Hash + Eq + Copy + Debug> Drop for LockedItem<V> {
     fn drop(&mut self) {
         super_trace!("{:?}: removing lock", self.value);
-        let rx = self.set.locks.remove(&self.value);
-        assert!(rx.is_some());
-        // This unwrap can't fail because there is still a receiver, `rx`.
-        self.tx.send(()).unwrap();
+        self.set.locks.remove(&self.value).unwrap();
+        // self._tx is dropped here, waking any waiting receivers.
     }
 }
 
@@ -44,28 +41,25 @@ impl<V: Hash + Eq + Copy + Debug> LockSet<V> {
 
     pub async fn lock(&self, value: V) -> LockedItem<V> {
         let tx = loop {
-            let mut rx = {
+            let rx = {
                 match self.locks.entry(value) {
                     Entry::Occupied(oe) => oe.get().clone(),
                     Entry::Vacant(ve) => {
-                        let (tx, rx) = watch::channel(());
+                        let (tx, rx) = watch_once::channel();
                         ve.insert(rx);
                         break tx;
                     }
                 }
             };
             super_trace!("{:?}: waiting for existing lock", value);
-            // Note: since we don't hold the locks mutex now, the corresponding
-            // LockedItem may have been dropped, in which case the sender was
-            // dropped.  In this case, the changed() Result will be an Err,
-            // which we ignore with ok().
-            rx.changed().await.ok();
+            // Note: the sender always drops, resulting in an Err, which we ignore with ok().
+            rx.recv().await.ok();
         };
         super_trace!("{:?}: inserted new lock", value);
 
         LockedItem {
             value,
-            tx,
+            _tx: tx,
             set: self.clone(),
         }
     }
