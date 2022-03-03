@@ -136,6 +136,8 @@ typedef struct WriteBlockResponse {
 void object_store_begin_txg(vdev_t *, uint64_t);
 void object_store_end_txg(vdev_t *, nvlist_t *, uint64_t);
 void object_store_free_block(vdev_t *, uint64_t, uint64_t);
-void object_store_flush_writes(zio_t *);
+void object_store_flush_all_writes(zio_t *);
+void object_store_update_max_blockid(zio_t *);
+void object_store_flush_locked_writes(spa_t *);
 void object_store_restart_agent(vdev_t *);
 void object_store_get_stats(vdev_t *, vdev_object_store_stats_t *);

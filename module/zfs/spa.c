@@ -9425,7 +9425,7 @@ spa_sync(spa_t *spa, uint64_t txg)
 
 	VERIFY(spa_writeable(spa));
 
-	if (!spa_normal_class(spa)->mc_ops->msop_block_based) {
+	if (spa_normal_class(spa)->mc_ops->msop_object_based) {
 		object_store_begin_txg(spa->spa_root_vdev->vdev_child[0], txg);
 	}
 

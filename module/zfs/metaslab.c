@@ -1715,7 +1715,7 @@ metaslab_df_alloc(metaslab_t *msp, uint64_t size)
 
 const metaslab_ops_t zfs_metaslab_ops = {
 	metaslab_df_alloc,
-	B_TRUE
+	B_FALSE
 };
 #endif /* WITH_DF_BLOCK_ALLOCATOR */
 
@@ -1764,7 +1764,7 @@ metaslab_cf_alloc(metaslab_t *msp, uint64_t size)
 
 const metaslab_ops_t zfs_metaslab_ops = {
 	metaslab_cf_alloc,
-	B_TRUE
+	B_FALSE
 };
 #endif /* WITH_CF_BLOCK_ALLOCATOR */
 
@@ -1827,7 +1827,7 @@ metaslab_ndf_alloc(metaslab_t *msp, uint64_t size)
 
 const metaslab_ops_t zfs_metaslab_ops = {
 	metaslab_ndf_alloc,
-	B_TRUE
+	B_FALSE
 };
 #endif /* WITH_NDF_BLOCK_ALLOCATOR */
 
@@ -1842,7 +1842,7 @@ metaslab_sequential_alloc(metaslab_t *msp, uint64_t size)
 
 const metaslab_ops_t zfs_objectstore_ops = {
 	metaslab_sequential_alloc,
-	B_FALSE
+	B_TRUE
 };
 
 /*

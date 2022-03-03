@@ -178,11 +178,11 @@ zio_handle_panic_injection(spa_t *spa, char *tag, uint64_t type)
 
 		if (handler->zi_record.zi_type == type &&
 		    strcmp(tag, handler->zi_record.zi_func) == 0) {
-			if (spa_normal_class(spa)->mc_ops->msop_block_based) {
-				panic("Panic requested in function %s\n", tag);
-			} else {
+			if (spa_normal_class(spa)->mc_ops->msop_object_based) {
 				vdev_t *vd = spa->spa_root_vdev->vdev_child[0];
 				object_store_restart_agent(vd);
+			} else {
+				panic("Panic requested in function %s\n", tag);
 			}
 		}
 	}

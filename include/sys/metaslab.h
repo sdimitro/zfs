@@ -40,7 +40,7 @@ extern "C" {
 
 typedef struct metaslab_ops {
 	uint64_t (*msop_alloc)(metaslab_t *, uint64_t);
-	boolean_t msop_block_based;
+	boolean_t msop_object_based;
 } metaslab_ops_t;
 
 

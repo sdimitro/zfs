@@ -43,6 +43,7 @@
 #include <sys/vdev_trim.h>
 #include <sys/vdev_file.h>
 #include <sys/vdev_raidz.h>
+#include <sys/vdev_object_store.h>
 #include <sys/metaslab.h>
 #include <sys/uberblock_impl.h>
 #include <sys/txg.h>
@@ -514,6 +515,23 @@ spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw)
 	return (1);
 }
 
+int
+spa_config_write_wanted(spa_t *spa, int locks)
+{
+	int locks_wanted = 0;
+	for (int i = 0; i < SCL_LOCKS; i++) {
+		spa_config_lock_t *scl = &spa->spa_config_lock[i];
+		if (!(locks & (1 << i)))
+			continue;
+		mutex_enter(&scl->scl_lock);
+		if (scl->scl_write_wanted) {
+			locks_wanted |= 1 << i;
+		}
+		mutex_exit(&scl->scl_lock);
+	}
+	return (locks_wanted);
+}
+
 /*
  * This function should only be called as an exception since it
  * will not check for any waiting writers and could lead to starvation.
@@ -546,6 +564,9 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
 
 	ASSERT3U(SCL_LOCKS, <, sizeof (wlocks_held) * NBBY);
 
+	boolean_t object_store_write = (rw == RW_WRITER) &&
+	    spa_is_object_based(spa) && (locks & SCL_ZIO);
+
 	for (int i = 0; i < SCL_LOCKS; i++) {
 		spa_config_lock_t *scl = &spa->spa_config_lock[i];
 		if (scl->scl_writer == curthread)
@@ -561,6 +582,16 @@ spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw)
 			ASSERT(scl->scl_writer != curthread);
 			while (scl->scl_count != 0) {
 				scl->scl_write_wanted++;
+
+				/*
+				 * If an object store pool needs to
+				 * grab the SCL_ZIO lock as writer, then
+				 * flush out any writes which have already
+				 * been issued.
+				 */
+				if (object_store_write && (1 << i) == SCL_ZIO)
+					object_store_flush_locked_writes(spa);
+
 				cv_wait(&scl->scl_cv, &scl->scl_lock);
 				scl->scl_write_wanted--;
 			}
