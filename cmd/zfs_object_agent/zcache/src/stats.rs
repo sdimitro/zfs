@@ -10,14 +10,16 @@ use clap::{Arg, SubCommand};
 use log::*;
 use num_traits::cast::ToPrimitive;
 use std::cmp::max;
-use std::io::{self, Write};
 use std::thread::sleep;
 use std::time::Duration;
+use util::flush_stdout;
 use util::message::TYPE_ZCACHE_STATS;
+use util::nice_number_count;
+use util::nice_p2size;
+use util::write_stdout;
+use util::writeln_stdout;
 use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::*;
-use util::{nice_number_count, nice_p2size};
-use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "stats";
 
@@ -315,7 +317,7 @@ impl StatsDisplay {
             }
 
             // Flush stdout in case output is redirected to a file
-            io::stdout().flush().unwrap_or(());
+            flush_stdout().ok();
 
             match self.interval {
                 None => return Ok(()),

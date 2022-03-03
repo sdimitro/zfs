@@ -9,14 +9,16 @@ use chrono::Local;
 use clap::{Arg, SubCommand};
 use log::*;
 use std::cmp::max;
-use std::io::{self, Write};
 use std::sync::atomic::Ordering::Relaxed;
 use std::thread::sleep;
 use std::time::Duration;
+use util::flush_stdout;
 use util::message::TYPE_ZCACHE_IOSTAT;
+use util::nice_number_time;
+use util::nice_p2size;
+use util::write_stdout;
+use util::writeln_stdout;
 use util::zettacache_stats::*;
-use util::{nice_number_time, nice_p2size};
-use util::{write_stdout, writeln_stdout};
 
 static NAME: &str = "iostat";
 
@@ -355,7 +357,7 @@ impl IoStatDisplay {
                     Some(name) => self.display_iostat_histogram(name, &delta),
                 }
                 // Flush stdout in case output is redirected to a file
-                io::stdout().flush()?;
+                flush_stdout()?;
             } else {
                 info!("object agent restarted");
             }

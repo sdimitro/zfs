@@ -44,4 +44,5 @@ pub use tunable::read_tunable_config;
 pub use vec_ext::tersevec;
 pub use vec_ext::AlignedBytes;
 pub use vec_ext::AlignedVec;
+pub use write_stdout::flush_stdout;
 pub use zcache_devices::{DeviceEntry, DeviceList};
