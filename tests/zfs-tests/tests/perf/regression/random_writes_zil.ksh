@@ -20,10 +20,6 @@
 
 function cleanup
 {
-	# kill fio and iostat
-	pkill fio
-	pkill iostat
-
 	#
 	# We're using many filesystems depending on the number of
 	# threads for each test, and there's no good way to get a list

@@ -39,9 +39,6 @@
 
 function cleanup
 {
-	# kill fio and iostat
-	pkill fio
-	pkill iostat
 	destroy_perf_pool
 }
 
