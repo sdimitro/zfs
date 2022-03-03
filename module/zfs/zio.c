@@ -662,7 +662,7 @@ zio_add_child(zio_t *pio, zio_t *cio)
 	 * I/O to indicate that if it needs to wait, it also needs
 	 * to flush the backend afterwards.
 	 */
-	if (!spa_normal_class(pio->io_spa)->mc_ops->msop_block_based &&
+	if (spa_normal_class(pio->io_spa)->mc_ops->msop_object_based &&
 	    cio->io_type == ZIO_TYPE_WRITE && IO_IS_ALLOCATING(cio)) {
 		pio->io_control_flags |= ZIO_CONTROL_FLUSH_WRITES;
 	}
@@ -3568,7 +3568,7 @@ zio_dva_allocate(zio_t *zio)
 	int error;
 	int flags = 0;
 
-	if (!spa_normal_class(spa)->mc_ops->msop_block_based)
+	if (spa_normal_class(spa)->mc_ops->msop_object_based)
 		return (zio_object_allocate(zio));
 
 	if (zio->io_gang_leader == NULL) {
@@ -3869,9 +3869,19 @@ zio_vdev_io_start(zio_t *zio)
 			 * SCL_ZIO writers.
 			 */
 			if (zio->io_type == ZIO_TYPE_WRITE &&
-			    !mc->mc_ops->msop_block_based) {
+			    mc->mc_ops->msop_object_based) {
 				spa_config_enter_read_priority(spa,
 				    SCL_ZIO, zio);
+
+				object_store_update_max_blockid(zio);
+
+				/*
+				 * If there is a spa_config_lock WRITER
+				 * waiting, then keep flushing out the max
+				 * I/O that has been issued.
+				 */
+				if (spa_config_write_wanted(spa, SCL_ZIO))
+					object_store_flush_locked_writes(spa);
 			} else {
 				spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
 			}
@@ -4506,7 +4516,7 @@ zio_ready(zio_t *zio)
 		return (NULL);
 	}
 
-	if (!spa_normal_class(zio->io_spa)->mc_ops->msop_block_based &&
+	if (spa_normal_class(zio->io_spa)->mc_ops->msop_object_based &&
 	    zio->io_control_flags & ZIO_CONTROL_FLUSH_WRITES &&
 	    zio->io_waiter) {
 		/*
@@ -4530,7 +4540,7 @@ zio_ready(zio_t *zio)
 		 * Now that all logical I/Os are ready, we can
 		 * tell the object store to flush them.
 		 */
-		object_store_flush_writes(zio);
+		object_store_flush_all_writes(zio);
 	}
 
 	if (zio->io_ready) {

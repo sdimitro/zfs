@@ -142,6 +142,9 @@ typedef struct vdev_object_store {
 	krwlock_t vos_sock_rwlock;
 	ksocket_t vos_sock;
 
+	/* updated atomically */
+	uint64_t vos_max_blockid;
+
 	kmutex_t vos_outstanding_lock;
 	kcondvar_t vos_outstanding_cv;
 	boolean_t vos_serial_done[VOS_SERIAL_TYPES];
@@ -1411,8 +1414,13 @@ object_store_free_block(vdev_t *vd, uint64_t offset, uint64_t asize)
 	vos->vos_free_list_len++;
 }
 
+/*
+ * This function will flush all the writes which have been allocated
+ * as part of the mega zio regardless of where they are in the zio
+ * pipeline.
+ */
 void
-object_store_flush_writes(zio_t *zio)
+object_store_flush_all_writes(zio_t *zio)
 {
 	vdev_t *vd = vdev_find_leaf(zio->io_spa->spa_root_vdev,
 	    &vdev_object_store_ops);
@@ -1422,6 +1430,46 @@ object_store_flush_writes(zio_t *zio)
 	uint64_t blockid = zio->io_max_offset >> SPA_MINBLOCKSHIFT;
 	mutex_exit(&zio->io_lock);
 	agent_flush_writes(vos, blockid);
+}
+
+void
+object_store_update_max_blockid(zio_t *zio)
+{
+	vdev_t *vd = vdev_find_leaf(zio->io_spa->spa_root_vdev,
+	    &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
+	vdev_object_store_t *vos = vd->vdev_tsd;
+
+	mutex_enter(&zio->io_lock);
+	uint64_t blockid = zio->io_max_offset >> SPA_MINBLOCKSHIFT;
+	mutex_exit(&zio->io_lock);
+
+	uint64_t max_blockid;
+	while (blockid >
+	    (max_blockid = atomic_load_64(&vos->vos_max_blockid)) &&
+	    (max_blockid != atomic_cas_64(&vos->vos_max_blockid,
+	    max_blockid, blockid))) {
+		continue;
+	}
+}
+
+/*
+ * Flush all writes which hold the SCL_ZIO config lock. Use the
+ * vos_max_blockid since it tracks all writes which have been issued to
+ * the agent and, subsequently, hold the SCL_ZIO lock.
+ */
+void
+object_store_flush_locked_writes(spa_t *spa)
+{
+	vdev_t *vd = vdev_find_leaf(spa->spa_root_vdev,
+	    &vdev_object_store_ops);
+	ASSERT(vdev_is_object_based(vd));
+	vdev_object_store_t *vos = vd->vdev_tsd;
+
+	uint64_t max_blockid = atomic_load_64(&vos->vos_max_blockid);
+	zfs_dbgmsg("object_store_flush_locked_write: max %llu",
+	    (u_longlong_t)max_blockid);
+	agent_flush_writes(vos, max_blockid);
 }
 
 void
@@ -2109,6 +2157,7 @@ vdev_object_store_open(vdev_t *vd, uint64_t *psize, uint64_t *max_psize,
 	vos->vos_vdev = vd;
 	vos->vos_open_completed = B_FALSE;
 	vos->vos_closing = B_FALSE;
+	vos->vos_max_blockid = 0;
 
 	ASSERT(vd->vdev_path != NULL);
 	ASSERT3P(vos->vos_agent_thread, ==, NULL);

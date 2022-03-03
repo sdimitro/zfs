@@ -5592,7 +5592,8 @@ zdb_leak(void *arg, uint64_t start, uint64_t size)
 }
 
 static metaslab_ops_t zdb_metaslab_ops = {
-	NULL	/* alloc */
+	NULL,	/* alloc */
+	B_FALSE
 };
 
 static int
