@@ -316,7 +316,7 @@ zfs_object_store_receive(vdev_object_store_t *vos, kvec_t *iov,
 		zfs_dbgmsg("(%px) zfs_object_store_receive socket closed",
 		    curthread);
 		rw_exit(&vos->vos_sock_rwlock);
-		return (SET_ERROR(ENOTCONN));
+		return (SET_ERROR(-ENOTCONN));
 	}
 
 	size_t recvd = ksock_receive(vos->vos_sock, &msg, iov, iovcnt,
@@ -335,7 +335,7 @@ zfs_object_store_send(vdev_object_store_t *vos, kvec_t *iov, int iovcnt,
 		zfs_dbgmsg("(%px) zfs_object_store_send socket closed",
 		    curthread);
 		rw_exit(&vos->vos_sock_rwlock);
-		return (SET_ERROR(ENOTCONN));
+		return (SET_ERROR(-ENOTCONN));
 	}
 	ssize_t sent = ksock_send(vos->vos_sock, &msg, iov, iovcnt, size);
 	rw_exit(&vos->vos_sock_rwlock);
