@@ -197,7 +197,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // Note: allocating memory here could result in infinite recursion, and must be avoided.
         let (new_layout, info_offset) = new_layout(layout);
         let info_ptr = ptr.offset(info_offset) as *const PerAllocInfo;
-        (&*info_ptr).decrement(layout);
+        (*info_ptr).decrement(layout);
 
         System.dealloc(ptr, new_layout)
     }

@@ -282,12 +282,10 @@ impl StatsDisplay {
         let mut remote = RemoteChannel::new(false).await?;
 
         loop {
-            let latest: CacheStats;
-
-            match remote.call(TYPE_ZCACHE_STATS, None).await {
+            let latest: CacheStats = match remote.call(TYPE_ZCACHE_STATS, None).await {
                 Ok(response) => {
                     let stats_json = response.lookup_string("stats_json").unwrap();
-                    latest = serde_json::from_str(stats_json.to_str()?).unwrap();
+                    serde_json::from_str(stats_json.to_str()?).unwrap()
                 }
                 Err(RemoteError::ResultError(_)) => {
                     return Err(anyhow!("No cache found"));
@@ -297,7 +295,7 @@ impl StatsDisplay {
                     // typically something like "Connection reset by peer (os error 104)"
                     return Err(e);
                 }
-            }
+            };
 
             // Periodically display the column headers
             if (iteration % (self.get_terminal_height() - 3) as u64) == 0 {
