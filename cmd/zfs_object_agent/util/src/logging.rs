@@ -1,5 +1,5 @@
 use crate::tunable::log_tunable_config;
-use crate::{get_tunable, with_alloctag_hf};
+use crate::{get_tunable, lazy_static_ptr, with_alloctag_hf};
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
@@ -14,21 +14,17 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::panic::PanicInfo;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::{panic, process, ptr, thread};
-
-static LOG_MESSAGES_PTR: AtomicPtr<std::sync::Mutex<VecDeque<String>>> =
-    AtomicPtr::new(ptr::null_mut());
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::{panic, process, thread};
 
 type PanicHook = Box<dyn Fn(&panic::PanicInfo) + Sync + Send>;
 
+lazy_static_ptr! {
+    static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<String>> = Default::default();
+}
+
 lazy_static! {
     static ref LOG_PATTERN: String = "[{d(%Y-%m-%d %H:%M:%S%.3f)}][{t}][{l}] {m}{n}".to_string();
-    static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<String>> = {
-        let mut inner = Default::default();
-        LOG_MESSAGES_PTR.store(&mut inner, Ordering::Relaxed);
-        inner
-    };
     static ref MAX_LOG_MESSAGES: usize = get_tunable("max_log_messages", 100_000);
     static ref PANIC_LOG_FOLDER: String =
         get_tunable("panic_log_folder", "/var/log/zoa".to_string());

@@ -10,6 +10,7 @@ mod btreemap_ext;
 mod credentials;
 mod die;
 mod from64;
+pub mod lazy_static_ptr;
 mod lock_set;
 mod logging;
 pub mod message;

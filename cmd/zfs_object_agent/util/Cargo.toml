@@ -23,6 +23,7 @@ log4rs = "1.0.0"
 libc = "0.2"
 more-asserts = "0.2.1"
 num-traits = "0.2.14"
+paste = "1.0.6"
 rand = "0.8.3"
 rusoto_credential = "0.47.0"
 safer-ffi = { version = "0.0.6", features = ["proc_macros"] }
