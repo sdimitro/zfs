@@ -542,7 +542,7 @@ impl ObjectAccess {
                     usize::try_from(output.content_length.unwrap_or(0)).unwrap(),
                 )
             });
-            let mut count = 0;
+            let mut count: u32 = 0;
             match output
                 .body
                 .unwrap()

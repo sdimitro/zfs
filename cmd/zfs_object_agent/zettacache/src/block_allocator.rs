@@ -1834,7 +1834,7 @@ impl BlockAllocator {
         let begin = Instant::now();
         let old_pending = self.spacemap.pending_len() + self.spacemap_next.pending_len();
         let ndirty_slabs = self.dirty_slabs.len();
-        let mut allocd_slabs = 0;
+        let mut allocd_slabs: u64 = 0;
         for slab_id in std::mem::take(&mut self.dirty_slabs) {
             let slab = self.slabs.get_mut(slab_id);
 
