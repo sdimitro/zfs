@@ -1897,14 +1897,16 @@ impl BlockAllocator {
         let (spacemap, spacemap_next) =
             futures::future::join(self.spacemap.flush(), self.spacemap_next.flush()).await;
         debug!(
-            "wrote {}, {} entries to spacemaps in {}ms [sm: {}, {}% alloc] [next: {}, {}% alloc]",
+            "wrote {}, {} entries to spacemaps in {}ms [sm: {}, {}% alloc, {}] [next: {}, {}% alloc, {}]",
             nice_p2size(self.spacemap.bytes() + self.spacemap_next.bytes() - old_space),
             nice_number_count(pending as f64),
             begin.elapsed().as_millis(),
             nice_number_count(self.spacemap.total_entries() as f64),
             self.spacemap.alloc_entries() * 100 / (self.spacemap.total_entries() + 1),
+            nice_p2size(self.spacemap.bytes()),
             nice_number_count(self.spacemap_next.total_entries() as f64),
             self.spacemap_next.alloc_entries() * 100 / (self.spacemap_next.total_entries() + 1),
+            nice_p2size(self.spacemap_next.bytes()),
         );
         (spacemap, spacemap_next)
     }

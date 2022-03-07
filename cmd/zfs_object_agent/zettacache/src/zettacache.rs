@@ -23,6 +23,7 @@ use crate::DumpStructuresOptions;
 use anyhow::Result;
 use bytes::Bytes;
 use conv::ConvUtil;
+use derivative::Derivative;
 use either::Either;
 use futures::future;
 use futures::stream::*;
@@ -130,11 +131,13 @@ struct MergeProgressPhys {
     new_index: IndexRunPhys,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Derivative)]
+#[derivative(Debug)]
 struct ZettaCheckpointPhys {
     generation: CheckpointId,
     pool_guids: Vec<PoolGuid>,
     extent_allocator: ExtentAllocatorPhys,
+    #[derivative(Debug = "ignore")]
     block_allocator: BlockAllocatorPhys,
     last_atime: Atime,
     old_index: IndexRunPhys,

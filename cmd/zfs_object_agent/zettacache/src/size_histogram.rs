@@ -1,15 +1,19 @@
+use derivative::Derivative;
 use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
 use util::From64;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone, Derivative)]
+#[derivative(Debug)]
 pub struct SizeHistogramPhys {
     start: SystemTime,
     pub lookups: u64,
     pub cache_capacity: u64,
     pub meta_overhead: u64,
     pub bucket_size: u64,
+    #[derivative(Debug(format_with = "util::tersevec"))]
     pub live_histogram: Vec<u64>,
+    #[derivative(Debug(format_with = "util::tersevec"))]
     pub ghost_histogram: Vec<u64>,
 }
 

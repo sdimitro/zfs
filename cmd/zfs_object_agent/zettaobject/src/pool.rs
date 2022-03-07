@@ -219,8 +219,9 @@ pub struct UberblockPhys {
     txg: Txg,         // redundant with key, for verification
     date: SystemTime, // for debugging
     storage_object_log: ObjectBasedLogPhys<StorageObjectLogEntry>,
+    #[derivative(Debug = "ignore")]
     reclaim_info: ReclaimInfoPhys, // Extendible hash structures for reclaiming free blocks.
-    next_block: BlockId,           // Next BlockID that can be allocated.
+    next_block: BlockId, // Next BlockID that can be allocated.
     obsolete_objects: ObjectDeleterPhys,
     stats: PoolStatsPhys,
     features: Vec<(FeatureFlag, u64)>, // Each pair is a feature and its refcount
