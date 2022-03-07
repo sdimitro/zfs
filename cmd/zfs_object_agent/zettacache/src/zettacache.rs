@@ -578,7 +578,7 @@ impl MergeState {
             .range((start_key.map_or(Unbounded, Excluded), Unbounded))
             .peekable();
 
-        let mut index_skips = 0;
+        let mut index_skips: u64 = 0;
         while let Some(chunk) = index_stream.next().await {
             for &entry in chunk.entries() {
                 // If the next index is already "started", advance the old index to the start point
@@ -1326,7 +1326,7 @@ impl ZettaCache {
             }
             if let Some((rx, new_index_phys)) = &mut merging {
                 let begin = Instant::now();
-                let mut msg_count = 0;
+                let mut msg_count: u64 = 0;
                 let mut free_count = 0;
                 let mut cache_updates_count = 0;
                 let mut state_lock_held = Duration::ZERO;

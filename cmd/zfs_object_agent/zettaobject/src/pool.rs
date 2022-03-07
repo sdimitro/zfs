@@ -798,7 +798,7 @@ impl PoolState {
         let oa = &shared_state.object_access;
         let begin = Instant::now();
         let last_obj = self.object_block_map.last_object();
-        let mut count = 0;
+        let mut count: u32 = 0;
 
         oa.delete_objects(
             select_all(
@@ -2239,7 +2239,7 @@ async fn reclaim_frees_object(
             a.header.min_txg = min(a.header.min_txg, b.header.min_txg);
             a.header.max_txg = max(a.header.max_txg, b.header.max_txg);
             a.header.next_block = max(a.header.next_block, b.header.next_block);
-            let mut already_moved = 0;
+            let mut already_moved: u32 = 0;
             for (k, v) in b.blocks.drain() {
                 let len = u32::try_from(v.len()).unwrap();
                 match a.blocks.insert(k, v) {
