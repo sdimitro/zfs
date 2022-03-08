@@ -1,21 +1,39 @@
+use crate::get_tunable;
+use crate::lazy_static_ptr;
 use crate::tunable::log_tunable_config;
-use crate::{get_tunable, lazy_static_ptr, with_alloctag_hf};
+use crate::with_alloctag_hf;
+use crate::TrackingAllocator;
+use crate::ALLOCATOR_PRINT_MIN_ALLOCS;
+use crate::ALLOCATOR_PRINT_MIN_BYTES;
+
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
 use log4rs::append::console::ConsoleAppender;
 use log4rs::append::file::FileAppender;
 use log4rs::append::Append;
-use log4rs::config::{Appender, Config, Root};
-use log4rs::config::{Deserialize, Deserializers, Logger};
+use log4rs::config::Appender;
+use log4rs::config::Config;
+use log4rs::config::Deserialize;
+use log4rs::config::Deserializers;
+use log4rs::config::Logger;
+use log4rs::config::Root;
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::filter::threshold::ThresholdFilter;
+use signal_hook::consts::SIGUSR1;
+use signal_hook::iterator::exfiltrator::SignalOnly;
+use signal_hook::iterator::SignalsInfo;
+use signal_hook::low_level::emulate_default_handler;
 use std::collections::VecDeque;
 use std::fs::OpenOptions;
+use std::io::BufWriter;
 use std::io::Write;
+use std::panic;
 use std::panic::PanicInfo;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::{panic, process, thread};
+use std::process;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread;
 
 type PanicHook = Box<dyn Fn(&panic::PanicInfo) + Sync + Send>;
 
@@ -81,25 +99,35 @@ impl Append for BufferAppender {
 }
 
 impl BufferAppender {
-    fn get_writer() -> Box<dyn Write> {
+    fn get_writer(filename: String) -> Box<dyn Write> {
         match OpenOptions::new().append(true).create(true).open(format!(
-            "{}/panic_{}.log",
+            "{}/{}",
             PANIC_LOG_FOLDER.as_str(),
-            process::id()
+            filename
         )) {
-            Ok(file) => Box::new(file) as Box<dyn Write>,
+            Ok(file) => {
+                info!("dumping info to {}", filename);
+                Box::new(BufWriter::new(file)) as Box<dyn Write>
+            }
             Err(_) => Box::new(std::io::stderr()),
+        }
+    }
+
+    fn dump_log_messages<W>(mut writer: W)
+    where
+        W: Write,
+    {
+        if let Ok(messages) = LOG_MESSAGES.lock() {
+            for message in messages.iter() {
+                writeln!(writer, "{}", message).unwrap();
+            }
         }
     }
 
     /// Dump log messages in memory to a file or stderr.
     pub fn dump(info: &PanicInfo) {
-        let mut output = Self::get_writer();
-        if let Ok(messages) = LOG_MESSAGES.lock() {
-            for message in messages.iter() {
-                writeln!(output, "{}", message).unwrap();
-            }
-        }
+        let mut output = Self::get_writer(format!("panic_{}.log", process::id()));
+        Self::dump_log_messages(&mut output);
 
         let location = info.location().unwrap();
         let msg = match info.payload().downcast_ref::<&'static str>() {
@@ -118,6 +146,7 @@ impl BufferAppender {
         )
         .unwrap();
         writeln!(output, "stack backtrace:\n{:?}", Backtrace::new()).unwrap();
+        output.flush().ok();
     }
 }
 
@@ -277,4 +306,43 @@ pub fn setup_logging(
         // Log all the tunables.
         log_tunable_config();
     }
+}
+
+/// Dump trace logs and memory tracking stats when receiving SIGUSR1
+pub fn register_siguser1_to_dump_tracing() -> Result<(), std::io::Error> {
+    let mut signals = SignalsInfo::<SignalOnly>::new(&[SIGUSR1])?;
+    std::thread::spawn(move || {
+        for signum in &mut signals {
+            match signum {
+                SIGUSR1 => {
+                    let info_path = format!(
+                        "SIGUSR1_pid{}_{}.out",
+                        process::id(),
+                        chrono::Local::now().format("%Y-%m-%d-%H:%M:%S%.3f"),
+                    );
+                    let mut out = BufferAppender::get_writer(info_path);
+                    writeln!(out, "=== Log Traces").ok();
+                    BufferAppender::dump_log_messages(&mut out);
+                    writeln!(out, "\n=== Memory Statistics").ok();
+                    writeln!(
+                        out,
+                        "{}",
+                        TrackingAllocator::format(
+                            *ALLOCATOR_PRINT_MIN_ALLOCS,
+                            *ALLOCATOR_PRINT_MIN_BYTES
+                        )
+                    )
+                    .ok();
+                    out.flush().ok();
+                }
+                _ => {
+                    // This should never be executed as we are registered for
+                    // SIGUSER1 only.
+                    eprintln!("Got an unexpected signal: {:?}", signum);
+                    emulate_default_handler(signum).unwrap();
+                }
+            }
+        }
+    });
+    Ok(())
 }

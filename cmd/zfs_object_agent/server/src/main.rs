@@ -1,10 +1,14 @@
-use clap::{Arg, SubCommand};
+use std::time::Duration;
+
+use clap::Arg;
+use clap::SubCommand;
 use git_version::git_version;
 use lazy_static::lazy_static;
 use log::*;
-use std::time::Duration;
 use util::get_tunable;
 use util::TrackingAllocator;
+use util::ALLOCATOR_PRINT_MIN_ALLOCS;
+use util::ALLOCATOR_PRINT_MIN_BYTES;
 use zettaobject::test_connectivity;
 
 #[global_allocator]
@@ -20,10 +24,6 @@ static GIT_VERSION: &str = git_version!(
 lazy_static! {
     static ref ALLOCATOR_PRINT_DURATION: Duration =
         Duration::from_secs(get_tunable("allocator_print_secs", 60));
-    static ref ALLOCATOR_PRINT_MIN_BYTES: u64 =
-        get_tunable("allocator_print_min_bytes", 1024 * 1024);
-    static ref ALLOCATOR_PRINT_MIN_ALLOCS: u64 =
-        get_tunable("allocator_print_min_allocs", 1_000_000);
 }
 
 fn main() {
@@ -68,7 +68,7 @@ fn main() {
                 .short("t")
                 .long("config-file")
                 .value_name("FILE")
-                .help("Configuration file to set tunables (toml/json/yaml")
+                .help("Configuration file to set tunables (toml/json/yaml)")
                 .takes_value(true),
         )
         .arg(

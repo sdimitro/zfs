@@ -9,6 +9,7 @@ use std::mem;
 use std::path::Path;
 use std::process;
 use tokio::runtime::Runtime;
+use util::register_siguser1_to_dump_tracing;
 use uuid::Uuid;
 use zettacache::ZettaCache;
 
@@ -68,6 +69,8 @@ pub fn start(
     cache_paths: Vec<&str>,
     runtime: Runtime,
 ) -> Result<(), anyhow::Error> {
+    register_siguser1_to_dump_tracing()?;
+
     /*
      * Take an exclusive lock on a lock file. This prevents multiple agent
      * processes from operating out of the same socket_dir.
