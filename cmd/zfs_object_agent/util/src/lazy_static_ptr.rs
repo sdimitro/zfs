@@ -1,6 +1,13 @@
+use derivative::Derivative;
 pub use lazy_static::lazy_static;
 pub use paste::paste;
+use std::ops::Deref;
+use std::ops::DerefMut;
 pub use std::sync::atomic::{AtomicPtr, Ordering};
+use std::{
+    collections::HashSet,
+    sync::{Arc, Mutex},
+};
 
 /// This macro is similar to `lazy_static!`, but for each static created, it creates an
 /// additional static variable with the `_PTR` suffix, which is an `AtomicPtr` to the contents of
@@ -60,4 +67,101 @@ macro_rules! lazy_static_ptr {
 
     // empty trailing tokens
     () => ()
+}
+
+#[derive(Derivative)]
+#[derivative(Hash(bound = ""))]
+#[derivative(PartialEq(bound = ""))]
+#[derivative(Eq(bound = ""))]
+/// This wrapping struct exists so that we can mark the raw pointer as Send+Sync (i.e. safe to
+/// use from different threads).
+struct DebugPointer<T>(*const T);
+unsafe impl<T> Send for DebugPointer<T> {}
+unsafe impl<T> Sync for DebugPointer<T> {}
+
+impl<T> DebugPointer<T> {
+    fn new(guard: &DebugPointerGuard<T>) -> Self {
+        Self(&*guard.value)
+    }
+}
+
+/// A RAII guard that deref's to the stored value.  When dropped, its pointer will be removed
+/// from the DebugPointerSet that it was created from.
+pub struct DebugPointerGuard<T> {
+    value: Box<T>,
+    set: DebugPointerSet<T>,
+}
+
+impl<T> Deref for DebugPointerGuard<T> {
+    type Target = T;
+
+    fn deref(&self) -> &Self::Target {
+        &*self.value
+    }
+}
+
+impl<T> DerefMut for DebugPointerGuard<T> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.value
+    }
+}
+
+impl<T> Drop for DebugPointerGuard<T> {
+    fn drop(&mut self) {
+        let removed = self
+            .set
+            .set
+            .lock()
+            .unwrap()
+            .remove(&DebugPointer::new(self));
+        assert!(removed);
+    }
+}
+
+#[derive(Derivative)]
+#[derivative(Clone(bound = ""))]
+#[derivative(Default(bound = ""))]
+/// This is a set of structs, which we will store pointers to so that we can find them in the
+/// debugger.  Note that the stored type T is unconstrained (e.g. it need not be Hash), because
+/// we are storing (but not dereferencing) a pointer to it.  Typical use is combined with
+/// `lazy_static_ptr!`:
+/// ```
+/// fn func(thing: Thing) {
+///     lazy_static_ptr! {
+///         static ref THINGS: DebugPointerSet<Thing> = Default::default();
+///     }
+///     let mut thing = THINGS.insert(thing);
+///     // use `thing` as usual, it deref's to the passed in Thing
+///     thing.method();
+/// }
+/// ```
+/// Note that `lazy_static_ptr!` doesn't work well inside `async`
+/// functions/methods/closures, because it's hard to name the variable in the
+/// debugger (it has {braces} in its name).  The workaround is to either create
+/// the lazy_static_ptr! at the file level (not inside a function), or to
+/// desugar the `async fn` to a regular `fn` that returns a `Future`.
+pub struct DebugPointerSet<T> {
+    set: Arc<Mutex<HashSet<DebugPointer<T>>>>,
+}
+
+impl<T> DebugPointerSet<T> {
+    pub fn new() -> Self {
+        Default::default()
+    }
+
+    /// Insert a new object to the DebugPointerSet.  The debugger can be used to find a pointer
+    /// to the object.  The object is moved into the returned DebugPointerGuard, which holds the
+    /// object in a Box, so that its location in memory doesn't change.  The DebugPointerGuard
+    /// can be dereferenced to the contained object. Note that the pointer tracks the location of
+    /// the DebugPointerGuard's contents, even if the object is moved out of the Guard with
+    /// `mem::replace()` or `mem::take()`.
+    pub fn insert(&self, value: T) -> DebugPointerGuard<T> {
+        let guard = DebugPointerGuard {
+            value: Box::new(value),
+            set: self.clone(),
+        };
+        let inserted = self.set.lock().unwrap().insert(DebugPointer::new(&guard));
+        assert!(inserted);
+        guard
+    }
 }

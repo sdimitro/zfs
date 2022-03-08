@@ -2468,6 +2468,7 @@ dependencies = [
  "chrono",
  "config",
  "dashmap",
+ "derivative",
  "enum-map",
  "lazy_static",
  "libc",

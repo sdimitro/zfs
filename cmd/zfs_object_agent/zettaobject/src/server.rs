@@ -31,6 +31,8 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use util::get_tunable;
+use util::lazy_static_ptr;
+use util::lazy_static_ptr::DebugPointerSet;
 use util::maybe_die_with;
 use util::message::*;
 use util::super_trace;
@@ -416,20 +418,46 @@ impl Responder {
         }
     }
 
-    async fn response_task(
+    fn response_task(
         output: OwnedWriteHalf,
-        mut rx: mpsc::UnboundedReceiver<ResponseMessage>,
-    ) {
-        let mut output = BufWriter::with_capacity(1024 * 1024, output);
-        while let Some(message) = rx.recv().await {
-            Self::write_response(&mut output, message).await;
+        rx: mpsc::UnboundedReceiver<ResponseMessage>,
+    ) -> impl Future<Output = ()> {
+        let output = BufWriter::with_capacity(1024 * 1024, output);
 
-            // drain the channel before flushing
-            while let Some(Some(message)) = rx.recv().now_or_never() {
-                Self::write_response(&mut output, message).await;
+        // It would improve readability if we used a struct rather than a tuple for the state we
+        // are saving in the DebugPointerSet.  However, the debugger can't cast to a struct type
+        // defined here, because the fully-qualified type name would contain {braces}.  The
+        // alternative would be to declare the struct at the top level, but having the internal
+        // details of this method spread to the surrounding state seems worse than the tuple.
+        //
+        // Similarly, declaring RESPOND_RECEIVERS inside an async closure or function would cause
+        // its fully-qualified symbol name to contain `{{closure}}`, so we couldn't name it in
+        // the debugger.
+        lazy_static_ptr! {
+            static ref RESPOND_RECEIVERS:
+                DebugPointerSet<(
+                    mpsc::UnboundedReceiver<ResponseMessage>,
+                    BufWriter<OwnedWriteHalf>
+                )> = Default::default();
+        }
+
+        // Save our rx and output in the global debug state, so that we can find them from the
+        // debugger.
+        let mut state = RESPOND_RECEIVERS.insert((rx, output));
+
+        async move {
+            // destructure the tuple back into the rx/output
+            let (rx, output) = &mut *state;
+            while let Some(message) = rx.recv().await {
+                Self::write_response(output, message).await;
+
+                // drain the channel before flushing
+                while let Some(Some(message)) = rx.recv().now_or_never() {
+                    Self::write_response(output, message).await;
+                }
+
+                output.flush().await.unwrap();
             }
-
-            output.flush().await.unwrap();
         }
     }
 }
