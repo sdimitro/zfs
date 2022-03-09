@@ -1,10 +1,12 @@
-use crate::remote_channel::{RemoteChannel, RemoteError};
-use crate::subcommand::ZcacheSubCommand;
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::SubCommand;
 use util::message::TYPE_CLEAR_HIT_DATA;
 use util::writeln_stdout;
+
+use crate::remote_channel::RemoteChannel;
+use crate::remote_channel::RemoteError;
+use crate::subcommand::ZcacheSubCommand;
 
 static NAME: &str = "clear_hit_data";
 

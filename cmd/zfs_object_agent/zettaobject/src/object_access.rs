@@ -1,35 +1,58 @@
-use anyhow::{anyhow, Context, Result};
+use core::time::Duration;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::iter;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use arr_macro::arr;
 use async_stream::stream;
-use bytes::{Bytes, BytesMut};
-use core::time::Duration;
-use enum_map::{Enum, EnumMap};
+use bytes::Bytes;
+use bytes::BytesMut;
+use enum_map::Enum;
+use enum_map::EnumMap;
+use futures::future;
 use futures::future::Either;
 use futures::stream;
-use futures::{future, Future, StreamExt, TryStreamExt};
+use futures::Future;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use futures_core::Stream;
 use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
 use rand::prelude::*;
-use rusoto_core::{ByteStream, RusotoError};
-use rusoto_credential::{ChainProvider, InstanceMetadataProvider, ProfileProvider};
-use rusoto_s3::{
-    Delete, DeleteObjectsRequest, GetObjectRequest, HeadObjectOutput, HeadObjectRequest,
-    ListObjectsV2Request, ObjectIdentifier, PutObjectError, PutObjectOutput, PutObjectRequest,
-    S3Client, S3,
-};
-use std::error::Error;
-use std::fmt::Formatter;
-use std::iter;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-use std::{collections::HashMap, fmt::Display};
+use rusoto_core::ByteStream;
+use rusoto_core::RusotoError;
+use rusoto_credential::ChainProvider;
+use rusoto_credential::InstanceMetadataProvider;
+use rusoto_credential::ProfileProvider;
+use rusoto_s3::Delete;
+use rusoto_s3::DeleteObjectsRequest;
+use rusoto_s3::GetObjectRequest;
+use rusoto_s3::HeadObjectOutput;
+use rusoto_s3::HeadObjectRequest;
+use rusoto_s3::ListObjectsV2Request;
+use rusoto_s3::ObjectIdentifier;
+use rusoto_s3::PutObjectError;
+use rusoto_s3::PutObjectOutput;
+use rusoto_s3::PutObjectRequest;
+use rusoto_s3::S3Client;
+use rusoto_s3::S3;
 use tokio::sync::Semaphore;
 use tokio::time::error::Elapsed;
-use util::{get_tunable, super_trace, watch_once, with_alloctag};
+use util::get_tunable;
+use util::super_trace;
+use util::watch_once;
+use util::with_alloctag;
 
 struct ObjectCache {
     // XXX cache key should include Bucket
@@ -305,8 +328,9 @@ where
                 if bhr.status == StatusCode::BAD_REQUEST
                     && bhr.body_as_str().contains("ExpiredToken")
                 {
-                    // Tokens are refreshed on expiry. But if a request is delivered late, the token might have expired
-                    // by the time it is processsed. We retry once in the event of this error.
+                    // Tokens are refreshed on expiry. But if a request is delivered late, the
+                    // token might have expired by the time it is processsed. We retry once in
+                    // the event of this error.
                     if !expired_token_retried {
                         info!(
                             "Retrying on ExpiredToken error; request took {} secs.",
@@ -324,9 +348,11 @@ where
                 if bhr.status == StatusCode::FORBIDDEN
                     && bhr.body_as_str().contains("RequestTimeTooSkewed")
                 {
-                    // If the request is delivered late, it is rejected by the S3 server. In the event of this error,
-                    // a request is retried. If the system time is too skewed (15 minutes for Amazon S3), requests will
-                    // get rejected repeatedly and will never succeed. To avoid this, we retry just once and then give up.
+                    // If the request is delivered late, it is rejected by the S3 server. In the
+                    // event of this error, a request is retried. If the system time is too
+                    // skewed (15 minutes for Amazon S3), requests will get rejected repeatedly
+                    // and will never succeed. To avoid this, we retry just once and then give
+                    // up.
                     if !time_skew_retried {
                         info!(
                             "Retrying on RequestTimeTooSkewed error; request took {} secs.",
@@ -365,16 +391,12 @@ where
     }
 }
 
-/// `timeout_opt` controls whether the overall request will be
-/// cancelled after a certain amount of time. This is useful
-/// for requests that have complex retry logic or need to
-/// complete quickly for correctness reasons.
-/// If a timeout is not specified, a default per-request timeout
-/// will be used. This helps avoid problems where the object
-/// store backend drops some requests on the floor. This
-/// per-request timeout will be retried indefinitely, so
-/// Err(TimeoutError) doesn't need to be handled gracefully
-/// unless `timeout_opt` is specified.
+/// `timeout_opt` controls whether the overall request will be cancelled after a certain amount
+/// of time. This is useful for requests that have complex retry logic or need to complete
+/// quickly for correctness reasons.  If a timeout is not specified, a default per-request
+/// timeout will be used. This helps avoid problems where the object store backend drops some
+/// requests on the floor. This per-request timeout will be retried indefinitely, so
+/// Err(TimeoutError) doesn't need to be handled gracefully unless `timeout_opt` is specified.
 async fn retry<F, O, E>(
     msg: &str,
     timeout_opt: Option<Duration>,
@@ -386,7 +408,8 @@ where
 {
     trace!("{}: begin", msg);
     let begin = Instant::now();
-    // Because of the `xor` here, exactly one of timeout_opt and retry_timeout_opt will be None and the other will be Some.
+    // Because of the `xor` here, exactly one of timeout_opt and retry_timeout_opt will be None and
+    // the other will be Some.
     let retry_timeout_opt = timeout_opt.xor(Some(*PER_REQUEST_TIMEOUT));
     let result = match timeout_opt {
         Some(timeout) => {
@@ -437,7 +460,8 @@ impl ObjectAccess {
         rusoto_s3::S3Client::new_with(http_client, creds, region)
     }
 
-    /// Get client using the instance metadata provider and ignoring all other sources of credentials.
+    /// Get client using the instance metadata provider and ignoring all other sources of
+    /// credentials.
     pub fn get_client_with_instance_profile(endpoint: &str, region_str: &str) -> S3Client {
         let http_client = rusoto_core::HttpClient::new().unwrap();
         let creds = InstanceMetadataProvider::new();
@@ -547,9 +571,8 @@ impl ObjectAccess {
                 .body
                 .unwrap()
                 .try_for_each(|b| {
-                    // XXX This memory copy is expensive.  Redesign this to
-                    // return a bytes::Buf that chains together all of the Bytes
-                    // provided here?
+                    // XXX This memory copy is expensive.  Redesign this to return a bytes::Buf
+                    // that chains together all of the Bytes provided here?
                     v.extend_from_slice(&b);
                     count += 1;
                     future::ready(Ok(()))
@@ -588,11 +611,10 @@ impl ObjectAccess {
             let bytes = self
                 .get_object_from_s3(key.clone(), stat_type, None)
                 .await?;
-            // Note: we *should* have the same data from S3 (in the `vec`) and in
-            // the cache, so this invalidation is normally not necessary.  However,
-            // in case a bug (or undetected RAM error) resulted in incorrect cached
-            // data, we want to invalidate the cache so that we won't get the bad
-            // cached data again.
+            // Note: we *should* have the same data from S3 (in the `vec`) and in the cache, so
+            // this invalidation is normally not necessary.  However, in case a bug (or
+            // undetected RAM error) resulted in incorrect cached data, we want to invalidate the
+            // cache so that we won't get the bad cached data again.
             Self::invalidate_cache(key);
             Ok(bytes)
         } else {
@@ -601,8 +623,8 @@ impl ObjectAccess {
     }
 
     pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
-        // Recursive async functions require Box-ing their future, even if we
-        // "tail call".  Use a loop to retry instead.
+        // Recursive async functions require Box-ing their future, even if we "tail call".  Use a
+        // loop to retry instead.
         loop {
             // XXX copying key
             if let Some(result) = self.get_object_cached(key.clone(), stat_type).await {

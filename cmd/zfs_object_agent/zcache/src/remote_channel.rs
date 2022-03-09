@@ -1,13 +1,19 @@
-use anyhow::{anyhow, Result};
-use log::*;
-use nvpair::{NvEncoding, NvList};
-use semver::Version;
 use std::thread::sleep;
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+use anyhow::anyhow;
+use anyhow::Result;
+use log::*;
+use nvpair::NvEncoding;
+use nvpair::NvList;
+use semver::Version;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
 use util::message::MessageHeader;
-use util::message::{AGENT_REQUEST_TYPE, AGENT_RESPONSE_TYPE, TYPE_VERSION};
+use util::message::AGENT_REQUEST_TYPE;
+use util::message::AGENT_RESPONSE_TYPE;
+use util::message::TYPE_VERSION;
 use util::writeln_stderr;
 
 #[derive(Debug)]

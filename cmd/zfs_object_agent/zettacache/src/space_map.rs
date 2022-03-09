@@ -1,3 +1,10 @@
+use std::sync::Arc;
+
+use futures::future;
+use futures::stream::StreamExt;
+use serde::Deserialize;
+use serde::Serialize;
+
 use crate::base_types::Extent;
 use crate::base_types::OnDisk;
 use crate::block_access::BlockAccess;
@@ -8,11 +15,6 @@ use crate::block_based_log::BlockBasedLogEntry;
 use crate::block_based_log::BlockBasedLogPhys;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
-use futures::future;
-use futures::stream::StreamExt;
-use serde::Deserialize;
-use serde::Serialize;
-use std::sync::Arc;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct MarkGenerationEntry {

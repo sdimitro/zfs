@@ -13,11 +13,12 @@ tty, significantly improving the performance of utilities that redirect their
 output to files.
 !*/
 
-use lazy_static::lazy_static;
-use libc::atexit;
 use std::io::BufWriter;
 use std::io::Write;
 use std::sync::Mutex;
+
+use lazy_static::lazy_static;
+use libc::atexit;
 
 lazy_static! {
     pub static ref STDOUT: Mutex<Box<dyn std::io::Write + Send>> = {

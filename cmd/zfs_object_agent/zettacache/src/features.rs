@@ -1,8 +1,11 @@
+use std::collections::HashMap;
+use std::fmt::Display;
+
 use lazy_static::lazy_static;
 use log::info;
 use more_asserts::assert_lt;
-use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, fmt::Display};
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 pub enum FeatureType {

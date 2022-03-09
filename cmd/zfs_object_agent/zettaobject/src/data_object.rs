@@ -1,21 +1,28 @@
-use crate::base_types::*;
-use crate::object_access::{ObjectAccess, ObjectAccessOpType};
-use anyhow::{anyhow, Context, Result};
-use bytes::Bytes;
 use core::slice;
+use std::collections::HashMap;
+use std::fmt;
+use std::fmt::Display;
+use std::iter;
+use std::mem::size_of;
+use std::time::Instant;
+
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
+use bytes::Bytes;
 use futures::stream;
 use log::*;
 use more_asserts::*;
 use rusoto_core::ByteStream;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::fmt::Display;
-use std::mem::size_of;
-use std::time::Instant;
-use std::{fmt, iter};
+use serde::Deserialize;
+use serde::Serialize;
 use util::with_alloctag;
 use util::From64;
 use zettacache::base_types::*;
+
+use crate::base_types::*;
+use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessOpType;
 
 pub const NUM_DATA_PREFIXES: u64 = 64;
 
@@ -318,7 +325,8 @@ impl DataObject {
                         .iter()
                         .map(|block| self.blocks.get(block).unwrap().clone())
                         .collect::<Vec<_>>();
-                    // By passing a ByteStream here, we avoid copying the block contents into a contiguous buffer.
+                    // By passing a ByteStream here, we avoid copying the block contents into a
+                    // contiguous buffer.
                     let iter = iter::once(header_len_bytes.clone())
                         .chain(iter::once(phys_bytes.clone()))
                         .chain(my_bytesvec.into_iter())

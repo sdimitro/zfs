@@ -1,10 +1,13 @@
-use crate::get_tunable;
-use crate::lazy_static_ptr;
-use crate::tunable::log_tunable_config;
-use crate::with_alloctag_hf;
-use crate::TrackingAllocator;
-use crate::ALLOCATOR_PRINT_MIN_ALLOCS;
-use crate::ALLOCATOR_PRINT_MIN_BYTES;
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::io::BufWriter;
+use std::io::Write;
+use std::panic;
+use std::panic::PanicInfo;
+use std::process;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread;
 
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
@@ -24,16 +27,14 @@ use signal_hook::consts::SIGUSR1;
 use signal_hook::iterator::exfiltrator::SignalOnly;
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::low_level::emulate_default_handler;
-use std::collections::VecDeque;
-use std::fs::OpenOptions;
-use std::io::BufWriter;
-use std::io::Write;
-use std::panic;
-use std::panic::PanicInfo;
-use std::process;
-use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
-use std::thread;
+
+use crate::get_tunable;
+use crate::lazy_static_ptr;
+use crate::tunable::log_tunable_config;
+use crate::with_alloctag_hf;
+use crate::TrackingAllocator;
+use crate::ALLOCATOR_PRINT_MIN_ALLOCS;
+use crate::ALLOCATOR_PRINT_MIN_BYTES;
 
 type PanicHook = Box<dyn Fn(&panic::PanicInfo) + Sync + Send>;
 

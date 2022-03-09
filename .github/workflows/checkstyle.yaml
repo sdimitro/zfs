@@ -26,6 +26,11 @@ jobs:
         flake8 --version
         scanelf --version
         shellcheck --version
+    - name: Install nightly rustfmt
+      uses: actions-rs/toolchain@v1
+      with:
+        toolchain: nightly
+        components: rustfmt
     - name: Prepare
       run: |
         ./autogen.sh

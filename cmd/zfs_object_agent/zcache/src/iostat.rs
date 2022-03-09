@@ -1,17 +1,17 @@
 //! The iostat subcommand for zcache.
 
-use crate::remote_channel::{RemoteChannel, RemoteError};
-use crate::subcommand::ZcacheSubCommand;
-use anyhow::anyhow;
-use anyhow::Result;
-use async_trait::async_trait;
-use chrono::Local;
-use clap::{Arg, SubCommand};
-use log::*;
 use std::cmp::max;
 use std::sync::atomic::Ordering::Relaxed;
 use std::thread::sleep;
 use std::time::Duration;
+
+use anyhow::anyhow;
+use anyhow::Result;
+use async_trait::async_trait;
+use chrono::Local;
+use clap::Arg;
+use clap::SubCommand;
+use log::*;
 use util::flush_stdout;
 use util::message::TYPE_ZCACHE_IOSTAT;
 use util::nice_number_time;
@@ -19,6 +19,10 @@ use util::nice_p2size;
 use util::write_stdout;
 use util::writeln_stdout;
 use util::zettacache_stats::*;
+
+use crate::remote_channel::RemoteChannel;
+use crate::remote_channel::RemoteError;
+use crate::subcommand::ZcacheSubCommand;
 
 static NAME: &str = "iostat";
 

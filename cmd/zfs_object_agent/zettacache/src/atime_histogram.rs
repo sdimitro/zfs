@@ -1,18 +1,21 @@
-use crate::base_types::Atime;
-use crate::index::IndexValue;
-use derivative::Derivative;
-use lazy_static::lazy_static;
-use log::*;
-use more_asserts::*;
-use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::iter;
 use std::mem;
 use std::ops::AddAssign;
 use std::ops::SubAssign;
+
+use derivative::Derivative;
+use lazy_static::lazy_static;
+use log::*;
+use more_asserts::*;
+use serde::Deserialize;
+use serde::Serialize;
 use util::get_tunable;
 use util::nice_p2size;
 use util::BinaryIndexTree;
+
+use crate::base_types::Atime;
+use crate::index::IndexValue;
 
 lazy_static! {
     // How many extra nodes to add to the binary index tree each time we grow it.

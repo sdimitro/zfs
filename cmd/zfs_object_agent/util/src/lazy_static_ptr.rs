@@ -1,13 +1,14 @@
+use std::collections::HashSet;
+use std::ops::Deref;
+use std::ops::DerefMut;
+pub use std::sync::atomic::AtomicPtr;
+pub use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::sync::Mutex;
+
 use derivative::Derivative;
 pub use lazy_static::lazy_static;
 pub use paste::paste;
-use std::ops::Deref;
-use std::ops::DerefMut;
-pub use std::sync::atomic::{AtomicPtr, Ordering};
-use std::{
-    collections::HashSet,
-    sync::{Arc, Mutex},
-};
 
 /// This macro is similar to `lazy_static!`, but for each static created, it creates an
 /// additional static variable with the `_PTR` suffix, which is an `AtomicPtr` to the contents of

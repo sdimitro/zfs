@@ -143,9 +143,13 @@ RUSTDIRS = cmd/zfs_object_agent
 PHONY += rustfmt
 rustfmt: $(RUSTDIRS)
 	@if type cargo-fmt > /dev/null 2>&1; then \
+		toolchain="" ; \
+		if rustup toolchain list | grep -q nightly ; then \
+			toolchain="+nightly" ; \
+		fi ; \
 		set -e ; \
 		for dir in $(RUSTDIRS) ; do \
-			cargo fmt --all --manifest-path $$dir/Cargo.toml -- --check ; \
+			cargo $$toolchain fmt --all --manifest-path $$dir/Cargo.toml -- --check ; \
 		done \
 	else \
 		echo "skipping rustfmt because cargo-fmt is not installed"; \

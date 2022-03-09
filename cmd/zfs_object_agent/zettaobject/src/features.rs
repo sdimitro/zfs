@@ -1,6 +1,11 @@
+use std::borrow::Borrow;
+use std::collections::HashSet;
+use std::fmt::Display;
+use std::hash::Hash;
+
 use lazy_static::lazy_static;
-use serde::{Deserialize, Serialize};
-use std::{borrow::Borrow, collections::HashSet, fmt::Display, hash::Hash};
+use serde::Deserialize;
+use serde::Serialize;
 
 use crate::pool::PoolOpenError;
 

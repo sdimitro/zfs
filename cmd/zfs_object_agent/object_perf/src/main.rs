@@ -1,8 +1,9 @@
+use std::time::Duration;
+
 use clap::AppSettings;
 use clap::Arg;
 use clap::SubCommand;
 use git_version::git_version;
-use std::time::Duration;
 use uuid::Uuid;
 use zettaobject::ObjectAccess;
 mod s3perf;

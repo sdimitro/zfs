@@ -3,7 +3,8 @@
 //! These structures on the zettacache side are serialized and then deserialized
 //! by the zettacache subcommands.
 
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 
 #[derive(Serialize, Deserialize)]
 pub struct DeviceEntry {

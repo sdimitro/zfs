@@ -19,11 +19,12 @@ mod superblock;
 mod zcachedb;
 mod zettacache;
 
+pub use zcachedb::DumpSlabsOptions;
+pub use zcachedb::DumpStructuresOptions;
+pub use zcachedb::ZettaCacheDBCommand;
+
 pub use crate::zettacache::InsertSource;
 pub use crate::zettacache::LookupOperation;
 pub use crate::zettacache::LookupResponse;
 pub use crate::zettacache::LookupSource;
 pub use crate::zettacache::ZettaCache;
-pub use zcachedb::DumpSlabsOptions;
-pub use zcachedb::DumpStructuresOptions;
-pub use zcachedb::ZettaCacheDBCommand;

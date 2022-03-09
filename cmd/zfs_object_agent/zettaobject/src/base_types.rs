@@ -1,6 +1,9 @@
-use serde::{Deserialize, Serialize};
 use std::fmt::*;
-use zettacache::base_types::{BlockId, OnDisk};
+
+use serde::Deserialize;
+use serde::Serialize;
+use zettacache::base_types::BlockId;
+use zettacache::base_types::OnDisk;
 
 use crate::data_object::NUM_DATA_PREFIXES;
 

@@ -1,8 +1,14 @@
-use crate::base_types::*;
-use crate::block_access::BlockAccess;
-use crate::block_access::EncodeType;
-use crate::extent_allocator::ExtentAllocator;
-use crate::extent_allocator::ExtentAllocatorBuilder;
+use std::cmp::min;
+use std::collections::BTreeMap;
+use std::fmt::Debug;
+use std::marker::PhantomData;
+use std::ops::Add;
+use std::ops::Bound::*;
+use std::ops::Sub;
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::time::Instant;
+
 use anyhow::Context;
 use futures::future::join;
 use futures::stream;
@@ -14,17 +20,8 @@ use log::*;
 use lru::LruCache;
 use more_asserts::*;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use std::cmp::min;
-use std::collections::BTreeMap;
-use std::fmt::Debug;
-use std::marker::PhantomData;
-use std::ops::Add;
-use std::ops::Bound::*;
-use std::ops::Sub;
-use std::sync::Arc;
-use std::sync::Mutex;
-use std::time::Instant;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
 use util::get_tunable;
 use util::nice_p2size;
@@ -34,6 +31,12 @@ use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
 use util::From64;
 use util::LockSet;
+
+use crate::base_types::*;
+use crate::block_access::BlockAccess;
+use crate::block_access::EncodeType;
+use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
 
 lazy_static! {
     // ENTRIES_PER_CHUNK is chosen so that chunks of the Index will be 8KB on disk, with a
@@ -484,7 +487,8 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
     ) -> Self {
         // load in summary from disk
         let begin = Instant::now();
-        // XXX how to measure memory usage, since it's gathered async?  Copy it later?  Or just rely on the log statement below?
+        // XXX how to measure memory usage, since it's gathered async?  Copy it later?  Or just rely
+        // on the log statement below?
         let chunks = phys
             .chunk_summary
             .iter(block_access.clone())
@@ -572,7 +576,8 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             .binary_search_by_key(key, |chunk_summary| f(&chunk_summary.first_entry))
         {
             Ok(index) => ChunkId(index as u64),
-            Err(index) if index == 0 => return (None, false), // key is before the first chunk, therefore not present
+            // key is before the first chunk, therefore not present
+            Err(index) if index == 0 => return (None, false),
             Err(index) => ChunkId(index as u64 - 1),
         };
 

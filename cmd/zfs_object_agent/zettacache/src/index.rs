@@ -1,9 +1,8 @@
-use crate::atime_histogram::AtimeHistogramPhys;
-use crate::base_types::*;
-use crate::block_access::*;
-use crate::block_based_log::*;
-use crate::extent_allocator::ExtentAllocator;
-use crate::extent_allocator::ExtentAllocatorBuilder;
+use std::cmp::max;
+use std::mem::size_of;
+use std::num::NonZeroU64;
+use std::sync::Arc;
+
 use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
@@ -11,14 +10,18 @@ use more_asserts::*;
 use safer_ffi::prelude::*;
 use serde::de::Error;
 use serde::de::Visitor;
-use serde::{Deserialize, Serialize};
-use std::cmp::max;
-use std::mem::size_of;
-use std::num::NonZeroU64;
-use std::sync::Arc;
+use serde::Deserialize;
+use serde::Serialize;
 use util::message::slice_to_struct;
 use util::message::struct_to_slice;
 use util::writeln_stdout;
+
+use crate::atime_histogram::AtimeHistogramPhys;
+use crate::base_types::*;
+use crate::block_access::*;
+use crate::block_based_log::*;
+use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[repr(packed)]

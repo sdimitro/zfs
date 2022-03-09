@@ -1,3 +1,13 @@
+use std::collections::BTreeSet;
+use std::error::Error;
+use std::fs;
+use std::fs::File;
+use std::io::prelude::*;
+use std::io::Read;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
 use ::util::writeln_stderr;
 use ::util::writeln_stdout;
 use chrono::prelude::*;
@@ -17,14 +27,6 @@ use rusoto_credential::InstanceMetadataProvider;
 use rusoto_credential::ProfileProvider;
 use rusoto_credential::ProvideAwsCredentials;
 use rusoto_s3::*;
-use std::collections::BTreeSet;
-use std::error::Error;
-use std::fs;
-use std::fs::File;
-use std::io::prelude::*;
-use std::io::Read;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
 use tokio::io::AsyncReadExt;
 use zettacache::base_types::*;
 use zettaobject::base_types::*;

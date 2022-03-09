@@ -1,22 +1,28 @@
-use crate::base_types::*;
-use crate::object_access::{ObjectAccess, ObjectAccessOpType};
-use crate::pool::PoolSharedState;
-use anyhow::{Context, Result};
+use std::marker::PhantomData;
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::Context;
+use anyhow::Result;
 use futures::future;
 use futures::future::join;
 use futures::future::join_all;
-use futures::stream::{self, StreamExt};
+use futures::stream;
+use futures::stream::StreamExt;
 use futures_core::Stream;
 use lazy_static::lazy_static;
 use log::*;
 use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
-use std::marker::PhantomData;
-use std::sync::Arc;
-use std::time::Instant;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::task::JoinHandle;
 use util::get_tunable;
 use zettacache::base_types::*;
+
+use crate::base_types::*;
+use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessOpType;
+use crate::pool::PoolSharedState;
 
 lazy_static! {
     pub static ref ENTRIES_PER_OBJECT: usize = get_tunable("entries_per_object", 100_000);

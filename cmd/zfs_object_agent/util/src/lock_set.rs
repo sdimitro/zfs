@@ -1,11 +1,13 @@
-use crate::super_trace;
-use crate::watch_once;
-use dashmap::mapref::entry::Entry;
-use dashmap::DashMap;
-use log::*;
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::sync::Arc;
+
+use dashmap::mapref::entry::Entry;
+use dashmap::DashMap;
+use log::*;
+
+use crate::super_trace;
+use crate::watch_once;
 
 #[derive(Default, Clone)]
 pub struct LockSet<V: Hash + Eq + Copy + Debug> {

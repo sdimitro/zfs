@@ -1,4 +1,56 @@
-use crate::atime_histogram::{AtimeHistogram, AtimeHistogramPhys};
+use std::collections::btree_map;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::convert::TryFrom;
+use std::mem;
+use std::ops::Bound::Excluded;
+use std::ops::Bound::Included;
+use std::ops::Bound::Unbounded;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use anyhow::Result;
+use bytes::Bytes;
+use conv::ConvUtil;
+use derivative::Derivative;
+use either::Either;
+use futures::future;
+use futures::stream::*;
+use futures::Future;
+use lazy_static::lazy_static;
+use log::*;
+use lru::LruCache;
+use more_asserts::*;
+use rand::Rng;
+use serde::Deserialize;
+use serde::Serialize;
+use sysinfo::System;
+use sysinfo::SystemExt;
+use tokio::sync::mpsc;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::time::sleep_until;
+use tokio::time::timeout_at;
+use util::get_tunable;
+use util::lock_non_send;
+use util::maybe_die_with;
+use util::nice_p2size;
+use util::super_trace;
+use util::with_alloctag;
+use util::with_alloctag_hf;
+use util::writeln_stderr;
+use util::writeln_stdout;
+use util::zettacache_stats::CacheStatCounter::*;
+use util::zettacache_stats::*;
+use util::AlignedBytes;
+use util::From64;
+use util::LockSet;
+use util::LockedItem;
+use uuid::Uuid;
+
+use crate::atime_histogram::AtimeHistogram;
+use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_allocator::zcachedb_dump_slabs;
@@ -20,51 +72,6 @@ use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
-use anyhow::Result;
-use bytes::Bytes;
-use conv::ConvUtil;
-use derivative::Derivative;
-use either::Either;
-use futures::future;
-use futures::stream::*;
-use futures::Future;
-use lazy_static::lazy_static;
-use log::*;
-use lru::LruCache;
-use more_asserts::*;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use std::collections::btree_map;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::mem;
-use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
-use sysinfo::System;
-use sysinfo::SystemExt;
-use tokio::sync::mpsc;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::Semaphore;
-use tokio::time::{sleep_until, timeout_at};
-use util::get_tunable;
-use util::lock_non_send;
-use util::maybe_die_with;
-use util::nice_p2size;
-use util::super_trace;
-use util::with_alloctag;
-use util::with_alloctag_hf;
-use util::writeln_stderr;
-use util::writeln_stdout;
-use util::zettacache_stats::CacheStatCounter::*;
-use util::zettacache_stats::*;
-use util::AlignedBytes;
-use util::From64;
-use util::LockSet;
-use util::LockedItem;
-use uuid::Uuid;
 
 lazy_static! {
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
@@ -74,7 +81,8 @@ lazy_static! {
     // we should be able to stay within 6% space utilization. An additional 4% is reserved for
     // the meta data for block storage (the block allocator's space maps).
     static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 10.0);
-    // This value needs to stay < 200 to safely avoid using up all available meta data space in the cache
+    // This value needs to stay < 200 to safely avoid using up all available meta data space in
+    // the cache
     static ref GHOST_CACHE_SIZE_PCT: u64 = std::cmp::min(get_tunable("ghost_cache_size_pct", 100), 200);
 
     // In order to keep enough free space available in the cache to ingest data during a merge,
@@ -86,10 +94,10 @@ lazy_static! {
     static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 97);
     static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 98);
 
-    // Keep the total footprint for the pending changes and index cache data at about 12% of total memory.
-    // The above tuning for eviction provides a 1TB "buffer" for insertions (on a 100TB config) during a
-    // merge. Using 5% for pending changes provides sufficient memory to absorb the same 1TB of insertions
-    // (on a 128GB config).
+    // Keep the total footprint for the pending changes and index cache data at about 12% of
+    // total memory.  The above tuning for eviction provides a 1TB "buffer" for insertions (on a
+    // 100TB config) during a merge. Using 5% for pending changes provides sufficient memory to
+    // absorb the same 1TB of insertions (on a 128GB config).
     static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 5.0);
     static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 7);
 
@@ -99,19 +107,21 @@ lazy_static! {
 
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
 
-    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The "speculative"
-    // buffer is for blocks being written. Note that ingesting a single block from an object can result
-    // in "inflation" since the entire object must be held in memory. But this is mitigated by the fact
-    // that we typically ingest the entire object on writes, and make a copy of the block to ingest on
-    // read (so we don't hold the object).
+    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The
+    // "speculative" buffer is for blocks being written. Note that ingesting a single block from
+    // an object can result in "inflation" since the entire object must be held in memory. But
+    // this is mitigated by the fact that we typically ingest the entire object on writes, and
+    // make a copy of the block to ingest on read (so we don't hold the object).
     static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
     static ref CACHE_WAIT_INSERT: bool = get_tunable("cache_wait_insert", false);
 
     static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
 
-    // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size instances/disks on gp3; because gp3 has ~1ms latency for each operation,
-    // and each closure this limit applies to, performs 2 operations (one read, and one write). Additionally, this is half the limit of outstanding writes.
+    // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size
+    // instances/disks on gp3; because gp3 has ~1ms latency for each operation, and each closure
+    // this limit applies to, performs 2 operations (one read, and one write). Additionally, this
+    // is half the limit of outstanding writes.
     static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = get_tunable("cache_rebalance_concurrency_limit", 8);
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
@@ -294,10 +304,12 @@ impl RebalanceState {
             if old.contains(&extent) {
                 match new {
                     Some(new_location) => {
-                        // This represents the offset of the passed in extent, into the extent that was moved as part
-                        // of the rebalance operation. For example, multiple contiguously allocated blocks maybe have
-                        // been moved via a single extent. Thus, to remap one of those blocks' to it's new location on
-                        // disk, we need this offset (this offset is maintained when the blocks are copied).
+                        // This represents the offset of the passed in extent, into the extent
+                        // that was moved as part of the rebalance operation. For example,
+                        // multiple contiguously allocated blocks maybe have been moved via a
+                        // single extent. Thus, to remap one of those blocks' to it's new
+                        // location on disk, we need this offset (this offset is maintained when
+                        // the blocks are copied).
                         let offset = extent.location - old.location;
 
                         return Some(DiskLocation::new(
@@ -306,17 +318,19 @@ impl RebalanceState {
                         ));
                     }
                     None => {
-                        // This means the extent was part of a rebalance operation, but when attempting to remap
-                        // the old location to a new location, the allocation failed. Thus, the old extent does not
-                        // have new location, and it will be invalid after the rebalance completes.
+                        // This means the extent was part of a rebalance operation, but when
+                        // attempting to remap the old location to a new location, the allocation
+                        // failed. Thus, the old extent does not have new location, and it will
+                        // be invalid after the rebalance completes.
                         return None;
                     }
                 }
             }
         }
 
-        // If we reach this point, we didn't find an extent in the mapping that contains the passed in extent, which means
-        // the passed in extent was not remapped; thus, we simply return the old extent's location.
+        // If we reach this point, we didn't find an extent in the mapping that contains the passed
+        // in extent, which means the passed in extent was not remapped; thus, we simply
+        // return the old extent's location.
         Some(extent.location)
     }
 }
@@ -370,9 +384,9 @@ impl MergeState {
         );
     }
 
-    /// This function runs in an async task to merge a set of pending changes with the current on-disk
-    /// index in order to produce a new up-to-date on-disk index. It sends periodic "progress updates"
-    /// (including block frees) to the checkpoint task.
+    /// This function runs in an async task to merge a set of pending changes with the current
+    /// on-disk index in order to produce a new up-to-date on-disk index. It sends periodic
+    /// "progress updates" (including block frees) to the checkpoint task.
     async fn merge_task(
         &self,
         tx: mpsc::Sender<IndexMessage>,
@@ -380,8 +394,8 @@ impl MergeState {
         start_key: Option<IndexKey>,
         block_access: &BlockAccess,
     ) {
-        // We don't currently support concurrent free()'s while the rebalance is in-progress. Thus, we
-        // need to do the rebalance first, prior to moving forward with the merge.
+        // We don't currently support concurrent free()'s while the rebalance is in-progress. Thus,
+        // we need to do the rebalance first, prior to moving forward with the merge.
         self.rebalance(block_access).await;
 
         let begin = Instant::now();
@@ -423,7 +437,8 @@ impl MergeState {
             }
 
             /// As entries from the old index are processed (possibly added to the new index),
-            /// they are now "obsolete" in the old index, so need to be removed from the atime histogram.
+            /// they are now "obsolete" in the old index, so need to be removed from the atime
+            /// histogram.
             fn obsolete(&mut self, entry: IndexEntry) {
                 self.obsoleted.insert(entry.value);
             }
@@ -470,10 +485,10 @@ impl MergeState {
                     if let Some(rebalance) = &state.rebalance {
                         let remapped_location = rebalance.remap(extent);
                         if entry.value.location() != remapped_location {
-                            // The data for this entry has been moved due to a cache rebalance operation.
-                            // Update the entry using the new location for the data. Note: if rebalance
-                            // was unable to move the data (evicting the entry instead) the new location
-                            // will be None.
+                            // The data for this entry has been moved due to a cache rebalance
+                            // operation. Update the entry using the new location for the data.
+                            // Note: if rebalance was unable to move the data (evicting the entry
+                            // instead) the new location will be None.
                             entry.value.set_location(remapped_location);
                             self.cache_updates.push(entry);
                         }
@@ -585,7 +600,8 @@ impl MergeState {
         while let Some(chunk) = index_stream.next().await {
             for &entry in chunk.entries() {
                 // If the next index is already "started", advance the old index to the start point
-                // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
+                // XXX - would be nice to simply *start* from the start_key, rather than iterate up
+                // to it
                 if let Some(start_key) = start_key {
                     if entry.key <= start_key {
                         super_trace!("skipping index entry: {:?}", entry.key);
@@ -666,7 +682,8 @@ impl MergeState {
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
-                            // We shouldn't have skipped any, because there has to be a corresponding Index entry
+                            // We shouldn't have skipped any, because there has to be a
+                            // corresponding Index entry
                             assert_gt!(pc_key, entry.key);
                             progress.ingest(self, entry, IngestSource::Index).await;
                         }
@@ -695,7 +712,8 @@ impl MergeState {
             // that we can print them out when failing below.
             pending_changes_iter.next();
         }
-        // Other pending changes refer to existing index entries and therefore should have been processed above
+        // Other pending changes refer to existing index entries and therefore should have been
+        // processed above
         assert!(
             pending_changes_iter.peek().is_none(),
             "next={:?}",
@@ -769,7 +787,8 @@ struct ZettaCacheState {
     // need the lock inside it.  But hopefully we split up the big State lock
     // and then this is useful.  Same goes for block_access.
     extent_allocator: Arc<ExtentAllocator>,
-    atime_histogram: AtimeHistogram, // includes pending_changes, including AtimeUpdate which is not logged
+    // includes pending_changes, including AtimeUpdate which is not logged
+    atime_histogram: AtimeHistogram,
     size_histogram: SizeHistogramPhys,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
@@ -841,7 +860,8 @@ impl ZettaCache {
             .unwrap()
             .range(0, checkpoint_size(block_access));
 
-        // metadata is stored on each disk, its size a percent of that disk, following the checkpoint (if any)
+        // metadata is stored on each disk, its size a percent of that disk, following the
+        // checkpoint (if any)
         let metadata_capacity = new_capacity
             .iter()
             .map(|&extent| {
@@ -948,11 +968,12 @@ impl ZettaCache {
         // Even when the cache is empty LruCache pre-allocates buckets inducing an overhead that is
         // separate from the actual per entry overhead yet tied to the number of entries that it can
         // hold.  The cache overhead consists of a tiny constant overhead for some of its metadata
-        // tracking (e.g. capacity, hasher fields, etc..) and per-entry overhead. At the time of this
-        // writing the LruCache uses a KeyRef<K> (8 bytes) for the key, and a Box<LruEntry> (8 bytes)
-        // as the value. Additionally assuming that HashBrown is used as the underlying HashMap we
-        // expect 8 + 1 bytes of overhead per entry. That would imply that the overhead be close to
-        // 3 * sizeof(usize) per entry but empirically we've found that it is closer to 5 * sizeof(usize).
+        // tracking (e.g. capacity, hasher fields, etc..) and per-entry overhead. At the time of
+        // this writing the LruCache uses a KeyRef<K> (8 bytes) for the key, and a
+        // Box<LruEntry> (8 bytes) as the value. Additionally assuming that HashBrown is
+        // used as the underlying HashMap we expect 8 + 1 bytes of overhead per entry. That
+        // would imply that the overhead be close to 3 * sizeof(usize) per entry but
+        // empirically we've found that it is closer to 5 * sizeof(usize).
         let index_cache_overhead_bytes = 5 * mem::size_of::<usize>();
 
         let index_cache_cap =
@@ -1101,7 +1122,8 @@ impl ZettaCache {
         )
         .await;
 
-        // Note, the old_index histogram covers only the part that doesn't overlap with the new_index.
+        // Note, the old_index histogram covers only the part that doesn't overlap with the
+        // new_index.
         let mut atime_histogram_phys = old_index.atime_histogram().clone();
         if let Some(merge_progress) = &checkpoint.merge_progress {
             assert_eq!(old_index.trim_key(), merge_progress.new_index.last_key());
@@ -1138,20 +1160,24 @@ impl ZettaCache {
         let system_memory = usize::from64(sysinfo.total_memory() * 1024);
 
         // Calculate a maximum size for the pending_changes as a percentage of system memory
-        // Note that during a merge, this space must also accomodate the space used by old_pending_changes
+        // Note that during a merge, this space must also accomodate the space used by
+        // old_pending_changes
         let pending_changes_max_bytes = (*PENDING_CHANGES_MEM_PCT * system_memory as f64)
             .approx_as::<usize>()
             .unwrap()
             / 100;
-        // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data entries
+        // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data
+        // entries
         let pending_changes_entries_bytes = pending_changes_max_bytes * 65 / 100;
         // Each entry in the BTreeMap is comprised of a key (IndexKey) and a value (PendingChange)
         let pending_changes_entry_size =
             mem::size_of::<IndexKey>() + mem::size_of::<PendingChange>();
-        // Limit the number of pending change entries to not exceed the amount of memory being made available
+        // Limit the number of pending change entries to not exceed the amount of memory being made
+        // available
         let pending_changes_cap = pending_changes_entries_bytes / pending_changes_entry_size;
-        // In order to stay inside this desired cap, we need to be triggering a new merge before we are more
-        // than half way to the cap. Trigger at about 1/3 to provide some slop space.
+        // In order to stay inside this desired cap, we need to be triggering a new merge before we
+        // are more than half way to the cap. Trigger at about 1/3 to provide some slop
+        // space.
         let pending_changes_trigger = pending_changes_cap / 3;
         info!(
             "pending changes max length set to {} entries [{}% of {} = {} and entry size {}]",
@@ -1286,7 +1312,8 @@ impl ZettaCache {
                         if let Some(PendingChange::Insert(old_value)) =
                             pending_changes.insert(key, PendingChange::Insert(value))
                         {
-                            // We are replacing an old value, adjust the histogram to reflect the change
+                            // We are replacing an old value, adjust the histogram to reflect the
+                            // change
                             atime_histogram.remove(old_value);
                         }
                         super_trace!("insert {:?} {:?}", key, value);
@@ -1306,12 +1333,13 @@ impl ZettaCache {
         pending_changes
     }
 
-    /// The checkpoint task is primarily responsible for writing out a persistent checkpoint every 60s.
-    /// It is also responsible for kicking off a merge task every time we accumulate enough pending change.
-    /// While a merge task is running, this task listens for and processes eviction requests from the merge task.
-    /// The active merge task state is also captured in each checkpoint so that it may be resumed from the
-    /// checkpoint if necessary. On resume the merge task is restarted during cache open and a channel to
-    /// task and the index phys for the current progress are passed in.
+    /// The checkpoint task is primarily responsible for writing out a persistent checkpoint every
+    /// 60s. It is also responsible for kicking off a merge task every time we accumulate enough
+    /// pending change. While a merge task is running, this task listens for and processes
+    /// eviction requests from the merge task. The active merge task state is also captured in
+    /// each checkpoint so that it may be resumed from the checkpoint if necessary. On resume
+    /// the merge task is restarted during cache open and a channel to task and the index phys
+    /// for the current progress are passed in.
     async fn checkpoint_task(
         &self,
         mut merging: Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)>,
@@ -1377,9 +1405,11 @@ impl ZettaCache {
                                 // because they could not be remapped.
                                 for entry in progress.cache_updates.into_iter() {
                                     match entry.value.location() {
-                                        // It's possible the key wasn't already in the cache, so this may add or update the key.
+                                        // It's possible the key wasn't already in the cache, so
+                                        // this may add or update the key.
                                         Some(_) => state.index_cache.put(entry.key, entry.value),
-                                        // It's possible the key isn't in the cache; .pop() doesn't fail in that case.
+                                        // It's possible the key isn't in the cache; .pop() doesn't
+                                        // fail in that case.
                                         None => state.index_cache.pop(&entry.key),
                                     };
                                 }
@@ -1666,8 +1696,9 @@ impl ZettaCache {
                 .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
             Some(permit)
         } else {
-            // The permit should be dropped when the write to disk completes. It serves to limit the number
-            // of insert()'s that we can buffer before dropping (ignoring) insertion requests.
+            // The permit should be dropped when the write to disk completes. It serves to limit the
+            // number of insert()'s that we can buffer before dropping (ignoring)
+            // insertion requests.
             match buffer
                 .clone()
                 .try_acquire_many_owned(u32::try_from(bytes).unwrap())
@@ -1834,14 +1865,17 @@ impl ZettaCache {
         if let LookupResponse::Present((cache_bytes, locked_key)) =
             self.lookup(guid, block, LookupSource::Write).await
         {
-            // For (hopefully) obvious reasons, we only need to do the heal when the bytes contained in the cache differ
-            // from the bytes contained in the object store. The bytes contained in the object store are always preferred
-            // over the bytes contained in the cache; we assume the bytes passed were retrieved from the object store.
+            // For (hopefully) obvious reasons, we only need to do the heal when the bytes contained
+            // in the cache differ from the bytes contained in the object store. The
+            // bytes contained in the object store are always preferred over the bytes
+            // contained in the cache; we assume the bytes passed were retrieved from the object
+            // store.
             if *cache_bytes != *object_bytes {
                 self.stats.track_count(HealedBlocks);
                 debug!("Healing cache: {:?}", locked_key.key());
-                // Note: this will result in a second insert for the same key in the index. This will be resolved either
-                // in the insert code (if the first insert is in pending_changes) or later during the next merge.
+                // Note: this will result in a second insert for the same key in the index. This
+                // will be resolved either in the insert code (if the first insert
+                // is in pending_changes) or later during the next merge.
                 self.insert(
                     locked_key,
                     object_bytes.len(),
@@ -2295,9 +2329,10 @@ impl ZettaCacheState {
             btree_map::Entry::Vacant(ve) => {
                 // Only in Index, not pending_changes.
                 if pending_len < self.pending_changes_cap {
-                    // Perserve the original atime (from the Index) in case we "replace" this block and
-                    // need to reset the histogram for the original block (i.e. when we find the old block
-                    // during the merge, we can decrement the atime histogram)
+                    // Perserve the original atime (from the Index) in case we "replace" this block
+                    // and need to reset the histogram for the original block
+                    // (i.e. when we find the old block during the merge, we can
+                    // decrement the atime histogram)
                     super_trace!(
                         "adding PendingChanges::UpdateAtime({:?}) for {:?}",
                         new_value,
@@ -2646,8 +2681,8 @@ impl ZettaCacheState {
         mut next_index: IndexRun,
     ) -> mpsc::Receiver<MergeMessage> {
         // The checkpoint task will be constantly reading from the channel, so we don't really need
-        // much of a buffer here. We use 100 because we might accumulate some messages while actually
-        // flushing out the checkpoint.
+        // much of a buffer here. We use 100 because we might accumulate some messages while
+        // actually flushing out the checkpoint.
         let (index_tx, checkpoint_rx) = mpsc::channel(100);
         let (merge_tx, index_rx) = mpsc::channel(100);
 
@@ -2666,7 +2701,8 @@ impl ZettaCacheState {
                 .next_index_task(index_rx, index_tx.clone(), &mut next_index)
                 .await;
 
-            // We drop this before sending the Complete message, so that rotate_index() can unwrap the Arc.
+            // We drop this before sending the Complete message, so that rotate_index() can unwrap
+            // the Arc.
             drop(merge);
             // XXX - wait for the merge_task to complete as well?
 
@@ -2856,17 +2892,20 @@ impl ZettaCacheState {
             for (key, pc) in self.pending_changes.iter_mut() {
                 match pc {
                     PendingChange::Insert(value) => {
-                        // Inserts in the "pending changes" list will never be moved as part of a rebalance.
+                        // Inserts in the "pending changes" list will never be moved as part of a
+                        // rebalance.
                         let extent = value.extent().unwrap();
                         assert_eq!(rebalance.remap(extent).unwrap(), extent.location);
                     }
                     PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                        // If a lookup occurs on a block that is being moved as part of rebalancing, the lookup will
-                        // return the "old" location of the block (which is valid while we are merging) and will be
-                        // stored in an UpdateAtime record in pending_changes. Now that the merge is complete, we need
-                        // to either: 1) remap these old locations to their "new" rebalanced locations, or 2) remove
-                        // the UpdateAtime due to rebalancing having had to evict the entry from the cache (i.e. due
-                        // to an allocation failure when attempting to allocate the new disk location).
+                        // If a lookup occurs on a block that is being moved as part of
+                        // rebalancing, the lookup will return the "old" location of the block
+                        // (which is valid while we are merging) and will be stored in an
+                        // UpdateAtime record in pending_changes. Now that the merge is complete,
+                        // we need to either: 1) remap these old locations to their "new"
+                        // rebalanced locations, or 2) remove the UpdateAtime due to rebalancing
+                        // having had to evict the entry from the cache (i.e. due to an
+                        // allocation failure when attempting to allocate the new disk location).
                         match rebalance.remap(value.extent().unwrap()) {
                             Some(location) => {
                                 value.set_location(Some(location));

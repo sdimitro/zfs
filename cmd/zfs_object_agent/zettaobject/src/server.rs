@@ -7,28 +7,34 @@
 //! modify the connection-specific state).  See the method-level documentation
 //! for more details.
 
-use anyhow::anyhow;
-use anyhow::Result;
-use bytes::Bytes;
-use futures::{future, Future, FutureExt};
-use lazy_static::lazy_static;
-use log::*;
-use nvpair::{NvEncoding, NvList};
-use safer_ffi::prelude::*;
-use semver::Version;
-use semver::VersionReq;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use anyhow::anyhow;
+use anyhow::Result;
+use bytes::Bytes;
+use futures::future;
+use futures::Future;
+use futures::FutureExt;
+use lazy_static::lazy_static;
+use log::*;
+use nvpair::NvEncoding;
+use nvpair::NvList;
+use safer_ffi::prelude::*;
+use semver::Version;
+use semver::VersionReq;
+use serde::Serialize;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::io::BufWriter;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
 use util::get_tunable;
 use util::lazy_static_ptr;

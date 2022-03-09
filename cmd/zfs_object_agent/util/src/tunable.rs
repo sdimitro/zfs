@@ -1,8 +1,11 @@
-use config::{Config, ConfigError};
+use std::fmt::Debug;
+use std::sync::RwLock;
+
+use config::Config;
+use config::ConfigError;
 use lazy_static::lazy_static;
 use log::*;
 use serde::Deserialize;
-use std::{fmt::Debug, sync::RwLock};
 
 lazy_static! {
     pub static ref CONFIG: RwLock<Config> = Default::default();

@@ -1,18 +1,21 @@
-use crate::base_types::DiskId;
-use crate::base_types::Extent;
-use lazy_static::lazy_static;
-use log::*;
-use more_asserts::*;
-use serde::{Deserialize, Serialize};
 use std::cmp::max;
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::mem;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
+
+use lazy_static::lazy_static;
+use log::*;
+use more_asserts::*;
+use serde::Deserialize;
+use serde::Serialize;
 use util::get_tunable;
 use util::iter_wrapping;
 use util::RangeTree;
+
+use crate::base_types::DiskId;
+use crate::base_types::Extent;
 
 lazy_static! {
     // XXX maybe this is wasteful for the smaller logs?

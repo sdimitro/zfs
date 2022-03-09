@@ -21,7 +21,8 @@ impl<T: Clone> Sender<T> {
 }
 
 impl<T: Clone> Receiver<T> {
-    /// Receive value, consuming this Receiver.  Returns an error if the Sender was dropped before calling .send().
+    /// Receive value, consuming this Receiver.  Returns an error if the Sender was dropped before
+    /// calling .send().
     pub async fn recv(mut self) -> Result<T, watch::error::RecvError> {
         match self.0.changed().await {
             // Unwrap is safe because it's only changed to Some.

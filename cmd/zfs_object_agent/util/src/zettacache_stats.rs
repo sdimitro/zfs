@@ -12,22 +12,30 @@
 // The simplicity of having only one set of structs seems to outweigh the cost of
 // having to maintain two sets of structs and the minor inconvenience of having to
 // dereference the Atomic values to access them.
-//
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 
-use crate::write_stdout;
-use crate::{nice_number_count, nice_number_time, nice_p2size};
-use arr_macro::arr;
-use enum_map::{Enum, EnumMap};
-use num_traits::cast::ToPrimitive;
-use serde::{Deserialize, Serialize};
-use std::fmt::{Display, Formatter};
-use std::ops::{AddAssign, Sub};
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::ops::AddAssign;
+use std::ops::Sub;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::atomic::Ordering::Relaxed;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
+
+use arr_macro::arr;
+use enum_map::Enum;
+use enum_map::EnumMap;
+use num_traits::cast::ToPrimitive;
+use serde::Deserialize;
+use serde::Serialize;
 use uuid::Uuid;
+
+use crate::nice_number_count;
+use crate::nice_number_time;
+use crate::nice_p2size;
+use crate::write_stdout;
 
 /// The zettacache disk I/O types that are collected and displayed for each disk.
 #[derive(Debug, Enum, Copy, Clone, Serialize, Deserialize)]

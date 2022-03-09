@@ -1,10 +1,10 @@
+use std::cmp::Ordering;
+use std::collections::btree_map::Iter;
+use std::collections::BTreeMap;
+use std::iter::Fuse;
+use std::ops::Range;
+
 use more_asserts::*;
-use std::{
-    cmp::Ordering,
-    collections::{btree_map::Iter, BTreeMap},
-    iter::Fuse,
-    ops::Range,
-};
 
 #[derive(Default)]
 pub struct BitRange {

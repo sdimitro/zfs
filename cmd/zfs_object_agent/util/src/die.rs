@@ -12,19 +12,20 @@
 //! call sites.  Therefore you don't need to worry about adding a high-frequency
 //! caller and having it "always" die on that caller.
 
-use crate::get_tunable;
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::fmt::Display;
+use std::panic::Location;
+use std::path::Path;
+use std::sync::RwLock;
+use std::time::Duration;
+use std::time::Instant;
+
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
-use std::{
-    collections::HashSet,
-    ffi::OsStr,
-    fmt::Display,
-    panic::Location,
-    path::Path,
-    sync::RwLock,
-    time::{Duration, Instant},
-};
+
+use crate::get_tunable;
 
 lazy_static! {
     // RUN_TIME is a random amount between 0 and 2x the configured MTBF (Mean

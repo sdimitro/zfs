@@ -1,8 +1,12 @@
-use crate::{OAError, ObjectAccess, ObjectAccessOpType};
+use std::time::Duration;
+
 use rand::Rng;
 use rusoto_core::RusotoError;
 use serde::Deserialize;
-use std::time::Duration;
+
+use crate::OAError;
+use crate::ObjectAccess;
+use crate::ObjectAccessOpType;
 
 #[derive(Debug, Deserialize)]
 struct Error {
@@ -34,7 +38,8 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
                     error.code, error.message
                 )),
                 Err(_) => {
-                    // If the error string can not be deserialized as xml, return the enterity of the error back.
+                    // If the error string can not be deserialized as xml, return the enterity of
+                    // the error back.
                     Err(format!("Connectivity test failed: {}", bhr.body_as_str()))
                 }
             }

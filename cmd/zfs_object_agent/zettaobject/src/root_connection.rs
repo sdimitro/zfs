@@ -1,15 +1,7 @@
-use crate::base_types::*;
-use crate::features::FeatureError;
-use crate::object_access::{ObjectAccess, StatMapValue};
-use crate::pool::*;
-use crate::pool_destroy;
-use crate::server::return_result;
-use crate::server::ConnectionState;
-use crate::server::HandlerReturn;
-use crate::server::Responder;
-use crate::server::SerialHandlerReturn;
-use crate::server::Server;
-use crate::server::{handler_return_ok, FailureMessage};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::sync::Arc;
+
 use anyhow::anyhow;
 use anyhow::Result;
 use bytes::Bytes;
@@ -21,16 +13,29 @@ use nvpair::NvList;
 use semver::Version;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::sync::Arc;
+use util::get_tunable;
 use util::maybe_die_with;
 use util::message::*;
+use util::super_trace;
 use util::AlignedVec;
-use util::{get_tunable, super_trace};
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
+
+use crate::base_types::*;
+use crate::features::FeatureError;
+use crate::object_access::ObjectAccess;
+use crate::object_access::StatMapValue;
+use crate::pool::*;
+use crate::pool_destroy;
+use crate::server::handler_return_ok;
+use crate::server::return_result;
+use crate::server::ConnectionState;
+use crate::server::FailureMessage;
+use crate::server::HandlerReturn;
+use crate::server::Responder;
+use crate::server::SerialHandlerReturn;
+use crate::server::Server;
 
 lazy_static! {
     pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
@@ -315,7 +320,8 @@ impl RootConnectionState {
         #[derivative(Debug)]
         struct EndTxgRequest<'a> {
             #[serde(with = "serde_bytes")]
-            // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid filling the log unnecessarily.
+            // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid
+            // filling the log unnecessarily.
             #[derivative(Debug = "ignore")]
             uberblock: &'a [u8],
             #[serde(with = "serde_bytes")]
@@ -426,8 +432,8 @@ impl RootConnectionState {
             let mut data = pool.read_block(BlockId(request.block), heal).await;
 
             //
-            // If the cache has the wrong content/size for this BlockId, then proactively do a healing read
-            // from the object store.
+            // If the cache has the wrong content/size for this BlockId, then proactively do a
+            // healing read from the object store.
             //
             if !heal && data.len() != request.size as usize {
                 debug!(

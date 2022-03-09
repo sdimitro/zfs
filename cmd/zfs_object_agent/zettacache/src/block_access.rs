@@ -1,6 +1,14 @@
-use crate::base_types::DiskId;
-use crate::base_types::DiskLocation;
-use crate::base_types::Extent;
+use std::fmt::Debug;
+use std::fmt::Display;
+use std::fs::File;
+use std::io::Read;
+use std::io::Write;
+use std::os::unix::prelude::AsRawFd;
+use std::os::unix::prelude::OpenOptionsExt;
+use std::path::Path;
+use std::sync::atomic::Ordering;
+use std::time::Instant;
+
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
@@ -15,24 +23,20 @@ use num::NumCast;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
-use std::fmt::Debug;
-use std::fmt::Display;
-use std::fs::File;
-use std::io::Read;
-use std::io::Write;
-use std::os::unix::prelude::AsRawFd;
-use std::os::unix::prelude::OpenOptionsExt;
-use std::path::Path;
-use std::sync::atomic::Ordering;
-use std::time::Instant;
 use tokio::sync::oneshot;
 use util::get_tunable;
 use util::with_alloctag;
 use util::zettacache_stats::*;
+use util::AlignedBytes;
+use util::AlignedVec;
+use util::DeviceEntry;
+use util::DeviceList;
 use util::From64;
-use util::{AlignedBytes, AlignedVec};
-use util::{DeviceEntry, DeviceList};
 use uuid::Uuid;
+
+use crate::base_types::DiskId;
+use crate::base_types::DiskLocation;
+use crate::base_types::Extent;
 
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
@@ -423,7 +427,8 @@ impl BlockAccess {
         );
     }
 
-    // XXX ideally this would return a sector-aligned address, so it can be used directly for a directio write
+    // XXX ideally this would return a sector-aligned address, so it can be used directly for a
+    // directio write
     pub fn chunk_to_raw<T: Serialize>(&self, encoding: EncodeType, struct_obj: &T) -> AlignedBytes {
         let (payload, compression) = match encoding {
             EncodeType::Json => {
@@ -479,7 +484,8 @@ impl BlockAccess {
         buf.extend_from_slice(&header_bytes);
         // Encode a NUL byte after the header, so that we know where it ends.
         buf.extend_from_slice(&[0]);
-        // XXX copying data around; use bincode::serialize_into() to append it into a larger-than-necessary vec?
+        // XXX copying data around; use bincode::serialize_into() to append it into a
+        // larger-than-necessary vec?
         buf.extend_from_slice(&payload);
         buf.extend_from_slice(&vec![0; len - unrounded_len]);
 

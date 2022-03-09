@@ -3,7 +3,9 @@ use chrono::Duration;
 use chrono::Utc;
 use lazy_static::lazy_static;
 use log::*;
-use rusoto_credential::{AwsCredentials, CredentialsError, ProvideAwsCredentials};
+use rusoto_credential::AwsCredentials;
+use rusoto_credential::CredentialsError;
+use rusoto_credential::ProvideAwsCredentials;
 use tokio::sync::Mutex;
 
 use crate::get_tunable;
@@ -14,10 +16,10 @@ lazy_static! {
     static ref CREDENTIALS_BUFFER_SECONDS: Duration = Duration::seconds(get_tunable("credential_buffer_secs", 15 * 60));
 }
 
-/// The `ResilientCredentialsProvider` is a wrapper over another `ProvideAwsCredentials`. It caches the credentials
-/// until they expire. On expiry, it auto-refreshes the credentials. This primarily differs from
-/// `rusoto_credential::AutoRefreshingProvider` in that it uses a tunable buffer period which defaults to 15 minutes
-/// instead of a hard-coded 20 seconds.
+/// The `ResilientCredentialsProvider` is a wrapper over another `ProvideAwsCredentials`. It caches
+/// the credentials until they expire. On expiry, it auto-refreshes the credentials. This primarily
+/// differs from `rusoto_credential::AutoRefreshingProvider` in that it uses a tunable buffer period
+/// which defaults to 15 minutes instead of a hard-coded 20 seconds.
 #[derive(Debug)]
 pub struct ResilientCredentialsProvider<P: ProvideAwsCredentials> {
     credentials_provider: P,
@@ -45,8 +47,8 @@ impl<P: ProvideAwsCredentials + Send + Sync> ProvideAwsCredentials
         // Has the cached credentials expired?
         if let Some(creds) = cred_guard.as_ref() {
             let expired = match creds.expires_at() {
-                // We incorporate a buffer period of 15 minutes, which is the max clock skew that is tolerated by AWS
-                // while determining if the credentials have expired.
+                // We incorporate a buffer period of 15 minutes, which is the max clock skew that is
+                // tolerated by AWS while determining if the credentials have expired.
                 Some(cred_expiry) => *cred_expiry - *CREDENTIALS_BUFFER_SECONDS < Utc::now(),
                 None => false,
             };

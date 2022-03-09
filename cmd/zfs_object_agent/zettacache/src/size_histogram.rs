@@ -1,6 +1,8 @@
-use derivative::Derivative;
-use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
+
+use derivative::Derivative;
+use serde::Deserialize;
+use serde::Serialize;
 use util::From64;
 
 #[derive(Serialize, Deserialize, Clone, Derivative)]
@@ -37,7 +39,8 @@ impl SizeHistogramPhys {
         }
     }
 
-    /// Record a "hit" in the appropriate size bucket (taking into account the cache metadata overhead)
+    /// Record a "hit" in the appropriate size bucket (taking into account the cache metadata
+    /// overhead)
     pub fn live_hit(&mut self, size_at_hit: u64) {
         let index = usize::from64((size_at_hit + self.meta_overhead) / self.bucket_size);
         // The histogram may not be large enough if we've expanded the capacity

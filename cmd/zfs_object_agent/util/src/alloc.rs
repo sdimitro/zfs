@@ -1,6 +1,3 @@
-use crate::get_tunable;
-use backtrace::Backtrace;
-use lazy_static::lazy_static;
 use std::alloc::GlobalAlloc;
 use std::alloc::Layout;
 use std::alloc::System;
@@ -13,6 +10,11 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
+
+use backtrace::Backtrace;
+use lazy_static::lazy_static;
+
+use crate::get_tunable;
 
 lazy_static! {
     pub static ref ALLOCATOR_PRINT_MIN_BYTES: u64 =
@@ -143,7 +145,8 @@ impl PerAllocInfo {
                         if gather_backtrace {
                             Key::from_backtrace(&Backtrace::new_unresolved())
                         } else {
-                            // Computing the backtrace is too expensive; don't track this allocation.
+                            // Computing the backtrace is too expensive; don't track this
+                            // allocation.
                             return Default::default();
                         }
                     } else if ALLOC_TAG_OTHER.load(Ordering::Relaxed) {

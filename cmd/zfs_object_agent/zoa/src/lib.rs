@@ -1,19 +1,21 @@
+use std::ffi::CStr;
+use std::os::raw::c_char;
+
 use foreign_types::ForeignType;
 use libc::c_void;
 use nix::errno::Errno;
-use std::ffi::CStr;
-use std::os::raw::c_char;
+use nvpair::NvList;
+use nvpair::NvListRef;
+use zettacache::base_types::PoolGuid;
 use zettaobject::base_types::Txg;
 use zettaobject::debug::DebugHandle;
-
-use nvpair::{NvList, NvListRef};
-use zettacache::base_types::PoolGuid;
 
 #[allow(non_camel_case_types)]
 pub type zoa_handle_t = c_void;
 
 /// # Safety
-/// The c_char pointers must be to actual C strings. handle must be a valid pointer to a void *, or NULL.
+/// The c_char pointers must be to actual C strings. handle must be a valid pointer to a void *, or
+/// NULL.
 #[no_mangle]
 pub unsafe extern "C" fn libzoa_init(
     socket_dir_ptr: *const c_char,

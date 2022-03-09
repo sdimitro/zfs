@@ -1,17 +1,23 @@
-use crate::remote_channel::RemoteChannel;
-use crate::remote_channel::RemoteError;
-use crate::subcommand::ZcacheSubCommand;
+use std::time::Duration;
+use std::time::SystemTime;
+use std::time::UNIX_EPOCH;
+
 use anyhow::Result;
 use async_trait::async_trait;
-use chrono::{DateTime, Local};
+use chrono::DateTime;
+use chrono::Local;
 use clap::Arg;
 use clap::SubCommand;
 use num_traits::cast::ToPrimitive;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use util::message::TYPE_REPORT_HITS;
 use util::nice_p2size;
+use util::write_stdout;
+use util::writeln_stdout;
 use util::From64;
-use util::{write_stdout, writeln_stdout};
+
+use crate::remote_channel::RemoteChannel;
+use crate::remote_channel::RemoteError;
+use crate::subcommand::ZcacheSubCommand;
 
 static NAME: &str = "report_hits";
 

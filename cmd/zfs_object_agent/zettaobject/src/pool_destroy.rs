@@ -1,18 +1,17 @@
-use crate::object_access::ObjectAccess;
-use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
-use crate::pool::PoolPhys;
+use std::collections::HashMap;
+use std::io::ErrorKind;
+use std::process;
+use std::sync::Arc;
+use std::time::SystemTime;
+
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::stream::StreamExt;
 use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
-use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
-use std::io::ErrorKind;
-use std::process;
-use std::sync::Arc;
-use std::time::SystemTime;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::fs;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
@@ -21,6 +20,10 @@ use tokio::sync::Mutex;
 use util::get_tunable;
 use util::maybe_die_with;
 use zettacache::base_types::*;
+
+use crate::object_access::ObjectAccess;
+use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
+use crate::pool::PoolPhys;
 
 lazy_static! {
     static ref POOL_DESTROYER: Mutex<Option<PoolDestroyer>> = Default::default();
@@ -437,7 +440,8 @@ pub async fn destroy_pool(
 
 /// Resume destroying a pool that was previously marked for destroying.
 pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) -> Result<()> {
-    // Fail the request if resumption of deletion is being requested on a pool that is not in destroyed state.
+    // Fail the request if resumption of deletion is being requested on a pool that is not in
+    // destroyed state.
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     let pool_destroyer = maybe_pool_destroyer.as_mut().unwrap();
     match PoolPhys::get(&object_access, guid).await {
@@ -457,7 +461,8 @@ pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) ->
     }
 }
 
-/// Retrieve the PoolDestroyer's list of pools that are either being destroyed or have been destroyed.
+/// Retrieve the PoolDestroyer's list of pools that are either being destroyed or have been
+/// destroyed.
 pub async fn get_destroy_list() -> NvList {
     maybe_die_with(|| "in get_destroy_list");
 

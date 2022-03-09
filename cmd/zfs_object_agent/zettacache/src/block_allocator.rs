@@ -1,7 +1,18 @@
-use crate::block_access::BlockAccess;
-use crate::extent_allocator::{ExtentAllocator, ExtentAllocatorBuilder};
-use crate::space_map::{SpaceMap, SpaceMapEntry, SpaceMapPhys};
-use crate::{base_types::*, DumpSlabsOptions};
+use std::cmp;
+use std::cmp::max;
+use std::cmp::min;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::fmt;
+use std::iter;
+use std::mem;
+use std::ops::Add;
+use std::ops::Bound::*;
+use std::ops::Sub;
+use std::sync::Arc;
+use std::time::Instant;
+
 use bimap::BiBTreeMap;
 use derivative::Derivative;
 use either::Either;
@@ -11,13 +22,8 @@ use more_asserts::*;
 use num_traits::cast::ToPrimitive;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
-use serde::{Deserialize, Serialize};
-use std::cmp::{self, max, min};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
-use std::ops::{Add, Bound::*, Sub};
-use std::sync::Arc;
-use std::time::Instant;
-use std::{fmt, iter, mem};
+use serde::Deserialize;
+use serde::Serialize;
 use util::get_tunable;
 use util::nice_number_count;
 use util::nice_p2size;
@@ -27,6 +33,15 @@ use util::writeln_stdout;
 use util::BitRange;
 use util::From64;
 use util::RangeTree;
+
+use crate::base_types::*;
+use crate::block_access::BlockAccess;
+use crate::extent_allocator::ExtentAllocator;
+use crate::extent_allocator::ExtentAllocatorBuilder;
+use crate::space_map::SpaceMap;
+use crate::space_map::SpaceMapEntry;
+use crate::space_map::SpaceMapPhys;
+use crate::DumpSlabsOptions;
 
 lazy_static! {
     static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
@@ -1020,10 +1035,9 @@ impl SortedSlabs {
         }
 
         if self.last_allocated.is_none() {
-            // We've iterated through all the existing slabs in
-            // the SortedSlab set for this checkpoint. This flag
-            // will be reset when we re-create this SortedSlabs
-            // at the end of the checkpoint.
+            // We've iterated through all the existing slabs in the SortedSlab set for this
+            // checkpoint. This flag will be reset when we re-create this SortedSlabs at the end
+            // of the checkpoint.
             self.been_through_once = true;
         }
         self.get_current()
@@ -1036,8 +1050,9 @@ impl SortedSlabs {
 
     fn remove(&mut self, id: SlabId) {
         if let Some(last) = self.last_allocated {
-            // If we are removing the slab that matches the allocation cursor, we need to ensure we advance the cursor
-            // so that future allocations don't attempt to allocate from this removed slab.
+            // If we are removing the slab that matches the allocation cursor, we need to ensure
+            // we advance the cursor so that future allocations don't attempt to allocate from
+            // this removed slab.
             if last.slab_id == id {
                 self.advance();
             }
@@ -1058,9 +1073,8 @@ impl SortedSlabs {
 // key - max allocation that this set of slabs can satisfy
 // value - the set of sorted slabs
 //
-// Note: Even though not strictly necessary, in general
-// the BitmapBased slabs are before all the ExtentBased
-// ones (i.e. Bitmaps are used for smaller allocation sizes).
+// Note: Even though not strictly necessary, in general the BitmapBased slabs are before all the
+// ExtentBased ones (i.e. Bitmaps are used for smaller allocation sizes).
 struct SlabAllocationBuckets(BTreeMap<u32, SortedSlabs>);
 
 impl SlabAllocationBuckets {
@@ -1418,21 +1432,18 @@ impl BlockAllocator {
         // TODO - WIP Allocation Algorithm
         //
         // The current naive implemenation of the allocation is the following:
-        // - We are iterating over the slabs of the our allocation bucket in
-        //   sorted order from the slabs with the most free space to the ones
-        //   with the least free space (according to their free space accounting
-        //   since our latest flush/checkpoint).
-        // - We are looking at the current slab used since our last allocation
-        //   (or the first slab if this is the first allocation since the last
-        //    checkpoint), and try to allocate from that.
-        // - If the allocation fails we move to the next slab in our set of
-        //   sorted slabs, and try to allocate from that one.
-        // - If that fails too, we keep trying through all the slabs in that
-        //   set until we go through them all at which point we will try to
-        //   convert a FreeSlab to this type, add it to the set, and allocate
-        //   from it.
-        // - If that fails too then we fail the allocation (and any allocation
-        //   for that allocation size until the next flush/checkpoint).
+        // - We are iterating over the slabs of the our allocation bucket in sorted order from the
+        //   slabs with the most free space to the ones with the least free space (according to
+        //   their free space accounting since our latest flush/checkpoint).
+        // - We are looking at the current slab used since our last allocation (or the first slab if
+        //   this is the first allocation since the last checkpoint), and try to allocate from that.
+        // - If the allocation fails we move to the next slab in our set of sorted slabs, and try to
+        //   allocate from that one.
+        // - If that fails too, we keep trying through all the slabs in that set until we go through
+        //   them all at which point we will try to convert a FreeSlab to this type, add it to the
+        //   set, and allocate from it.
+        // - If that fails too then we fail the allocation (and any allocation for that allocation
+        //   size until the next flush/checkpoint).
         //
         // Obviously this is far from ideal but it is deterministic and easy
         // to reason about for now.
@@ -1499,23 +1510,27 @@ impl BlockAllocator {
     }
 
     //
-    // This function is the entry-point to starting the cache rebalancing process. This will select which slab(s)
-    // need to be rebalanced, mark those slabs as undergoing evacuation, and allocate new disk locations for the
-    // data currently stored on those slabs. The value returned by this function is a map of key-value pairs,
-    // where the key denotes the current location on disk (i.e. on the slab(s) being evacuated), and the value is
-    // the newly allocated disk location where the data should be moved (to facilitate the evacuation).
+    // This function is the entry-point to starting the cache rebalancing process. This will select
+    // which slab(s) need to be rebalanced, mark those slabs as undergoing evacuation, and
+    // allocate new disk locations for the data currently stored on those slabs. The value
+    // returned by this function is a map of key-value pairs, where the key denotes the current
+    // location on disk (i.e. on the slab(s) being evacuated), and the value is
+    // the newly allocated disk location where the data should be moved (to facilitate the
+    // evacuation).
     //
-    // It is the responsibility of the consumer of this function to actually move the data from the old location,
-    // to the new location. This way, the allocator remains responsible only for the allocation of disk extents,
-    // and not for the reading and writing of the block data.
+    // It is the responsibility of the consumer of this function to actually move the data from the
+    // old location, to the new location. This way, the allocator remains responsible only for
+    // the allocation of disk extents, and not for the reading and writing of the block data.
     //
-    // Once the consumer has finished the process of moving the data blocks to their new locations, it is also the
-    // consumer's responsibility to call the "rebalance_fini" function, marking the rebalance process as finished.
-    // This allows the allocator to transition the slabs that were undergoing evacuation to free slabs, such that
-    // the slabs can later be used for allocation.
+    // Once the consumer has finished the process of moving the data blocks to their new locations,
+    // it is also the consumer's responsibility to call the "rebalance_fini" function, marking
+    // the rebalance process as finished. This allows the allocator to transition the slabs that
+    // were undergoing evacuation to free slabs, such that the slabs can later be used for
+    // allocation.
     //
     pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, Option<DiskLocation>>> {
-        // For now, ensure rebalance_fini() is called before this function can be called a second time.
+        // For now, ensure rebalance_fini() is called before this function can be called a second
+        // time.
         assert!(self.evacuating_slabs.is_empty());
 
         let begin = Instant::now();
@@ -1528,16 +1543,18 @@ impl BlockAllocator {
 
         info!("initializing rebalance of {} slabs", slabs.len());
 
-        // In order to ensure the allocations performed in rebalance_slab() (called below) are not satisfied by any
-        // of the slabs we're going to rebalance, we need to remove these slabs from the list of slabs available
-        // for allocation. Further, we must remove all slabs before we do any allocations, to ensure we don't move
-        // an extent multiple times; otherwise, data corruption could occur, as the data contained in the extents,
-        // can be moved by the caller in any order.
+        // In order to ensure the allocations performed in rebalance_slab() (called below) are not
+        // satisfied by any of the slabs we're going to rebalance, we need to remove these
+        // slabs from the list of slabs available for allocation. Further, we must remove
+        // all slabs before we do any allocations, to ensure we don't move
+        // an extent multiple times; otherwise, data corruption could occur, as the data contained
+        // in the extents, can be moved by the caller in any order.
         //
-        // For example, if we mark an extent as moving from disk location A to B, and then again from B to C, the
-        // final data contained at disk location C could be incorrect, if the caller does the move of B to C before
-        // the move of A to B. Since we do not enforce the order in which the caller will do the copies, we need to
-        // ensure this cannot happen, by never moving an extent more than once.
+        // For example, if we mark an extent as moving from disk location A to B, and then again
+        // from B to C, the final data contained at disk location C could be incorrect, if
+        // the caller does the move of B to C before the move of A to B. Since we do not
+        // enforce the order in which the caller will do the copies, we need to ensure this
+        // cannot happen, by never moving an extent more than once.
         for &id in slabs.iter() {
             trace!("prepping slab '{:?}' for rebalancing", id);
             self.slab_buckets.remove_slab(self.slabs.get(id));
@@ -1566,10 +1583,11 @@ impl BlockAllocator {
         let min_number_of_free_slabs =
             (available * *SLAB_REBALANCING_MIN_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
 
-        // We only want to trigger a new rebalance operation once we drop below the minimum number of free slabs
-        // currently available. This way, there's a buffer between the minimum and target number of free slabs,
-        // such that we're never constantly in a state of needing to rebalance; i.e. we balance between reaching
-        // the minimum, starting a rebalance to reach the target, and then not rebalancing again until we reach
+        // We only want to trigger a new rebalance operation once we drop below the minimum number
+        // of free slabs currently available. This way, there's a buffer between the minimum
+        // and target number of free slabs, such that we're never constantly in a state of
+        // needing to rebalance; i.e. we balance between reaching the minimum, starting a
+        // rebalance to reach the target, and then not rebalancing again until we reach
         // the minimum again.
         if current_number_of_free_slabs >= min_number_of_free_slabs {
             return 0;
@@ -1620,17 +1638,20 @@ impl BlockAllocator {
             .map(|slab| slab.to_sorted_slab_entry())
             .collect();
 
-        // The goal of the rebalance, is to generate more free slabs, such that we can satisfy future allocations. It doesn't
-        // matter which bucket the free slab came from; if the free slab comes from a very fragmented bucket, or a very compact
-        // bucket, it doesn't really matter. The only thing that matters, is that we have free slabs available, such that future
-        // allocations do not fail.
+        // The goal of the rebalance, is to generate more free slabs, such that we can satisfy
+        // future allocations. It doesn't matter which bucket the free slab came from; if
+        // the free slab comes from a very fragmented bucket, or a very compact bucket, it
+        // doesn't really matter. The only thing that matters, is that we have free slabs available,
+        // such that future allocations do not fail.
         //
-        // Further, a secondary goal, is to accomplish the aformentioned primary goal, but while minimizing the cost of doing so;
-        // i.e. minimizing the bytes read and written by the rebalacing process.
+        // Further, a secondary goal, is to accomplish the aformentioned primary goal, but while
+        // minimizing the cost of doing so; i.e. minimizing the bytes read and written by
+        // the rebalacing process.
         //
-        // As such, we select the slabs that we intend to rebalance, by seeking to rebalance the most free slabs first. This way,
-        // we will choose the slabs that can be evacuated with the least about of data transfer (i.e. disk reads and writes),
-        // regardless of the bucket the slab belongs too.
+        // As such, we select the slabs that we intend to rebalance, by seeking to rebalance the
+        // most free slabs first. This way, we will choose the slabs that can be evacuated
+        // with the least about of data transfer (i.e. disk reads and writes), regardless of
+        // the bucket the slab belongs too.
         slabs
             .iter()
             .filter_map(|entry| {
@@ -1639,9 +1660,10 @@ impl BlockAllocator {
                 let bucket = slab.max_size();
                 let bytes_free_in_bucket = free_space_per_bucket.get_mut(&bucket).unwrap();
 
-                // If there's not enough free space in the bucket to completely evacuate this slab's allocated bytes,
-                // then we skip it, and move on to the next slab in the (sorted) list. This way, we don't have to handle
-                // allocation failures when rebalance_slab() is called.
+                // If there's not enough free space in the bucket to completely evacuate this slab's
+                // allocated bytes, then we skip it, and move on to the next slab in
+                // the (sorted) list. This way, we don't have to handle allocation
+                // failures when rebalance_slab() is called.
                 *bytes_free_in_bucket = bytes_free_in_bucket.checked_sub(slab.capacity_bytes())?;
 
                 Some(slab.id)
@@ -1668,12 +1690,16 @@ impl BlockAllocator {
                         let slot_size = slab.max_size();
                         assert_eq!(extent_size % slot_size, 0);
 
-                        // For bitmap based slabs, we know the boundaries of each allocation, since each allocation must have
-                        // been done in a slot-sized chuck. Thus, we can break up a multi-slot allocated extent into single-slot
-                        // extents, which is what we're doing here. We choose to do this, so that when we later allocate the
-                        // new location for these extents, we'll allocate in slot-sized chunks, ensuring we fill all holes in
-                        // the slabs we're allocating from. Otherwise, we would have to (potentially) allocate in multi-slot
-                        // contiguous chunks, and due to slab fragmentation, the slabs may not be able to fulfill those requests.
+                        // For bitmap based slabs, we know the boundaries of each allocation, since
+                        // each allocation must have been done in a
+                        // slot-sized chuck. Thus, we can break up a multi-slot allocated extent
+                        // into single-slot extents, which is what we're
+                        // doing here. We choose to do this, so that when we later allocate the
+                        // new location for these extents, we'll allocate in slot-sized chunks,
+                        // ensuring we fill all holes in the slabs we're
+                        // allocating from. Otherwise, we would have to (potentially) allocate in
+                        // multi-slot contiguous chunks, and due to slab
+                        // fragmentation, the slabs may not be able to fulfill those requests.
                         Either::Left(
                             (0..(extent_size / slot_size)).map(move |slot_index| Extent {
                                 size: u64::from(slot_size),
@@ -1704,8 +1730,9 @@ impl BlockAllocator {
             })
             .collect();
 
-        // Since evacuating slabs don't have any allocatable space, we must account for that here; we must do
-        // this before we transition to an evacuating slab (evacuating slabs have no free space).
+        // Since evacuating slabs don't have any allocatable space, we must account for that here;
+        // we must do this before we transition to an evacuating slab (evacuating slabs have
+        // no free space).
         let slab = self.slabs.get(id);
         self.available_space -= slab.free_space();
 
@@ -1733,9 +1760,10 @@ impl BlockAllocator {
                 self.slab_extent_from_id(id),
             );
 
-            // Since we reduce the available space when transitioning a slab to be evacuating, we need to
-            // ensure we increase the available space when transitioning the slab to be free. We must do
-            // this after the slab has been marked a free slab, since evacuating slabs have no free space.
+            // Since we reduce the available space when transitioning a slab to be evacuating, we
+            // need to ensure we increase the available space when transitioning the
+            // slab to be free. We must do this after the slab has been marked a free
+            // slab, since evacuating slabs have no free space.
             self.available_space += self.slabs.get(id).free_space();
         }
     }

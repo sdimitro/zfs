@@ -1,15 +1,25 @@
 //! zcache list_devices subcommand
 
-use crate::remote_channel::{RemoteChannel, RemoteError};
-use crate::subcommand::ZcacheSubCommand;
-use anyhow::{anyhow, Context, Result};
-use async_trait::async_trait;
-use clap::{Arg, SubCommand};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::path::PathBuf;
+
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
+use async_trait::async_trait;
+use clap::Arg;
+use clap::SubCommand;
 use util::message::TYPE_LIST_DEVICES;
-use util::{nice_p2size, DeviceEntry, DeviceList};
-use util::{write_stdout, writeln_stdout};
+use util::nice_p2size;
+use util::write_stdout;
+use util::writeln_stdout;
+use util::DeviceEntry;
+use util::DeviceList;
+
+use crate::remote_channel::RemoteChannel;
+use crate::remote_channel::RemoteError;
+use crate::subcommand::ZcacheSubCommand;
 
 static NAME: &str = "list_devices";
 

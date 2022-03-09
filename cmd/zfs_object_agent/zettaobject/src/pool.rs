@@ -1,31 +1,33 @@
-use crate::base_types::*;
-use crate::data_object::DataObject;
-use crate::features;
-use crate::features::FeatureError;
-use crate::features::FeatureFlag;
-use crate::heartbeat;
-use crate::heartbeat::HeartbeatGuard;
-use crate::heartbeat::HeartbeatPhys;
-use crate::heartbeat::HEARTBEAT_INTERVAL;
-use crate::heartbeat::LEASE_DURATION;
-use crate::object_access::{OAError, ObjectAccess, ObjectAccessOpType};
-use crate::object_based_log::*;
-use crate::object_block_map::ObjectBlockMap;
-use crate::object_block_map::StorageObjectLogEntry;
-use crate::object_deleter::ObjectDeleter;
-use crate::object_deleter::ObjectDeleterPhys;
-use crate::pool_destroy;
-use crate::pool_destroy::PoolDestroyingPhys;
+use std::borrow::Borrow;
+use std::cmp::max;
+use std::cmp::min;
+use std::collections::hash_map;
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
+use std::collections::HashMap;
+use std::collections::HashSet;
+use std::fmt;
+use std::fmt::Display;
+use std::mem;
+use std::ops::Bound::*;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+
+use anyhow::Context;
 use anyhow::Error;
-use anyhow::{Context, Result};
+use anyhow::Result;
 use bytes::Bytes;
 use conv::ConvUtil;
 use derivative::Derivative;
 use futures::future;
 use futures::future::join;
+use futures::future::join3;
+use futures::future::join5;
 use futures::future::Either;
 use futures::future::Future;
-use futures::future::{join3, join5};
 use futures::stream;
 use futures::stream::select_all::select_all;
 use futures::stream::*;
@@ -34,19 +36,8 @@ use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use nvpair::NvList;
-use serde::{Deserialize, Serialize};
-use std::borrow::Borrow;
-use std::cmp::{max, min};
-use std::collections::hash_map;
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
-use std::fmt;
-use std::fmt::Display;
-use std::mem;
-use std::ops::Bound::*;
-use std::pin::Pin;
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::{Instant, SystemTime};
+use serde::Deserialize;
+use serde::Serialize;
 use stream_reduce::Reduce;
 use tokio::sync::oneshot;
 use tokio::sync::watch;
@@ -63,6 +54,27 @@ use zettacache::InsertSource;
 use zettacache::LookupResponse;
 use zettacache::LookupSource;
 use zettacache::ZettaCache;
+
+use crate::base_types::*;
+use crate::data_object::DataObject;
+use crate::features;
+use crate::features::FeatureError;
+use crate::features::FeatureFlag;
+use crate::heartbeat;
+use crate::heartbeat::HeartbeatGuard;
+use crate::heartbeat::HeartbeatPhys;
+use crate::heartbeat::HEARTBEAT_INTERVAL;
+use crate::heartbeat::LEASE_DURATION;
+use crate::object_access::OAError;
+use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessOpType;
+use crate::object_based_log::*;
+use crate::object_block_map::ObjectBlockMap;
+use crate::object_block_map::StorageObjectLogEntry;
+use crate::object_deleter::ObjectDeleter;
+use crate::object_deleter::ObjectDeleterPhys;
+use crate::pool_destroy;
+use crate::pool_destroy::PoolDestroyingPhys;
 
 lazy_static! {
     // start freeing when the pending frees are this % of the entire pool
@@ -238,7 +250,9 @@ pub struct PoolStatsPhys {
     pub blocks_bytes: u64, // Note: does not include the pending_object
     pub pending_frees_count: u64,
     pub pending_frees_bytes: u64,
-    pub objects_count: u64, // XXX shouldn't really be needed on disk since we always have the storage_object_log loaded into the `objects` field
+    // XXX shouldn't really be needed on disk since we always have the storage_object_log loaded
+    // into the `objects` field
+    pub objects_count: u64,
 }
 impl OnDisk for PoolStatsPhys {}
 
@@ -563,7 +577,8 @@ type SyncTask =
 #[derive(Debug)]
 enum PendingObjectState {
     Pending(DataObject, Vec<oneshot::Sender<()>>), // available to write
-    NotPending(BlockId), // not available to write; this is the next blockID to use
+    // not available to write; this is the next blockID to use
+    NotPending(BlockId),
 }
 
 impl PendingObjectState {
@@ -1842,9 +1857,9 @@ impl Pool {
             if let Ok(heartbeat) = heartbeat_res {
                 info!("Heartbeat found: {:?}", heartbeat);
                 /*
-                 * We do this twice, because in the normal case we'll find an updated heartbeat within
-                 * a couple seconds. In the case where there are unexpected s3 failures or network
-                 * problems, we wait for the full duration.
+                 * We do this twice, because in the normal case we'll find an updated heartbeat
+                 * within a couple seconds. In the case where there are unexpected s3 failures or
+                 * network problems, we wait for the full duration.
                  */
                 let short_duration = *HEARTBEAT_INTERVAL * 2;
                 let long_duration = *LEASE_DURATION * 2 - short_duration;
@@ -2046,9 +2061,8 @@ async fn build_new_frees<'a, I>(
             future::ready(())
         })
         .await;
-    // Note: the caller (end_txg_cb()) is about to call flush(), but doing it
-    // here ensures that the time to PUT these objects is accounted for in the
-    // info!() below.
+    // Note: the caller (end_txg_cb()) is about to call flush(), but doing it here ensures that
+    // the time to PUT these objects is accounted for in the info!() below.
     log.flush(txg).await;
 
     info!(
@@ -2070,10 +2084,9 @@ async fn get_object_sizes(
         .for_each(|ent| {
             match ent {
                 ObjectSizeLogEntry::Exists(object_size) => {
-                    // Overwrite existing value, if any.  We have to explicitly
-                    // remove it using the ObjectId so that we find any entry
-                    // that matches this ObjectId (even with a different
-                    // num_blocks/bytes).
+                    // Overwrite existing value, if any.  We have to explicitly remove it using
+                    // the ObjectId so that we find any entry that matches this ObjectId (even
+                    // with a different num_blocks/bytes).
                     object_sizes.remove(&object_size.object);
                     object_sizes.insert(object_size);
                 }
@@ -2094,17 +2107,15 @@ async fn get_object_sizes(
     object_sizes
 }
 
-/// returns (free_bytes, map), where free_bytes is the number of free bytes
-/// in the log, and map lists the frees associated with each object.
+/// returns (free_bytes, map), where free_bytes is the number of free bytes in the log, and map
+/// lists the frees associated with each object.
 async fn get_frees_per_obj(
     state: &PoolState,
     pending_frees_log_stream: impl Stream<Item = PendingFreesLogEntry>,
 ) -> (u64, HashMap<ObjectId, Vec<PendingFreesLogEntry>>) {
-    // XXX The Vecs will grow by doubling, thus wasting ~1/4 of the
-    // memory used by it.  It would be better if we gathered the
-    // BlockID's into a single big Vec with the exact required size,
-    // then in-place sort, and then have this map to a slice of the one
-    // big Vec.
+    // XXX The Vecs will grow by doubling, thus wasting ~1/4 of the memory used by it.  It would
+    // be better if we gathered the BlockID's into a single big Vec with the exact required size,
+    // then in-place sort, and then have this map to a slice of the one big Vec.
     let mut frees_per_obj: HashMap<ObjectId, Vec<PendingFreesLogEntry>> = HashMap::new();
     let mut count: u64 = 0;
     let mut freed_bytes: u64 = 0;
@@ -2138,10 +2149,9 @@ async fn reclaim_frees_object(
     let first_object = objects.first().unwrap().0.object;
     let last_object = objects.last().unwrap().0.object;
 
-    // Note that the .reduce() below can't completely determine the next_block
-    // because if we skip the GET (because this object doesn't have any
-    // non-freed blocks), it won't be visited by the .reduce() when the
-    // filter_map() below returns None.
+    // Note that the .reduce() below can't completely determine the next_block because if we skip
+    // the GET (because this object doesn't have any non-freed blocks), it won't be visited by
+    // the .reduce() when the filter_map() below returns None.
     let next_block = state.object_block_map.object_to_next_block(last_object);
     trace!(
         "reclaim: consolidating {} objects into {:?} to free {} blocks (last {:?} next {:?})",
@@ -2171,40 +2181,34 @@ async fn reclaim_frees_object(
 
         let shared_state = state.shared_state.clone();
         Some(async move {
-            // Bypass object cache so that it isn't added, so that when we
-            // overwrite it with put(), we don't need to copy the data into the
-            // cache to invalidate.
+            // Bypass object cache so that it isn't added, so that when we overwrite it with
+            // put(), we don't need to copy the data into the cache to invalidate.
             let mut phys =
                 DataObject::get(&shared_state.object_access, shared_state.guid, object, ObjectAccessOpType::ReclaimGet, true)
                     .await
                     .unwrap();
 
             for ent in frees {
-                // If we crashed in the middle of this operation last time, the
-                // block may already have been removed (and the object
-                // rewritten), however the stats were not yet updated (since
-                // that happens as part of txg_end, atomically with the updates
-                // to the PendingFreesLog).  In this case we ignore the fact
-                // that it isn't present, but count this block as removed for
-                // stats purposes.
+                // If we crashed in the middle of this operation last time, the block may already
+                // have been removed (and the object rewritten), however the stats were not yet
+                // updated (since that happens as part of txg_end, atomically with the updates to
+                // the PendingFreesLog).  In this case we ignore the fact that it isn't present,
+                // but count this block as removed for stats purposes.
                 if let Some(v) = phys.blocks.remove(&ent.block) {
                     assert_eq!(u32::try_from(v.len()).unwrap(), ent.size);
                     phys.header.blocks_size -= ent.size;
                 }
             }
 
-            // The object could have been rewritten as part of a previous
-            // reclaim that we crashed in the middle of.  In that case, the
-            // object may have additional blocks which we do not expect (past
-            // next_block).  However, the expected size (new_object_size) must
-            // match the size of the blocks within the expected range (up to
-            // next_block).  Additionally, any blocks outside the expected range
-            // are also represented in their expected objects.  So, we can
-            // correctly remove them from this object, undoing the previous,
-            // uncommitted consolidation.  Therefore, if the expected size is
-            // zero, we can remove this object without reading it because it
-            // doesn't have any required blocks.  That happens above, where we
-            // `return None`.
+            // The object could have been rewritten as part of a previous reclaim that we crashed
+            // in the middle of.  In that case, the object may have additional blocks which we do
+            // not expect (past next_block).  However, the expected size (new_object_size) must
+            // match the size of the blocks within the expected range (up to next_block).
+            // Additionally, any blocks outside the expected range are also represented in their
+            // expected objects.  So, we can correctly remove them from this object, undoing the
+            // previous, uncommitted consolidation.  Therefore, if the expected size is zero, we
+            // can remove this object without reading it because it doesn't have any required
+            // blocks.  That happens above, where we `return None`.
             if phys.header.next_block != next_block {
                 debug!("reclaim: {:?} expected next {:?}, found next {:?}, trimming uncommitted consolidation",
                     object, next_block, phys.header.next_block);
@@ -2468,9 +2472,8 @@ async fn try_split_reclaim_logs(state: Arc<PoolState>, syncing_state: &mut PoolS
     );
 }
 
-/// reclaim free blocks from one of our pending-free logs
-/// processes the log with the most space freed
-/// If there is a checkpoint, this is a no-nop.
+/// reclaim free blocks from one of our pending-free logs processes the log with the most space
+/// freed If there is a checkpoint, this is a no-nop.
 fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState) {
     if syncing_state.reclaim_done.is_some() || syncing_state.checkpoint_txg.is_some() {
         return;
@@ -2492,9 +2495,9 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         syncing_state.stats.pending_frees_count
     );
 
-    // Note: the object size stream may or may not include entries added this
-    // txg.  Fortunately, the frees stream can't have any frees within object
-    // created this txg, so this is not a problem.
+    // Note: the object size stream may or may not include entries added this txg.  Fortunately,
+    // the frees stream can't have any frees within object created this txg, so this is not a
+    // problem.
 
     // Load the log with the most space freed
     let best_reclaim_log = syncing_state
@@ -2540,19 +2543,17 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
             .unwrap();
 
         // sort objects by number of free blocks
-        // XXX should be based on free space (bytes)?  And perhaps objects that
-        // will be entirely freed should always be processed?
-        // XXX we want to maximize bytes freed per unit time. network bandwidth
-        // is the constraint on time, so bytes freed per bytes read+written
-        // would be a good metric. (or just read or just written, if we knew
-        // which direction was the performance constraint; we are reading more
-        // than writing, but if caching is effective then other processes may be
+        // XXX should be based on free space (bytes)?  And perhaps objects that will be entirely
+        // freed should always be processed?
+        // XXX we want to maximize bytes freed per unit time. network bandwidth is the constraint
+        // on time, so bytes freed per bytes read+written would be a good metric. (or just read
+        // or just written, if we knew which direction was the performance constraint; we are
+        // reading more than writing, but if caching is effective then other processes may be
         // doing more writing than reading)
         let mut objects_by_frees: BTreeSet<(usize, ObjectId)> = BTreeSet::new();
         for (obj, hs) in frees_per_object.iter() {
-            // MAX-len because we want to sort by which has the most to
-            // free, (high to low) and then by object ID (low to high)
-            // because we consolidate forward
+            // MAX-len because we want to sort by which has the most to free, (high to low) and
+            // then by object ID (low to high) because we consolidate forward
             objects_by_frees.insert((usize::MAX - hs.len(), *obj));
         }
 
@@ -2623,10 +2624,9 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                 //complete.rewritten_object_sizes.push((*obj, 0));
                 deleted_objects.push(later_object_size.object);
             }
-            // Note: we could calculate the new object's size here as well,
-            // but that would be based on the object_sizes map/log, which
-            // may have inaccuracies if we crashed during reclaim.  Instead
-            // we calculate the size based on the object contents, and
+            // Note: we could calculate the new object's size here as well, but that would be
+            // based on the object_sizes map/log, which may have inaccuracies if we crashed
+            // during reclaim.  Instead we calculate the size based on the object contents, and
             // return it from the spawned task.
 
             // Reclaim_frees_object reads all its objects in parallel, up to
@@ -2731,9 +2731,8 @@ async fn try_condense_object_log(state: Arc<PoolState>, syncing_state: &mut Pool
             .storage_object_log
             .append(txg, StorageObjectLogEntry::Alloc { object })
     });
-    // Note: the caller (end_txg_cb()) is about to call flush(), but doing it
-    // here ensures that the time to PUT these objects is accounted for in the
-    // info!() below.
+    // Note: the caller (end_txg_cb()) is about to call flush(), but doing it here ensures that
+    // the time to PUT these objects is accounted for in the info!() below.
     syncing_state.storage_object_log.flush(txg).await;
 
     info!(
@@ -2769,8 +2768,8 @@ async fn try_condense_object_sizes(
     );
 
     let begin = Instant::now();
-    // We need to call .iterate_after() before .clear(), otherwise we'd be
-    // iterating the new, empty generation.
+    // We need to call .iterate_after() before .clear(), otherwise we'd be iterating the new,
+    // empty generation.
     let stream = object_size_log.iter_remainder(txg, remainder).await;
     object_size_log.clear(txg).await;
     for object_size in object_sizes {
@@ -2783,9 +2782,8 @@ async fn try_condense_object_sizes(
             future::ready(())
         })
         .await;
-    // Note: the caller (end_txg_cb()) is about to call flush(), but doing it
-    // here ensures that the time to PUT these objects is accounted for in the
-    // info!() below.
+    // Note: the caller (end_txg_cb()) is about to call flush(), but doing it here ensures that
+    // the time to PUT these objects is accounted for in the info!() below.
     object_size_log.flush(txg).await;
 
     info!(
@@ -2838,9 +2836,9 @@ fn clean_metadata(
              * to wait for the necessary list operations, but we pay per request to s3.
              *
              * Instead, we should store in memory the lowest generation of a given log. We can
-             * quickly compare that value to the ObjectBasedLogPhys here, and determine whether any
-             * cleanup is necessary. We need to populate the list of lowest generations when we
-             * import the pool, but that is cheap compared to getting the full list every txg.
+             * quickly compare that value to the ObjectBasedLogPhys here, and determine whether
+             * any cleanup is necessary. We need to populate the list of lowest generations when
+             * we import the pool, but that is cheap compared to getting the full list every txg.
              */
             log_phys
                 .pending_frees_log
