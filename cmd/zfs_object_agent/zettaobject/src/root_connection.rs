@@ -183,7 +183,7 @@ impl RootConnectionState {
                     hostname: String,
                 },
                 Feature {
-                    invalid_features: Vec<String>,
+                    invalid_features: HashMap<String, String>,
                     can_readonly: bool,
                 },
                 Io {
@@ -208,7 +208,10 @@ impl RootConnectionState {
                     features,
                     can_readonly,
                 })) => Err(Failure::Feature {
-                    invalid_features: features.into_iter().map(|feature| feature.name).collect(),
+                    invalid_features: features
+                        .into_iter()
+                        .map(|feature| (feature.name, "".to_string()))
+                        .collect(),
                     can_readonly,
                 }),
                 Err(PoolOpenError::Get(e)) => {
