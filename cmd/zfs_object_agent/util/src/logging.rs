@@ -9,6 +9,8 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::thread;
 
+use atomic_counter::AtomicCounter;
+use atomic_counter::RelaxedCounter;
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
@@ -48,6 +50,7 @@ lazy_static! {
     static ref PANIC_LOG_FOLDER: String =
         get_tunable("panic_log_folder", "/var/log/zoa".to_string());
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
+    static ref PANIC_COUNTER: RelaxedCounter = RelaxedCounter::new(0);
     pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool =
         AtomicBool::new(get_tunable("super_expensive_trace", false));
 }
@@ -127,7 +130,11 @@ impl BufferAppender {
 
     /// Dump log messages in memory to a file or stderr.
     pub fn dump(info: &PanicInfo) {
-        let mut output = Self::get_writer(format!("panic_{}.log", process::id()));
+        let mut output = Self::get_writer(format!(
+            "panic_pid{}_{}.out",
+            process::id(),
+            PANIC_COUNTER.inc()
+        ));
         Self::dump_log_messages(&mut output);
 
         let location = info.location().unwrap();
