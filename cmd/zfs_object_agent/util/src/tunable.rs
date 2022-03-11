@@ -27,7 +27,10 @@ where
 
 pub fn read_tunable_config(file_name: &str) {
     let mut config = CONFIG.write().unwrap();
-    config.merge(config::File::with_name(file_name)).unwrap();
+    *config = Config::builder()
+        .add_source(config::File::with_name(file_name))
+        .build()
+        .unwrap();
 }
 
 pub fn log_tunable_config() {

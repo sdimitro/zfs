@@ -17,7 +17,7 @@ chrono = "0.4"
 conv = "0.3.3"
 cstr-argument = "0.1.1"
 derivative = "2.2.0"
-enum-map = "1.1.1"
+enum-map = "2.0.3"
 fs2 = "0.4.2"
 futures = "0.3.13"
 futures-core = "0.3.13"
@@ -36,7 +36,7 @@ rand = "0.8.3"
 rusoto_core = "0.47.0"
 rusoto_credential = "0.47.0"
 rusoto_s3 = "0.47.0"
-safer-ffi = { version = "0.0.6", features = ["proc_macros"] }
+safer-ffi = { version = "0.0.7", features = ["proc_macros"] }
 semver = "1.0.4"
 serde = { version = "1.0.125", features = ["derive"] }
 serde_bytes = "0.11"
