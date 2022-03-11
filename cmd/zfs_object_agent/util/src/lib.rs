@@ -7,6 +7,7 @@ mod alloc;
 mod binaryindextree;
 mod bitrange;
 mod btreemap_ext;
+pub mod concurrent_batch;
 mod credentials;
 mod die;
 mod from64;

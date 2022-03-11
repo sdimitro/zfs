@@ -32,6 +32,7 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::time::sleep_until;
 use tokio::time::timeout_at;
+use util::concurrent_batch::ConcurrentBatch;
 use util::get_tunable;
 use util::lock_non_send;
 use util::maybe_die_with;
@@ -126,12 +127,6 @@ lazy_static! {
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
     static ref LOOKUP_FAIL_RANDOM: u32 = get_tunable("lookup_fail_random", 0);
-
-    // How many allocations we can have outstanding and not yet written (per disk).  This is a
-    // balance between higher ingest throughput, and longer time to wait for the
-    // outstanding_writes lock in flush_checkpoint() (with the state lock held).  Should be more
-    // than DISK_WRITE_MAX_QUEUE_DEPTH, otherwise we're leaving writer threads idle.
-    static ref OUTSTANDING_ALLOCATIONS_PER_DISK: usize = get_tunable("outstanding_allocations_per_disk", 500);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -208,7 +203,6 @@ pub struct ZettaCache {
     timebase: Instant, // used when collecting stats
     demand_buffer_bytes_available: Arc<Semaphore>,
     speculative_buffer_bytes_available: Arc<Semaphore>,
-    write_slots: Arc<Semaphore>,
     cache_runtime_id: Uuid,
 }
 
@@ -795,10 +789,10 @@ struct ZettaCacheState {
     // This is needed to ensure that reads complete before we complete the next
     // checkpoint, so that we don't overwrite their locations on disk (if the
     // block is evicted and freed from the cache).
-    outstanding_reads: Arc<tokio::sync::RwLock<()>>,
+    outstanding_reads: ConcurrentBatch,
     // This is needed to ensure that writes complete before we complete the next
     // checkpoint, so that they are persisted to disk.
-    outstanding_writes: Arc<tokio::sync::RwLock<()>>,
+    outstanding_writes: ConcurrentBatch,
 
     atime: Atime,
     stats: Arc<CacheStats>,
@@ -1249,9 +1243,6 @@ impl ZettaCache {
             speculative_buffer_bytes_available: Arc::new(Semaphore::new(
                 *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
             )),
-            write_slots: Arc::new(Semaphore::new(
-                block_access.disks().count() * *OUTSTANDING_ALLOCATIONS_PER_DISK,
-            )),
             block_access,
             stats,
             timebase: Instant::now(),
@@ -1467,24 +1458,55 @@ impl ZettaCache {
 
             // flush out a new checkpoint every CHECKPOINT_INTERVAL to capture the current state
             sleep_until(next_tick).await;
-            {
-                let old_index_phys = self.old_index.write().await.get_phys();
-                self.state
-                    .lock()
-                    .await
-                    .flush_checkpoint(
-                        old_index_phys,
-                        merging.as_mut().map(|(_, phys)| (phys.clone())),
-                        completed_merge,
-                    )
-                    .await;
-            }
+            self.flush_checkpoint(
+                merging.as_mut().map(|(_, phys)| (phys.clone())),
+                completed_merge,
+            )
+            .await;
             next_tick = std::cmp::max(
                 tokio::time::Instant::now(),
                 next_tick + *CHECKPOINT_INTERVAL,
             );
             completed_merge = false;
         }
+    }
+
+    async fn flush_checkpoint(&self, new_index: Option<IndexRunPhys>, completed_merge: bool) {
+        {
+            // Wait for all outstanding reads, so that if we free the space they are reading, it
+            // can't be overwritten until after the read completes.  We wait without holding the
+            // state lock, and we replace the existing lock with a new one, so that new reads can
+            // start even while we are waiting for the previous batch to complete.
+            let begin = Instant::now();
+            // Bind to a variable here so that we can drop the state lock before waiting for the
+            // batch of reads to complete.
+            let outstanding_reads = lock_non_send(&self.state).await.outstanding_reads.rotate();
+            outstanding_reads.await;
+            debug!(
+                "waited for outstanding_reads in {}ms",
+                begin.elapsed().as_millis()
+            );
+        }
+
+        {
+            // Wait for all outstanding writes, so that if we crash, the blocks referenced by the
+            // index/operation_log will actually have the correct contents.  See above comments
+            // on how the ConcurrentBatch is manipulated.
+            let begin = Instant::now();
+            let outstanding_writes = lock_non_send(&self.state).await.outstanding_writes.rotate();
+            outstanding_writes.await;
+            debug!(
+                "waited for outstanding_writes in {}ms",
+                begin.elapsed().as_millis()
+            );
+        }
+
+        let old_index_phys = self.old_index.write().await.get_phys();
+        self.state
+            .lock()
+            .await
+            .flush_checkpoint(old_index_phys, new_index, completed_merge)
+            .await;
     }
 
     pub async fn lookup(
@@ -1748,20 +1770,8 @@ impl ZettaCache {
         });
 
         let state = self.state.clone();
-        let write_slots = self.write_slots.clone();
         tokio::spawn(async move {
-            // Get a permit to write to disk before waiting on the state lock.
-            // This ensures that once we assign this insertion to a checkpoint,
-            // the insertion will complete relatively quickly (e.g.
-            // milliseconds).  This way, we don't have outstanding_writes that
-            // take a long time to complete, preventing a checkpoint from making
-            // progress.  Acquiring the WritePermit may take a long time,
-            // because we have to wait for any in-progress insertions (up to
-            // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
-            let _write_permit = write_slots.acquire_owned().await.unwrap();
-
-            // Now that we are ready to issue the write to disk, insert to the
-            // cache in the current checkpoint (allocate a block, add to
+            // Insert to the cache in the current checkpoint (allocate a block, add to
             // pending_changes and outstanding_writes).
             let fut = lock_non_send(&state).await.insert(locked_key, bytes);
             fut.await;
@@ -1820,19 +1830,9 @@ impl ZettaCache {
                     .await;
 
                 if !present {
-                    // Get a permit to write to disk before waiting on the state lock.
-                    // This ensures that once we assign this insertion to a checkpoint,
-                    // the insertion will complete relatively quickly (e.g.
-                    // milliseconds).  This way, we don't have outstanding_writes that
-                    // take a long time to complete, preventing a checkpoint from making
-                    // progress.  Acquiring the WritePermit may take a long time,
-                    // because we have to wait for any in-progress insertions (up to
-                    // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
-                    let _write_permit = cache.write_slots.acquire_owned().await.unwrap();
                     let len = aligned_bytes.len();
 
-                    // Now that we are ready to issue the write to disk, insert to the
-                    // cache in the current checkpoint (allocate a block, add to
+                    // Insert to the cache in the current checkpoint (allocate a block, add to
                     // pending_changes and outstanding_writes).
                     let fut = lock_non_send(&cache.state)
                         .await
@@ -2373,7 +2373,7 @@ impl ZettaCacheState {
         // There can't be a write lock on the outstanding_reads because it's
         // only held for write when the state lock is also held, and we have the
         // state lock.
-        let read_permit = self.outstanding_reads.clone().try_read_owned().unwrap();
+        let read_permit = self.outstanding_reads.acquire();
 
         let block_access = self.block_access.clone();
 
@@ -2469,7 +2469,7 @@ impl ZettaCacheState {
         self.operation_log
             .push(OperationLogEntry::Insert(key, value));
 
-        let write_permit = self.outstanding_writes.clone().try_read_owned().unwrap();
+        let write_permit = self.outstanding_writes.acquire();
 
         let block_access = self.block_access.clone();
         future::Either::Right(async move {
@@ -2520,25 +2520,6 @@ impl ZettaCacheState {
         );
 
         let begin_checkpoint = Instant::now();
-
-        // Wait for all outstanding reads, so that if we free the space they are
-        // reading, it can't be overwritten until after the read completes.
-        let begin = Instant::now();
-        self.outstanding_reads.write().await;
-        debug!(
-            "waited for outstanding_reads in {}ms",
-            begin.elapsed().as_millis()
-        );
-
-        // Wait for all outstanding writes, so that if we crash, the blocks
-        // referenced by the index/operation_log will actually have the correct
-        // contents.
-        let begin = Instant::now();
-        self.outstanding_writes.write().await;
-        debug!(
-            "waited for outstanding_writes in {}ms",
-            begin.elapsed().as_millis()
-        );
 
         debug!(
             "{:?} pending changes at checkpoint",

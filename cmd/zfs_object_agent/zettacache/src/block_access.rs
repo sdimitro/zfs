@@ -41,6 +41,8 @@ use crate::base_types::Extent;
 lazy_static! {
     static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
     static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = get_tunable("disk_write_max_queue_depth", 32);
+    static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize =
+        get_tunable("disk_metadata_write_max_queue_depth", 16);
     static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
 }
 
@@ -132,9 +134,10 @@ pub struct Disk {
     device_path: String,
     size: u64,
     sector_size: usize,
-    io_stats: DiskIoStats,
+    io_stats: &'static DiskIoStats,
     reader_tx: flume::Sender<ReadMessage>,
     writer_tx: flume::Sender<WriteMessage>,
+    metadata_writer_tx: flume::Sender<WriteMessage>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -168,12 +171,14 @@ const CUSTOM_OFLAGS: i32 = 0;
 struct ReadMessage {
     offset: u64,
     size: usize,
+    io_type: DiskIoType,
     tx: oneshot::Sender<AlignedBytes>,
 }
 
 struct WriteMessage {
     offset: u64,
     bytes: AlignedBytes,
+    io_type: DiskIoType,
     tx: oneshot::Sender<()>,
 }
 
@@ -190,7 +195,7 @@ impl Disk {
             .open(disk_path)
             .with_context(|| format!("opening disk '{}'", disk_path))?;
         // see comment in `struct Disk`
-        let file: &'static File = Box::leak(Box::new(file));
+        let file = &*Box::leak(Box::new(file));
         let stat = nix::sys::stat::fstat(file.as_raw_fd())?;
         trace!("stat: {:?}", stat);
         let mode = SFlag::from_bits_truncate(stat.st_mode);
@@ -215,15 +220,19 @@ impl Disk {
 
         let (reader_tx, reader_rx) = flume::unbounded();
         let (writer_tx, writer_rx) = flume::unbounded();
+        let (metadata_writer_tx, metadata_writer_rx) = flume::unbounded();
+
+        let io_stats = &*Box::leak(Box::new(DiskIoStats::new(device)));
 
         let this = Disk {
             file,
             device_path: disk_path.to_string(),
             size,
             sector_size,
-            io_stats: DiskIoStats::new(device),
+            io_stats,
             reader_tx,
             writer_tx,
+            metadata_writer_tx,
         };
 
         for _ in 0..*DISK_READ_MAX_QUEUE_DEPTH {
@@ -232,14 +241,20 @@ impl Disk {
             // tokio::task::spawn_blocking() because the latter has a limit of how many
             // threads it will create (default 512)
             std::thread::spawn(move || {
-                Self::reader_thread(file, sector_size, rx);
+                Self::reader_thread(file, io_stats, sector_size, rx);
             });
         }
         if !readonly {
             for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
                 let rx = writer_rx.clone();
                 std::thread::spawn(move || {
-                    Self::writer_thread(file, sector_size, rx);
+                    Self::writer_thread(file, io_stats, sector_size, rx);
+                });
+            }
+            for _ in 0..*DISK_METADATA_WRITE_MAX_QUEUE_DEPTH {
+                let rx = metadata_writer_rx.clone();
+                std::thread::spawn(move || {
+                    Self::writer_thread(file, io_stats, sector_size, rx);
                 });
             }
         }
@@ -248,8 +263,14 @@ impl Disk {
         Ok(this)
     }
 
-    fn reader_thread(file: &'static File, sector_size: usize, rx: flume::Receiver<ReadMessage>) {
+    fn reader_thread(
+        file: &'static File,
+        io_stats: &'static DiskIoStats,
+        sector_size: usize,
+        rx: flume::Receiver<ReadMessage>,
+    ) {
         while let Ok(message) = rx.recv() {
+            let op = OpInProgress::new(&io_stats.stats[message.io_type]);
             let vec = pread_aligned(
                 file,
                 message.offset.try_into().unwrap(),
@@ -258,6 +279,7 @@ impl Disk {
             )
             .unwrap();
             assert_eq!(vec.len(), message.size);
+            op.end(message.size as u64);
             message.tx.send(vec.into()).unwrap();
         }
     }
@@ -266,24 +288,34 @@ impl Disk {
         self.verify_aligned(offset);
         self.verify_aligned(size);
 
-        let op = OpInProgress::new(&self.io_stats.stats[io_type]);
         let (tx, rx) = oneshot::channel();
-        let message = ReadMessage { offset, size, tx };
+        let message = ReadMessage {
+            offset,
+            size,
+            io_type,
+            tx,
+        };
 
         self.reader_tx.send_async(message).await.unwrap();
         let bytes = rx.await.unwrap();
-        op.end(size as u64);
         bytes
     }
 
-    fn writer_thread(file: &'static File, sector_size: usize, rx: flume::Receiver<WriteMessage>) {
+    fn writer_thread(
+        file: &'static File,
+        io_stats: &'static DiskIoStats,
+        sector_size: usize,
+        rx: flume::Receiver<WriteMessage>,
+    ) {
         while let Ok(message) = rx.recv() {
             let offset = i64::try_from(message.offset).unwrap();
             // Directio requires the pointer to be sector-aligned.  The message
             // sender aligned it for us if necessary.
             assert_eq!(message.bytes.alignment() % sector_size, 0);
             assert_eq!(message.bytes.as_ptr() as usize % sector_size, 0);
+            let op = OpInProgress::new(&io_stats.stats[message.io_type]);
             nix::sys::uio::pwrite(file.as_raw_fd(), &message.bytes, offset).unwrap();
+            op.end(message.bytes.len() as u64);
             message.tx.send(()).unwrap();
         }
     }
@@ -293,14 +325,21 @@ impl Disk {
         self.verify_aligned(bytes.len());
         self.verify_aligned(bytes.alignment());
 
-        let op = OpInProgress::new(&self.io_stats.stats[io_type]);
-        let len = bytes.len();
         let (tx, rx) = oneshot::channel();
-        let message = WriteMessage { offset, bytes, tx };
+        let message = WriteMessage {
+            offset,
+            bytes,
+            io_type,
+            tx,
+        };
 
-        self.writer_tx.send_async(message).await.unwrap();
+        let tx = match io_type {
+            DiskIoType::WriteDataForInsert => &self.writer_tx,
+            DiskIoType::MaintenanceWrite => &self.metadata_writer_tx,
+            _ => panic!("invalid {:?} for write", io_type),
+        };
+        tx.send_async(message).await.unwrap();
         rx.await.unwrap();
-        op.end(len as u64);
     }
 
     fn verify_aligned<N: Num + NumCast + Copy + Debug + Display>(&self, n: N) {
@@ -555,7 +594,7 @@ impl BlockAccess {
         serde_json::to_string(&IoStatsRef {
             cache_runtime_id: agent_id, // used to detect agent restarts across stat snapshots
             timestamp: self.timebase.elapsed(),
-            disk_stats: self.disks.iter().map(|disk| &disk.io_stats).collect(),
+            disk_stats: self.disks.iter().map(|disk| disk.io_stats).collect(),
         })
         .unwrap()
     }
