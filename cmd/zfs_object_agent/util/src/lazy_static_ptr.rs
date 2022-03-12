@@ -18,13 +18,13 @@ pub use paste::paste;
 ///
 /// For example:
 /// ```
-/// lazy_static_ptr! {
-///    pub static ref STRINGS: Mutex<Vec<String>> = Default::default();
+/// util::lazy_static_ptr! {
+///    pub static ref STRINGS: std::sync::Mutex<Vec<String>> = Default::default();
 /// }
 /// ```
 /// This will declare a `pub static` variable named `STRINGS` which will deref to a
 /// `Box<Mutex<Vec<String>>>`, similar to lazy_static!.  Additionally, it will declare
-/// ```
+/// ```ignore
 /// static STRINGS_PTR: AtomicPtr<Mutex<Vec<String>>> = ...;
 /// ```
 /// When `STRINGS` is initialized (on first dereference, or the .initialize() method),
@@ -127,14 +127,13 @@ impl<T> Drop for DebugPointerGuard<T> {
 /// we are storing (but not dereferencing) a pointer to it.  Typical use is combined with
 /// `lazy_static_ptr!`:
 /// ```
-/// fn func(thing: Thing) {
-///     lazy_static_ptr! {
-///         static ref THINGS: DebugPointerSet<Thing> = Default::default();
-///     }
-///     let mut thing = THINGS.insert(thing);
-///     // use `thing` as usual, it deref's to the passed in Thing
-///     thing.method();
+/// use util::lazy_static_ptr::DebugPointerSet;
+/// util::lazy_static_ptr! {
+///     static ref THINGS: DebugPointerSet<Vec<u64>> = Default::default();
 /// }
+/// let mut thing = THINGS.insert(Default::default());
+/// // use `thing` as usual, it deref's to the passed in Thing
+/// thing.push(42);
 /// ```
 /// Note that `lazy_static_ptr!` doesn't work well inside `async`
 /// functions/methods/closures, because it's hard to name the variable in the

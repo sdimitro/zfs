@@ -12,7 +12,7 @@ use more_asserts::*;
 /// #[derivative(Debug)]
 /// struct Foo {
 ///     #[derivative(Debug(format_with = "util::tersevec"))]
-///     member: Vec<Bar>
+///     member: Vec<u64>
 /// }
 /// ```
 pub fn tersevec<E>(vec: &[E], fmt: &mut Formatter) -> Result {
