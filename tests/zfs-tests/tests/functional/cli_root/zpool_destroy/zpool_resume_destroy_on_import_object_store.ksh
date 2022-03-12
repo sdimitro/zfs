@@ -70,6 +70,8 @@ log_onexit cleanup
 create_pool -p $TESTPOOL
 typeset guid=$(get_object_store_pool_guid $TESTPOOL)
 
+log_must zfs set compression=off $TESTPOOL
+
 # populate the zpool with 1 GB data
 sudo dd if=/dev/zero of=/$TESTPOOL/foo bs=1M count=1024
 
