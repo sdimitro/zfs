@@ -105,13 +105,14 @@ impl Append for BufferAppender {
 
 impl BufferAppender {
     fn get_writer(filename: String) -> Box<dyn Write> {
-        match OpenOptions::new().append(true).create(true).open(format!(
-            "{}/{}",
-            PANIC_LOG_FOLDER.as_str(),
-            filename
-        )) {
+        let writer_path = format!("{}/{}", PANIC_LOG_FOLDER.as_str(), filename);
+        match OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&writer_path)
+        {
             Ok(file) => {
-                info!("dumping info to {}", filename);
+                info!("dumping info to {}", writer_path);
                 Box::new(BufWriter::new(file)) as Box<dyn Write>
             }
             Err(_) => Box::new(std::io::stderr()),
