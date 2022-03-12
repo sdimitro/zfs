@@ -8,6 +8,7 @@ use log::info;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
+use util::measure;
 use zettacache::base_types::PoolGuid;
 
 use crate::base_types::ObjectId;
@@ -79,7 +80,7 @@ impl ObjectDeleter {
         };
 
         if !object_access.readonly() {
-            tokio::spawn(Self::delete_task(
+            measure!("ObjectDeleter::delete_task()").spawn(Self::delete_task(
                 object_access,
                 guid,
                 initiation_rx,

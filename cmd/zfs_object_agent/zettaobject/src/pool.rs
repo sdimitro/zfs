@@ -45,6 +45,7 @@ use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::measure;
 use util::super_trace;
 use util::with_alloctag;
 use util::AlignedBytes;
@@ -1588,14 +1589,15 @@ impl Pool {
             true => state.zettacache.clone(),
             false => None,
         };
-        tokio::spawn(async move {
+        measure!("Pool::initiate_flush_object_impl()").spawn(async move {
             if let Some(cache) = cache {
-                cache
-                    .insert_all(guid, &phys.blocks, InsertSource::Write)
+                measure!()
+                    .fut(cache.insert_all(guid, &phys.blocks, InsertSource::Write))
                     .await;
             }
 
-            phys.put(&shared_state.object_access, ObjectAccessOpType::TxgSyncPut)
+            measure!()
+                .fut(phys.put(&shared_state.object_access, ObjectAccessOpType::TxgSyncPut))
                 .await;
             for sender in senders {
                 sender.send(()).unwrap();
@@ -2533,7 +2535,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     let (sender, receiver) = oneshot::channel();
     syncing_state.reclaim_done = Some(receiver);
 
-    tokio::spawn(async move {
+    measure!("try_reclaim_frees()").spawn(async move {
         // load pending frees
         let (freed_bytes, mut frees_per_object) =
             get_frees_per_obj(&state, pending_frees_log_stream).await;
@@ -2636,7 +2638,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                 .unwrap();
             let permit = outstanding.clone().acquire_many_owned(num_permits).await;
             let state = state.clone();
-            join_handles.push(tokio::spawn(async move {
+            join_handles.push(measure!("reclaim_frees_object").spawn(async move {
                 let _permit = permit; // force permit to be moved & dropped in the task
                 reclaim_frees_object(&state, objects_to_consolidate).await
             }));
@@ -2813,7 +2815,7 @@ fn clean_metadata(
     if syncing_state.checkpoint_txg.is_some() {
         return None;
     }
-    Some(tokio::spawn(async move {
+    Some(measure!("clean_metadata()").spawn(async move {
         let ub = match UberblockPhys::get(
             &state.shared_state.object_access,
             state.shared_state.guid,

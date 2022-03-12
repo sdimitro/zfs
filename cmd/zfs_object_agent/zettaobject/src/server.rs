@@ -40,6 +40,7 @@ use util::get_tunable;
 use util::lazy_static_ptr;
 use util::lazy_static_ptr::DebugPointerSet;
 use util::maybe_die_with;
+use util::measure;
 use util::message::*;
 use util::super_trace;
 use util::with_alloctag_hf;
@@ -454,15 +455,22 @@ impl Responder {
         async move {
             // destructure the tuple back into the rx/output
             let (rx, output) = &mut *state;
-            while let Some(message) = rx.recv().await {
-                Self::write_response(output, message).await;
+            while let Some(message) = measure!("Responder::response_task() recv")
+                .fut(rx.recv())
+                .await
+            {
+                let m = measure!("Responder::response_task() write_response");
+                m.fut(Self::write_response(output, message)).await;
 
                 // drain the channel before flushing
                 while let Some(Some(message)) = rx.recv().now_or_never() {
-                    Self::write_response(output, message).await;
+                    m.fut(Self::write_response(output, message)).await;
                 }
 
-                output.flush().await.unwrap();
+                measure!("Responder::response_task() flush")
+                    .fut(output.flush())
+                    .await
+                    .unwrap();
             }
         }
     }

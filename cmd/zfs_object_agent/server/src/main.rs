@@ -203,6 +203,7 @@ fn main() {
                             *ALLOCATOR_PRINT_MIN_BYTES
                         )
                     );
+                    debug!("measurements:\n{}", util::measure::dump());
                 }
             });
 

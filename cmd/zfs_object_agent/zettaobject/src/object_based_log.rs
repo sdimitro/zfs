@@ -17,6 +17,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use util::get_tunable;
+use util::measure;
 use zettacache::base_types::*;
 
 use crate::base_types::*;
@@ -291,7 +292,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         // reference them from the spawned task (use Arc)
         let shared_state = self.shared_state.clone();
         let name = self.name.clone();
-        let handle = tokio::spawn(async move {
+        let handle = measure!("ObjectBasedLog::initiate_flush()").spawn(async move {
             chunk.put(&shared_state.object_access, &name).await;
         });
         self.pending_flushes.push(handle);

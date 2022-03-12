@@ -15,6 +15,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use util::get_tunable;
 use util::maybe_die_with;
+use util::measure;
 use util::message::*;
 use util::super_trace;
 use util::AlignedVec;
@@ -387,7 +388,7 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
 
-        tokio::spawn(async move {
+        measure!("RootConnectionState::write_block()").spawn(async move {
             pool.write_block(BlockId(request.block), data.into()).await;
             let response = WriteBlockResponse {
                 block: request.block,
@@ -428,7 +429,7 @@ impl RootConnectionState {
             .as_ref()
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
-        tokio::spawn(async move {
+        measure!("RootConnectionState::read_block").spawn(async move {
             let mut data = pool.read_block(BlockId(request.block), heal).await;
 
             //

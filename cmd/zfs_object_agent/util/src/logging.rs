@@ -32,6 +32,7 @@ use signal_hook::low_level::emulate_default_handler;
 
 use crate::get_tunable;
 use crate::lazy_static_ptr;
+use crate::measure;
 use crate::tunable::log_tunable_config;
 use crate::with_alloctag_hf;
 use crate::TrackingAllocator;
@@ -329,8 +330,10 @@ pub fn register_siguser1_to_dump_tracing() -> Result<(), std::io::Error> {
                         chrono::Local::now().format("%Y-%m-%d-%H:%M:%S%.3f"),
                     );
                     let mut out = BufferAppender::get_writer(info_path);
+
                     writeln!(out, "=== Log Traces").ok();
                     BufferAppender::dump_log_messages(&mut out);
+
                     writeln!(out, "\n=== Memory Statistics").ok();
                     writeln!(
                         out,
@@ -341,6 +344,10 @@ pub fn register_siguser1_to_dump_tracing() -> Result<(), std::io::Error> {
                         )
                     )
                     .ok();
+
+                    writeln!(out, "\n=== Measurements").ok();
+                    writeln!(out, "{}", measure::dump()).ok();
+
                     out.flush().ok();
                 }
                 _ => {

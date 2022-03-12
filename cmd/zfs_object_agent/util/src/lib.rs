@@ -14,6 +14,7 @@ mod from64;
 pub mod lazy_static_ptr;
 mod lock_set;
 mod logging;
+pub mod measure;
 pub mod message;
 mod mutex_ext;
 mod nicenum;

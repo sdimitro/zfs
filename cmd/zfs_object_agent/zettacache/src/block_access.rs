@@ -25,6 +25,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::oneshot;
 use util::get_tunable;
+use util::measure;
 use util::with_alloctag;
 use util::zettacache_stats::*;
 use util::AlignedBytes;
@@ -271,13 +272,16 @@ impl Disk {
     ) {
         while let Ok(message) = rx.recv() {
             let op = OpInProgress::new(&io_stats.stats[message.io_type]);
-            let vec = pread_aligned(
-                file,
-                message.offset.try_into().unwrap(),
-                message.size,
-                sector_size,
-            )
-            .unwrap();
+            let vec = measure!()
+                .func(|| {
+                    pread_aligned(
+                        file,
+                        message.offset.try_into().unwrap(),
+                        message.size,
+                        sector_size,
+                    )
+                })
+                .unwrap();
             assert_eq!(vec.len(), message.size);
             op.end(message.size as u64);
             message.tx.send(vec.into()).unwrap();
@@ -297,7 +301,7 @@ impl Disk {
         };
 
         self.reader_tx.send_async(message).await.unwrap();
-        let bytes = rx.await.unwrap();
+        let bytes = measure!().fut(rx).await.unwrap();
         bytes
     }
 
@@ -314,7 +318,9 @@ impl Disk {
             assert_eq!(message.bytes.alignment() % sector_size, 0);
             assert_eq!(message.bytes.as_ptr() as usize % sector_size, 0);
             let op = OpInProgress::new(&io_stats.stats[message.io_type]);
-            nix::sys::uio::pwrite(file.as_raw_fd(), &message.bytes, offset).unwrap();
+            measure!()
+                .func(|| nix::sys::uio::pwrite(file.as_raw_fd(), &message.bytes, offset))
+                .unwrap();
             op.end(message.bytes.len() as u64);
             message.tx.send(()).unwrap();
         }
@@ -339,7 +345,7 @@ impl Disk {
             _ => panic!("invalid {:?} for write", io_type),
         };
         tx.send_async(message).await.unwrap();
-        rx.await.unwrap();
+        measure!().fut(rx).await.unwrap();
     }
 
     fn verify_aligned<N: Num + NumCast + Copy + Debug + Display>(&self, n: N) {

@@ -36,6 +36,7 @@ use util::concurrent_batch::ConcurrentBatch;
 use util::get_tunable;
 use util::lock_non_send;
 use util::maybe_die_with;
+use util::measure;
 use util::nice_p2size;
 use util::super_trace;
 use util::with_alloctag;
@@ -1265,12 +1266,12 @@ impl ZettaCache {
         };
 
         let my_cache = this.clone();
-        tokio::spawn(async move {
+        measure!("checkpoint_task").spawn(async move {
             my_cache.checkpoint_task(merging).await;
         });
 
         let state = this.state.clone();
-        tokio::spawn(async move {
+        measure!("atime interval").spawn(async move {
             // XXX maybe we should bump the atime after a set number of
             // accesses, so each histogram bucket starts with the same count.
             // We could then add an auxiliary structure saying what wall clock
@@ -1515,8 +1516,11 @@ impl ZettaCache {
         block: BlockId,
         source: LookupSource,
     ) -> LookupResponse {
-        let key = IndexKey::new(self.state.lock().await.map_pool_guid(guid), block);
-        let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
+        let key = IndexKey::new(
+            measure!().fut(self.state.lock()).await.map_pool_guid(guid),
+            block,
+        );
+        let locked_key = LockedKey(measure!().fut(self.outstanding_lookups.lock(key)).await);
 
         // In debug mode, return failure randomly every specified number of requests
         if *LOOKUP_FAIL_RANDOM != 0 && rand::thread_rng().gen_ratio(1, *LOOKUP_FAIL_RANDOM) {
@@ -1634,7 +1638,7 @@ impl ZettaCache {
                 // Got the index entry from pending state or index cache and
                 // already called f().  Now that we've dropped the state lock,
                 // run the future that it returned.
-                return fut.await;
+                return measure!().fut(fut).await;
             }
             Either::Right(f) => f,
         };
@@ -1685,7 +1689,7 @@ impl ZettaCache {
                 f(&mut state, None)
             }
         };
-        fut.await
+        measure!().fut(fut).await
     }
 
     async fn reserve_buffer_space(
@@ -1750,7 +1754,10 @@ impl ZettaCache {
         // This permit will be dropped when the write to disk completes.  It
         // serves to limit the number of insert()'s that we can buffer before
         // dropping (ignoring) insertion requests.
-        let insert_permit = match self.reserve_buffer_space(bytes_len, source).await {
+        let insert_permit = match measure!()
+            .fut(self.reserve_buffer_space(bytes_len, source))
+            .await
+        {
             Some(permit) => permit,
             None => {
                 self.stats.track_count(InsertDropQueueFull);
@@ -1770,11 +1777,14 @@ impl ZettaCache {
         });
 
         let state = self.state.clone();
-        tokio::spawn(async move {
+        measure!("ZettaCache::insert()").spawn(async move {
             // Insert to the cache in the current checkpoint (allocate a block, add to
             // pending_changes and outstanding_writes).
-            let fut = lock_non_send(&state).await.insert(locked_key, bytes);
-            fut.await;
+            let fut = measure!()
+                .fut(lock_non_send(&state))
+                .await
+                .insert(locked_key, bytes);
+            measure!().fut(fut).await;
             // We want to hold onto the insert_permit until the write completes
             // because it represents the memory that's required to buffer this
             // insertion, which isn't released until the io completes.
@@ -1823,10 +1833,12 @@ impl ZettaCache {
                 // system crashed or the pool was rewound, a BlockId that was
                 // already persisted to the cache may be reused.
 
-                let present = cache
-                    .lookup_impl(&locked_key, LookupSource::Write, |_state, value| {
-                        future::ready(value.is_some())
-                    })
+                let present = measure!()
+                    .fut(
+                        cache.lookup_impl(&locked_key, LookupSource::Write, |_state, value| {
+                            future::ready(value.is_some())
+                        }),
+                    )
                     .await;
 
                 if !present {
@@ -1837,7 +1849,7 @@ impl ZettaCache {
                     let fut = lock_non_send(&cache.state)
                         .await
                         .insert(locked_key, aligned_bytes);
-                    fut.await;
+                    measure!().fut(fut).await;
 
                     cache.stats.track_bytes(InsertBytes, len as u64);
                     cache.stats.track_count(match source {
@@ -1852,7 +1864,7 @@ impl ZettaCache {
                 futures.push(fut)
             });
         }
-        tokio::spawn(async move {
+        measure!("ZettaCache::insert_all()").spawn(async move {
             futures.for_each(|_| async {}).await;
             // We want to hold onto the insert_permit until the write completes
             // because it represents the memory that's required to buffer this
@@ -2671,13 +2683,13 @@ impl ZettaCacheState {
         let spawn_merge = merge.clone();
         let start_key = next_index.last_key();
 
-        tokio::spawn(async move {
+        measure!("MergeState::merge_task()").spawn(async move {
             spawn_merge
                 .merge_task(merge_tx, old_index, start_key, &block_access)
                 .await;
         });
 
-        tokio::spawn(async move {
+        measure!("MergeState::next_index_task()").spawn(async move {
             merge
                 .next_index_task(index_rx, index_tx.clone(), &mut next_index)
                 .await;

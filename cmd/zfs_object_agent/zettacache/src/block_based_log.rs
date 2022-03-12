@@ -24,6 +24,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
 use util::get_tunable;
+use util::measure;
 use util::nice_p2size;
 use util::super_trace;
 use util::with_alloctag;
@@ -126,7 +127,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
         {
             let block_access = block_access.clone();
-            tokio::spawn(async move {
+            measure!("BlockBasedLogPhys::iter_chunks() reader").spawn(async move {
                 let block_access = &*block_access;
                 stream::iter(extents.into_iter().map(|(offset, extent)| async move {
                     let truncated_extent =
@@ -145,7 +146,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
         let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(*ITER_CHUNK_BUFFER);
 
-        tokio::spawn(async move {
+        measure!("BlockBasedLogPhys::iter_chunks() deserializer").spawn(async move {
             let mut chunk_id = ChunkId(0);
             while let Some(extent_bytes) = extent_rx.recv().await {
                 let mut total_consumed = 0;
