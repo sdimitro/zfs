@@ -29,7 +29,7 @@ outputdir = /var/tmp/test_results
 tags = ['functional']
 
 [tests/functional/acl/off]
-tests = ['posixmode']
+tests = ['dosmode', 'posixmode']
 tags = ['functional', 'acl']
 
 [tests/functional/alloc_class]
@@ -696,7 +696,7 @@ tags = ['functional', 'nestedfs']
 
 [tests/functional/no_space]
 tests = ['enospc_001_pos', 'enospc_002_pos', 'enospc_003_pos',
-    'enospc_df']
+    'enospc_df', 'enospc_rm']
 tags = ['functional', 'no_space']
 
 [tests/functional/nopwrite]

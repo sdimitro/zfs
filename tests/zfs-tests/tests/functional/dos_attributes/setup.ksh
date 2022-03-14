@@ -31,6 +31,5 @@
 
 . $STF_SUITE/include/libtest.shlib
 
-default_setup_noexit ${DISKS%% *}
-log_must zfs set compression=off $TESTPOOL
-log_pass
+DISK=${DISKS%% *}
+default_setup $DISK

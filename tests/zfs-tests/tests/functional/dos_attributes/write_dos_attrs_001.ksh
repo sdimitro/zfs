@@ -21,16 +21,41 @@
 #
 
 #
-# Copyright 2007 Sun Microsystems, Inc.  All rights reserved.
+# Copyright 2009 Sun Microsystems, Inc.  All rights reserved.
 # Use is subject to license terms.
 #
 
 #
-# Copyright (c) 2013 by Delphix. All rights reserved.
+# Copyright (c) 2013, 2016 by Delphix. All rights reserved.
 #
 
 . $STF_SUITE/include/libtest.shlib
 
-default_setup_noexit ${DISKS%% *}
-log_must zfs set compression=off $TESTPOOL
-log_pass
+#
+# DESCRIPTION:
+#
+# Write additional file level attributes stored in upper half of z_pflags
+#
+# STARTEGY:
+#		1) Create a file
+#		2) Execute write_dos_attributes on the file we created
+#		3) Verify that write_dos_attributes exited successfully
+#
+
+verify_runnable "global"
+
+FILETOTEST="$TESTDIR/test_write_dos_attrs.txt"
+
+function cleanup
+{
+	rm -f $FILETOTEST
+}
+
+log_onexit cleanup
+
+log_must chmod 777 $TESTDIR
+log_must eval "echo 'This is a test file.' > $FILETOTEST"
+log_must write_dos_attributes offline $FILETOTEST
+log_must write_dos_attributes nooffline $FILETOTEST
+
+log_pass "writing DOS attributes succeeded."
