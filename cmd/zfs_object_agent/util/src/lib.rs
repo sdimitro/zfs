@@ -40,6 +40,7 @@ pub use die::maybe_die_with;
 pub use from64::From64;
 pub use lock_set::LockSet;
 pub use lock_set::LockedItem;
+pub use logging::log;
 pub use logging::register_siguser1_to_dump_tracing;
 pub use logging::setup_logging;
 pub use logging::SUPER_EXPENSIVE_TRACE;

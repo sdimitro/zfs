@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
-use log::*;
 
 use crate::super_trace;
 use crate::watch_once;
