@@ -76,11 +76,13 @@ lazy_static! {
     ];
     // log operations that take longer than this with info!()
     static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
+    static ref XLONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("xlong_operation_secs", 60));
+    static ref PANIC_ON_XLONG_OPERATION: bool = get_tunable("panic_on_xlong_operation", false);
 
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
     pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
     pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
-    pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(get_tunable("per_request_timeout_secs", 2));
+    pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs_f64(get_tunable("per_request_timeout_secs", 2.0));
     static ref OBJECT_CACHE_SIZE: usize = get_tunable("object_cache_size", 100);
 }
 
@@ -300,16 +302,17 @@ impl<E> From<RusotoError<E>> for OAError<E> {
 
 async fn retry_impl<F, O, E>(
     msg: &str,
-    timeout_opt: Option<Duration>,
+    timeout_opt_initial: Option<Duration>,
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: core::fmt::Debug,
+    E: std::error::Error + 'static,
     F: Future<Output = Result<O, OAError<E>>>,
 {
     let mut time_skew_retried = false;
     let mut expired_token_retried = false;
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
+    let mut timeout_opt = timeout_opt_initial;
     loop {
         let begin = Instant::now();
         let result = match timeout_opt {
@@ -319,7 +322,7 @@ where
             },
             None => f().await,
         };
-        match result {
+        let e = match result {
             res @ Ok(_) => return res,
             res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
             res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
@@ -370,21 +373,26 @@ where
                 if NON_RETRYABLE_ERRORS.contains(&bhr.status) {
                     return Err(OAError::RequestError(RusotoError::Unknown(bhr)));
                 }
+                OAError::RequestError(RusotoError::Unknown(bhr))
             }
-            Err(e) => {
-                debug!(
-                    "{} returned: {:?}; retrying in {}ms",
-                    msg,
-                    e,
-                    delay.as_millis()
-                );
-                if delay > *LONG_OPERATION_DURATION {
-                    info!(
-                        "long retry: {} returned: {:?}; retrying in {:?}",
-                        msg, e, delay
-                    );
-                }
+            Err(e @ OAError::TimeoutError(_)) => {
+                timeout_opt = timeout_opt
+                    .map(|d| d.checked_mul(2).unwrap_or_else(|| Duration::from_secs(60)));
+                e
             }
+            Err(e) => e,
+        };
+        debug!(
+            "{} returned: {}; retrying in {}ms",
+            msg,
+            e,
+            delay.as_millis()
+        );
+        if delay > *LONG_OPERATION_DURATION {
+            info!(
+                "long retry: {} returned: {}; retrying in {:?}",
+                msg, e, delay
+            );
         }
         tokio::time::sleep(delay).await;
         delay = delay.mul_f64(thread_rng().gen_range(1.5..2.5));
@@ -403,7 +411,7 @@ async fn retry<F, O, E>(
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: core::fmt::Debug,
+    E: std::error::Error + 'static,
     F: Future<Output = Result<O, OAError<E>>>,
 {
     trace!("{}: begin", msg);
@@ -422,7 +430,13 @@ where
     };
     let elapsed = begin.elapsed();
     trace!("{}: returned in {}ms", msg, elapsed.as_millis());
-    if elapsed > *LONG_OPERATION_DURATION {
+    if elapsed > *XLONG_OPERATION_DURATION && *PANIC_ON_XLONG_OPERATION {
+        panic!(
+            "extremely long operation: {}, returned in {:.1}s",
+            msg,
+            elapsed.as_secs_f64()
+        );
+    } else if elapsed > *LONG_OPERATION_DURATION {
         info!(
             "long completion: {}: returned in {:.1}s",
             msg,

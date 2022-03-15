@@ -13,6 +13,7 @@ use atomic_counter::AtomicCounter;
 use atomic_counter::RelaxedCounter;
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
+pub use log::log;
 use log::*;
 use log4rs::append::console::ConsoleAppender;
 use log4rs::append::file::FileAppender;
@@ -60,7 +61,7 @@ lazy_static! {
 macro_rules! super_trace {
     ($($arg:tt)+) => ({
         if $crate::SUPER_EXPENSIVE_TRACE.load(std::sync::atomic::Ordering::Relaxed) {
-            log!(log::Level::Trace, $($arg)+)
+            $crate::log!(log::Level::Trace, $($arg)+)
         }
     })
 }

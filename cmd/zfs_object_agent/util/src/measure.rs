@@ -112,7 +112,7 @@ impl Display for DelayedFormat {
 /// Create and return a new `&'static Measurement`, and add it to the global registry which is
 /// printed by dump().  The instance will be identified by the call site (file:line:col), and
 /// optionally a string literal argument.
-/// ```
+/// ```ignore
 /// measure!().fut(async move {...}).await;
 /// measure!("identifying tag").func(|| {...}).await;
 /// ```
