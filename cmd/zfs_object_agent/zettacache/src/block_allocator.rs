@@ -199,7 +199,7 @@ impl BitmapSlab {
         Slab::new(
             id,
             generation,
-            SlabType::BitmapBased(BitmapSlab {
+            SlabEnum::BitmapBased(BitmapSlab {
                 allocatable,
                 allocating: Default::default(),
                 freeing: Default::default(),
@@ -475,7 +475,7 @@ impl ExtentSlab {
         Slab::new(
             id,
             generation,
-            SlabType::ExtentBased(ExtentSlab {
+            SlabEnum::ExtentBased(ExtentSlab {
                 allocatable,
                 allocating: Default::default(),
                 freeing: Default::default(),
@@ -695,7 +695,7 @@ struct FreeSlab {
 
 impl FreeSlab {
     fn new_slab(id: SlabId, generation: SlabGeneration, extent: Extent) -> Slab {
-        Slab::new(id, generation, SlabType::Free(FreeSlab { extent }))
+        Slab::new(id, generation, SlabEnum::Free(FreeSlab { extent }))
     }
 }
 
@@ -774,7 +774,7 @@ impl EvacuatingSlab {
         Slab::new(
             id,
             generation,
-            SlabType::Evacuating(EvacuatingSlab { extent }),
+            SlabEnum::Evacuating(EvacuatingSlab { extent }),
         )
     }
 }
@@ -848,35 +848,29 @@ impl SlabTrait for EvacuatingSlab {
     }
 }
 
-enum SlabType {
+enum SlabEnum {
     BitmapBased(BitmapSlab),
     ExtentBased(ExtentSlab),
     Evacuating(EvacuatingSlab),
     Free(FreeSlab),
 }
 
-impl SlabType {
-    fn with_trait_mut<R, F>(&mut self, cb: F) -> R
-    where
-        F: FnOnce(&mut dyn SlabTrait) -> R,
-    {
+impl SlabEnum {
+    fn as_dyn(&self) -> &dyn SlabTrait {
         match self {
-            SlabType::BitmapBased(t) => cb(t),
-            SlabType::ExtentBased(t) => cb(t),
-            SlabType::Evacuating(t) => cb(t),
-            SlabType::Free(t) => cb(t),
+            SlabEnum::BitmapBased(t) => t,
+            SlabEnum::ExtentBased(t) => t,
+            SlabEnum::Evacuating(t) => t,
+            SlabEnum::Free(t) => t,
         }
     }
 
-    fn with_trait<R, F>(&self, cb: F) -> R
-    where
-        F: FnOnce(&dyn SlabTrait) -> R,
-    {
+    fn as_mut_dyn(&mut self) -> &mut dyn SlabTrait {
         match self {
-            SlabType::BitmapBased(t) => cb(t),
-            SlabType::ExtentBased(t) => cb(t),
-            SlabType::Evacuating(t) => cb(t),
-            SlabType::Free(t) => cb(t),
+            SlabEnum::BitmapBased(t) => t,
+            SlabEnum::ExtentBased(t) => t,
+            SlabEnum::Evacuating(t) => t,
+            SlabEnum::Free(t) => t,
         }
     }
 }
@@ -884,41 +878,41 @@ impl SlabType {
 struct Slab {
     id: SlabId,
     generation: SlabGeneration,
-    info: SlabType,
+    inner: SlabEnum,
     is_dirty: bool,
     is_allocd: bool, // used for logging
 }
 
 impl Slab {
-    fn new(id: SlabId, generation: SlabGeneration, info: SlabType) -> Slab {
+    fn new(id: SlabId, generation: SlabGeneration, inner: SlabEnum) -> Slab {
         Slab {
             id,
             generation,
-            info,
+            inner,
             is_dirty: false,
             is_allocd: false,
         }
     }
 
     fn import_alloc(&mut self, extent: Extent) {
-        self.info.with_trait_mut(|t| t.import_alloc(extent));
+        self.inner.as_mut_dyn().import_alloc(extent);
     }
 
     fn import_free(&mut self, extent: Extent) {
-        self.info.with_trait_mut(|t| t.import_free(extent));
+        self.inner.as_mut_dyn().import_free(extent);
     }
 
     fn allocate(&mut self, size: u32) -> Option<Extent> {
         self.is_allocd = true;
-        self.info.with_trait_mut(|t| t.allocate(size))
+        self.inner.as_mut_dyn().allocate(size)
     }
 
     fn free(&mut self, extent: Extent) {
-        self.info.with_trait_mut(|t| t.free(extent));
+        self.inner.as_mut_dyn().free(extent);
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
-        self.info.with_trait_mut(|t| t.flush_to_spacemap(spacemap));
+        self.inner.as_mut_dyn().flush_to_spacemap(spacemap);
         self.is_dirty = false;
         self.is_allocd = false;
     }
@@ -929,38 +923,37 @@ impl Slab {
         // make the entries in the old spacemap obsolete.
         self.generation = self.generation.next();
         spacemap.mark_generation(self.id, self.generation);
-        self.info
-            .with_trait_mut(|t| t.condense_to_spacemap(spacemap));
+        self.inner.as_mut_dyn().condense_to_spacemap(spacemap);
     }
 
     fn max_size(&self) -> u32 {
-        self.info.with_trait(|t| t.max_size())
+        self.inner.as_dyn().max_size()
     }
 
     fn free_space(&self) -> u64 {
-        self.info.with_trait(|t| t.free_space())
+        self.inner.as_dyn().free_space()
     }
 
     fn allocated_space(&self) -> u64 {
-        self.info.with_trait(|t| t.allocated_space())
+        self.inner.as_dyn().allocated_space()
     }
 
     fn capacity_bytes(&self) -> u64 {
-        self.info.with_trait(|t| t.capacity_bytes())
+        self.inner.as_dyn().capacity_bytes()
     }
 
     fn num_segments(&self) -> u64 {
-        self.info.with_trait(|t| t.num_segments())
+        self.inner.as_dyn().num_segments()
     }
 
     fn allocated_extents(&self) -> Vec<Extent> {
-        self.info.with_trait(|t| t.allocated_extents())
+        self.inner.as_dyn().allocated_extents()
     }
 
     fn get_phys(&self) -> SlabPhys {
         SlabPhys {
             generation: self.generation,
-            slab_type: self.info.with_trait(|t| t.phys_type()),
+            slab_type: self.inner.as_dyn().phys_type(),
         }
     }
 
@@ -973,11 +966,11 @@ impl Slab {
 
     fn dump_info(&self) {
         writeln_stdout!("{:?} {:?}", self.id, self.generation);
-        self.info.with_trait(|t| t.dump_info());
+        self.inner.as_dyn().dump_info();
     }
 
     fn location(&self) -> DiskLocation {
-        self.info.with_trait(|t| t.location())
+        self.inner.as_dyn().location()
     }
 }
 
@@ -1321,17 +1314,17 @@ impl BlockAllocator {
         for slab in slabs.0.iter() {
             available_space += slab.free_space();
 
-            match &slab.info {
-                SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => {
+            match &slab.inner {
+                SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => {
                     slabs_by_bucket
                         .entry(slab.max_size())
                         .or_default()
                         .push(slab.to_sorted_slab_entry());
                 }
-                SlabType::Free(_) => {
+                SlabEnum::Free(_) => {
                     free_slabs.push(slab.id);
                 }
-                SlabType::Evacuating(_) => {
+                SlabEnum::Evacuating(_) => {
                     evacuating_slabs.push(slab.id);
                 }
             }
@@ -1400,7 +1393,7 @@ impl BlockAllocator {
 
         let extent = new_slab.allocate(request_size);
         assert!(extent.is_some());
-        assert!(matches!(self.slabs.get(new_id).info, SlabType::Free(_)));
+        assert!(matches!(self.slabs.get(new_id).inner, SlabEnum::Free(_)));
         *self.slabs.get_mut(new_id) = new_slab;
         self.dirty_slab_id(new_id);
         trace!("{:?} added to {} byte bucket", new_id, bucket);
@@ -1631,9 +1624,9 @@ impl BlockAllocator {
             .slabs
             .0
             .iter()
-            .filter(|&slab| match slab.info {
-                SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => true,
-                SlabType::Evacuating(_) | SlabType::Free(_) => false,
+            .filter(|&slab| match slab.inner {
+                SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => true,
+                SlabEnum::Evacuating(_) | SlabEnum::Free(_) => false,
             })
             .map(|slab| slab.to_sorted_slab_entry())
             .collect();
@@ -1684,8 +1677,8 @@ impl BlockAllocator {
             .allocated_extents()
             .iter()
             .flat_map(|&old| {
-                match slab.info {
-                    SlabType::BitmapBased(_) => {
+                match slab.inner {
+                    SlabEnum::BitmapBased(_) => {
                         let extent_size = u32::try_from(old.size).unwrap();
                         let slot_size = slab.max_size();
                         assert_eq!(extent_size % slot_size, 0);
@@ -1707,8 +1700,8 @@ impl BlockAllocator {
                             }),
                         )
                     }
-                    SlabType::ExtentBased(_) => Either::Right(std::iter::once(old)),
-                    SlabType::Evacuating(_) | SlabType::Free(_) => panic!("invalid slab type"),
+                    SlabEnum::ExtentBased(_) => Either::Right(std::iter::once(old)),
+                    SlabEnum::Evacuating(_) | SlabEnum::Free(_) => panic!("invalid slab type"),
                 }
             })
             .collect();
@@ -1906,7 +1899,7 @@ impl BlockAllocator {
             let slabs = &mut self.slabs;
             let iter = bucket.by_freeness.iter().filter_map(|entry| {
                 let slab = slabs.get(entry.slab_id);
-                if let SlabType::Free(_) = slab.info {
+                if let SlabEnum::Free(_) = slab.inner {
                     None
                 } else {
                     Some(slab.to_sorted_slab_entry())
@@ -2427,14 +2420,14 @@ impl SlabBucketsReport {
 
     fn add_slab(&mut self, slab: &Slab) {
         // Free and Evacuating slabs don't belong on a bucket, just log them for the total stats
-        match slab.info {
-            SlabType::BitmapBased(_) | SlabType::ExtentBased(_) => {
+        match slab.inner {
+            SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => {
                 let bucket_info = self.buckets.range_mut(slab.max_size()..).next().unwrap().1;
                 bucket_info.add_slab(slab);
                 let nslabs = bucket_info.stats.nslabs;
                 self.reset_hist_scaling_factor(nslabs);
             }
-            SlabType::Free(_) | SlabType::Evacuating(_) => {}
+            SlabEnum::Free(_) | SlabEnum::Evacuating(_) => {}
         }
         self.total.add_slab(slab);
     }
@@ -2577,11 +2570,11 @@ fn zcachedb_dump_slabs_report(
     for slab in slabs {
         buckets_by_max_size.add_slab(slab);
 
-        match &slab.info {
-            SlabType::BitmapBased(_) => bitmap_based_summary.add_slab(slab),
-            SlabType::ExtentBased(_) => extent_based_summary.add_slab(slab),
-            SlabType::Free(_) => empty_total.add_slab(slab),
-            SlabType::Evacuating(_) => evacuating_total.add_slab(slab),
+        match &slab.inner {
+            SlabEnum::BitmapBased(_) => bitmap_based_summary.add_slab(slab),
+            SlabEnum::ExtentBased(_) => extent_based_summary.add_slab(slab),
+            SlabEnum::Free(_) => empty_total.add_slab(slab),
+            SlabEnum::Evacuating(_) => evacuating_total.add_slab(slab),
         }
     }
     let max_scaling_factor = cmp::max(
