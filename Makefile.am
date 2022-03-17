@@ -103,7 +103,7 @@ endif
 endif
 
 PHONY += codecheck
-codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck \
+codecheck: cstyle shellcheck checkbashisms flake8 mancheck testscheck vcscheck zstdcheck \
 	rustfmt rustclippy
 
 PHONY += checkstyle
@@ -132,6 +132,7 @@ cstyle:
 		! -name 'opt_global.h' \
 		! -name '*_if*.h' \
 		! -name 'libzoa.h' \
+		! -name 'zstd_compat_wrapper.h' \
 		! -path './module/zstd/lib/*' \
 		! -path './include/sys/lua/*' \
 		! -path './module/lua/l*.[ch]' \
@@ -199,6 +200,10 @@ vcscheck:
 		git ls-files . --exclude-standard --others | \
 		awk '{c++; print} END {if(c>0) exit 1}' ; \
 	fi
+
+PHONY += zstdcheck
+zstdcheck:
+	@$(MAKE) -C module/zstd checksymbols
 
 PHONY += lint
 lint: cppcheck paxcheck

@@ -38,7 +38,7 @@
 #include <libintl.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <strings.h>
+#include <string.h>
 #include <unistd.h>
 #include <stddef.h>
 #include <fcntl.h>
@@ -4309,9 +4309,9 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 	boolean_t recursive;
 	char *snapname = NULL;
 	char destsnap[MAXPATHLEN * 2];
-	char origin[MAXNAMELEN];
+	char origin[MAXNAMELEN] = {0};
 	char name[MAXPATHLEN];
-	char tmp_keylocation[MAXNAMELEN];
+	char tmp_keylocation[MAXNAMELEN] = {0};
 	nvlist_t *rcvprops = NULL; /* props received from the send stream */
 	nvlist_t *oxprops = NULL; /* override (-o) and exclude (-x) props */
 	nvlist_t *origprops = NULL; /* original props (if destination exists) */
@@ -4327,8 +4327,6 @@ zfs_receive_one(libzfs_handle_t *hdl, int infd, const char *tosnap,
 #define	CLOCK_MONOTONIC_RAW CLOCK_MONOTONIC
 #endif
 	clock_gettime(CLOCK_MONOTONIC_RAW, &begin_time);
-	bzero(origin, MAXNAMELEN);
-	bzero(tmp_keylocation, MAXNAMELEN);
 
 	(void) snprintf(errbuf, sizeof (errbuf), dgettext(TEXT_DOMAIN,
 	    "cannot receive"));
@@ -5256,7 +5254,7 @@ zfs_receive_impl(libzfs_handle_t *hdl, const char *tosnap,
 		 * We computed the checksum in the wrong byteorder in
 		 * recv_read() above; do it again correctly.
 		 */
-		bzero(&zcksum, sizeof (zio_cksum_t));
+		memset(&zcksum, 0, sizeof (zio_cksum_t));
 		fletcher_4_incremental_byteswap(&drr, sizeof (drr), &zcksum);
 		flags->byteswap = B_TRUE;
 

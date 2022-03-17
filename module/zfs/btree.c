@@ -53,11 +53,7 @@ kmem_cache_t *zfs_btree_leaf_cache;
  * (while the asymptotic complexity of the other steps is the same, the
  * importance of the constant factors cannot be denied).
  */
-#ifdef ZFS_DEBUG
-int zfs_btree_verify_intensity = 5;
-#else
 int zfs_btree_verify_intensity = 0;
-#endif
 
 /*
  * A convenience function to silence warnings from memmove's return value and
@@ -163,7 +159,7 @@ zfs_btree_create(zfs_btree_t *tree, int (*compar) (const void *, const void *),
 	 */
 	ASSERT3U(size, <=, (BTREE_LEAF_SIZE - sizeof (zfs_btree_hdr_t)) / 4);
 
-	bzero(tree, sizeof (*tree));
+	memset(tree, 0, sizeof (*tree));
 	tree->bt_compar = compar;
 	tree->bt_elem_size = size;
 	tree->bt_height = -1;
@@ -381,7 +377,7 @@ bt_shift_core(zfs_btree_t *tree, zfs_btree_core_t *node, uint64_t idx,
 	int sign = (dir == BSD_LEFT ? -1 : +1);
 	uint8_t *e_out = e_start + sign * off * size;
 	uint64_t e_count = count;
-	bcopy(e_start, e_out, e_count * size);
+	bmov(e_start, e_out, e_count * size);
 
 	zfs_btree_hdr_t **c_start = node->btc_children + idx +
 	    (shape == BSS_TRAPEZOID ? 0 : 1);
