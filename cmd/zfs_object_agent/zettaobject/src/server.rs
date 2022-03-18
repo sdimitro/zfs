@@ -20,7 +20,6 @@ use bytes::Bytes;
 use futures::future;
 use futures::Future;
 use futures::FutureExt;
-use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvEncoding;
 use nvpair::NvList;
@@ -36,20 +35,19 @@ use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use util::get_tunable;
 use util::lazy_static_ptr;
 use util::lazy_static_ptr::DebugPointerSet;
 use util::maybe_die_with;
 use util::measure;
 use util::message::*;
 use util::super_trace;
+use util::tunable;
 use util::with_alloctag_hf;
 use util::AlignedVec;
 
-lazy_static! {
+tunable! {
     // max zfs block size is 16MB
-    pub static ref UNREASONABLE_REQUEST_SIZE: u32 =
-        get_tunable("unreasonable_request_size", 20_000_000);
+    pub static ref UNREASONABLE_REQUEST_SIZE: u32 = 20_000_000;
 }
 
 // Ss: ServerState (consumer's state associated with the server)

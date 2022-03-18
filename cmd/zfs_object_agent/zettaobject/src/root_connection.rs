@@ -7,17 +7,16 @@ use anyhow::Result;
 use bytes::Bytes;
 use derivative::Derivative;
 use futures::future;
-use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use semver::Version;
 use serde::Deserialize;
 use serde::Serialize;
-use util::get_tunable;
 use util::maybe_die_with;
 use util::measure;
 use util::message::*;
 use util::super_trace;
+use util::tunable;
 use util::AlignedVec;
 use uuid::Uuid;
 use zettacache::base_types::*;
@@ -38,9 +37,8 @@ use crate::server::Responder;
 use crate::server::SerialHandlerReturn;
 use crate::server::Server;
 
-lazy_static! {
-    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
-        get_tunable("die_before_end_txg_response_pct", 0.0);
+tunable! {
+    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 = 0.0;
 }
 
 pub struct RootServerState {

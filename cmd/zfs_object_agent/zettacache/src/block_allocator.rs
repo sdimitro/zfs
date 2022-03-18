@@ -16,7 +16,6 @@ use std::time::Instant;
 use bimap::BiBTreeMap;
 use derivative::Derivative;
 use either::Either;
-use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use num_traits::cast::ToPrimitive;
@@ -24,10 +23,13 @@ use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::Deserialize;
 use serde::Serialize;
-use util::get_tunable;
 use util::nice_number_count;
 use util::nice_p2size;
 use util::super_trace;
+use util::tunable;
+use util::tunable::ByteSize32;
+use util::tunable::Percent;
+use util::tunable_convert_noop;
 use util::with_alloctag;
 use util::writeln_stdout;
 use util::BitRange;
@@ -43,10 +45,11 @@ use crate::space_map::SpaceMapEntry;
 use crate::space_map::SpaceMapPhys;
 use crate::DumpSlabsOptions;
 
-lazy_static! {
-    static ref DEFAULT_SLAB_SIZE: u32 = get_tunable("default_slab_size", 16 * 1024 * 1024);
+tunable_convert_noop!(SlabAllocationBucketsPhys);
+tunable! {
+    static ref DEFAULT_SLAB_SIZE: ByteSize32 = ByteSize32::mib(16);
     static ref DEFAULT_SLAB_BUCKETS: SlabAllocationBucketsPhys =
-        get_tunable("default_slab_buckets", SlabAllocationBucketsPhys::default());
+        SlabAllocationBucketsPhys::default();
 
     //
     // The rate that we condense our slabs every checkpoint is guided by three factors; we
@@ -100,27 +103,21 @@ lazy_static! {
     //
     // In practice, on demanding workloads, the Max Badness metric will dominate (i.e. tell us
     // to condense more than the other metrics).
-    static ref SLAB_CONDENSE_RATE_FACTOR: f64 =
-        get_tunable("slab_condense_rate_factor", 2.0);
-    static ref SLAB_CONDENSE_MIN_PER_CHECKPOINT: u64 =
-        get_tunable("slab_condense_min_per_checkpoint", 1000);
-    static ref SLAB_CONDENSE_MAX_BADNESS_RATIO: f64 =
-        get_tunable("slab_condense_max_badness_ratio", 20.0);
-    static ref SLAB_CONDENSE_MIN_BADNESS_ENTRIES: u64 =
-        get_tunable("slab_condense_min_badness_entries", 1_000_000);
+    static ref SLAB_CONDENSE_RATE_FACTOR: f64 = 2.0;
+    static ref SLAB_CONDENSE_MIN_PER_CHECKPOINT: u64 = 1000;
+    static ref SLAB_CONDENSE_MAX_BADNESS_RATIO: f64 = 20.0;
+    static ref SLAB_CONDENSE_MIN_BADNESS_ENTRIES: u64 = 1_000_000;
 
     // The minimum amount of free space that should be contained in free slabs, as a
     // percentage; i.e. at a minimum, 25% of all free space within the allocator, should be
     // contained in free slabs.  We use this to determine when to start a rebalance operation,
     // such that we can get back to our target percentage. The special value of "0" can be
     // used to diable rebalancing entirely.
-    static ref SLAB_REBALANCING_MIN_FREE_SLABS_PCT: u64 =
-        get_tunable("slab_rebalancing_min_free_slabs_pct", 25);
+    static ref SLAB_REBALANCING_MIN_FREE_SLABS_PCT: Percent = Percent::new(25.0);
 
     // The target amount of free space that should be contained in free slabs, as a percentage;
     // i.e. 50% of all free space within the allocator, should be contained in free slabs.
-    static ref SLAB_REBALANCING_TARGET_FREE_SLABS_PCT: u64 =
-        get_tunable("slab_rebalancing_target_free_slabs_pct", 50);
+    static ref SLAB_REBALANCING_TARGET_FREE_SLABS_PCT: Percent = Percent::new(50.0);
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, PartialOrd, Ord)]
@@ -1574,7 +1571,7 @@ impl BlockAllocator {
 
         let available = self.available();
         let min_number_of_free_slabs =
-            (available * *SLAB_REBALANCING_MIN_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
+            SLAB_REBALANCING_MIN_FREE_SLABS_PCT.apply(available) / u64::from(self.slab_size);
 
         // We only want to trigger a new rebalance operation once we drop below the minimum number
         // of free slabs currently available. This way, there's a buffer between the minimum
@@ -1587,7 +1584,7 @@ impl BlockAllocator {
         }
 
         let target_number_of_free_slabs =
-            (available * *SLAB_REBALANCING_TARGET_FREE_SLABS_PCT) / 100 / u64::from(self.slab_size);
+            SLAB_REBALANCING_TARGET_FREE_SLABS_PCT.apply(available) / u64::from(self.slab_size);
         target_number_of_free_slabs.saturating_sub(current_number_of_free_slabs)
     }
 
@@ -2088,7 +2085,7 @@ impl SlabAllocationBucketsPhys {
         buckets.push((64 * 1024, true));
         buckets.push((256 * 1024, true));
         buckets.push((1024 * 1024, true));
-        buckets.push((*DEFAULT_SLAB_SIZE, true));
+        buckets.push((DEFAULT_SLAB_SIZE.as_u32(), true));
 
         SlabAllocationBucketsPhys { buckets }
     }
@@ -2123,7 +2120,7 @@ impl BlockAllocatorPhys {
         T: IntoIterator<Item = Extent>,
     {
         let mut this = BlockAllocatorPhys {
-            slab_size: *DEFAULT_SLAB_SIZE,
+            slab_size: DEFAULT_SLAB_SIZE.as_u32(),
             spacemap: SpaceMapPhys::new(),
             spacemap_next: SpaceMapPhys::new(),
             next_slab_to_condense: SlabId(0),

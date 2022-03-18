@@ -20,7 +20,7 @@ use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use bytes::Bytes;
-use conv::ConvUtil;
+use bytesize::ByteSize;
 use derivative::Derivative;
 use futures::future;
 use futures::future::join;
@@ -43,10 +43,11 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use util::get_tunable;
 use util::maybe_die_with;
 use util::measure;
 use util::super_trace;
+use util::tunable;
+use util::tunable::Percent;
 use util::with_alloctag;
 use util::AlignedBytes;
 use uuid::Uuid;
@@ -77,14 +78,14 @@ use crate::object_deleter::ObjectDeleterPhys;
 use crate::pool_destroy;
 use crate::pool_destroy::PoolDestroyingPhys;
 
-lazy_static! {
+tunable! {
     // start freeing when the pending frees are this % of the entire pool
-    static ref FREE_HIGHWATER_PCT: f64 = get_tunable("free_highwater_pct", 10.0);
+    static ref FREE_HIGHWATER_PCT: Percent = Percent::new(10.0);
     // stop freeing when the pending frees are this % of the free log
-    static ref FREE_LOWWATER_PCT: f64 = get_tunable("free_lowwater_pct", 40.0);
+    static ref FREE_LOWWATER_PCT: Percent = Percent::new(40.0);
     // don't bother freeing unless there are at least this number of free blocks
-    static ref FREE_MIN_BLOCKS: u64 = get_tunable("free_min_blocks", 1000);
-    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 2 * 1024 * 1024);
+    static ref FREE_MIN_BLOCKS: u64 = 1000;
+    static ref TARGET_OBJECT_SIZE: ByteSize = ByteSize::mib(2);
 
     // Split a reclaim free log when it exceeds this many entries.  We picked 10 million to
     // keep the memory size for loading pending frees and object sizes logs at about 1/2 GB.
@@ -95,29 +96,31 @@ lazy_static! {
     // "side" of the split. Given object size=2MB, group size=1000 objects, and min block
     // size=512b, the maximum blocks (and thus entries) in one object group is 4 million.
     // Therefore this setting should be >4M.
-    static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = get_tunable("reclaim_log_entries_limit", 10_000_000);
+    static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = 10_000_000;
 
     // When reclaiming free blocks, allow this many concurrent
     // GetObject+PutObject requests.
-    static ref RECLAIM_QUEUE_DEPTH: usize = get_tunable("reclaim_queue_depth", 200);
-    // Max concurrent GetObject's for a single object consolidation.
-    static ref RECLAIM_ONE_BUFFERED: usize = *RECLAIM_QUEUE_DEPTH / 10 + 1;
+    static ref RECLAIM_QUEUE_DEPTH: usize = 200;
 
     // minimum number of chunks before we consider condensing
-    static ref LOG_CONDENSE_MIN_CHUNKS: usize = get_tunable("log_condense_min_chunks", 30);
+    static ref LOG_CONDENSE_MIN_CHUNKS: usize = 30;
     // when log is 5x as large as the condensed version
-    static ref LOG_CONDENSE_MULTIPLE: usize = get_tunable("log_condense_multiple", 5);
+    static ref LOG_CONDENSE_MULTIPLE: usize = 5;
 
-    pub static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
-
-    pub static ref CREATE_WAIT_DURATION: Duration = Duration::from_secs(get_tunable("create_wait_duration_secs", 30));
+    pub static ref CLAIM_DURATION: Duration = Duration::from_secs(2);
+    pub static ref CREATE_WAIT_DURATION: Duration = Duration::from_secs(30);
 
     // By default, retain metadata for as long as we would return Uberblocks in a block-based pool
-    static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
+    static ref METADATA_RETENTION_TXGS: u64 = 128;
 
-    static ref WRITES_INGEST_TO_ZETTACACHE: bool = get_tunable("writes_ingest_to_zettacache", true);
+    static ref WRITES_INGEST_TO_ZETTACACHE: bool = true;
 
-    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = get_tunable("sibling_blocks_ingest_to_zettacache", false);
+    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = false;
+}
+
+lazy_static! {
+    // Max concurrent GetObject's for a single object consolidation.
+    static ref RECLAIM_ONE_BUFFERED: usize = *RECLAIM_QUEUE_DEPTH / 10 + 1;
 }
 
 const ONE_MIB: u64 = 1_048_576;
@@ -1289,7 +1292,7 @@ impl Pool {
             Self::write_unordered_to_pending_object(
                 state,
                 syncing_state,
-                Some(*MAX_BYTES_PER_OBJECT),
+                Some(TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()),
                 None,
             );
             Self::initiate_flush_object_impl(state, syncing_state);
@@ -1657,7 +1660,7 @@ impl Pool {
             Self::write_unordered_to_pending_object(
                 &self.state,
                 syncing_state,
-                Some(*MAX_BYTES_PER_OBJECT),
+                Some(TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()),
                 None,
             );
             receiver
@@ -2482,9 +2485,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     }
 
     if syncing_state.stats.pending_frees_bytes
-        < (syncing_state.stats.blocks_bytes as f64 * *FREE_HIGHWATER_PCT / 100f64)
-            .approx_as::<u64>()
-            .unwrap()
+        < FREE_HIGHWATER_PCT.apply(syncing_state.stats.blocks_bytes)
         || syncing_state.stats.pending_frees_count < *FREE_MIN_BLOCKS
     {
         return;
@@ -2540,9 +2541,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         let (freed_bytes, mut frees_per_object) =
             get_frees_per_obj(&state, pending_frees_log_stream).await;
 
-        let required_free_bytes = (freed_bytes as f64 * *FREE_LOWWATER_PCT / 100.0)
-            .approx_as::<u64>()
-            .unwrap();
+        let required_free_bytes = FREE_LOWWATER_PCT.apply(freed_bytes);
 
         // sort objects by number of free blocks
         // XXX should be based on free space (bytes)?  And perhaps objects that will be entirely
@@ -2604,7 +2603,9 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                     if writing.contains(&later_object) {
                         break;
                     }
-                    if new_size + later_object_new_size.num_bytes > *MAX_BYTES_PER_OBJECT {
+                    if new_size + later_object_new_size.num_bytes
+                        > TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()
+                    {
                         break;
                     }
                 }

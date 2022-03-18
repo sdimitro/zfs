@@ -17,8 +17,8 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::watch;
 use tokio::sync::watch::Receiver;
-use util::get_tunable;
 use util::maybe_die_with;
+use util::tunable;
 use uuid::Uuid;
 
 use crate::object_access::OAError;
@@ -26,17 +26,13 @@ use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessOpType;
 use crate::pool::CLAIM_DURATION;
 
-lazy_static! {
-    pub static ref LEASE_DURATION: Duration =
-        Duration::from_millis(get_tunable("lease_duration_ms", 50_000));
-    pub static ref HEARTBEAT_INTERVAL: Duration =
-        Duration::from_millis(get_tunable("heartbeat_interval_ms", 1_000));
-    pub static ref WRITE_TIMEOUT: Duration =
-        Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
-    pub static ref HEARTBEAT_PANIC: bool = get_tunable("heartbeat_panic", true);
-    pub static ref INTERVAL_PANIC: bool = get_tunable("interval_panic", false);
-    pub static ref HEARTBEAT_TIMEOUT: Duration =
-        get_tunable("heartbeat_timeout", *LEASE_DURATION / 5);
+tunable! {
+    pub static ref LEASE_DURATION: Duration = Duration::from_secs(50);
+    pub static ref HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+    pub static ref WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+    pub static ref HEARTBEAT_PANIC: bool = true;
+    pub static ref INTERVAL_PANIC: bool = false;
+    pub static ref HEARTBEAT_TIMEOUT: Duration = *LEASE_DURATION / 5;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]

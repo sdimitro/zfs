@@ -49,8 +49,8 @@ use rusoto_s3::S3Client;
 use rusoto_s3::S3;
 use tokio::sync::Semaphore;
 use tokio::time::error::Elapsed;
-use util::get_tunable;
 use util::super_trace;
+use util::tunable;
 use util::watch_once;
 use util::with_alloctag;
 
@@ -74,16 +74,19 @@ lazy_static! {
         StatusCode::PRECONDITION_FAILED,
         StatusCode::PAYLOAD_TOO_LARGE,
     ];
-    // log operations that take longer than this with info!()
-    static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
-    static ref XLONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("xlong_operation_secs", 60));
-    static ref PANIC_ON_XLONG_OPERATION: bool = get_tunable("panic_on_xlong_operation", false);
+}
 
-    pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
-    pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
-    pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
-    pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs_f64(get_tunable("per_request_timeout_secs", 2.0));
-    static ref OBJECT_CACHE_SIZE: usize = get_tunable("object_cache_size", 100);
+tunable! {
+    // log operations that take longer than this with info!()
+    static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(2);
+    static ref XLONG_OPERATION_DURATION: Duration = Duration::from_secs(60);
+    static ref PANIC_ON_XLONG_OPERATION: bool = false;
+
+    pub static ref OBJECT_DELETION_BATCH_SIZE: usize = 1000;
+    static ref OBJECT_CACHE_IS_BYPASSABLE: bool = false;
+    static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = 100;
+    static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
+    static ref OBJECT_CACHE_SIZE: usize = 100;
 }
 
 #[derive(Debug, Enum, Copy, Clone)]

@@ -12,13 +12,12 @@ use std::time::Instant;
 
 use anyhow::Result;
 use bytes::Bytes;
-use conv::ConvUtil;
+use bytesize::ByteSize;
 use derivative::Derivative;
 use either::Either;
 use futures::future;
 use futures::stream::*;
 use futures::Future;
-use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
 use more_asserts::*;
@@ -33,18 +32,21 @@ use tokio::sync::Semaphore;
 use tokio::time::sleep_until;
 use tokio::time::timeout_at;
 use util::concurrent_batch::ConcurrentBatch;
-use util::get_tunable;
 use util::lock_non_send;
 use util::maybe_die_with;
 use util::measure;
 use util::nice_p2size;
 use util::super_trace;
+use util::tunable;
+use util::tunable::LayeredTunable;
+use util::tunable::Percent;
 use util::with_alloctag;
 use util::with_alloctag_hf;
 use util::writeln_stderr;
 use util::writeln_stdout;
 use util::zettacache_stats::CacheStatCounter::*;
-use util::zettacache_stats::*;
+use util::zettacache_stats::CacheStats;
+use util::zettacache_stats::DiskIoType;
 use util::AlignedBytes;
 use util::From64;
 use util::LockSet;
@@ -75,17 +77,28 @@ use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 
-lazy_static! {
-    static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
+#[derive(Debug)]
+struct GhostCacheSizePct(Percent);
+impl LayeredTunable for GhostCacheSizePct {
+    type Input = Percent;
+    fn convert(input: Self::Input) -> Result<Self> {
+        // This value needs to stay < 200 to safely avoid using up all available metadata space
+        // in the cache.
+        Ok(GhostCacheSizePct(Percent::new(
+            input.as_percent().min(200.0),
+        )))
+    }
+}
+tunable! { static ref GHOST_CACHE_SIZE_PCT: GhostCacheSizePct = GhostCacheSizePct(Percent::new(100.0)); }
+
+tunable! {
+    static ref DEFAULT_CHECKPOINT_SIZE_PCT: Percent = Percent::new(0.1);
 
     // Assuming a worst case of a 2K average block size, the index should stay within about 1% of
     // the total cache size. As long as the ghost entry "addition" is reasonable (say < 2x) then
     // we should be able to stay within 6% space utilization. An additional 4% is reserved for
     // the meta data for block storage (the block allocator's space maps).
-    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 10.0);
-    // This value needs to stay < 200 to safely avoid using up all available meta data space in
-    // the cache
-    static ref GHOST_CACHE_SIZE_PCT: u64 = std::cmp::min(get_tunable("ghost_cache_size_pct", 100), 200);
+    static ref DEFAULT_METADATA_SIZE_PCT: Percent = Percent::new(10.0);
 
     // In order to keep enough free space available in the cache to ingest data during a merge,
     // keep at least 2% of the cache "free". Set the target at 97% and trigger eviction if we
@@ -93,41 +106,41 @@ lazy_static! {
     // rate of a 1% cache size increase during merges. We need to have slop for the rabalance code
     // to be able to consolidate slabs (to create empty slabs) to accomodate block size changes in
     // the workload.
-    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 97);
-    static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 98);
+    static ref TARGET_CACHE_SIZE_PCT: Percent = Percent::new(97.0);
+    static ref HIGH_WATER_CACHE_SIZE_PCT: Percent = Percent::new(98.0);
 
     // Keep the total footprint for the pending changes and index cache data at about 12% of
     // total memory.  The above tuning for eviction provides a 1TB "buffer" for insertions (on a
     // 100TB config) during a merge. Using 5% for pending changes provides sufficient memory to
     // absorb the same 1TB of insertions (on a 128GB config).
-    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 5.0);
-    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 7);
+    static ref PENDING_CHANGES_MEM_PCT: Percent = Percent::new(5.0);
+    static ref INDEX_CACHE_ENTRIES_MEM_PCT: Percent = Percent::new(7.0);
 
-    static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
+    static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 
-    static ref MERGE_PROGRESS_CHUNK: usize = get_tunable("merge_progress_chunk", 1_000_000);
+    static ref MERGE_PROGRESS_CHUNK: usize = 1_000_000;
 
-    static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
+    static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = 100;
 
     // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The
     // "speculative" buffer is for blocks being written. Note that ingesting a single block from
     // an object can result in "inflation" since the entire object must be held in memory. But
     // this is mitigated by the fact that we typically ingest the entire object on writes, and
     // make a copy of the block to ingest on read (so we don't hold the object).
-    static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
-    static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
-    static ref CACHE_WAIT_INSERT: bool = get_tunable("cache_wait_insert", false);
+    static ref CACHE_INSERT_DEMAND_BUFFER_SIZE: ByteSize = ByteSize::mib(256);
+    static ref CACHE_INSERT_SPECULATIVE_BUFFER_SIZE: ByteSize = ByteSize::mib(256);
+    static ref CACHE_WAIT_INSERT: bool = false;
 
-    static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
+    static ref DISK_EXPAND_MIN_PCT: Percent = Percent::new(10.0);
 
     // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size
     // instances/disks on gp3; because gp3 has ~1ms latency for each operation, and each closure
     // this limit applies to, performs 2 operations (one read, and one write). Additionally, this
     // is half the limit of outstanding writes.
-    static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = get_tunable("cache_rebalance_concurrency_limit", 8);
+    static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = 8;
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
-    static ref LOOKUP_FAIL_RANDOM: u32 = get_tunable("lookup_fail_random", 0);
+    static ref LOOKUP_FAIL_RANDOM: u32 = 0;
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -833,11 +846,8 @@ pub enum LookupOperation {
 }
 
 fn checkpoint_size(block_access: &BlockAccess) -> u64 {
-    block_access.round_up_to_sector(
-        (*DEFAULT_CHECKPOINT_SIZE_PCT / 100.0 * block_access.total_capacity() as f64)
-            .approx_as::<u64>()
-            .unwrap(),
-    )
+    block_access
+        .round_up_to_sector(DEFAULT_CHECKPOINT_SIZE_PCT.apply(block_access.total_capacity()))
 }
 
 impl ZettaCache {
@@ -866,11 +876,7 @@ impl ZettaCache {
                 }
                 .range(
                     0,
-                    block_access.round_up_to_sector(
-                        (*DEFAULT_METADATA_SIZE_PCT / 100.0 * extent.size as f64)
-                            .approx_as::<u64>()
-                            .unwrap(),
-                    ),
+                    block_access.round_up_to_sector(DEFAULT_METADATA_SIZE_PCT.apply(extent.size)),
                 )
             })
             .collect::<Vec<_>>();
@@ -907,11 +913,9 @@ impl ZettaCache {
             operation_log: Default::default(),
             last_atime: Atime(0),
             size_histogram: SizeHistogramPhys::new(
-                total_capacity + (total_capacity / 100 * *GHOST_CACHE_SIZE_PCT),
+                total_capacity + GHOST_CACHE_SIZE_PCT.0.apply(total_capacity),
                 total_capacity,
-                (total_capacity as f64 * *DEFAULT_METADATA_SIZE_PCT / 100.0)
-                    .approx_as::<u64>()
-                    .unwrap(),
+                DEFAULT_METADATA_SIZE_PCT.apply(total_capacity),
                 *QUANTILES_IN_SIZE_HISTOGRAM,
             ),
 
@@ -951,7 +955,7 @@ impl ZettaCache {
 
     fn index_cache_estimate_capacity(system_memory: usize) -> usize {
         // Calculate the maximum size for the index cache as a percentage of system memory
-        let target_index_cache_bytes = (*INDEX_CACHE_ENTRIES_MEM_PCT * system_memory) / 100;
+        let target_index_cache_bytes = INDEX_CACHE_ENTRIES_MEM_PCT.apply(system_memory);
 
         // Looking at the source of LruCache at the time of this writing we see that LruEntry<K,V>
         // is composed of the following elements: K, V, and 2 pointers. Thus, we use the following
@@ -1064,7 +1068,7 @@ impl ZettaCache {
                     // Added space must be at least large enough for the checkpoint and one slab.
                     if added_bytes
                         > checkpoint_size(&block_access) + checkpoint.block_allocator.slab_size()
-                        && added_bytes as f64 > phys.size as f64 * *DISK_EXPAND_MIN_PCT / 100.0
+                        && added_bytes > DISK_EXPAND_MIN_PCT.apply(phys.size)
                     {
                         Some(Extent::new(disk, phys.size, added_bytes))
                     } else {
@@ -1157,10 +1161,7 @@ impl ZettaCache {
         // Calculate a maximum size for the pending_changes as a percentage of system memory
         // Note that during a merge, this space must also accomodate the space used by
         // old_pending_changes
-        let pending_changes_max_bytes = (*PENDING_CHANGES_MEM_PCT * system_memory as f64)
-            .approx_as::<usize>()
-            .unwrap()
-            / 100;
+        let pending_changes_max_bytes = PENDING_CHANGES_MEM_PCT.apply(system_memory);
         // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data
         // entries
         let pending_changes_entries_bytes = pending_changes_max_bytes * 65 / 100;
@@ -1177,7 +1178,7 @@ impl ZettaCache {
         info!(
             "pending changes max length set to {} entries [{}% of {} = {} and entry size {}]",
             pending_changes_cap,
-            *PENDING_CHANGES_MEM_PCT,
+            PENDING_CHANGES_MEM_PCT.as_percent(),
             nice_p2size(system_memory as u64),
             nice_p2size(pending_changes_entries_bytes as u64),
             nice_p2size(pending_changes_entry_size as u64)
@@ -1238,12 +1239,12 @@ impl ZettaCache {
             new_index: Arc::new(tokio::sync::RwLock::new(new_index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
             outstanding_lookups: LockSet::new(),
-            demand_buffer_bytes_available: Arc::new(Semaphore::new(
-                *CACHE_INSERT_DEMAND_BUFFER_BYTES,
-            )),
-            speculative_buffer_bytes_available: Arc::new(Semaphore::new(
-                *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
-            )),
+            demand_buffer_bytes_available: Arc::new(Semaphore::new(usize::from64(
+                CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64(),
+            ))),
+            speculative_buffer_bytes_available: Arc::new(Semaphore::new(usize::from64(
+                CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64(),
+            ))),
             block_access,
             stats,
             timebase: Instant::now(),
@@ -1700,13 +1701,13 @@ impl ZettaCache {
         let (buffer, size, stat, wait_insert) = match source {
             InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => (
                 &self.speculative_buffer_bytes_available,
-                *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
+                CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64(),
                 SpeculativeBufferBytesAvailable,
                 false,
             ),
             InsertSource::Read => (
                 &self.demand_buffer_bytes_available,
-                *CACHE_INSERT_DEMAND_BUFFER_BYTES,
+                CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64(),
                 DemandBufferBytesAvailable,
                 *CACHE_WAIT_INSERT,
             ),
@@ -1719,7 +1720,7 @@ impl ZettaCache {
                 .await
                 .expect("error from acquire_many_owned");
             self.stats
-                .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
+                .track_instantaneous(stat, size - buffer.available_permits() as u64);
             Some(permit)
         } else {
             // The permit should be dropped when the write to disk completes. It serves to limit the
@@ -1731,7 +1732,7 @@ impl ZettaCache {
             {
                 Ok(permit) => {
                     self.stats
-                        .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
+                        .track_instantaneous(stat, size - buffer.available_permits() as u64);
                     Some(permit)
                 }
                 Err(tokio::sync::TryAcquireError::NoPermits) => None,
@@ -2587,7 +2588,7 @@ impl ZettaCacheState {
             checkpoint.claim(&mut checkpoint_extents);
             let checkpoint_bytes = checkpoint_extents.allocatable_bytes();
             let allocator_bytes = self.extent_allocator.allocatable_bytes();
-            if allocator_bytes + *DEFAULT_EXTENT_SIZE * 4 < checkpoint_bytes {
+            if allocator_bytes + DEFAULT_EXTENT_SIZE.as_u64() * 4 < checkpoint_bytes {
                 warn!("possible leak of metadata space: {} available according to checkpoint but not in memory",
                     nice_p2size(checkpoint_bytes - allocator_bytes));
             }
@@ -2766,7 +2767,7 @@ impl ZettaCacheState {
     ) -> Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)> {
         if self.pending_changes.len() < self.pending_changes_trigger
             && self.block_allocator.size() - self.block_allocator.available()
-                < (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
+                < HIGH_WATER_CACHE_SIZE_PCT.apply(self.block_allocator.size())
             && !self.block_allocator.rebalance_needed()
         {
             trace!(
@@ -2777,16 +2778,16 @@ impl ZettaCacheState {
         }
 
         let used = self.block_allocator.size() - self.block_allocator.available();
-        let target_size = (self.block_allocator.size() / 100) * *TARGET_CACHE_SIZE_PCT;
+        let target_size = TARGET_CACHE_SIZE_PCT.apply(self.block_allocator.size());
         let target_reduction = used.checked_sub(target_size).unwrap_or_default();
         info!(
-            "target cache size for storage size {}GB is {}GB; {}MB used; {}MB high-water; {}MB freeing; histogram covers {}MB",
-            self.block_allocator.size() / 1024 / 1024 / 1024,
-            target_size / 1024 / 1024 / 1024,
-            used / 1024 / 1024,
-            (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT / 1024 / 1024,
-            self.block_allocator.freeing() / 1024 / 1024,
-            self.atime_histogram.sum_live() / 1024 / 1024,
+            "target cache size for storage size {} is {}; {} used; {} high-water; {} freeing; histogram covers {}",
+            nice_p2size(self.block_allocator.size()),
+            nice_p2size(target_size),
+            nice_p2size(used),
+            nice_p2size(HIGH_WATER_CACHE_SIZE_PCT.apply(self.block_allocator.size())),
+            nice_p2size(self.block_allocator.freeing()),
+            nice_p2size(self.atime_histogram.sum_live()),
         );
         self.stats
             .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
@@ -2802,7 +2803,7 @@ impl ZettaCacheState {
             .atime_for_eviction_target(target_reduction);
 
         let ghost_size = self.atime_histogram.sum_ghost() + target_reduction;
-        let ghost_target = (self.block_allocator.size() / 100) * *GHOST_CACHE_SIZE_PCT;
+        let ghost_target = GHOST_CACHE_SIZE_PCT.0.apply(self.block_allocator.size());
         let ghost_reduction = ghost_size.checked_sub(ghost_target).unwrap_or_default();
         let ghost_atime = self.atime_histogram.atime_for_ghost_target(ghost_reduction);
         debug!(
@@ -2945,7 +2946,7 @@ impl ZettaCacheState {
     fn clear_hit_data(&mut self) {
         let cache_capacity = self.block_access.total_capacity();
         self.size_histogram = SizeHistogramPhys::new(
-            cache_capacity + cache_capacity / 100 * *GHOST_CACHE_SIZE_PCT,
+            cache_capacity + GHOST_CACHE_SIZE_PCT.0.apply(cache_capacity),
             cache_capacity,
             cache_capacity - self.block_allocator.size(),
             *QUANTILES_IN_SIZE_HISTOGRAM,

@@ -3,9 +3,8 @@ use std::time::Duration;
 use clap::Arg;
 use clap::SubCommand;
 use git_version::git_version;
-use lazy_static::lazy_static;
 use log::*;
-use util::get_tunable;
+use util::tunable;
 use util::TrackingAllocator;
 use util::ALLOCATOR_PRINT_MIN_ALLOCS;
 use util::ALLOCATOR_PRINT_MIN_BYTES;
@@ -21,9 +20,8 @@ static GIT_VERSION: &str = git_version!(
     }
 );
 
-lazy_static! {
-    static ref ALLOCATOR_PRINT_DURATION: Duration =
-        Duration::from_secs(get_tunable("allocator_print_secs", 60));
+tunable! {
+    static ref ALLOCATOR_PRINT_DURATION: Duration = Duration::from_secs(60);
 }
 
 fn main() {
@@ -165,7 +163,7 @@ fn main() {
                 .values_of("cache-device")
                 .map_or(Vec::new(), |values| values.collect());
             if let Some(file_name) = matches.value_of("config-file") {
-                util::read_tunable_config(file_name);
+                util::tunable::read_config(file_name);
             }
 
             util::setup_logging(

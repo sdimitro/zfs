@@ -17,8 +17,8 @@ use tokio::fs::OpenOptions;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tokio::sync::Mutex;
-use util::get_tunable;
 use util::maybe_die_with;
+use util::tunable;
 use zettacache::base_types::*;
 
 use crate::object_access::ObjectAccess;
@@ -27,9 +27,11 @@ use crate::pool::PoolPhys;
 
 lazy_static! {
     static ref POOL_DESTROYER: Mutex<Option<PoolDestroyer>> = Default::default();
+}
 
+tunable! {
     // Persist zpool destroy progress after this number of iterations of bulk object destroy.
-    static ref DESTROY_PROGRESS_FREQUENCY: usize = get_tunable("destroy_progress_frequency", 10);
+    static ref DESTROY_PROGRESS_FREQUENCY: usize = 10;
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy)]

@@ -1,19 +1,18 @@
 use async_trait::async_trait;
 use chrono::Duration;
 use chrono::Utc;
-use lazy_static::lazy_static;
 use log::*;
 use rusoto_credential::AwsCredentials;
 use rusoto_credential::CredentialsError;
 use rusoto_credential::ProvideAwsCredentials;
 use tokio::sync::Mutex;
 
-use crate::get_tunable;
+use crate::tunable;
 
-lazy_static! {
-    /// Buffer period to use while determining if cached credentials have expired.
-    /// The default value is 15 minutes, the maximum clock skew allowed for s3 requests.
-    static ref CREDENTIALS_BUFFER_SECONDS: Duration = Duration::seconds(get_tunable("credential_buffer_secs", 15 * 60));
+tunable! {
+    // Buffer period to use while determining if cached credentials have expired.
+    // The default value is 15 minutes, the maximum clock skew allowed for s3 requests.
+    static ref CREDENTIALS_BUFFER_DURATION: Duration = Duration::minutes(15);
 }
 
 /// The `ResilientCredentialsProvider` is a wrapper over another `ProvideAwsCredentials`. It caches
@@ -49,7 +48,7 @@ impl<P: ProvideAwsCredentials + Send + Sync> ProvideAwsCredentials
             let expired = match creds.expires_at() {
                 // We incorporate a buffer period of 15 minutes, which is the max clock skew that is
                 // tolerated by AWS while determining if the credentials have expired.
-                Some(cred_expiry) => *cred_expiry - *CREDENTIALS_BUFFER_SECONDS < Utc::now(),
+                Some(cred_expiry) => *cred_expiry - *CREDENTIALS_BUFFER_DURATION < Utc::now(),
                 None => false,
             };
             if !expired {

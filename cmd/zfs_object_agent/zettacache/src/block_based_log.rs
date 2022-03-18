@@ -10,12 +10,12 @@ use std::sync::Mutex;
 use std::time::Instant;
 
 use anyhow::Context;
+use bytesize::ByteSize;
 use futures::future::join;
 use futures::stream;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures_core::Stream;
-use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
 use more_asserts::*;
@@ -23,10 +23,10 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
-use util::get_tunable;
 use util::measure;
 use util::nice_p2size;
 use util::super_trace;
+use util::tunable;
 use util::with_alloctag;
 use util::zettacache_stats::DiskIoType;
 use util::AlignedVec;
@@ -39,7 +39,7 @@ use crate::block_access::EncodeType;
 use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 
-lazy_static! {
+tunable! {
     // ENTRIES_PER_CHUNK is chosen so that chunks of the Index will be 8KB on disk, with a
     // minimum of padding.  The size in bytes of each field is:
     // chunk_to_raw(BlockBasedLogChunkBorrowed<IndexEntry>):
@@ -51,21 +51,21 @@ lazy_static! {
     //    3: entries slice length
     // 8048: = 337 * (1+23): slice of slices (1=slice len, 23 = size_of<IndexEntryPhys>)
     // >=23: padding.  Typically, 35 bytes of padding is observed.
-    static ref ENTRIES_PER_CHUNK: usize = get_tunable("entries_per_chunk", 337);
+    static ref ENTRIES_PER_CHUNK: usize = 337;
     // Note: kernel sends writes to disk in at most 256K chunks (at least with nvme driver)
-    static ref WRITE_AGGREGATION_SIZE: usize = get_tunable("write_aggregation_size", 256 * 1024);
+    static ref WRITE_AGGREGATION_SIZE: ByteSize = ByteSize::kib(256);
     // We primarily use the chunk cache to ensure that when looking up all the
     // entries in an object, we need at most one read from the index.  So we
     // only need as many chunks in the cache as the number of objects that we
     // might be processing concurrently.
-    static ref CHUNK_CACHE_ENTRIES: usize = get_tunable("chunk_cache_entries", 128);
+    static ref CHUNK_CACHE_ENTRIES: usize = 128;
     // This can be increased if we need to have multiple (128MB) extents being
     // read at once.  Each one would typically be read from a different disk, so
     // this may be needed if we the throughput of multiple disks.
-    static ref ITER_CONCURRENT_READS: usize = get_tunable("iter_concurrent_reads", 1);
+    static ref ITER_CONCURRENT_READS: usize = 1;
     // Number of chunks to buffer in the channel; experimentally determinded
     // that >100 gives good performance.
-    static ref ITER_CHUNK_BUFFER: usize = get_tunable("iter_chunk_buffer", 1000);
+    static ref ITER_CHUNKS_TO_BUFFER: usize = 1000;
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -144,7 +144,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
             });
         }
 
-        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(*ITER_CHUNK_BUFFER);
+        let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(*ITER_CHUNKS_TO_BUFFER);
 
         measure!("BlockBasedLogPhys::iter_chunks() deserializer").spawn(async move {
             let mut chunk_id = ChunkId(0);
@@ -415,14 +415,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 }
                 _ => (),
             }
-            if pending_write.is_none() && raw_chunk.len() < 2 * *WRITE_AGGREGATION_SIZE {
+            let agg_size = usize::from64(WRITE_AGGREGATION_SIZE.as_u64());
+            if pending_write.is_none() && raw_chunk.len() < 2 * agg_size {
                 pending_write = Some((
                     extent.location,
                     with_alloctag("BlockBasedLog::flush_impl()", || {
-                        AlignedVec::with_capacity(
-                            *WRITE_AGGREGATION_SIZE,
-                            self.block_access.round_up_to_sector(1),
-                        )
+                        AlignedVec::with_capacity(agg_size, self.block_access.round_up_to_sector(1))
                     }),
                 ));
             }

@@ -5,21 +5,21 @@ use std::mem;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
 
-use lazy_static::lazy_static;
+use bytesize::ByteSize;
 use log::*;
 use more_asserts::*;
 use serde::Deserialize;
 use serde::Serialize;
-use util::get_tunable;
 use util::iter_wrapping;
+use util::tunable;
 use util::RangeTree;
 
 use crate::base_types::DiskId;
 use crate::base_types::Extent;
 
-lazy_static! {
+tunable! {
     // XXX maybe this is wasteful for the smaller logs?
-    pub static ref DEFAULT_EXTENT_SIZE: u64 = get_tunable("default_extent_size", 128 * 1024 * 1024);
+    pub static ref DEFAULT_EXTENT_SIZE: ByteSize = ByteSize::mib(128);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -166,7 +166,7 @@ impl ExtentAllocator {
                     // 4KB.
                     let max_size = max(
                         min_size,
-                        min(*DEFAULT_EXTENT_SIZE, (extent.size / 128) & !(4095)),
+                        min(DEFAULT_EXTENT_SIZE.as_u64(), (extent.size / 128) & !(4095)),
                     );
                     best_extent = Some(Extent::new(
                         extent.location.disk(),
