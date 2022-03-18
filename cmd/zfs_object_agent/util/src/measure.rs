@@ -75,6 +75,10 @@ impl Measurement {
     {
         tokio::spawn(self.fut(future))
     }
+
+    pub fn hit(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+    }
 }
 
 impl Display for Measurement {

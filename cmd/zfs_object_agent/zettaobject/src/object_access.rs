@@ -4,6 +4,7 @@ use std::error::Error;
 use std::fmt::Display;
 use std::fmt::Formatter;
 use std::iter;
+use std::ops::Range;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
@@ -29,6 +30,7 @@ use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
 use lru::LruCache;
+use more_asserts::assert_le;
 use rand::prelude::*;
 use rusoto_core::ByteStream;
 use rusoto_core::RusotoError;
@@ -566,14 +568,19 @@ impl ObjectAccess {
         key: String,
         stat_type: ObjectAccessOpType,
         timeout: Option<Duration>,
+        range: Option<Range<usize>>,
     ) -> Result<Bytes> {
         let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
         let op = self.access_stats.begin(stat_type);
         let msg = format!("get {}", key);
+        let range_string = range
+            .as_ref()
+            .map(|r| format!("bytes={}-{}", r.start, r.end - 1));
         let bytes = retry(&msg, timeout, || async {
             let req = GetObjectRequest {
                 bucket: self.bucket_str.clone(),
                 key: key.clone(),
+                range: range_string.clone(),
                 ..Default::default()
             };
             let output = self.client.get_object(req).await?;
@@ -602,12 +609,16 @@ impl ObjectAccess {
                 }
                 Ok(_) => {
                     trace!(
-                        "{}: got {} bytes of data in {} chunks in {}ms",
+                        "{}: got {} bytes of data ({:?}) in {} chunks in {}ms",
                         msg,
                         v.len(),
+                        output.content_range,
                         count,
                         begin.elapsed().as_millis()
                     );
+                    if let Some(range) = &range {
+                        assert_le!(v.len(), range.end - range.start);
+                    }
                     Ok(v)
                 }
             }
@@ -626,7 +637,7 @@ impl ObjectAccess {
     ) -> Result<Bytes> {
         if *OBJECT_CACHE_IS_BYPASSABLE {
             let bytes = self
-                .get_object_from_s3(key.clone(), stat_type, None)
+                .get_object_from_s3(key.clone(), stat_type, None, None)
                 .await?;
             // Note: we *should* have the same data from S3 (in the `vec`) and in the cache, so
             // this invalidation is normally not necessary.  However, in case a bug (or
@@ -636,6 +647,61 @@ impl ObjectAccess {
             Ok(bytes)
         } else {
             self.get_object(key, stat_type).await
+        }
+    }
+
+    pub async fn get_object_range(
+        &self,
+        key: String,
+        range: Range<usize>,
+        stat_type: ObjectAccessOpType,
+    ) -> Result<Bytes> {
+        // Recursive async functions require Box-ing their future, even if we
+        // "tail call".  Use a loop to retry instead.
+        loop {
+            // XXX copying key
+            if let Some(result) = self
+                .get_object_range_impl(key.clone(), range.clone(), stat_type)
+                .await
+            {
+                return result;
+            }
+        }
+    }
+
+    async fn get_object_range_impl(
+        &self,
+        key: String,
+        range: Range<usize>,
+        stat_type: ObjectAccessOpType,
+    ) -> Option<Result<Bytes>> {
+        // need this block separate so that we can drop the mutex before the .await's
+        let rx = {
+            let mut c = CACHE.lock().unwrap();
+            match c.cache.get(&key) {
+                Some(bytes) => {
+                    super_trace!("found {} in cache", key);
+                    return Some(Ok(bytes.slice(range)));
+                }
+                None => c.reading.get(&key).map(|(_, rx)| rx.clone()),
+            }
+        };
+        match rx {
+            None => Some(
+                self.get_object_from_s3(key.clone(), stat_type, None, Some(range.clone()))
+                    .await,
+            ),
+            Some(rx) => {
+                super_trace!("{}: found GET in progress, waiting", key);
+                match rx.recv().await {
+                    Ok(bytes) => Some(Ok(bytes.slice(range))),
+                    // Sender doesn't have a value for us. The caller will retry.
+                    Err(_) => {
+                        debug!("{}: waited for failed GET, retrying", key);
+                        None
+                    }
+                }
+            }
         }
     }
 
@@ -670,8 +736,9 @@ impl ObjectAccess {
                         let (tx, rx) = watch_once::channel::<Bytes>();
                         c.reading.insert(key.clone(), (true, rx));
                         Either::Left(async move {
-                            let result =
-                                self.get_object_from_s3(key.clone(), stat_type, None).await;
+                            let result = self
+                                .get_object_from_s3(key.clone(), stat_type, None, None)
+                                .await;
 
                             // We need to remove the `reading` entry regardless of the result.
                             let mut myc = CACHE.lock().unwrap();
