@@ -10,15 +10,15 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use bytes::Bytes;
+use bytesize::ByteSize;
 use futures::stream;
-use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use rusoto_core::ByteStream;
 use serde::Deserialize;
 use serde::Serialize;
-use util::get_tunable;
 use util::measure;
+use util::tunable;
 use util::with_alloctag;
 use util::From64;
 use zettacache::base_types::*;
@@ -29,10 +29,9 @@ use crate::object_access::ObjectAccessOpType;
 
 pub const NUM_DATA_PREFIXES: u64 = 64;
 
-lazy_static! {
-    pub static ref DATA_OBJ_RANGED_GET: bool = get_tunable("data_obj_ranged_get", false);
-    pub static ref DATA_OBJ_TRY_HEADER_SIZE: usize =
-        get_tunable("data_obj_try_header_size", 32 * 1024);
+tunable! {
+    pub static ref DATA_OBJ_RANGED_GET: bool = false;
+    pub static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(32);
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
@@ -289,7 +288,11 @@ impl DataObject {
     ) -> Result<Bytes> {
         let key = Self::key(guid, object);
         let header_bytes = object_access
-            .get_object_range(key.clone(), 0..*DATA_OBJ_TRY_HEADER_SIZE, stat_type)
+            .get_object_range(
+                key.clone(),
+                0..usize::from64(DATA_OBJ_TRY_HEADER_SIZE.as_u64()),
+                stat_type,
+            )
             .await?;
         let (phys, data_offset) = Self::deserialize_header(&header_bytes, || {
             format!("get {:?} for {:?}", object, block)
