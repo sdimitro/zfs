@@ -549,6 +549,8 @@ impl ReclaimInfo {
     }
 }
 
+type WriteCallback = Box<dyn FnOnce() + Send>;
+
 /// state that's modified while syncing a txg
 //#[derive(Debug)]
 struct PoolSyncingState {
@@ -561,7 +563,7 @@ struct PoolSyncingState {
     reclaim_info: ReclaimInfo, // Extendible hash structure for pending frees
 
     pending_object: PendingObjectState,
-    pending_unordered_writes: HashMap<BlockId, (Bytes, oneshot::Sender<()>)>,
+    pending_unordered_writes: HashMap<BlockId, (Bytes, WriteCallback)>,
     pub last_txg: Txg,
     pub syncing_txg: Option<Txg>,
     stats: PoolStatsPhys,
@@ -578,22 +580,27 @@ struct PoolSyncingState {
 type SyncTask =
     Box<dyn FnOnce(&mut PoolSyncingState) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> + Send>;
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 enum PendingObjectState {
-    Pending(DataObject, Vec<oneshot::Sender<()>>), // available to write
+    // available to write
+    Pending(
+        DataObject,
+        #[derivative(Debug(format_with = "util::tersevec"))] Vec<WriteCallback>,
+    ),
     // not available to write; this is the next blockID to use
     NotPending(BlockId),
 }
 
 impl PendingObjectState {
-    fn as_mut_pending(&mut self) -> (&mut DataObject, &mut Vec<oneshot::Sender<()>>) {
+    fn as_mut_pending(&mut self) -> (&mut DataObject, &mut Vec<WriteCallback>) {
         match self {
             PendingObjectState::Pending(phys, done) => (phys, done),
             _ => panic!("invalid {:?}", self),
         }
     }
 
-    fn unwrap_pending(self) -> (DataObject, Vec<oneshot::Sender<()>>) {
+    fn unwrap_pending(self) -> (DataObject, Vec<WriteCallback>) {
         match self {
             PendingObjectState::Pending(phys, done) => (phys, done),
             _ => panic!("invalid {:?}", self),
@@ -1266,11 +1273,11 @@ impl Pool {
                                 obsolete_write,
                                 recovered_obj.header.object,
                             );
-                            let (_, sender) = syncing_state
+                            let (_, callback) = syncing_state
                                 .pending_unordered_writes
                                 .remove(&obsolete_write)
                                 .unwrap();
-                            sender.send(()).unwrap();
+                            callback();
                         }
                         assert!(!syncing_state.pending_object.is_pending());
                         syncing_state.pending_object =
@@ -1568,7 +1575,7 @@ impl Pool {
             }
         };
 
-        let (phys, senders) = mem::replace(
+        let (phys, callbacks) = mem::replace(
             &mut syncing_state.pending_object,
             PendingObjectState::new_pending(
                 state.shared_state.guid,
@@ -1602,8 +1609,8 @@ impl Pool {
             measure!()
                 .fut(phys.put(&shared_state.object_access, ObjectAccessOpType::TxgSyncPut))
                 .await;
-            for sender in senders {
-                sender.send(()).unwrap();
+            for callback in callbacks {
+                callback();
             }
         });
     }
@@ -1620,17 +1627,18 @@ impl Pool {
         }
 
         let mut next_block = syncing_state.next_block();
-        while let Some((buf, sender)) = syncing_state.pending_unordered_writes.remove(&next_block) {
+        while let Some((buf, callback)) = syncing_state.pending_unordered_writes.remove(&next_block)
+        {
             super_trace!(
                 "found next {:?} in unordered pending writes; transferring to pending object",
                 next_block
             );
-            let (phys, senders) = syncing_state.pending_object.as_mut_pending();
+            let (phys, callbacks) = syncing_state.pending_object.as_mut_pending();
             phys.header.blocks_size += u32::try_from(buf.len()).unwrap();
             phys.blocks.insert(phys.header.next_block, buf);
             next_block = next_block.next();
             phys.header.next_block = next_block;
-            senders.push(sender);
+            callbacks.push(callback);
             if let Some(size_limit) = size_limit_opt {
                 if phys.header.blocks_size >= size_limit {
                     Self::initiate_flush_object_impl(state, syncing_state);
@@ -1645,17 +1653,16 @@ impl Pool {
         Self::check_pending_flushes(state, syncing_state);
     }
 
-    pub async fn write_block(&self, block: BlockId, bytes: AlignedBytes) {
-        let receiver = self.state.with_syncing_state(|syncing_state| {
+    pub fn write_block(&self, block: BlockId, bytes: AlignedBytes, cb: WriteCallback) {
+        self.state.with_syncing_state(|syncing_state| {
             // XXX change to return error
             assert!(syncing_state.syncing_txg.is_some());
             assert_ge!(block, syncing_state.next_block());
 
-            let (sender, receiver) = oneshot::channel();
             super_trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
-                .insert(block, (bytes.clone(), sender));
+                .insert(block, (bytes.clone(), cb));
 
             Self::write_unordered_to_pending_object(
                 &self.state,
@@ -1663,9 +1670,7 @@ impl Pool {
                 Some(TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()),
                 None,
             );
-            receiver
         });
-        receiver.await.unwrap();
     }
 
     async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {

@@ -386,14 +386,17 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
 
-        measure!("RootConnectionState::write_block()").spawn(async move {
-            pool.write_block(BlockId(request.block), data.into()).await;
-            let response = WriteBlockResponse {
-                block: request.block,
-                token: request.token,
-            };
-            responder.respond_with_struct(MessageType::WriteBlock, &response, Bytes::new());
-        });
+        pool.write_block(
+            BlockId(request.block),
+            data.into(),
+            Box::new(move || {
+                let response = WriteBlockResponse {
+                    block: request.block,
+                    token: request.token,
+                };
+                responder.respond_with_struct(MessageType::WriteBlock, &response, Bytes::new());
+            }),
+        );
         Ok(())
     }
 
