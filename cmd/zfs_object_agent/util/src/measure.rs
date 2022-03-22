@@ -1,11 +1,14 @@
 use core::fmt;
 use std::fmt::Display;
 use std::future::Future;
+use std::mem::size_of_val;
 use std::sync::atomic::AtomicU64;
+use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::sync::Once;
 
+use futures::FutureExt;
 use tokio::task::JoinHandle;
 
 use crate::lazy_static_ptr;
@@ -19,6 +22,7 @@ pub struct Measurement {
     initializer: Once,
     count: AtomicU64,
     inflight: AtomicU64,
+    fut_size: AtomicUsize,
 }
 
 impl Measurement {
@@ -29,6 +33,7 @@ impl Measurement {
             initializer: Once::new(),
             count: AtomicU64::new(0),
             inflight: AtomicU64::new(0),
+            fut_size: AtomicUsize::new(0),
         }
     }
 
@@ -41,17 +46,28 @@ impl Measurement {
         });
     }
 
-    /// Measure the execution of the provided future (when the implicitly-returned Future is
-    /// awaited).
-    pub async fn fut<F, R>(&self, future: F) -> R
+    /// Wrap the provided future in one that will measure its execution.
+    // Lifetime annotations say that self must live longer than the `future` argument.  This is
+    // typically satisfied by `&'static self`, i.e. the static Measurement created by `measure!()`.
+    pub fn fut<'a, 'b, R>(
+        &'a self,
+        future: impl Future<Output = R> + 'b,
+    ) -> impl Future<Output = R> + 'b
     where
-        F: Future<Output = R>,
+        'a: 'b,
     {
+        if self.fut_size.load(Ordering::Relaxed) == 0 {
+            // Multiple threads may race to set this, but they will all store the same value, so
+            // it isn't worth using a Once to guarantee that it doesn't get stored multiple
+            // times.
+            self.fut_size.store(size_of_val(&future), Ordering::Relaxed);
+        }
         self.count.fetch_add(1, Ordering::Relaxed);
         self.inflight.fetch_add(1, Ordering::Relaxed);
-        let result = future.await;
-        self.inflight.fetch_sub(1, Ordering::Relaxed);
-        result
+        // We don't use an async function or closure because it doubles the size of the future.
+        future.inspect(move |_| {
+            self.inflight.fetch_sub(1, Ordering::Relaxed);
+        })
     }
 
     /// Measure the execution of the provided closure.
@@ -90,6 +106,10 @@ impl Display for Measurement {
             self.count.load(Ordering::Relaxed),
             self.inflight.load(Ordering::Relaxed)
         )?;
+        let fut_size = self.fut_size.load(Ordering::Relaxed);
+        if fut_size != 0 {
+            write!(f, ", fut_size {}B", fut_size)?;
+        }
         Ok(())
     }
 }
@@ -132,4 +152,27 @@ macro_rules! measure {
     () => {
         $crate::measure!("")
     };
+}
+
+#[cfg(test)]
+mod test {
+    use std::mem::size_of_val;
+
+    use more_asserts::*;
+
+    #[test]
+    fn nonexponential() {
+        let f = futures::future::ready(1u64);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        let f = measure!().fut(f);
+        assert_le!(size_of_val(&f), 1024);
+    }
 }

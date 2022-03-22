@@ -2594,6 +2594,7 @@ dependencies = [
  "dashmap",
  "derivative",
  "enum-map",
+ "futures",
  "humantime",
  "lazy_static",
  "libc",
