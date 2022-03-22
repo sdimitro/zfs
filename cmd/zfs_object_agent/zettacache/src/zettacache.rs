@@ -6,6 +6,7 @@ use std::mem;
 use std::ops::Bound::Excluded;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
+use std::ops::Deref;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -69,6 +70,8 @@ use crate::extent_allocator::DEFAULT_EXTENT_SIZE;
 use crate::features::check_features;
 use crate::features::SUPPORTED_FEATURES;
 use crate::index::*;
+use crate::pool_id::PoolGuidMapping;
+use crate::pool_id::PoolGuidMappingPhys;
 use crate::size_histogram::SizeHistogramPhys;
 use crate::superblock::DiskPhys;
 use crate::superblock::PrimaryPhys;
@@ -154,7 +157,7 @@ struct MergeProgressPhys {
 #[derivative(Debug)]
 struct ZettaCheckpointPhys {
     generation: CheckpointId,
-    pool_guids: Vec<PoolGuid>,
+    pool_guids: PoolGuidMappingPhys,
     extent_allocator: ExtentAllocatorPhys,
     #[derivative(Debug = "ignore")]
     block_allocator: BlockAllocatorPhys,
@@ -204,7 +207,15 @@ enum PendingChange {
 struct UpdateAtime(IndexValue, Atime);
 
 #[derive(Clone)]
-pub struct ZettaCache {
+pub struct ZettaCache(Arc<Inner>);
+impl Deref for ZettaCache {
+    type Target = Inner;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct Inner {
     block_access: Arc<BlockAccess>,
 
     // lock ordering: index first then state
@@ -218,6 +229,7 @@ pub struct ZettaCache {
     demand_buffer_bytes_available: Arc<Semaphore>,
     speculative_buffer_bytes_available: Arc<Semaphore>,
     cache_runtime_id: Uuid,
+    pool_guids: PoolGuidMapping,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -782,7 +794,6 @@ struct ZettaCacheState {
     primary: PrimaryPhys,
     guid: u64,
     primary_disk: DiskId,
-    pool_guids: Vec<PoolGuid>,
     block_allocator: BlockAllocator,
     pending_changes: PendingChanges,
     pending_changes_trigger: usize,
@@ -891,7 +902,7 @@ impl ZettaCache {
         (checkpoint_capacity, metadata_capacity, data_capacity)
     }
 
-    pub async fn create(block_access: &BlockAccess) {
+    async fn create(block_access: &BlockAccess) {
         let guid: u64 = rand::random();
 
         let total_capacity = block_access.total_capacity();
@@ -906,7 +917,7 @@ impl ZettaCache {
 
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
-            pool_guids: Vec::new(),
+            pool_guids: Default::default(),
             block_allocator: BlockAllocatorPhys::new(data_capacity),
             extent_allocator: ExtentAllocatorPhys::new(metadata_capacity),
             old_index: IndexRunPhys::new(Atime(0), Atime(0)),
@@ -990,7 +1001,7 @@ impl ZettaCache {
         index_cache_cap
     }
 
-    pub async fn open(paths: Vec<&str>) -> Result<ZettaCache> {
+    pub async fn open(paths: Vec<&str>) -> Result<Self> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
             disks.push(Disk::new(path, false)?);
@@ -1197,7 +1208,7 @@ impl ZettaCache {
             pending_changes_trigger,
             merge: None,
             index_cache: with_alloctag("ZettaCacheState::index_cache hashtable", || {
-                LruCache::new(ZettaCache::index_cache_estimate_capacity(system_memory))
+                LruCache::new(Self::index_cache_estimate_capacity(system_memory))
             }),
             atime_histogram: AtimeHistogram::new(atime_histogram_phys),
             size_histogram: checkpoint.size_histogram,
@@ -1205,7 +1216,6 @@ impl ZettaCache {
             primary,
             primary_disk,
             guid,
-            pool_guids: checkpoint.pool_guids,
             outstanding_reads: Default::default(),
             outstanding_writes: Default::default(),
             atime: checkpoint.last_atime,
@@ -1234,7 +1244,7 @@ impl ZettaCache {
             state.clear_hit_data();
         }
 
-        let this = ZettaCache {
+        let this = Self(Arc::new(Inner {
             old_index: Arc::new(tokio::sync::RwLock::new(old_index)),
             new_index: Arc::new(tokio::sync::RwLock::new(new_index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
@@ -1249,7 +1259,8 @@ impl ZettaCache {
             stats,
             timebase: Instant::now(),
             cache_runtime_id: Uuid::new_v4(),
-        };
+            pool_guids: PoolGuidMapping::open(checkpoint.pool_guids),
+        }));
 
         let merging = match checkpoint.merge_progress {
             Some(progress) => Some(
@@ -1507,7 +1518,12 @@ impl ZettaCache {
         self.state
             .lock()
             .await
-            .flush_checkpoint(old_index_phys, new_index, completed_merge)
+            .flush_checkpoint(
+                old_index_phys,
+                new_index,
+                completed_merge,
+                self.pool_guids.to_phys(),
+            )
             .await;
     }
 
@@ -1517,10 +1533,7 @@ impl ZettaCache {
         block: BlockId,
         source: LookupSource,
     ) -> LookupResponse {
-        let key = IndexKey::new(
-            measure!().fut(self.state.lock()).await.map_pool_guid(guid),
-            block,
-        );
+        let key = IndexKey::new(self.pool_guids.map_pool_guid(guid), block);
         let locked_key = LockedKey(measure!().fut(self.outstanding_lookups.lock(key)).await);
 
         // In debug mode, return failure randomly every specified number of requests
@@ -1574,7 +1587,7 @@ impl ZettaCache {
         let fut_or_f = {
             // We don't want to hold the state lock while reading from disk so we
             // use lock_non_send() to ensure that we can't hold it across .await.
-            let mut state = lock_non_send(&self.state).await;
+            let mut state = measure!().fut(lock_non_send(&self.state)).await;
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
@@ -1673,7 +1686,7 @@ impl ZettaCache {
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
-                let mut state = lock_non_send(&self.state).await;
+                let mut state = measure!().fut(lock_non_send(&self.state)).await;
                 let value = state.lookup_with_value_from_index(&key, entry.value, source);
                 if value.is_none() {
                     super_trace!(
@@ -1686,7 +1699,7 @@ impl ZettaCache {
             None => {
                 // key not in index
                 super_trace!("cache miss after reading index for {:?}", key);
-                let mut state = lock_non_send(&self.state).await;
+                let mut state = measure!().fut(lock_non_send(&self.state)).await;
                 f(&mut state, None)
             }
         };
@@ -1801,7 +1814,7 @@ impl ZettaCache {
         blocks: &HashMap<BlockId, Bytes>,
         source: InsertSource,
     ) {
-        let pool_id = self.state.lock().await.map_pool_guid(guid);
+        let pool_id = self.pool_guids.map_pool_guid(guid);
         let insert_permit = match self
             .reserve_buffer_space(
                 blocks.values().map(|bytes| bytes.len()).sum::<usize>(),
@@ -2272,22 +2285,6 @@ impl ZettaCacheState {
         }
     }
 
-    /// Returns the Id (index) associated with the pool GUID.
-    /// If not found, the GUID is added to the known set and a new Id generated.
-    fn map_pool_guid(&mut self, guid: PoolGuid) -> PoolId {
-        // XXX - this is an O(n) algorithm, which is fine for a small number of pools,
-        // but we may want to use a hashmap for this if there are lots of pools.
-        for (id, mapped_guid) in self.pool_guids.iter().enumerate() {
-            if *mapped_guid == guid {
-                return PoolId(u8::try_from(id).unwrap());
-            }
-        }
-        let id = u8::try_from(self.pool_guids.len()).unwrap();
-        debug!("New {:?} added with {:?}", guid, PoolId(id));
-        self.pool_guids.push(guid);
-        PoolId(id)
-    }
-
     fn lookup_with_value_from_index(
         &mut self,
         key: &IndexKey,
@@ -2518,6 +2515,7 @@ impl ZettaCacheState {
         old_index: IndexRunPhys,
         new_index: Option<IndexRunPhys>,
         completed_merge: bool,
+        pool_guids: PoolGuidMappingPhys,
     ) {
         debug!(
             "flushing checkpoint {:?}",
@@ -2566,7 +2564,7 @@ impl ZettaCacheState {
 
         let checkpoint = ZettaCheckpointPhys {
             generation: self.primary.checkpoint_id.next(),
-            pool_guids: self.pool_guids.clone(),
+            pool_guids,
             extent_allocator: self.extent_allocator.get_phys(),
             old_index,
             operation_log: operation_log_phys,

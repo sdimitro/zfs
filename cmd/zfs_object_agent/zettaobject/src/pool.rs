@@ -882,7 +882,7 @@ impl Pool {
         object_access: Arc<ObjectAccess>,
         pool_phys: &PoolPhys,
         txg: Txg,
-        cache: Option<ZettaCache>,
+        zettacache: Option<ZettaCache>,
         heartbeat_guard: Option<HeartbeatGuard>,
         readonly: bool,
         mut syncing_txg: Option<Txg>,
@@ -972,7 +972,7 @@ impl Pool {
                     resuming: tx,
                     checkpoint_txg,
                 })),
-                zettacache: cache,
+                zettacache,
                 object_block_map,
                 resuming: rx,
                 heartbeat_guard,
@@ -999,7 +999,7 @@ impl Pool {
         object_access: Arc<ObjectAccess>,
         guid: PoolGuid,
         txg: Option<Txg>,
-        cache: Option<ZettaCache>,
+        zettacache: Option<ZettaCache>,
         id: Uuid,
         syncing_txg: Option<Txg>,
         rollback: bool,
@@ -1065,7 +1065,7 @@ impl Pool {
                         resuming: tx,
                         checkpoint_txg: None,
                     })),
-                    zettacache: cache,
+                    zettacache,
                     object_block_map,
                     resuming: rx,
                     heartbeat_guard: if !shared_state.object_access.readonly() {
@@ -1093,7 +1093,7 @@ impl Pool {
                 object_access.clone(),
                 &phys,
                 target,
-                cache,
+                zettacache,
                 if !object_access.readonly() {
                     Some(heartbeat::start_heartbeat(object_access.clone(), id).await)
                 } else {
