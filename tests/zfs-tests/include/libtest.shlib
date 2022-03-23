@@ -307,7 +307,7 @@ function default_setup_noexit
 	log_note begin default_setup_noexit
 
 	if is_global_zone; then
-	    create_pool -p $TESTPOOL -d "$disklist"
+	    create_pool -p $TESTPOOL -d "$disklist" -e "-f"
 	else
 		reexport_pool
 	fi
@@ -2061,7 +2061,7 @@ function create_pool
 	else
 		zpool_create_cmd="zpool create \
 			$extra_options \
-			-f $pool $devices_list $log_options"
+			$pool $devices_list $log_options"
 	fi
 
 	log_note $zpool_create_cmd

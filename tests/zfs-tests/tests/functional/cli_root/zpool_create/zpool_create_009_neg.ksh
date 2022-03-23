@@ -76,12 +76,12 @@ for opt in "" "mirror" "raidz" "draid"; do
 	fi
 
 	# Create two pools but using the same disks.
-	create_pool -p $TESTPOOL -d "$opt $disks"
+	create_pool -p $TESTPOOL -d "$opt $disks" -e "-f"
 	log_mustnot zpool create -f $TESTPOOL1 $opt $disks
 	destroy_pool $TESTPOOL
 
 	# Create two pools and part of the devices were overlapped
-	create_pool -p $TESTPOOL -d "$opt $disks"
+	create_pool -p $TESTPOOL -d "$opt $disks" -e "-f"
 	log_mustnot zpool create -f $TESTPOOL1 $opt $DISK0
 	destroy_pool $TESTPOOL
 
