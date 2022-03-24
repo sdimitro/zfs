@@ -12,8 +12,8 @@ use ::util::writeln_stderr;
 use ::util::writeln_stdout;
 use chrono::prelude::*;
 use chrono::DateTime;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
+use clap::Subcommand;
 use client::Client;
 use futures::stream::StreamExt;
 use git_version::git_version;
@@ -397,6 +397,42 @@ async fn do_destroy_old_pools(
     Ok(())
 }
 
+async fn do_dump_object(
+    object_access: Arc<ObjectAccess>,
+    pool_guid: u64,
+    object: u64,
+    verbose: usize,
+) {
+    match DataObject::get(
+        &object_access,
+        PoolGuid(pool_guid),
+        ObjectId::new(BlockId(object)),
+        ObjectAccessOpType::ReadsGet,
+        true,
+    )
+    .await
+    {
+        Ok(obj) => {
+            writeln_stdout!("Data object header: {}", obj);
+            for (k, v) in obj.blocks.iter().sorted() {
+                if verbose < 2 {
+                    writeln_stdout!(
+                        "Block id: {}, Length: {}, Contents: {:?}...",
+                        k,
+                        v.len(),
+                        v.slice(0..8)
+                    );
+                } else {
+                    writeln_stdout!("Block id: {}, Length: {}, Contents: {:?}", k, v.len(), v);
+                }
+            }
+        }
+        Err(e) => {
+            writeln_stderr!("Failed to access DataObject: {:?}", e);
+        }
+    };
+}
+
 fn get_object_access(
     endpoint: &str,
     region: &str,
@@ -419,227 +455,97 @@ fn get_object_access(
     }
 }
 
+#[derive(Parser)]
+//#[clap(long_about = None)]
+#[clap(version=GIT_VERSION)]
+#[clap(about = "ZFS Object Agent test")]
+#[clap(propagate_version = true)]
+struct Cli {
+    #[clap(short, long, help = "S3 endpoint", default_value = ENDPOINT)]
+    endpoint: String,
+    #[clap(short, long, help = "S3 region", default_value = REGION)]
+    region: String,
+    #[clap(short, long, help = "S3 bucket", default_value = BUCKET_NAME)]
+    bucket: String,
+    #[clap(short, long, help = "credentials profile", default_value = "default")]
+    profile: String,
+    #[clap(short = 'i', long, requires = "aws-secret-access-key")]
+    aws_access_key_id: Option<String>,
+    #[clap(short = 's', long, requires = "aws-access-key-id")]
+    aws_secret_access_key: Option<String>,
+    #[clap(short, long, parse(from_occurrences))]
+    verbose: usize,
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    S3Rusoto,
+    Create,
+    Write,
+    Read,
+    Free,
+    Btree,
+    Nvpair,
+    RusotoRole,
+    ListPools,
+    ListPoolObjects,
+    DestroyOldPools {
+        #[clap(short = 'd', long)]
+        days: u64,
+    },
+    DumpObject {
+        #[clap(short, long)]
+        pool_guid: u64,
+        #[clap(short, long)]
+        object: u64,
+    },
+}
+
 #[tokio::main]
-async fn main() {
-    let matches = clap::App::new("zoa_test")
-        .about("ZFS object agent test")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::with_name("endpoint")
-                .short("e")
-                .long("endpoint")
-                .help("S3 endpoint")
-                .takes_value(true)
-                .default_value(ENDPOINT),
-        )
-        .arg(
-            Arg::with_name("region")
-                .short("r")
-                .long("region")
-                .help("S3 region")
-                .takes_value(true)
-                .default_value(REGION),
-        )
-        .arg(
-            Arg::with_name("bucket")
-                .short("b")
-                .long("bucket")
-                .help("S3 bucket")
-                .takes_value(true)
-                .default_value(BUCKET_NAME),
-        )
-        .arg(
-            Arg::with_name("profile")
-                .short("p")
-                .long("profile")
-                .help("credentials profile")
-                .takes_value(true)
-                .default_value("default"),
-        )
-        .arg(
-            Arg::with_name("aws_access_key_id")
-                .short("i")
-                .long("aws_access_key_id")
-                .takes_value(true)
-                .help("AWS access key id"),
-        )
-        .arg(
-            Arg::with_name("aws_secret_access_key")
-                .short("s")
-                .long("aws_secret_access_key")
-                .takes_value(true)
-                .help("AWS secret access key"),
-        )
-        .arg(
-            Arg::with_name("verbosity")
-                .short("v")
-                .long("verbose")
-                .help("verbosity")
-                .multiple(true),
-        )
-        .subcommand(SubCommand::with_name("s3").about("s3 test"))
-        .subcommand(SubCommand::with_name("s3_rusoto").about("s3 rusoto test"))
-        .subcommand(SubCommand::with_name("create").about("create test "))
-        .subcommand(SubCommand::with_name("write").about("write test"))
-        .subcommand(SubCommand::with_name("read").about("read test"))
-        .subcommand(SubCommand::with_name("free").about("free test"))
-        .subcommand(SubCommand::with_name("btree").about("btree test"))
-        .subcommand(SubCommand::with_name("nvpair").about("nvpair test"))
-        .subcommand(SubCommand::with_name("rusoto_role").about("rusoto credentials test"))
-        .subcommand(SubCommand::with_name("list_pools").about("list pools"))
-        .subcommand(SubCommand::with_name("list_pool_objects").about("list pool objects"))
-        .subcommand(
-            SubCommand::with_name("destroy_old_pools")
-                .about("destroy old pools")
-                .arg(
-                    Arg::with_name("number-of-days")
-                        .short("d")
-                        .long("number-of-days")
-                        .required(true)
-                        .takes_value(true)
-                        .help("number of days"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("dump_object")
-                .about("dump data object")
-                .arg(
-                    Arg::with_name("pool_guid")
-                        .short("p")
-                        .long("pool_guid")
-                        .required(true)
-                        .takes_value(true)
-                        .help("guid of pool to retrieve object from"),
-                )
-                .arg(
-                    Arg::with_name("object_id")
-                        .short("o")
-                        .long("object_id")
-                        .required(true)
-                        .takes_value(true)
-                        .help("id of object to retreive"),
-                ),
-        )
-        .get_matches();
+async fn main() -> Result<(), Box<dyn Error>> {
+    let cli = Cli::parse();
 
-    // Command line parameters
-    let endpoint = matches.value_of("endpoint").unwrap();
-    let region_str = matches.value_of("region").unwrap();
-    let bucket_name = matches.value_of("bucket").unwrap();
-    let profile = matches.value_of("profile").unwrap();
-    let aws_access_key_id = matches.value_of("aws_access_key_id");
-    let aws_secret_access_key = matches.value_of("aws_secret_access_key");
-    let verbosity = matches.occurrences_of("verbosity");
-
-    if aws_access_key_id.is_some() != aws_secret_access_key.is_some() {
-        matches.usage();
-        panic!("Error: Both aws_access_key_id and aws_secret_access_key should be specified.");
-    }
-
-    if verbosity > 0 || matches.subcommand_name().is_none() {
+    if cli.verbose > 0 {
         println!(
             "endpoint: {}, region: {}, bucket: {} profile: {} access_id: {:?}, secret_key: {:?}",
-            endpoint, region_str, bucket_name, profile, aws_access_key_id, aws_secret_access_key
+            cli.endpoint,
+            cli.region,
+            cli.bucket,
+            cli.profile,
+            cli.aws_access_key_id,
+            cli.aws_secret_access_key
         );
     }
 
     let object_access = get_object_access(
-        endpoint,
-        region_str,
-        bucket_name,
-        profile,
-        aws_access_key_id,
-        aws_secret_access_key,
+        &cli.endpoint,
+        &cli.region,
+        &cli.bucket,
+        &cli.profile,
+        cli.aws_access_key_id.as_deref(),
+        cli.aws_secret_access_key.as_deref(),
     );
 
-    match matches.subcommand() {
-        ("s3_rusoto", Some(_matches)) => {
-            do_s3_rusoto().await.unwrap();
+    match cli.command {
+        Commands::S3Rusoto => do_s3_rusoto().await?,
+        Commands::Create => do_create().await?,
+        Commands::Write => do_write().await?,
+        Commands::Read => do_read().await?,
+        Commands::Free => do_free().await?,
+        Commands::Btree => do_btree(),
+        Commands::Nvpair => do_nvpair(),
+        Commands::RusotoRole => do_rusoto_role().await?,
+        Commands::ListPools => do_list_pools(&object_access, false).await?,
+        Commands::ListPoolObjects => do_list_pools(&object_access, true).await?,
+        Commands::DestroyOldPools { days } => {
+            let min_age = Duration::from_secs(days * 60 * 60 * 24);
+            do_destroy_old_pools(&object_access, min_age).await?;
         }
-        ("create", Some(_matches)) => {
-            do_create().await.unwrap();
+        Commands::DumpObject { pool_guid, object } => {
+            do_dump_object(object_access, pool_guid, object, cli.verbose).await
         }
-        ("write", Some(_matches)) => {
-            do_write().await.unwrap();
-        }
-        ("read", Some(_matches)) => {
-            do_read().await.unwrap();
-        }
-        ("free", Some(_matches)) => {
-            do_free().await.unwrap();
-        }
-        ("btree", Some(_matches)) => {
-            do_btree();
-        }
-        ("nvpair", Some(_matches)) => {
-            do_nvpair();
-        }
-        ("rusoto_role", Some(_matches)) => {
-            do_rusoto_role().await.unwrap();
-        }
-        ("list_pools", Some(_matches)) => {
-            do_list_pools(&object_access, false).await.unwrap();
-        }
-        ("list_pool_objects", Some(_matches)) => {
-            do_list_pools(&object_access, true).await.unwrap();
-        }
-        ("destroy_old_pools", Some(destroy_matches)) => {
-            let age_str = destroy_matches.value_of("number-of-days").unwrap();
-            let min_age = Duration::from_secs(age_str.parse::<u64>().unwrap() * 60 * 60 * 24);
-
-            do_destroy_old_pools(&object_access, min_age).await.unwrap();
-        }
-        ("dump_object", Some(dump_matches)) => {
-            let pool_guid = match str::parse::<u64>(dump_matches.value_of("pool_guid").unwrap()) {
-                Ok(value) => PoolGuid(value),
-                Err(_e) => {
-                    writeln_stderr!("Failed to parse pool guid");
-                    return;
-                }
-            };
-            let object = match str::parse::<u64>(dump_matches.value_of("object_id").unwrap()) {
-                Ok(value) => ObjectId::new(BlockId(value)),
-                Err(_e) => {
-                    writeln_stderr!("Failed to parse object id");
-                    return;
-                }
-            };
-            match DataObject::get(
-                &object_access,
-                pool_guid,
-                object,
-                ObjectAccessOpType::ReadsGet,
-                true,
-            )
-            .await
-            {
-                Ok(obj) => {
-                    writeln_stdout!("Data object header: {}", obj);
-                    for (k, v) in obj.blocks.iter().sorted() {
-                        if verbosity < 2 {
-                            writeln_stdout!(
-                                "Block id: {}, Length: {}, Contents: {:?}...",
-                                k,
-                                v.len(),
-                                v.slice(0..8)
-                            );
-                        } else {
-                            writeln_stdout!(
-                                "Block id: {}, Length: {}, Contents: {:?}",
-                                k,
-                                v.len(),
-                                v
-                            );
-                        }
-                    }
-                }
-                Err(e) => {
-                    writeln_stderr!("Failed to access DataObject: {:?}", e);
-                }
-            };
-        }
-        _ => {
-            matches.usage();
-        }
-    };
+    }
+    Ok(())
 }
