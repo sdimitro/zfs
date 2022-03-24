@@ -13,6 +13,7 @@ mod block_based_log;
 mod extent_allocator;
 mod features;
 mod index;
+mod pool_id;
 mod size_histogram;
 mod space_map;
 mod superblock;

@@ -20,7 +20,7 @@ use anyhow::Context;
 use anyhow::Error;
 use anyhow::Result;
 use bytes::Bytes;
-use conv::ConvUtil;
+use bytesize::ByteSize;
 use derivative::Derivative;
 use futures::future;
 use futures::future::join;
@@ -43,10 +43,11 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
-use util::get_tunable;
 use util::maybe_die_with;
 use util::measure;
 use util::super_trace;
+use util::tunable;
+use util::tunable::Percent;
 use util::with_alloctag;
 use util::AlignedBytes;
 use uuid::Uuid;
@@ -77,14 +78,14 @@ use crate::object_deleter::ObjectDeleterPhys;
 use crate::pool_destroy;
 use crate::pool_destroy::PoolDestroyingPhys;
 
-lazy_static! {
+tunable! {
     // start freeing when the pending frees are this % of the entire pool
-    static ref FREE_HIGHWATER_PCT: f64 = get_tunable("free_highwater_pct", 10.0);
+    static ref FREE_HIGHWATER_PCT: Percent = Percent::new(10.0);
     // stop freeing when the pending frees are this % of the free log
-    static ref FREE_LOWWATER_PCT: f64 = get_tunable("free_lowwater_pct", 40.0);
+    static ref FREE_LOWWATER_PCT: Percent = Percent::new(40.0);
     // don't bother freeing unless there are at least this number of free blocks
-    static ref FREE_MIN_BLOCKS: u64 = get_tunable("free_min_blocks", 1000);
-    static ref MAX_BYTES_PER_OBJECT: u32 = get_tunable("max_bytes_per_object", 2 * 1024 * 1024);
+    static ref FREE_MIN_BLOCKS: u64 = 1000;
+    static ref TARGET_OBJECT_SIZE: ByteSize = ByteSize::mib(2);
 
     // Split a reclaim free log when it exceeds this many entries.  We picked 10 million to
     // keep the memory size for loading pending frees and object sizes logs at about 1/2 GB.
@@ -95,29 +96,31 @@ lazy_static! {
     // "side" of the split. Given object size=2MB, group size=1000 objects, and min block
     // size=512b, the maximum blocks (and thus entries) in one object group is 4 million.
     // Therefore this setting should be >4M.
-    static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = get_tunable("reclaim_log_entries_limit", 10_000_000);
+    static ref RECLAIM_LOG_ENTRIES_LIMIT: u64 = 10_000_000;
 
     // When reclaiming free blocks, allow this many concurrent
     // GetObject+PutObject requests.
-    static ref RECLAIM_QUEUE_DEPTH: usize = get_tunable("reclaim_queue_depth", 200);
-    // Max concurrent GetObject's for a single object consolidation.
-    static ref RECLAIM_ONE_BUFFERED: usize = *RECLAIM_QUEUE_DEPTH / 10 + 1;
+    static ref RECLAIM_QUEUE_DEPTH: usize = 200;
 
     // minimum number of chunks before we consider condensing
-    static ref LOG_CONDENSE_MIN_CHUNKS: usize = get_tunable("log_condense_min_chunks", 30);
+    static ref LOG_CONDENSE_MIN_CHUNKS: usize = 30;
     // when log is 5x as large as the condensed version
-    static ref LOG_CONDENSE_MULTIPLE: usize = get_tunable("log_condense_multiple", 5);
+    static ref LOG_CONDENSE_MULTIPLE: usize = 5;
 
-    pub static ref CLAIM_DURATION: Duration = Duration::from_secs(get_tunable("claim_duration_secs", 2));
-
-    pub static ref CREATE_WAIT_DURATION: Duration = Duration::from_secs(get_tunable("create_wait_duration_secs", 30));
+    pub static ref CLAIM_DURATION: Duration = Duration::from_secs(2);
+    pub static ref CREATE_WAIT_DURATION: Duration = Duration::from_secs(30);
 
     // By default, retain metadata for as long as we would return Uberblocks in a block-based pool
-    static ref METADATA_RETENTION_TXGS: u64 = get_tunable("metadata_retention_txgs", 128);
+    static ref METADATA_RETENTION_TXGS: u64 = 128;
 
-    static ref WRITES_INGEST_TO_ZETTACACHE: bool = get_tunable("writes_ingest_to_zettacache", true);
+    static ref WRITES_INGEST_TO_ZETTACACHE: bool = true;
 
-    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = get_tunable("sibling_blocks_ingest_to_zettacache", false);
+    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = false;
+}
+
+lazy_static! {
+    // Max concurrent GetObject's for a single object consolidation.
+    static ref RECLAIM_ONE_BUFFERED: usize = *RECLAIM_QUEUE_DEPTH / 10 + 1;
 }
 
 const ONE_MIB: u64 = 1_048_576;
@@ -144,7 +147,7 @@ impl PoolOwnerPhys {
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_from_s3(Self::key(id), ObjectAccessOpType::MetadataGet, None)
+            .get_object_from_s3(Self::key(id), ObjectAccessOpType::MetadataGet, None, None)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -546,6 +549,8 @@ impl ReclaimInfo {
     }
 }
 
+type WriteCallback = Box<dyn FnOnce() + Send>;
+
 /// state that's modified while syncing a txg
 //#[derive(Debug)]
 struct PoolSyncingState {
@@ -558,7 +563,7 @@ struct PoolSyncingState {
     reclaim_info: ReclaimInfo, // Extendible hash structure for pending frees
 
     pending_object: PendingObjectState,
-    pending_unordered_writes: HashMap<BlockId, (Bytes, oneshot::Sender<()>)>,
+    pending_unordered_writes: HashMap<BlockId, (Bytes, WriteCallback)>,
     pub last_txg: Txg,
     pub syncing_txg: Option<Txg>,
     stats: PoolStatsPhys,
@@ -575,22 +580,27 @@ struct PoolSyncingState {
 type SyncTask =
     Box<dyn FnOnce(&mut PoolSyncingState) -> Pin<Box<dyn Future<Output = ()> + Send + '_>> + Send>;
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 enum PendingObjectState {
-    Pending(DataObject, Vec<oneshot::Sender<()>>), // available to write
+    // available to write
+    Pending(
+        DataObject,
+        #[derivative(Debug(format_with = "util::tersevec"))] Vec<WriteCallback>,
+    ),
     // not available to write; this is the next blockID to use
     NotPending(BlockId),
 }
 
 impl PendingObjectState {
-    fn as_mut_pending(&mut self) -> (&mut DataObject, &mut Vec<oneshot::Sender<()>>) {
+    fn as_mut_pending(&mut self) -> (&mut DataObject, &mut Vec<WriteCallback>) {
         match self {
             PendingObjectState::Pending(phys, done) => (phys, done),
             _ => panic!("invalid {:?}", self),
         }
     }
 
-    fn unwrap_pending(self) -> (DataObject, Vec<oneshot::Sender<()>>) {
+    fn unwrap_pending(self) -> (DataObject, Vec<WriteCallback>) {
         match self {
             PendingObjectState::Pending(phys, done) => (phys, done),
             _ => panic!("invalid {:?}", self),
@@ -872,7 +882,7 @@ impl Pool {
         object_access: Arc<ObjectAccess>,
         pool_phys: &PoolPhys,
         txg: Txg,
-        cache: Option<ZettaCache>,
+        zettacache: Option<ZettaCache>,
         heartbeat_guard: Option<HeartbeatGuard>,
         readonly: bool,
         mut syncing_txg: Option<Txg>,
@@ -962,7 +972,7 @@ impl Pool {
                     resuming: tx,
                     checkpoint_txg,
                 })),
-                zettacache: cache,
+                zettacache,
                 object_block_map,
                 resuming: rx,
                 heartbeat_guard,
@@ -989,7 +999,7 @@ impl Pool {
         object_access: Arc<ObjectAccess>,
         guid: PoolGuid,
         txg: Option<Txg>,
-        cache: Option<ZettaCache>,
+        zettacache: Option<ZettaCache>,
         id: Uuid,
         syncing_txg: Option<Txg>,
         rollback: bool,
@@ -1055,7 +1065,7 @@ impl Pool {
                         resuming: tx,
                         checkpoint_txg: None,
                     })),
-                    zettacache: cache,
+                    zettacache,
                     object_block_map,
                     resuming: rx,
                     heartbeat_guard: if !shared_state.object_access.readonly() {
@@ -1083,7 +1093,7 @@ impl Pool {
                 object_access.clone(),
                 &phys,
                 target,
-                cache,
+                zettacache,
                 if !object_access.readonly() {
                     Some(heartbeat::start_heartbeat(object_access.clone(), id).await)
                 } else {
@@ -1263,11 +1273,11 @@ impl Pool {
                                 obsolete_write,
                                 recovered_obj.header.object,
                             );
-                            let (_, sender) = syncing_state
+                            let (_, callback) = syncing_state
                                 .pending_unordered_writes
                                 .remove(&obsolete_write)
                                 .unwrap();
-                            sender.send(()).unwrap();
+                            callback();
                         }
                         assert!(!syncing_state.pending_object.is_pending());
                         syncing_state.pending_object =
@@ -1289,7 +1299,7 @@ impl Pool {
             Self::write_unordered_to_pending_object(
                 state,
                 syncing_state,
-                Some(*MAX_BYTES_PER_OBJECT),
+                Some(TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()),
                 None,
             );
             Self::initiate_flush_object_impl(state, syncing_state);
@@ -1565,7 +1575,7 @@ impl Pool {
             }
         };
 
-        let (phys, senders) = mem::replace(
+        let (phys, callbacks) = mem::replace(
             &mut syncing_state.pending_object,
             PendingObjectState::new_pending(
                 state.shared_state.guid,
@@ -1599,8 +1609,8 @@ impl Pool {
             measure!()
                 .fut(phys.put(&shared_state.object_access, ObjectAccessOpType::TxgSyncPut))
                 .await;
-            for sender in senders {
-                sender.send(()).unwrap();
+            for callback in callbacks {
+                callback();
             }
         });
     }
@@ -1617,17 +1627,18 @@ impl Pool {
         }
 
         let mut next_block = syncing_state.next_block();
-        while let Some((buf, sender)) = syncing_state.pending_unordered_writes.remove(&next_block) {
+        while let Some((buf, callback)) = syncing_state.pending_unordered_writes.remove(&next_block)
+        {
             super_trace!(
                 "found next {:?} in unordered pending writes; transferring to pending object",
                 next_block
             );
-            let (phys, senders) = syncing_state.pending_object.as_mut_pending();
+            let (phys, callbacks) = syncing_state.pending_object.as_mut_pending();
             phys.header.blocks_size += u32::try_from(buf.len()).unwrap();
             phys.blocks.insert(phys.header.next_block, buf);
             next_block = next_block.next();
             phys.header.next_block = next_block;
-            senders.push(sender);
+            callbacks.push(callback);
             if let Some(size_limit) = size_limit_opt {
                 if phys.header.blocks_size >= size_limit {
                     Self::initiate_flush_object_impl(state, syncing_state);
@@ -1642,27 +1653,24 @@ impl Pool {
         Self::check_pending_flushes(state, syncing_state);
     }
 
-    pub async fn write_block(&self, block: BlockId, bytes: AlignedBytes) {
-        let receiver = self.state.with_syncing_state(|syncing_state| {
+    pub fn write_block(&self, block: BlockId, bytes: AlignedBytes, cb: WriteCallback) {
+        self.state.with_syncing_state(|syncing_state| {
             // XXX change to return error
             assert!(syncing_state.syncing_txg.is_some());
             assert_ge!(block, syncing_state.next_block());
 
-            let (sender, receiver) = oneshot::channel();
             super_trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
-                .insert(block, (bytes.clone(), sender));
+                .insert(block, (bytes.clone(), cb));
 
             Self::write_unordered_to_pending_object(
                 &self.state,
                 syncing_state,
-                Some(*MAX_BYTES_PER_OBJECT),
+                Some(TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()),
                 None,
             );
-            receiver
         });
-        receiver.await.unwrap();
     }
 
     async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {
@@ -2482,9 +2490,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
     }
 
     if syncing_state.stats.pending_frees_bytes
-        < (syncing_state.stats.blocks_bytes as f64 * *FREE_HIGHWATER_PCT / 100f64)
-            .approx_as::<u64>()
-            .unwrap()
+        < FREE_HIGHWATER_PCT.apply(syncing_state.stats.blocks_bytes)
         || syncing_state.stats.pending_frees_count < *FREE_MIN_BLOCKS
     {
         return;
@@ -2540,9 +2546,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
         let (freed_bytes, mut frees_per_object) =
             get_frees_per_obj(&state, pending_frees_log_stream).await;
 
-        let required_free_bytes = (freed_bytes as f64 * *FREE_LOWWATER_PCT / 100.0)
-            .approx_as::<u64>()
-            .unwrap();
+        let required_free_bytes = FREE_LOWWATER_PCT.apply(freed_bytes);
 
         // sort objects by number of free blocks
         // XXX should be based on free space (bytes)?  And perhaps objects that will be entirely
@@ -2604,7 +2608,9 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
                     if writing.contains(&later_object) {
                         break;
                     }
-                    if new_size + later_object_new_size.num_bytes > *MAX_BYTES_PER_OBJECT {
+                    if new_size + later_object_new_size.num_bytes
+                        > TARGET_OBJECT_SIZE.as_u64().try_into().unwrap()
+                    {
                         break;
                     }
                 }

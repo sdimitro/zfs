@@ -31,10 +31,9 @@ use signal_hook::iterator::exfiltrator::SignalOnly;
 use signal_hook::iterator::SignalsInfo;
 use signal_hook::low_level::emulate_default_handler;
 
-use crate::get_tunable;
 use crate::lazy_static_ptr;
 use crate::measure;
-use crate::tunable::log_tunable_config;
+use crate::tunable;
 use crate::with_alloctag_hf;
 use crate::TrackingAllocator;
 use crate::ALLOCATOR_PRINT_MIN_ALLOCS;
@@ -46,15 +45,16 @@ lazy_static_ptr! {
     static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<String>> = Default::default();
 }
 
+tunable! {
+    static ref MAX_LOG_MESSAGES: usize = 100_000;
+    static ref PANIC_LOG_FOLDER: String = "/var/log/zoa".to_string();
+    pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool = AtomicBool::new(false);
+}
+
 lazy_static! {
     static ref LOG_PATTERN: String = "[{d(%Y-%m-%d %H:%M:%S%.3f)}][{t}][{l}] {m}{n}".to_string();
-    static ref MAX_LOG_MESSAGES: usize = get_tunable("max_log_messages", 100_000);
-    static ref PANIC_LOG_FOLDER: String =
-        get_tunable("panic_log_folder", "/var/log/zoa".to_string());
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
     static ref PANIC_COUNTER: RelaxedCounter = RelaxedCounter::new(0);
-    pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool =
-        AtomicBool::new(get_tunable("super_expensive_trace", false));
 }
 
 #[macro_export]
@@ -106,7 +106,7 @@ impl Append for BufferAppender {
 
 impl BufferAppender {
     fn get_writer(filename: String) -> Box<dyn Write> {
-        let writer_path = format!("{}/{}", PANIC_LOG_FOLDER.as_str(), filename);
+        let writer_path = format!("{}/{}", *PANIC_LOG_FOLDER, filename);
         match OpenOptions::new()
             .append(true)
             .create(true)
@@ -315,7 +315,7 @@ pub fn setup_logging(
         super_trace!("logging super expensive TRACE enabled");
 
         // Log all the tunables.
-        log_tunable_config();
+        tunable::log_config();
     }
 }
 

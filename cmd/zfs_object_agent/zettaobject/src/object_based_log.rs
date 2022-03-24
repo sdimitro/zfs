@@ -10,14 +10,13 @@ use futures::future::join_all;
 use futures::stream;
 use futures::stream::StreamExt;
 use futures_core::Stream;
-use lazy_static::lazy_static;
 use log::*;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::task::JoinHandle;
-use util::get_tunable;
 use util::measure;
+use util::tunable;
 use zettacache::base_types::*;
 
 use crate::base_types::*;
@@ -25,10 +24,9 @@ use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessOpType;
 use crate::pool::PoolSharedState;
 
-lazy_static! {
-    pub static ref ENTRIES_PER_OBJECT: usize = get_tunable("entries_per_object", 100_000);
-    pub static ref OBJECT_LOG_ITERATE_QUEUE_DEPTH: usize =
-        get_tunable("object_log_iterate_queue_depth", 100);
+tunable! {
+    pub static ref ENTRIES_PER_OBJECT: usize = 100_000;
+    pub static ref OBJECT_LOG_ITERATE_QUEUE_DEPTH: usize = 100;
 }
 
 /*

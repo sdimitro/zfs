@@ -4,15 +4,14 @@ use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use futures::stream::StreamExt;
-use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use rusoto_s3::S3;
 use semver::Version;
 use serde::Serialize;
-use util::get_tunable;
 use util::maybe_die_with;
 use util::message::*;
+use util::tunable;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
@@ -25,8 +24,8 @@ use crate::server::FailureMessage;
 use crate::server::HandlerReturn;
 use crate::server::Server;
 
-lazy_static! {
-    pub static ref GET_POOLS_QUEUE_DEPTH: usize = get_tunable("get_pools_queue_depth", 100);
+tunable! {
+    pub static ref GET_POOLS_QUEUE_DEPTH: usize = 100;
 }
 
 pub struct PublicServerState {

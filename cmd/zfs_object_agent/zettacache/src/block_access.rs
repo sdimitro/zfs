@@ -13,19 +13,18 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use bincode::Options;
-use lazy_static::lazy_static;
 use libc::c_void;
 use log::*;
 use nix::errno::Errno;
 use nix::sys::stat::SFlag;
-use num::Num;
-use num::NumCast;
+use num_traits::Num;
+use num_traits::NumCast;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::oneshot;
-use util::get_tunable;
 use util::measure;
+use util::tunable;
 use util::with_alloctag;
 use util::zettacache_stats::*;
 use util::AlignedBytes;
@@ -39,12 +38,11 @@ use crate::base_types::DiskId;
 use crate::base_types::DiskLocation;
 use crate::base_types::Extent;
 
-lazy_static! {
-    static ref MIN_SECTOR_SIZE: usize = get_tunable("min_sector_size", 512);
-    static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = get_tunable("disk_write_max_queue_depth", 32);
-    static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize =
-        get_tunable("disk_metadata_write_max_queue_depth", 16);
-    static ref DISK_READ_MAX_QUEUE_DEPTH: usize = get_tunable("disk_read_max_queue_depth", 64);
+tunable! {
+    static ref MIN_SECTOR_SIZE: usize = 512;
+    static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = 32;
+    static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize = 16;
+    static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
 }
 
 #[derive(Serialize, Deserialize, Debug)]

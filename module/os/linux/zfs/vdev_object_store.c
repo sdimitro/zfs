@@ -1042,7 +1042,7 @@ agent_resume_state_check(vdev_t *vd)
 		return (0);
 	}
 
-	if (bcmp(&vd->vdev_spa->spa_ubsync, &vos->vos_uberblock,
+	if (memcmp(&vd->vdev_spa->spa_ubsync, &vos->vos_uberblock,
 	    sizeof (uberblock_t)) == 0) {
 		return (0);
 	}
@@ -1053,7 +1053,7 @@ agent_resume_state_check(vdev_t *vd)
 		 * continue by sending the "end txg" command again, without
 		 * doing "resume txg".
 		 */
-		if (bcmp(&vd->vdev_spa->spa_uberblock, &vos->vos_uberblock,
+		if (memcmp(&vd->vdev_spa->spa_uberblock, &vos->vos_uberblock,
 		    sizeof (uberblock_t)) == 0) {
 			zfs_dbgmsg("resume: uberblock matches spa_uberblock; "
 			    "calling TXG_END again");
@@ -1638,7 +1638,7 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 			    AGENT_UBERBLOCK, &arr, &len);
 			if (err == 0) {
 				ASSERT3U(len, <=, sizeof (uberblock_t));
-				bcopy(arr, &vos->vos_uberblock, len);
+				memcpy(&vos->vos_uberblock, arr, len);
 
 				/*
 				 * We may be opening an uberblock from a pool
@@ -1648,8 +1648,8 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 				 * written.
 				 */
 				if (len < sizeof (uberblock_t)) {
-					bzero(&vos->vos_uberblock + len,
-					    sizeof (uberblock_t) - len);
+					memset(&vos->vos_uberblock + len,
+					    0, sizeof (uberblock_t) - len);
 				}
 				VERIFY0(nvlist_lookup_uint8_array(nv,
 				    AGENT_CONFIG, &arr, &len));

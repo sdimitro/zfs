@@ -14,7 +14,7 @@ use std::sync::Mutex;
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 
-use crate::get_tunable;
+use crate::tunable::get_tunable;
 
 lazy_static! {
     pub static ref ALLOCATOR_PRINT_MIN_BYTES: u64 =

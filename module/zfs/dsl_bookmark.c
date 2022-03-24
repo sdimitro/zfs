@@ -334,7 +334,8 @@ dsl_bookmark_node_alloc(char *shortname)
 	dsl_bookmark_node_t *dbn = kmem_alloc(sizeof (*dbn), KM_SLEEP);
 	dbn->dbn_name = spa_strdup(shortname);
 	dbn->dbn_dirty = B_FALSE;
-	bzero(dbn->dbn_redaction_birth_txg, DN_MAX_NBLKPTR * sizeof (uint64_t));
+	memset(dbn->dbn_redaction_birth_txg,
+	    0, DN_MAX_NBLKPTR * sizeof (uint64_t));
 	mutex_init(&dbn->dbn_lock, NULL, MUTEX_DEFAULT, NULL);
 	return (dbn);
 }

@@ -180,12 +180,25 @@ function use_object_store
 
 function endpoint_is_s3
 {
-	if [[ $ZTS_OBJECT_ENDPOINT == "https://s3*" ]]; then
-		return 0
-	else
-		return 1
-	fi
+	# This matches both http and https
+	grep -q "^http[s]*://s3" <<< $ZTS_OBJECT_ENDPOINT
+	return $?
 }
+
+#
+# Determine if the test is using an IAM role to access the S3 bucket
+# or via the secret keys
+#
+# Return 0 if using IAM, 1 if otherwise
+#
+function is_using_iam_role
+{
+	# When using IAM role both of the env variables AWS_SECRET_ACCESS_KEY
+	# and AWS_ACCESS_KEY_ID remains empty or zero length
+	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
+		return 1 || return 0
+}
+
 
 # Determine whether a dataset is mounted
 #
@@ -307,7 +320,7 @@ function default_setup_noexit
 	log_note begin default_setup_noexit
 
 	if is_global_zone; then
-	    create_pool -p $TESTPOOL -d "$disklist"
+	    create_pool -p $TESTPOOL -d "$disklist" -e "-f"
 	else
 		reexport_pool
 	fi
@@ -2061,7 +2074,7 @@ function create_pool
 	else
 		zpool_create_cmd="zpool create \
 			$extra_options \
-			-f $pool $devices_list $log_options"
+			$pool $devices_list $log_options"
 	fi
 
 	log_note $zpool_create_cmd

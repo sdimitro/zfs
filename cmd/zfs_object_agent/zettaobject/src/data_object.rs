@@ -10,12 +10,15 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use bytes::Bytes;
+use bytesize::ByteSize;
 use futures::stream;
 use log::*;
 use more_asserts::*;
 use rusoto_core::ByteStream;
 use serde::Deserialize;
 use serde::Serialize;
+use util::measure;
+use util::tunable;
 use util::with_alloctag;
 use util::From64;
 use zettacache::base_types::*;
@@ -25,6 +28,11 @@ use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessOpType;
 
 pub const NUM_DATA_PREFIXES: u64 = 64;
+
+tunable! {
+    pub static ref DATA_OBJ_RANGED_GET: bool = false;
+    pub static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(32);
+}
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
 pub struct DataObjectHeader {
@@ -155,15 +163,34 @@ impl DataObject {
         }
     }
 
+    /// Returns (phys, data_bytes)
     fn deserialize<F: FnOnce() -> String>(
         bytes: &Bytes,
         context: F,
     ) -> Result<(DataObjectPhys<'_>, Bytes)> {
-        let header_len = usize::from64(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
-        let header_slice = &bytes[8..8 + header_len];
-        let data_bytes = bytes.slice(8 + header_len..);
-        let phys: DataObjectPhys = bincode::deserialize(header_slice).with_context(context)?;
+        let (phys, data_offset) = Self::deserialize_header(bytes, context)?;
+        let data_bytes = bytes.slice(data_offset..);
         Ok((phys, data_bytes))
+    }
+
+    /// Returns (phys, offset_of_data)
+    fn deserialize_header<F: FnOnce() -> String>(
+        bytes: &Bytes,
+        context: F,
+    ) -> Result<(DataObjectPhys<'_>, usize)> {
+        let header_len = usize::from64(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
+        if bytes.len() < 8 + header_len {
+            return Err(anyhow!(
+                "header len {} greater than retrieved bytes {}",
+                8 + header_len,
+                bytes.len()
+            ));
+        }
+        let header_slice = &bytes[8..8 + header_len];
+        Ok((
+            bincode::deserialize(header_slice).with_context(context)?,
+            8 + header_len,
+        ))
     }
 
     async fn get_impl<F: FnOnce() -> String>(
@@ -216,6 +243,87 @@ impl DataObject {
         stat_type: ObjectAccessOpType,
         bypass_cache: bool,
     ) -> Result<Bytes> {
+        if *DATA_OBJ_RANGED_GET {
+            match Self::get_block_range(object_access, guid, object, block, stat_type).await {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    // presumably we didn't get enough bytes for the header; just get the whole
+                    // object
+                    debug!("error deserializing {}: {}", object, e);
+                    measure!("DataObject header deserialize failure").hit();
+                }
+            }
+        }
+        Self::get_block_whole(object_access, guid, object, block, stat_type, bypass_cache).await
+    }
+
+    /// Returns (offset, next_offset), or Err if not present.
+    fn locate_block(phys: DataObjectPhys, block: BlockId) -> Result<(usize, usize)> {
+        let arrays = DataObjectArrays::new(&phys);
+        assert_ge!(block, phys.header.object.as_min_block());
+        assert_lt!(block, phys.header.next_block);
+        let index = arrays
+            .binary_search(block)
+            .map_err(|_| anyhow!("expected {:?} not found in {:?}", block, phys.header.object))?;
+        let offset = arrays.offset(index);
+        let next_offset = if index < arrays.len() - 1 {
+            arrays.offset(index + 1)
+        } else {
+            assert_eq!(index, arrays.len() - 1);
+            phys.header.blocks_size as usize
+        };
+        Ok((offset, next_offset))
+    }
+
+    /// Get this block by (typically) 2 ranged GetObject requests: one for the header and then
+    /// one for the block contents.  This has higher latency but transfers less data.  This
+    /// should be used if there are unlikely to be multiple get_block()'s of blocks in the same
+    /// object, that could hit in the object cache.
+    async fn get_block_range(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        object: ObjectId,
+        block: BlockId,
+        stat_type: ObjectAccessOpType,
+    ) -> Result<Bytes> {
+        let key = Self::key(guid, object);
+        let header_bytes = object_access
+            .get_object_range(
+                key.clone(),
+                0..usize::from64(DATA_OBJ_TRY_HEADER_SIZE.as_u64()),
+                stat_type,
+            )
+            .await?;
+        let (phys, data_offset) = Self::deserialize_header(&header_bytes, || {
+            format!("get {:?} for {:?}", object, block)
+        })?;
+        assert_eq!(phys.header.guid, guid);
+        assert_eq!(phys.header.object, object);
+        let (offset, next_offset) = Self::locate_block(phys, block)?;
+        // XXX If the header_bytes already contains the data we're looking for,
+        // just use the existing buffer rather than going back to S3.
+        let data_bytes = object_access
+            .get_object_range(
+                key,
+                data_offset + offset..data_offset + next_offset,
+                stat_type,
+            )
+            .await?;
+        assert_eq!(data_bytes.len(), next_offset - offset);
+        Ok(data_bytes)
+    }
+
+    /// Get this block by reading the whole object, via the object cache.  This
+    /// should be used if there are likely to be subsequent get_block() calls on
+    /// other blocks in the same object.
+    async fn get_block_whole(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        object: ObjectId,
+        block: BlockId,
+        stat_type: ObjectAccessOpType,
+        bypass_cache: bool,
+    ) -> Result<Bytes> {
         // XXX if not in object cache, just get the header and then specific block needed from S3?
         let key = Self::key(guid, object);
         let bytes = match bypass_cache {
@@ -224,22 +332,10 @@ impl DataObject {
         };
         let (phys, data_bytes) =
             Self::deserialize(&bytes, || format!("get {:?} for {:?}", object, block))?;
-        let arrays = DataObjectArrays::new(&phys);
 
         assert_eq!(phys.header.guid, guid);
         assert_eq!(phys.header.object, object);
-        assert_ge!(block, object.as_min_block());
-        assert_lt!(block, phys.header.next_block);
-        let index = arrays
-            .binary_search(block)
-            .map_err(|_| anyhow!("expected {:?} not found in {:?}", block, object))?;
-        let offset = arrays.offset(index);
-        let next_offset = if index < arrays.len() - 1 {
-            arrays.offset(index + 1)
-        } else {
-            assert_eq!(index, arrays.len() - 1);
-            data_bytes.len()
-        };
+        let (offset, next_offset) = Self::locate_block(phys, block)?;
         Ok(data_bytes.slice(offset..next_offset))
     }
 

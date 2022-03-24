@@ -5,21 +5,20 @@ use std::ops::AddAssign;
 use std::ops::SubAssign;
 
 use derivative::Derivative;
-use lazy_static::lazy_static;
 use log::*;
 use more_asserts::*;
 use serde::Deserialize;
 use serde::Serialize;
-use util::get_tunable;
 use util::nice_p2size;
+use util::tunable;
 use util::BinaryIndexTree;
 
 use crate::base_types::Atime;
 use crate::index::IndexValue;
 
-lazy_static! {
+tunable! {
     // How many extra nodes to add to the binary index tree each time we grow it.
-    pub static ref ATIME_BIT_EXPANSION_NODES: usize = get_tunable("atime_bit_expansion_nodes", 10);
+    pub static ref ATIME_BIT_EXPANSION_NODES: usize = 10;
 }
 
 #[derive(Serialize, Deserialize, Clone, Derivative)]
