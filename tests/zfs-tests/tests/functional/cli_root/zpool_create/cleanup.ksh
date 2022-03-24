@@ -32,6 +32,8 @@
 . $STF_SUITE/include/libtest.shlib
 . $STF_SUITE/tests/functional/cli_root/zpool_create/zpool_create.shlib
 
-cleanup_devices $DISKS
+if ! use_object_store; then
+    cleanup_devices $DISKS
+fi
 
 log_pass

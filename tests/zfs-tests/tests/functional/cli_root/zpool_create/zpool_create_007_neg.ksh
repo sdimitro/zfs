@@ -80,10 +80,6 @@ if use_object_store; then
 		"-o object-region=$ZTS_REGION \
 		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
 		$TESTPOOL s3 $ZTS_BUCKET_NAME" \
-		"-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-		-o object-region=$ZTS_REGION \
-		-o object-credentials-profile=blah \
-		$TESTPOOL s3 $ZTS_BUCKET_NAME" \
 		"-o object-endpoint=blah \
 		-o object-region=$ZTS_REGION \
 		-o object-credentials-profile=$ZTS_CREDS_PROFILE \
@@ -103,6 +99,15 @@ if use_object_store; then
 			-o object-region=blah \
 			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
 			$TESTPOOL s3 $ZTS_BUCKET_NAME")
+
+		# This is also not applicable to test that uses
+		# IAM role to access the S3 bucket
+		if ! is_using_iam_role; then
+			args+=("-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
+				-o object-region=$ZTS_REGION \
+				-o object-credentials-profile=blah \
+				$TESTPOOL s3 $ZTS_BUCKET_NAME")
+		fi
 	fi
 else
 	set -A args  "" "-?" "-n" "-f" "-nf" "-fn" "-f -n" "--f" "-e" "-s" \
