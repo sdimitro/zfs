@@ -2,8 +2,12 @@ use std::fmt::Formatter;
 use std::fmt::Result;
 use std::ops::Deref;
 
+use bytes::buf::UninitSlice;
+use bytes::BufMut;
 use bytes::Bytes;
 use more_asserts::*;
+use tokio::io;
+use tokio::io::AsyncReadExt;
 
 /// # Examples:
 /// ```
@@ -125,11 +129,6 @@ impl AlignedVec {
         self.verify();
     }
 
-    /// Zero out any uninitialized part.
-    pub fn resize(&mut self, new_len: usize) {
-        self.vec.resize(self.pad + new_len, 0);
-    }
-
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         &mut self.vec[self.pad..]
     }
@@ -167,4 +166,33 @@ impl AlignedVec {
         assert_le!(self.pad + new_len, self.vec.capacity());
         self.vec.set_len(self.pad + new_len);
     }
+}
+
+unsafe impl BufMut for AlignedVec {
+    fn remaining_mut(&self) -> usize {
+        self.unused_capacity()
+    }
+
+    unsafe fn advance_mut(&mut self, cnt: usize) {
+        self.set_len(self.len() + cnt);
+    }
+
+    fn chunk_mut(&mut self) -> &mut UninitSlice {
+        unsafe { UninitSlice::from_raw_parts_mut(self.as_mut_ptr(), self.remaining_mut()) }
+    }
+}
+
+// BufMut's typically have "remaining capacity" that is not directly controlled from the consumer
+// (e.g. `Vec<u8>` has unlimited remaining, `AlignedVec` has remaining that includes the trailing
+// padding).  Therefore we take the `len` parameter and use the `BufMut::limit()` wrapper.
+pub async fn read_buf_exact_len<R, B>(reader: &mut R, buf: &mut B, len: usize) -> io::Result<()>
+where
+    R: AsyncReadExt + Unpin,
+    B: BufMut,
+{
+    let mut buf = buf.limit(len);
+    while buf.has_remaining_mut() {
+        reader.read_buf(&mut buf).await?;
+    }
+    Ok(())
 }

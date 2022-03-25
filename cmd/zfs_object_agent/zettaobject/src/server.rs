@@ -40,6 +40,7 @@ use util::lazy_static_ptr::DebugPointerSet;
 use util::maybe_die_with;
 use util::measure;
 use util::message::*;
+use util::read_buf_exact_len;
 use util::super_trace;
 use util::tunable;
 use util::with_alloctag_hf;
@@ -215,14 +216,12 @@ where
         let struct_slice = &mut struct_array[..header.struct_len as usize];
         input.read_exact(struct_slice).await?;
 
+        let payload_len = header.payload_len as usize;
         let mut payload_vec = with_alloctag_hf("get_next_request()", || {
             // XXX hardcoded 512; should be based on zettacache sector size
-            AlignedVec::with_capacity(header.payload_len as usize, 512)
+            AlignedVec::with_capacity(payload_len, 512)
         });
-        // XXX Would be nice if we didn't have to zero it out.
-        // probably need to use OwnedReadHalf::try_read_buf()?
-        payload_vec.resize(header.payload_len as usize);
-        input.read_exact(payload_vec.as_mut_slice()).await?;
+        read_buf_exact_len(input, &mut payload_vec, payload_len).await?;
 
         Ok((
             header.message_type,
