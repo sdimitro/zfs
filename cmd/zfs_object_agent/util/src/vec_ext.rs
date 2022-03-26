@@ -178,7 +178,12 @@ unsafe impl BufMut for AlignedVec {
     }
 
     fn chunk_mut(&mut self) -> &mut UninitSlice {
-        unsafe { UninitSlice::from_raw_parts_mut(self.as_mut_ptr(), self.remaining_mut()) }
+        unsafe {
+            UninitSlice::from_raw_parts_mut(
+                self.as_mut_ptr().offset(self.len().try_into().unwrap()),
+                self.remaining_mut(),
+            )
+        }
     }
 }
 
