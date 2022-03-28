@@ -1,8 +1,7 @@
 use std::time::Duration;
 
-use clap::AppSettings;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
+use clap::Subcommand;
 use git_version::git_version;
 use uuid::Uuid;
 use zettaobject::ObjectAccess;
@@ -19,144 +18,120 @@ static GIT_VERSION: &str = git_version!(
     }
 );
 
+#[derive(Parser)]
+#[clap(version=GIT_VERSION)]
+#[clap(name = "zfs_object_perf")]
+#[clap(about = "ZFS object storage performance tests")]
+#[clap(propagate_version = true)]
+struct Cli {
+    /// S3 endpoint
+    #[clap(short = 'e', long, default_value = ENDPOINT)]
+    endpoint: String,
+
+    /// S3 region
+    #[clap(short = 'r', long, default_value = REGION)]
+    region: String,
+
+    /// S3 bucket
+    #[clap(short = 'b', long, default_value = BUCKET_NAME)]
+    bucket: String,
+
+    /// credentials profile
+    #[clap(short = 'p', long, default_value = "default")]
+    profile: String,
+
+    /// Object size in KiB
+    #[clap(short = 's', long, default_value = "1024")]
+    object_size: u64,
+
+    /// number of concurrent GET/PUT operations
+    #[clap(short = 'q', long, default_value = "10")]
+    qdepth: u64,
+
+    /// How long to run the test (in seconds)
+    #[clap(short = 'd', long, default_value = "30", value_name = "SECONDS")]
+    time: u64,
+
+    /// Sets the level of logging verbosity
+    #[clap(short = 'v', parse(from_occurrences))]
+    verbosity: u64,
+
+    /// File to log output to
+    #[clap(
+        short = 'o',
+        long,
+        value_name = "FILE",
+        default_value = "/var/log/perflog"
+    )]
+    output_file: String,
+
+    /// Configuration file to set tunables (toml/json/yaml)
+    #[clap(short = 't', long, value_name = "FILE")]
+    config_file: Option<String>,
+
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// write test
+    Write,
+    /// read test
+    Read,
+}
+
 #[tokio::main]
 async fn main() {
-    let matches = clap::App::new("zfs_object_perf")
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .about("ZFS object storage performance tests")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::with_name("endpoint")
-                .short("e")
-                .long("endpoint")
-                .help("S3 endpoint")
-                .takes_value(true)
-                .default_value(ENDPOINT),
-        )
-        .arg(
-            Arg::with_name("region")
-                .short("r")
-                .long("region")
-                .help("S3 region")
-                .takes_value(true)
-                .default_value(REGION),
-        )
-        .arg(
-            Arg::with_name("bucket")
-                .short("b")
-                .long("bucket")
-                .help("S3 bucket")
-                .takes_value(true)
-                .default_value(BUCKET_NAME),
-        )
-        .arg(
-            Arg::with_name("profile")
-                .short("p")
-                .long("profile")
-                .help("credentials profile")
-                .takes_value(true)
-                .default_value("default"),
-        )
-        .arg(
-            Arg::with_name("object-size")
-                .short("s")
-                .long("object-size")
-                .help("Object size in KiB")
-                .takes_value(true)
-                .default_value("1024"),
-        )
-        .arg(
-            Arg::with_name("qdepth")
-                .short("q")
-                .long("qdepth")
-                .help("number of concurrent GET/PUT operations")
-                .takes_value(true)
-                .default_value("10"),
-        )
-        .arg(
-            Arg::with_name("runtime")
-                .short("t")
-                .long("time")
-                .help("How long to run the test (in seconds)")
-                .takes_value(true)
-                .default_value("30"),
-        )
-        .arg(
-            Arg::with_name("verbosity")
-                .short("v")
-                .multiple(true)
-                .help("Sets the level of logging verbosity"),
-        )
-        .arg(
-            Arg::with_name("output-file")
-                .short("o")
-                .long("output-file")
-                .value_name("FILE")
-                .help("File to log output to")
-                .takes_value(true)
-                .default_value("/var/tmp/perflog"),
-        )
-        .arg(
-            Arg::with_name("log-config")
-                .short("l")
-                .long("log-config")
-                .value_name("FILE")
-                .help("Configuration yaml file logging")
-                .takes_value(true),
-        )
-        .subcommand(SubCommand::with_name("write").about("write test"))
-        .subcommand(SubCommand::with_name("read").about("read test"))
-        .get_matches();
+    let cli = Cli::parse();
 
     util::setup_logging(
-        matches.occurrences_of("verbosity"),
-        matches.value_of("output-file"),
-        matches.value_of("log-config"),
+        cli.verbosity,
+        Some(&cli.output_file),
+        cli.config_file.as_deref(),
         false,
     );
 
-    // Command line parameters
-    let endpoint = matches.value_of("endpoint").unwrap();
-    let region_str = matches.value_of("region").unwrap();
-    let bucket_name = matches.value_of("bucket").unwrap();
-    let profile = matches.value_of("profile").unwrap();
-    let objsize_bytes: u64 = matches
-        .value_of("object-size")
-        .unwrap()
-        .parse::<u64>()
-        .unwrap()
-        * 1024;
-    let qdepth: u64 = matches.value_of("qdepth").unwrap().parse().unwrap();
-    let duration = Duration::from_secs(matches.value_of("runtime").unwrap().parse().unwrap());
+    let duration = Duration::from_secs(cli.time);
+    let objsize_bytes = cli.object_size * 1024;
 
     println!(
         "endpoint: {}, region: {}, bucket: {} profile: {}",
-        endpoint, region_str, bucket_name, profile
+        cli.endpoint, cli.region, cli.bucket, cli.profile
     );
 
     let object_access = ObjectAccess::new(
-        endpoint,
-        region_str,
-        bucket_name,
-        Some(profile.to_owned()),
+        &cli.endpoint,
+        &cli.region,
+        &cli.bucket,
+        Some(cli.profile.to_owned()),
         false,
     );
 
     let key_prefix = format!("zfs_object_perf/{}/", Uuid::new_v4());
     println!("Using prefix: '{}'", key_prefix);
-    match matches.subcommand() {
-        ("write", Some(_matches)) => {
-            s3perf::write_test(object_access, key_prefix, objsize_bytes, qdepth, duration)
-                .await
-                .unwrap();
+    match cli.command {
+        Commands::Write => {
+            s3perf::write_test(
+                object_access,
+                key_prefix,
+                objsize_bytes,
+                cli.qdepth,
+                duration,
+            )
+            .await
+            .unwrap();
         }
-        ("read", Some(_matches)) => {
-            s3perf::read_test(object_access, key_prefix, objsize_bytes, qdepth, duration)
-                .await
-                .unwrap();
+        Commands::Read => {
+            s3perf::read_test(
+                object_access,
+                key_prefix,
+                objsize_bytes,
+                cli.qdepth,
+                duration,
+            )
+            .await
+            .unwrap();
         }
-        _ => {
-            matches.usage();
-        }
-    };
+    }
 }

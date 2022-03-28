@@ -3022,7 +3022,7 @@ dependencies = [
 name = "zfs_object_perf"
 version = "0.1.0"
 dependencies = [
- "clap 2.34.0",
+ "clap 3.1.6",
  "futures",
  "git-version",
  "log",
