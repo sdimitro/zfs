@@ -18,6 +18,10 @@ impl<T: Clone> Sender<T> {
     pub fn send(self, value: T) -> Result<(), watch::error::SendError<Option<T>>> {
         self.0.send(Some(value))
     }
+
+    pub fn subscribe(&self) -> Receiver<T> {
+        Receiver(self.0.subscribe())
+    }
 }
 
 impl<T: Clone> Receiver<T> {

@@ -4,6 +4,7 @@
 #![warn(clippy::cast_sign_loss)]
 
 mod alloc;
+pub mod async_cache;
 mod binaryindextree;
 mod bitrange;
 mod btreemap_ext;

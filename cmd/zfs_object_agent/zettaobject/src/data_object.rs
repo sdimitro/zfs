@@ -4,6 +4,7 @@ use std::fmt;
 use std::fmt::Display;
 use std::iter;
 use std::mem::size_of;
+use std::sync::Arc;
 use std::time::Instant;
 
 use anyhow::anyhow;
@@ -12,11 +13,15 @@ use anyhow::Result;
 use bytes::Bytes;
 use bytesize::ByteSize;
 use futures::stream;
+use futures::FutureExt;
 use log::*;
 use more_asserts::*;
 use rusoto_core::ByteStream;
 use serde::Deserialize;
 use serde::Serialize;
+use util::async_cache::AsyncCache;
+use util::async_cache::GetMethod;
+use util::lazy_static_ptr;
 use util::measure;
 use util::tunable;
 use util::with_alloctag;
@@ -27,11 +32,41 @@ use crate::base_types::*;
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessOpType;
 
+// This is part of the on-disk format.
 pub const NUM_DATA_PREFIXES: u64 = 64;
 
 tunable! {
-    pub static ref DATA_OBJ_RANGED_GET: bool = false;
-    pub static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(32);
+    static ref DATA_OBJ_RANGED_GET: bool = false;
+    static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(32);
+    static ref OBJECT_CACHE_SIZE: usize = 100;
+}
+
+lazy_static_ptr! {
+    static ref CACHE: AsyncCache<Key, Arc<DataObject>> = AsyncCache::new(*OBJECT_CACHE_SIZE);
+}
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Eq)]
+struct Key {
+    guid: PoolGuid,
+    object: ObjectId,
+}
+
+impl Key {
+    fn new(guid: PoolGuid, object: ObjectId) -> Self {
+        Self { guid, object }
+    }
+}
+
+impl Display for Key {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "zfs/{}/data/{:03}/{}",
+            self.guid,
+            self.object.prefix(),
+            self.object
+        )
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone)]
@@ -136,16 +171,11 @@ impl DataObject {
     const MAX_HEADER_LEN: usize = (1 << 20) - 1;
 
     pub fn key(guid: PoolGuid, object: ObjectId) -> String {
-        format!("zfs/{}/data/{:03}/{}", guid, object.prefix(), object)
+        Key::new(guid, object).to_string()
     }
 
-    // Could change this to return an Iterator
-    pub fn prefixes(guid: PoolGuid) -> Vec<String> {
-        let mut vec = Vec::new();
-        for x in 0..NUM_DATA_PREFIXES {
-            vec.push(format!("zfs/{}/data/{:03}/", guid, x));
-        }
-        vec
+    pub fn prefixes(guid: PoolGuid) -> impl Iterator<Item = String> {
+        (0..NUM_DATA_PREFIXES).map(move |x| format!("zfs/{}/data/{:03}/", guid, x))
     }
 
     pub fn new(guid: PoolGuid, object: ObjectId, next_block: BlockId, txg: Txg) -> Self {
@@ -163,21 +193,8 @@ impl DataObject {
         }
     }
 
-    /// Returns (phys, data_bytes)
-    fn deserialize<F: FnOnce() -> String>(
-        bytes: &Bytes,
-        context: F,
-    ) -> Result<(DataObjectPhys<'_>, Bytes)> {
-        let (phys, data_offset) = Self::deserialize_header(bytes, context)?;
-        let data_bytes = bytes.slice(data_offset..);
-        Ok((phys, data_bytes))
-    }
-
     /// Returns (phys, offset_of_data)
-    fn deserialize_header<F: FnOnce() -> String>(
-        bytes: &Bytes,
-        context: F,
-    ) -> Result<(DataObjectPhys<'_>, usize)> {
+    fn deserialize_header(bytes: &[u8]) -> Result<(DataObjectPhys<'_>, usize)> {
         let header_len = usize::from64(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
         if bytes.len() < 8 + header_len {
             return Err(anyhow!(
@@ -187,25 +204,19 @@ impl DataObject {
             ));
         }
         let header_slice = &bytes[8..8 + header_len];
-        Ok((
-            bincode::deserialize(header_slice).with_context(context)?,
-            8 + header_len,
-        ))
+        Ok((bincode::deserialize(header_slice)?, 8 + header_len))
     }
 
-    async fn get_impl<F: FnOnce() -> String>(
+    async fn get_impl<D: Display>(
         object_access: &ObjectAccess,
-        key: String,
+        key: D,
         stat_type: ObjectAccessOpType,
-        bypass_cache: bool,
-        context: F,
     ) -> Result<Self> {
-        let bytes = match bypass_cache {
-            true => object_access.get_object_uncached(key, stat_type).await?,
-            false => object_access.get_object(key, stat_type).await?,
-        };
+        let bytes = object_access.get_object(key.to_string(), stat_type).await?;
         let begin = Instant::now();
-        let (phys, data_bytes) = Self::deserialize(&bytes, context)?;
+        let (phys, data_offset) =
+            Self::deserialize_header(&bytes).with_context(|| key.to_string())?;
+        let data_bytes = bytes.slice(data_offset..);
         let arrays = DataObjectArrays::new(&phys);
         let mut blocks = with_alloctag("DataObjectPhys HashMap", || {
             HashMap::with_capacity(arrays.len())
@@ -235,28 +246,6 @@ impl DataObject {
         Ok(data_object)
     }
 
-    pub async fn get_block(
-        object_access: &ObjectAccess,
-        guid: PoolGuid,
-        object: ObjectId,
-        block: BlockId,
-        stat_type: ObjectAccessOpType,
-        bypass_cache: bool,
-    ) -> Result<Bytes> {
-        if *DATA_OBJ_RANGED_GET {
-            match Self::get_block_range(object_access, guid, object, block, stat_type).await {
-                Ok(bytes) => return Ok(bytes),
-                Err(e) => {
-                    // presumably we didn't get enough bytes for the header; just get the whole
-                    // object
-                    debug!("error deserializing {}: {}", object, e);
-                    measure!("DataObject header deserialize failure").hit();
-                }
-            }
-        }
-        Self::get_block_whole(object_access, guid, object, block, stat_type, bypass_cache).await
-    }
-
     /// Returns (offset, next_offset), or Err if not present.
     fn locate_block(phys: DataObjectPhys, block: BlockId) -> Result<(usize, usize)> {
         let arrays = DataObjectArrays::new(&phys);
@@ -284,19 +273,24 @@ impl DataObject {
         guid: PoolGuid,
         object: ObjectId,
         block: BlockId,
-        stat_type: ObjectAccessOpType,
     ) -> Result<Bytes> {
-        let key = Self::key(guid, object);
+        let key = Key::new(guid, object);
+        if let Some(data) = CACHE.get_without_loading(key).await {
+            return data
+                .blocks
+                .get(&block)
+                .cloned()
+                .ok_or_else(|| anyhow!("expected {:?} not found in {:?}", block, object));
+        }
         let header_bytes = object_access
             .get_object_range(
-                key.clone(),
+                key.to_string(),
+                ObjectAccessOpType::ReadsGet,
                 0..usize::from64(DATA_OBJ_TRY_HEADER_SIZE.as_u64()),
-                stat_type,
             )
             .await?;
-        let (phys, data_offset) = Self::deserialize_header(&header_bytes, || {
-            format!("get {:?} for {:?}", object, block)
-        })?;
+        let (phys, data_offset) = Self::deserialize_header(&header_bytes)
+            .with_context(|| format!("{}: get {:?} for {:?}", key, object, block))?;
         assert_eq!(phys.header.guid, guid);
         assert_eq!(phys.header.object, object);
         let (offset, next_offset) = Self::locate_block(phys, block)?;
@@ -304,70 +298,90 @@ impl DataObject {
         // just use the existing buffer rather than going back to S3.
         let data_bytes = object_access
             .get_object_range(
-                key,
+                key.to_string(),
+                ObjectAccessOpType::ReadsGet,
                 data_offset + offset..data_offset + next_offset,
-                stat_type,
             )
             .await?;
         assert_eq!(data_bytes.len(), next_offset - offset);
         Ok(data_bytes)
     }
 
-    /// Get this block by reading the whole object, via the object cache.  This
-    /// should be used if there are likely to be subsequent get_block() calls on
-    /// other blocks in the same object.
-    async fn get_block_whole(
-        object_access: &ObjectAccess,
-        guid: PoolGuid,
-        object: ObjectId,
-        block: BlockId,
-        stat_type: ObjectAccessOpType,
-        bypass_cache: bool,
-    ) -> Result<Bytes> {
-        // XXX if not in object cache, just get the header and then specific block needed from S3?
-        let key = Self::key(guid, object);
-        let bytes = match bypass_cache {
-            true => object_access.get_object_uncached(key, stat_type).await?,
-            false => object_access.get_object(key, stat_type).await?,
-        };
-        let (phys, data_bytes) =
-            Self::deserialize(&bytes, || format!("get {:?} for {:?}", object, block))?;
-
-        assert_eq!(phys.header.guid, guid);
-        assert_eq!(phys.header.object, object);
-        let (offset, next_offset) = Self::locate_block(phys, block)?;
-        Ok(data_bytes.slice(offset..next_offset))
-    }
-
     pub async fn get_from_key(
         object_access: &ObjectAccess,
         key: String,
         stat_type: ObjectAccessOpType,
-        bypass_cache: bool,
     ) -> Result<Self> {
-        Self::get_impl(object_access, key.clone(), stat_type, bypass_cache, || {
-            format!("Failed to decode contents of {}", key)
-        })
-        .await
+        Self::get_impl(object_access, key, stat_type).await
     }
 
-    pub async fn get(
+    pub async fn get_uncached(
         object_access: &ObjectAccess,
         guid: PoolGuid,
         object: ObjectId,
         stat_type: ObjectAccessOpType,
-        bypass_cache: bool,
     ) -> Result<Self> {
         // We use get_impl() rather than get_from_key() to avoid allocating and
         // copying an additional String for the key in the common case.
-        Self::get_impl(
-            object_access,
-            Self::key(guid, object),
-            stat_type,
-            bypass_cache,
-            || format!("Failed to decode contents of {}", Self::key(guid, object)),
-        )
-        .await
+        Self::get_impl(object_access, Key::new(guid, object), stat_type).await
+    }
+
+    /// Note: always uses ObjectAccessOpType::ReadsGet
+    pub async fn get(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        object: ObjectId,
+    ) -> Result<(Arc<Self>, GetMethod)> {
+        measure!()
+            .fut(
+                CACHE.get_method(Key::new(guid, object), move |cache_key: Key| {
+                    measure!().fut(
+                        DataObject::get_impl(
+                            object_access,
+                            cache_key,
+                            ObjectAccessOpType::ReadsGet,
+                        )
+                        .map(|x| x.map(Arc::new)),
+                    )
+                }),
+            )
+            .await
+    }
+
+    /// Note: always uses ObjectAccessOpType::ReadsGet
+    pub async fn get_block(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        object: ObjectId,
+        block: BlockId,
+    ) -> Result<Bytes> {
+        if *DATA_OBJ_RANGED_GET {
+            match measure!()
+                .fut(Self::get_block_range(object_access, guid, object, block))
+                .await
+            {
+                Ok(bytes) => return Ok(bytes),
+                Err(e) => {
+                    // presumably we didn't get enough bytes for the header; get the whole object
+                    debug!("error deserializing {}: {}", object, e);
+                    measure!("DataObject header deserialize failure").hit();
+                }
+            }
+        }
+        // Get this block by reading the whole object, via the object cache.  This should be used
+        // if there are likely to be subsequent get_block() calls on other blocks in the same
+        // object.
+        Self::get(object_access, guid, object)
+            .await?
+            .0
+            .blocks
+            .get(&block)
+            .cloned()
+            .ok_or_else(|| anyhow!("expected {:?} not found in {:?}", block, object))
+    }
+
+    fn invalidate_cache(guid: PoolGuid, object: ObjectId) {
+        CACHE.invalidate(Key::new(guid, object));
     }
 
     pub async fn put(&self, object_access: &ObjectAccess, stat_type: ObjectAccessOpType) {
@@ -432,6 +446,12 @@ impl DataObject {
                 stat_type,
             )
             .await;
+        // Note that we need to PutObject before invalidating the cache.  If a get() is called
+        // while put() is in progress, it may see the old or new value, which is fine.  After
+        // put() returns, get() must return the new value.  If we invalidated before the
+        // PutObject, a concurrent get() could retrieve the old value and add it to the cache,
+        // allowing the old value to be read (from the cache) after put() returns.
+        Self::invalidate_cache(self.header.guid, self.header.object);
     }
 
     pub fn calculate_blocks_size(&self) -> u32 {

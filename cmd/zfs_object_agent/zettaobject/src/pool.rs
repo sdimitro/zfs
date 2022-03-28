@@ -43,6 +43,7 @@ use tokio::sync::oneshot;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
+use util::async_cache::GetMethod;
 use util::maybe_die_with;
 use util::measure;
 use util::super_trace;
@@ -147,7 +148,7 @@ impl PoolOwnerPhys {
 
     async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_from_s3(Self::key(id), ObjectAccessOpType::MetadataGet, None, None)
+            .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -828,14 +829,10 @@ impl PoolState {
         let mut count: u32 = 0;
 
         oa.delete_objects(
-            select_all(
-                DataObject::prefixes(shared_state.guid)
-                    .into_iter()
-                    .map(|prefix| {
-                        let start_after = Some(format!("{}{}", prefix, last_obj));
-                        Box::pin(oa.list_objects(prefix, start_after, true))
-                    }),
-            )
+            select_all(DataObject::prefixes(shared_state.guid).map(|prefix| {
+                let start_after = Some(format!("{}{}", prefix, last_obj));
+                oa.list_objects(prefix, start_after, true).boxed()
+            }))
             .inspect(|_| count += 1),
         )
         .await;
@@ -1167,7 +1164,6 @@ impl Pool {
                             &shared_state.object_access,
                             key,
                             ObjectAccessOpType::ReadsGet,
-                            false,
                         )
                         .await
                     }));
@@ -1673,21 +1669,13 @@ impl Pool {
         });
     }
 
-    async fn read_object_for_block(&self, block: BlockId, bypass_cache: bool) -> DataObject {
+    async fn read_object_for_block(&self, block: BlockId) -> (Arc<DataObject>, GetMethod) {
         let mut object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
         loop {
-            trace!("reading {:?} for {:?}", object, block);
-            match DataObject::get(
-                &shared_state.object_access,
-                shared_state.guid,
-                object,
-                ObjectAccessOpType::ReadsGet,
-                bypass_cache,
-            )
-            .await
-            {
-                Ok(object) => return object,
+            super_trace!("reading {:?} for {:?}", object, block);
+            match DataObject::get(&shared_state.object_access, shared_state.guid, object).await {
+                Ok(tuple) => return tuple,
                 Err(e) => {
                     // We may have failed due to the object not existing, due to the
                     // object/block map changing out from under us, and then the object being
@@ -1707,7 +1695,7 @@ impl Pool {
         }
     }
 
-    async fn read_block_impl(&self, block: BlockId, bypass_cache: bool) -> Bytes {
+    async fn read_block_impl(&self, block: BlockId) -> Bytes {
         let mut object = self.state.object_block_map.block_to_object(block);
         let shared_state = self.state.shared_state.clone();
         loop {
@@ -1717,8 +1705,6 @@ impl Pool {
                 shared_state.guid,
                 object,
                 block,
-                ObjectAccessOpType::ReadsGet,
-                bypass_cache,
             )
             .await
             {
@@ -1756,49 +1742,52 @@ impl Pool {
         match &self.state.zettacache {
             Some(cache) => match heal {
                 true => {
-                    let bytes = self.read_block_impl(block, heal).await;
-                    cache
-                        .heal(self.state.shared_state.guid, block, bytes.clone().into())
-                        .await;
-                    bytes
+                    // Using boxed() on this infrequently-called path reduces the size of the
+                    // RootConnectionState::read_block() future from 1200B->938B.
+                    measure!()
+                        .fut(async move {
+                            let bytes = self.read_block_impl(block).await;
+                            cache
+                                .heal(self.state.shared_state.guid, block, bytes.clone().into())
+                                .await;
+                            bytes
+                        })
+                        .boxed()
+                        .await
                 }
-                false => match cache
-                    .lookup(self.state.shared_state.guid, block, LookupSource::Read)
+                false => match measure!()
+                    .fut(cache.lookup(self.state.shared_state.guid, block, LookupSource::Read))
                     .await
                 {
                     LookupResponse::Present((cached_bytes, _key)) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
                         if *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
-                            let mut data_object = self.read_object_for_block(block, heal).await;
-                            let bytes = data_object.blocks.remove(&block).unwrap();
+                            let (data_object, method) = self.read_object_for_block(block).await;
+                            let bytes = data_object.blocks.get(&block).unwrap().clone();
 
-                            // Note: bytes.clone().into() will result in a
-                            // memcpy in BlockAccess::write_raw_permit(), if we
-                            // end up actually writing it to disk.
-                            let demand_insert = async {
-                                cache
-                                    .insert(
-                                        key,
-                                        bytes.len(),
-                                        || bytes.clone().into(),
-                                        InsertSource::Read,
-                                    )
-                                    .await;
-                            };
+                            // Note: bytes.clone().into() will result in a memcpy in
+                            // BlockAccess::write_raw_permit(), if we end up actually writing it
+                            // to disk.
+                            let demand_insert = cache.insert(
+                                key,
+                                bytes.len(),
+                                || bytes.clone().into(),
+                                InsertSource::Read,
+                            );
 
-                            let speculative_inserts = async {
-                                cache
-                                    .insert_all(
-                                        self.state.shared_state.guid,
-                                        &data_object.blocks,
-                                        InsertSource::SpeculativeRead,
-                                    )
-                                    .await;
-                            };
-                            join(demand_insert, speculative_inserts).await;
+                            if matches!(method, GetMethod::Loaded) {
+                                let speculative_inserts = cache.insert_all(
+                                    self.state.shared_state.guid,
+                                    &data_object.blocks,
+                                    InsertSource::SpeculativeRead,
+                                );
+                                join(demand_insert, speculative_inserts).await;
+                            } else {
+                                demand_insert.await;
+                            }
                             bytes
                         } else {
-                            let bytes = self.read_block_impl(block, heal).await;
+                            let bytes = self.read_block_impl(block).await;
 
                             // We explicitly copy to a new buffer so that the object buffer,
                             // which is much larger than this one block, can be freed before the
@@ -1820,7 +1809,7 @@ impl Pool {
                     }
                 },
             },
-            None => self.read_block_impl(block, heal).await,
+            None => measure!().fut(self.read_block_impl(block)).await,
         }
     }
 
@@ -2194,7 +2183,7 @@ async fn reclaim_frees_object(
             // Bypass object cache so that it isn't added, so that when we overwrite it with
             // put(), we don't need to copy the data into the cache to invalidate.
             let mut phys =
-                DataObject::get(&shared_state.object_access, shared_state.guid, object, ObjectAccessOpType::ReclaimGet, true)
+                DataObject::get_uncached(&shared_state.object_access, shared_state.guid, object, ObjectAccessOpType::ReclaimGet)
                     .await
                     .unwrap();
 

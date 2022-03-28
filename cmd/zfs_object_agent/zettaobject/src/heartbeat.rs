@@ -50,7 +50,7 @@ impl HeartbeatPhys {
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_from_s3(Self::key(id), ObjectAccessOpType::MetadataGet, None, None)
+            .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;

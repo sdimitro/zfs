@@ -20,16 +20,15 @@ use bytes::BytesMut;
 use enum_map::Enum;
 use enum_map::EnumMap;
 use futures::future;
-use futures::future::Either;
 use futures::stream;
 use futures::Future;
+use futures::FutureExt;
 use futures::StreamExt;
 use futures::TryStreamExt;
 use futures_core::Stream;
 use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
-use lru::LruCache;
 use more_asserts::assert_le;
 use rand::prelude::*;
 use rusoto_core::ByteStream;
@@ -51,23 +50,11 @@ use rusoto_s3::S3Client;
 use rusoto_s3::S3;
 use tokio::sync::Semaphore;
 use tokio::time::error::Elapsed;
-use util::super_trace;
+use util::measure;
 use util::tunable;
-use util::watch_once;
 use util::with_alloctag;
 
-struct ObjectCache {
-    // XXX cache key should include Bucket
-    cache: LruCache<String, Bytes>,
-    // key -> (cacheable, Receiver<value>)
-    reading: HashMap<String, (bool, watch_once::Receiver<Bytes>)>,
-}
-
 lazy_static! {
-    static ref CACHE: std::sync::Mutex<ObjectCache> = std::sync::Mutex::new(ObjectCache {
-        cache: LruCache::new(*OBJECT_CACHE_SIZE),
-        reading: HashMap::new(),
-    });
     static ref NON_RETRYABLE_ERRORS: Vec<StatusCode> = vec![
         StatusCode::BAD_REQUEST,
         StatusCode::FORBIDDEN,
@@ -85,10 +72,8 @@ tunable! {
     static ref PANIC_ON_XLONG_OPERATION: bool = false;
 
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = 1000;
-    static ref OBJECT_CACHE_IS_BYPASSABLE: bool = false;
     static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = 100;
     static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
-    static ref OBJECT_CACHE_SIZE: usize = 100;
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
@@ -563,11 +548,29 @@ impl ObjectAccess {
         })
     }
 
-    pub async fn get_object_from_s3(
+    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
+        self.get_object_impl(key, stat_type, None).boxed().await
+    }
+
+    pub async fn get_object_range(
         &self,
         key: String,
         stat_type: ObjectAccessOpType,
-        timeout: Option<Duration>,
+        range: Range<usize>,
+    ) -> Result<Bytes> {
+        measure!()
+            .fut(self.get_object_impl(key, stat_type, Some(range)))
+            .boxed()
+            .await
+    }
+
+    // Note: this generates a large future (~3KB), but it's used relatively infrequently, so it
+    // should always be boxed() to avoid increasing the future size for the hot path (e.g.
+    // RootConnectionState::read_block()).
+    async fn get_object_impl(
+        &self,
+        key: String,
+        stat_type: ObjectAccessOpType,
         range: Option<Range<usize>>,
     ) -> Result<Bytes> {
         let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
@@ -576,7 +579,7 @@ impl ObjectAccess {
         let range_string = range
             .as_ref()
             .map(|r| format!("bytes={}-{}", r.start, r.end - 1));
-        let bytes = retry(&msg, timeout, || async {
+        let bytes = retry(&msg, None, || async {
             let req = GetObjectRequest {
                 bucket: self.bucket_str.clone(),
                 key: key.clone(),
@@ -628,176 +631,6 @@ impl ObjectAccess {
 
         op.end(bytes.len() as u64);
         Ok(bytes.into())
-    }
-
-    pub async fn get_object_uncached(
-        &self,
-        key: String,
-        stat_type: ObjectAccessOpType,
-    ) -> Result<Bytes> {
-        if *OBJECT_CACHE_IS_BYPASSABLE {
-            let bytes = self
-                .get_object_from_s3(key.clone(), stat_type, None, None)
-                .await?;
-            // Note: we *should* have the same data from S3 (in the `vec`) and in the cache, so
-            // this invalidation is normally not necessary.  However, in case a bug (or
-            // undetected RAM error) resulted in incorrect cached data, we want to invalidate the
-            // cache so that we won't get the bad cached data again.
-            Self::invalidate_cache(key);
-            Ok(bytes)
-        } else {
-            self.get_object(key, stat_type).await
-        }
-    }
-
-    pub async fn get_object_range(
-        &self,
-        key: String,
-        range: Range<usize>,
-        stat_type: ObjectAccessOpType,
-    ) -> Result<Bytes> {
-        // Recursive async functions require Box-ing their future, even if we
-        // "tail call".  Use a loop to retry instead.
-        loop {
-            // XXX copying key
-            if let Some(result) = self
-                .get_object_range_impl(key.clone(), range.clone(), stat_type)
-                .await
-            {
-                return result;
-            }
-        }
-    }
-
-    async fn get_object_range_impl(
-        &self,
-        key: String,
-        range: Range<usize>,
-        stat_type: ObjectAccessOpType,
-    ) -> Option<Result<Bytes>> {
-        // need this block separate so that we can drop the mutex before the .await's
-        let rx = {
-            let mut c = CACHE.lock().unwrap();
-            match c.cache.get(&key) {
-                Some(bytes) => {
-                    super_trace!("found {} in cache", key);
-                    return Some(Ok(bytes.slice(range)));
-                }
-                None => c.reading.get(&key).map(|(_, rx)| rx.clone()),
-            }
-        };
-        match rx {
-            None => Some(
-                self.get_object_from_s3(key.clone(), stat_type, None, Some(range.clone()))
-                    .await,
-            ),
-            Some(rx) => {
-                super_trace!("{}: found GET in progress, waiting", key);
-                match rx.recv().await {
-                    Ok(bytes) => Some(Ok(bytes.slice(range))),
-                    // Sender doesn't have a value for us. The caller will retry.
-                    Err(_) => {
-                        debug!("{}: waited for failed GET, retrying", key);
-                        None
-                    }
-                }
-            }
-        }
-    }
-
-    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
-        // Recursive async functions require Box-ing their future, even if we "tail call".  Use a
-        // loop to retry instead.
-        loop {
-            // XXX copying key
-            if let Some(result) = self.get_object_cached(key.clone(), stat_type).await {
-                return result;
-            }
-        }
-    }
-
-    // None means we need to retry.  Some(Err) means that S3 returned a non-retryable error (e.g.
-    // object does not exist).
-    async fn get_object_cached(
-        &self,
-        key: String,
-        stat_type: ObjectAccessOpType,
-    ) -> Option<Result<Bytes>> {
-        let either = {
-            // need this block separate so that we can drop the mutex before the .await
-            let mut c = CACHE.lock().unwrap();
-            match c.cache.get(&key) {
-                Some(bytes) => {
-                    super_trace!("found {} in cache", key);
-                    return Some(Ok(bytes.clone()));
-                }
-                None => match c.reading.get(&key) {
-                    None => {
-                        let (tx, rx) = watch_once::channel::<Bytes>();
-                        c.reading.insert(key.clone(), (true, rx));
-                        Either::Left(async move {
-                            let result = self
-                                .get_object_from_s3(key.clone(), stat_type, None, None)
-                                .await;
-
-                            // We need to remove the `reading` entry regardless of the result.
-                            let mut myc = CACHE.lock().unwrap();
-                            let (cacheable, _) = myc.reading.remove(&key).unwrap();
-                            match result {
-                                Ok(bytes) => {
-                                    // This GET may have been marked non-cacheable by
-                                    // invalidate_cache().  In that case, the object's contents
-                                    // have been changed by a concurrent PUT, but since we
-                                    // initiated our GET before the PUT, the old value is
-                                    // sufficient for us.  But we don't want other GET's (which
-                                    // may have been initiated after the PUT completed) to see
-                                    // the potentially-old value that we got, so we don't add it
-                                    // to the cache or send it to other waiting GET's.
-                                    if cacheable {
-                                        myc.cache.put(key, bytes.clone());
-                                        // We removed and dropped the rx, so there may be no more
-                                        // receivers, so we can't unwrap().
-                                        tx.send(bytes.clone()).ok();
-                                    }
-                                    Some(Ok(bytes))
-                                }
-                                Err(e) => Some(Err(e)),
-                            }
-                        })
-                    }
-                    // If the in-progress GET is not cacheable, it won't send us the value.
-                    // However, there can be only one (potentially-cacheable) GET in progress at
-                    // a time, so we can't start another one until it completes.
-                    Some((_, rx)) => {
-                        super_trace!("{}: found GET in progress, waiting", key);
-                        let rx = rx.clone();
-                        Either::Right(async move {
-                            match rx.recv().await {
-                                Ok(bytes) => Some(Ok(bytes)),
-                                // Sender doesn't have a value for us. The caller will retry.
-                                Err(_) => {
-                                    debug!("{}: waited for failed GET, retrying", key);
-                                    None
-                                }
-                            }
-                        })
-                    }
-                },
-            }
-        };
-        either.await
-    }
-
-    fn invalidate_cache(key: String) {
-        let mut cache = CACHE.lock().unwrap();
-        cache.cache.pop(&key);
-        // If there's a concurrent GET going on, it may see the old value, which is fine.  But we
-        // can't allow new readers to see the old value, either via the watch channel or by
-        // finding it in the cache later.  We mark the in-progress GET as non-cacheable so that
-        // the getter will not send the stale value or add it to the cache.
-        if let Some((cacheable, _)) = cache.reading.get_mut(&key) {
-            *cacheable = false;
-        }
     }
 
     fn list_impl(
@@ -966,17 +799,9 @@ impl ObjectAccess {
     }
 
     pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessOpType) {
-        // Note that we need to PutObject before invalidating the cache.  If a
-        // get_object() is called while put_object() is in progress, it may see
-        // the old or new value, which is fine.  After put_object() returns,
-        // get_object() must return the new value.  If we invalidated before the
-        // PutObject, a concurrent get_object() could retrieve the old value and
-        // add it to the cache, allowing the old value to be read (from the
-        // cache) after put_object() returns.
         self.put_object_impl(key.clone(), data, stat_type, None)
             .await
             .unwrap();
-        Self::invalidate_cache(key);
     }
 
     pub async fn put_object_stream<F>(
@@ -990,7 +815,6 @@ impl ObjectAccess {
         self.put_object_stream_impl(key.clone(), streamfunc, stat_type, None)
             .await
             .unwrap();
-        Self::invalidate_cache(key);
     }
 
     pub async fn put_object_timed(
@@ -1003,7 +827,6 @@ impl ObjectAccess {
         let result = self
             .put_object_impl(key.clone(), data, stat_type, timeout)
             .await;
-        Self::invalidate_cache(key);
         result
     }
 

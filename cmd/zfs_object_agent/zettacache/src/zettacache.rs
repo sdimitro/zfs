@@ -1576,7 +1576,7 @@ impl ZettaCache {
     async fn lookup_impl<F, R, Fut>(&self, locked_key: &LockedKey, source: LookupSource, f: F) -> R
     where
         F: FnOnce(&mut ZettaCacheState, Option<ValidIndexValue>) -> Fut,
-        Fut: Future<Output = R>,
+        Fut: Future<Output = R> + Send,
     {
         let key = locked_key.key();
         // Hold the index lock over the whole operation
@@ -1673,8 +1673,8 @@ impl ZettaCache {
             }
         }
         let (entry_opt, chunk_cache_hit) = match index {
-            Either::Left(index) => index.lookup(key).await,
-            Either::Right(index) => index.lookup(key).await,
+            Either::Left(index) => measure!().fut(index.lookup(key)).await,
+            Either::Right(index) => measure!().fut(index.lookup(key)).await,
         };
         if matches!(source, LookupSource::Read) {
             if chunk_cache_hit {

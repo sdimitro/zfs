@@ -403,12 +403,11 @@ async fn do_dump_object(
     object: u64,
     verbose: usize,
 ) {
-    match DataObject::get(
+    match DataObject::get_uncached(
         &object_access,
         PoolGuid(pool_guid),
         ObjectId::new(BlockId(object)),
         ObjectAccessOpType::ReadsGet,
-        true,
     )
     .await
     {
