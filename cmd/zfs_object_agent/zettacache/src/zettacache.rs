@@ -1899,7 +1899,7 @@ impl ZettaCache {
             // store.
             if *cache_bytes != *object_bytes {
                 self.stats.track_count(HealedBlocks);
-                debug!("Healing cache: {:?}", locked_key.key());
+                debug!("healing cache: {:?}", locked_key.key());
                 // Note: this will result in a second insert for the same key in the index. This
                 // will be resolved either in the insert code (if the first insert
                 // is in pending_changes) or later during the next merge.
@@ -2448,10 +2448,7 @@ impl ZettaCacheState {
             self.pending_changes
                 .insert(key, PendingChange::Insert(value))
         }) {
-            debug!(
-                "Inserting {:?} over existing entry {:?}, should be heal",
-                value, pc
-            );
+            debug!("{key:?}: inserting {value:?} over existing entry {pc:?}, should be heal");
             let old_value = match pc {
                 PendingChange::Insert(old_value) => {
                     // Free the old extent for the previous insert. This is safe because the
@@ -2759,20 +2756,44 @@ impl ZettaCacheState {
         )
     }
 
+    fn need_merge(&self) -> bool {
+        let mut need_merge = false;
+
+        {
+            let used = self.pending_changes.len();
+            let max = self.pending_changes_trigger;
+            if used > max {
+                debug!("starting merge due to pending changes trigger {used} > {max}");
+                need_merge = true;
+            }
+        }
+
+        {
+            let used = self.block_allocator.size() - self.block_allocator.available();
+            let max = HIGH_WATER_CACHE_SIZE_PCT.apply(self.block_allocator.size());
+            if used > max {
+                debug!("starting merge due to high water cache size {used} > {max}");
+                need_merge = true;
+            }
+        }
+
+        {
+            let slabs = self.block_allocator.num_slabs_to_rebalance();
+            if slabs > 0 {
+                debug!("starting merge due to rebalance of {slabs} slabs");
+                need_merge = true;
+            }
+        }
+
+        need_merge
+    }
+
     /// Start a new merge task if there are enough pending changes
     async fn try_start_merge_task(
         &mut self,
         old_index: Arc<tokio::sync::RwLock<IndexRun>>,
     ) -> Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)> {
-        if self.pending_changes.len() < self.pending_changes_trigger
-            && self.block_allocator.size() - self.block_allocator.available()
-                < HIGH_WATER_CACHE_SIZE_PCT.apply(self.block_allocator.size())
-            && !self.block_allocator.rebalance_needed()
-        {
-            trace!(
-                "not starting new merge, only {} pending changes",
-                self.pending_changes.len()
-            );
+        if !self.need_merge() {
             return None;
         }
 
@@ -2845,6 +2866,19 @@ impl ZettaCacheState {
                 }
 
                 let log_phys = log.flush().await;
+
+                // We need to ensure that rebalance() won't copy from blocks that we're still in
+                // the middle of writing.  To solve a similar problem, we use the LockedKey to
+                // ensure that the reads from lookup() see new writes from insert().  We can't
+                // use that method here because we don't yet know what keys correspond to the map
+                // entries.  Here we simpy wait for all outstanding writes, which is not ideal to
+                // be doing with the state lock held, but it works.
+                let begin = Instant::now();
+                self.outstanding_writes.rotate().await;
+                debug!(
+                    "rebalance waited for outstanding_writes in {}ms",
+                    begin.elapsed().as_millis()
+                );
 
                 Some(RebalanceState { map, log_phys })
             }

@@ -1495,11 +1495,6 @@ impl BlockAllocator {
         self.dirty_slab_id(slab_id);
     }
 
-    pub fn rebalance_needed(&self) -> bool {
-        self.num_slabs_to_rebalance() != 0
-    }
-
-    //
     // This function is the entry-point to starting the cache rebalancing process. This will select
     // which slab(s) need to be rebalanced, mark those slabs as undergoing evacuation, and
     // allocate new disk locations for the data currently stored on those slabs. The value
@@ -1517,7 +1512,6 @@ impl BlockAllocator {
     // the rebalance process as finished. This allows the allocator to transition the slabs that
     // were undergoing evacuation to free slabs, such that the slabs can later be used for
     // allocation.
-    //
     pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, Option<DiskLocation>>> {
         // For now, ensure rebalance_fini() is called before this function can be called a second
         // time.
@@ -1566,7 +1560,7 @@ impl BlockAllocator {
         Some(map)
     }
 
-    fn num_slabs_to_rebalance(&self) -> u64 {
+    pub fn num_slabs_to_rebalance(&self) -> u64 {
         let current_number_of_free_slabs = self.free_slabs.len() as u64;
 
         let available = self.available();
