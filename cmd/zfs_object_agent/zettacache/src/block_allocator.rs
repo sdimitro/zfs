@@ -2177,10 +2177,6 @@ impl BlockAllocatorPhys {
     pub fn spacemap_next_capacity_bytes(&self) -> u64 {
         self.spacemap_next.capacity_bytes()
     }
-
-    pub fn slab_size(&self) -> u64 {
-        u64::from(self.slab_size)
-    }
 }
 
 pub async fn zcachedb_dump_spacemaps(

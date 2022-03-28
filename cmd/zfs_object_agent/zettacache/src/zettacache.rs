@@ -866,15 +866,19 @@ impl ZettaCache {
     fn divide_new_capacity(
         new_capacity: Vec<Extent>,
         block_access: &BlockAccess,
-    ) -> (Extent, Vec<Extent>, Vec<Extent>) {
+    ) -> (Option<Extent>, Vec<Extent>, Vec<Extent>) {
         // The checkpoint is stored on the largest provided disk (when adding disks,
         // only the new disks are candidates). Its size is a percent of the whole
         // cache.
-        let checkpoint_capacity = new_capacity
+        let largest_extent = new_capacity
             .iter()
             .max_by_key(|extent| extent.size)
-            .unwrap()
-            .range(0, checkpoint_size(block_access));
+            .unwrap();
+        let checkpoint_size = checkpoint_size(block_access);
+        if largest_extent.size < checkpoint_size {
+            return (None, Vec::new(), Vec::new());
+        }
+        let checkpoint_capacity = largest_extent.range(0, checkpoint_size);
 
         // metadata is stored on each disk, its size a percent of that disk, following the
         // checkpoint (if any)
@@ -899,7 +903,7 @@ impl ZettaCache {
             .map(|(new, metadata)| new.after(metadata).unwrap())
             .collect();
 
-        (checkpoint_capacity, metadata_capacity, data_capacity)
+        (Some(checkpoint_capacity), metadata_capacity, data_capacity)
     }
 
     async fn create(block_access: &BlockAccess) {
@@ -914,6 +918,7 @@ impl ZettaCache {
             .collect();
         let (checkpoint_capacity, metadata_capacity, data_capacity) =
             Self::divide_new_capacity(new_capacity, block_access);
+        let checkpoint_capacity = checkpoint_capacity.unwrap();
 
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
@@ -1060,10 +1065,12 @@ impl ZettaCache {
                 )
             }));
 
-            primary
-                .old_checkpoint_capacity
-                .push(primary.checkpoint_capacity);
-            primary.checkpoint_capacity = checkpoint_capacity;
+            if let Some(checkpoint_capacity) = checkpoint_capacity {
+                primary
+                    .old_checkpoint_capacity
+                    .push(primary.checkpoint_capacity);
+                primary.checkpoint_capacity = checkpoint_capacity;
+            }
             checkpoint.extent_allocator.extend(metadata_capacity);
             checkpoint.block_allocator.extend(data_capacity);
             size_changed = true;
@@ -1076,15 +1083,7 @@ impl ZettaCache {
                 let new_size = block_access.disk_size(disk);
                 if new_size > phys.size {
                     let added_bytes = new_size - phys.size;
-                    // Added space must be at least large enough for the checkpoint and one slab.
-                    if added_bytes
-                        > checkpoint_size(&block_access) + checkpoint.block_allocator.slab_size()
-                        && added_bytes > DISK_EXPAND_MIN_PCT.apply(phys.size)
-                    {
-                        Some(Extent::new(disk, phys.size, added_bytes))
-                    } else {
-                        None
-                    }
+                    Some(Extent::new(disk, phys.size, added_bytes))
                 } else {
                     None
                 }
@@ -1095,10 +1094,12 @@ impl ZettaCache {
             info!("expanding existing disks: {:?}", expanded_capacity);
             let (checkpoint_capacity, metadata_capacity, data_capacity) =
                 Self::divide_new_capacity(expanded_capacity, &block_access);
-            primary
-                .old_checkpoint_capacity
-                .push(primary.checkpoint_capacity);
-            primary.checkpoint_capacity = checkpoint_capacity;
+            if let Some(checkpoint_capacity) = checkpoint_capacity {
+                primary
+                    .old_checkpoint_capacity
+                    .push(primary.checkpoint_capacity);
+                primary.checkpoint_capacity = checkpoint_capacity;
+            }
             checkpoint.extent_allocator.extend(metadata_capacity);
             checkpoint.block_allocator.extend(data_capacity);
 
