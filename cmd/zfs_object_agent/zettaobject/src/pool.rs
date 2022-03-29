@@ -56,7 +56,6 @@ use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::InsertSource;
 use zettacache::LookupResponse;
-use zettacache::LookupSource;
 use zettacache::ZettaCache;
 
 use crate::base_types::*;
@@ -1743,7 +1742,7 @@ impl Pool {
                         .await
                 }
                 false => match measure!()
-                    .fut(cache.lookup(self.state.shared_state.guid, block, LookupSource::Read))
+                    .fut(cache.lookup(self.state.shared_state.guid, block))
                     .await
                 {
                     LookupResponse::Present((cached_bytes, _key)) => cached_bytes.into(),

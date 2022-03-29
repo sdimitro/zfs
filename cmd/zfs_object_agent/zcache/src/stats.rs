@@ -211,33 +211,31 @@ impl StatsDisplay {
         }
 
         // LOOKUPS
-        let write_lookups = values.value(LookupForWrite) as f64 * scale;
-        let read_lookups = values.value(LookupForRead) as f64 * scale;
+        let lookups = values.value(Lookup) as f64 * scale;
         let pending_changes_hits = values.value(IndexHitPendingChanges) as f64 * scale;
         let index_cache_hits = values.value(IndexHitIndexCache) as f64 * scale;
         let chunk_cache_hits = values.value(IndexHitChunkCache) as f64 * scale;
         let disk_hits = values.value(IndexHitDisk) as f64 * scale;
         let hits = values.value(CacheHit) as f64 * scale;
-        let total_lookups = read_lookups + write_lookups;
 
-        self.display_count(total_lookups);
+        self.display_count(lookups);
         self.display_bytes(values.value(LookupBytes) as f64 * scale);
         if self.show_lookup_detail {
             // LOOKUP DETAILS (optional)
-            self.display_percent(pending_changes_hits, read_lookups);
-            self.display_percent(index_cache_hits, read_lookups);
-            self.display_percent(chunk_cache_hits, read_lookups);
-            self.display_percent(disk_hits, read_lookups);
+            self.display_percent(pending_changes_hits, lookups);
+            self.display_percent(index_cache_hits, lookups);
+            self.display_percent(chunk_cache_hits, lookups);
+            self.display_percent(disk_hits, lookups);
         }
         // HITS
         self.display_count(hits);
-        self.display_percent(hits, read_lookups);
+        self.display_percent(hits, lookups);
 
         // INSERTS
         let inserts = (values.value(InsertForRead)
             + values.value(InsertForWrite)
             + values.value(InsertForSpeculativeRead)
-            + values.value(InsertForHealing)) as f64
+            + values.value(InsertForHeal)) as f64
             * scale;
         self.display_count(inserts);
         self.display_bytes(values.value(InsertBytes) as f64 * scale);

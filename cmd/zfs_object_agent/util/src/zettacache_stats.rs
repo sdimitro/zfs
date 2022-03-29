@@ -365,8 +365,7 @@ pub enum CacheStatCounter {
     // These stats are collected as part of the ZettaCache.stats struct.
     // They are consumed in the StatsDisplay.display_stat_values() function.
     LookupBytes,
-    LookupForRead,
-    LookupForWrite,
+    Lookup,
     CacheMissLockBusy, // pending, DOSE-905
     IndexHitPendingChanges,
     IndexHitIndexCache,
@@ -377,7 +376,7 @@ pub enum CacheStatCounter {
     InsertForRead,
     InsertForWrite,
     InsertForSpeculativeRead,
-    InsertForHealing,
+    InsertForHeal,
     InsertDropQueueFull,
     InsertDropLockBusy, // pending, DOSE-905
     HealedBlocks,
