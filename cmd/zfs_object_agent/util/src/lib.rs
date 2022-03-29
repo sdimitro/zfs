@@ -21,6 +21,7 @@ mod mutex_ext;
 mod nicenum;
 mod range_tree;
 pub mod tunable;
+pub mod unordered;
 mod vec_ext;
 pub mod watch_once;
 pub mod write_stdout;

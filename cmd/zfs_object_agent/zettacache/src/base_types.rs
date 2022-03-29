@@ -8,6 +8,7 @@ use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use util::From64;
 
 /*
  * Things that are stored on disk.
@@ -34,6 +35,20 @@ impl Display for BlockId {
 impl BlockId {
     pub fn next(&self) -> BlockId {
         BlockId(self.0 + 1)
+    }
+}
+impl Sub<BlockId> for BlockId {
+    type Output = usize;
+
+    fn sub(self, rhs: BlockId) -> Self::Output {
+        usize::from64(self.0 - rhs.0)
+    }
+}
+impl Add<usize> for BlockId {
+    type Output = Self;
+
+    fn add(self, rhs: usize) -> Self::Output {
+        Self(self.0 + rhs as u64)
     }
 }
 

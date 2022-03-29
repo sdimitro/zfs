@@ -49,6 +49,7 @@ use util::measure;
 use util::super_trace;
 use util::tunable;
 use util::tunable::Percent;
+use util::unordered::Unordered;
 use util::with_alloctag;
 use util::AlignedBytes;
 use uuid::Uuid;
@@ -564,7 +565,7 @@ struct PoolSyncingState {
     reclaim_info: ReclaimInfo, // Extendible hash structure for pending frees
 
     pending_object: PendingObjectState,
-    pending_unordered_writes: HashMap<BlockId, (Bytes, WriteCallback)>,
+    pending_unordered_writes: Unordered<BlockId, (Bytes, WriteCallback)>,
     pub last_txg: Txg,
     pub syncing_txg: Option<Txg>,
     stats: PoolStatsPhys,
@@ -955,7 +956,7 @@ impl Pool {
                         reclaim_logs: logs,
                     },
                     pending_object: PendingObjectState::NotPending(phys.next_block),
-                    pending_unordered_writes: HashMap::new(),
+                    pending_unordered_writes: Unordered::new(phys.next_block),
                     stats: phys.stats,
                     reclaim_done: None,
                     object_deleter: ObjectDeleter::open(
@@ -1052,7 +1053,7 @@ impl Pool {
                             reclaim_logs: logs,
                         },
                         pending_object: PendingObjectState::NotPending(BlockId(0)),
-                        pending_unordered_writes: Default::default(),
+                        pending_unordered_writes: Unordered::new(BlockId(0)),
                         stats: Default::default(),
                         reclaim_done: None,
                         object_deleter: ObjectDeleter::new(object_access.clone(), guid),
@@ -1204,18 +1205,11 @@ impl Pool {
         let recovered_objects = Self::get_recovered_objects(state, shared_state, txg).await;
 
         self.state.with_syncing_state(|syncing_state| {
-            let ordered_writes: BTreeSet<BlockId> = syncing_state
-                .pending_unordered_writes
-                .keys()
-                .copied()
-                .collect();
-
             let mut recovered_objects_iter = recovered_objects.into_iter().peekable();
-            let mut ordered_writes_iter = ordered_writes.into_iter().peekable();
 
             while let Some((_, next_recovered_object)) = recovered_objects_iter.peek() {
-                match ordered_writes_iter.peek() {
-                    Some(&next_ordered_write)
+                match syncing_state.pending_unordered_writes.peek() {
+                    Some(next_ordered_write)
                         if next_ordered_write
                             < next_recovered_object.header.object.as_min_block() =>
                     {
@@ -1244,9 +1238,6 @@ impl Pool {
                         Self::initiate_flush_object_impl(state, syncing_state);
                         let next_block = syncing_state.pending_object.next_block();
                         syncing_state.pending_object = PendingObjectState::NotPending(next_block);
-
-                        // skip over writes that were moved to pending_object and written out
-                        while ordered_writes_iter.next_if(|&b| b < next_block).is_some() {}
                     }
                     _ => {
                         // already-written object is next
@@ -1256,23 +1247,19 @@ impl Pool {
 
                         Self::account_new_object(state, syncing_state, &recovered_obj);
 
-                        // The kernel may not have known that this was already
-                        // written (e.g. we didn't quite get to sending the "write
-                        // done" response), so it sent us the write again.  In this
-                        // case we will not create an object, since the blocks are
-                        // already persistent, so we need to notify the waiter now.
-                        while let Some(obsolete_write) =
-                            ordered_writes_iter.next_if(|&b| b < recovered_obj.header.next_block)
+                        // The kernel may not have known that this was already written (e.g. we
+                        // didn't quite get to sending the "write done" response), so it sent us
+                        // the write again.  In this case we will not create an object, since the
+                        // blocks are already persistent, so we need to notify the waiter now.
+                        for (obsolete_write, (_, callback)) in syncing_state
+                            .pending_unordered_writes
+                            .drain(recovered_obj.header.next_block)
                         {
                             trace!(
                                 "resume: {:?} is obsoleted by existing {:?}",
                                 obsolete_write,
                                 recovered_obj.header.object,
                             );
-                            let (_, callback) = syncing_state
-                                .pending_unordered_writes
-                                .remove(&obsolete_write)
-                                .unwrap();
                             callback();
                         }
                         assert!(!syncing_state.pending_object.is_pending());
@@ -1623,12 +1610,12 @@ impl Pool {
         }
 
         let mut next_block = syncing_state.next_block();
-        while let Some((buf, callback)) = syncing_state.pending_unordered_writes.remove(&next_block)
-        {
+        while let Some((block, (buf, callback))) = syncing_state.pending_unordered_writes.pop() {
             super_trace!(
                 "found next {:?} in unordered pending writes; transferring to pending object",
                 next_block
             );
+            assert_eq!(block, next_block);
             let (phys, callbacks) = syncing_state.pending_object.as_mut_pending();
             phys.header.blocks_size += u32::try_from(buf.len()).unwrap();
             phys.blocks.insert(phys.header.next_block, buf);
