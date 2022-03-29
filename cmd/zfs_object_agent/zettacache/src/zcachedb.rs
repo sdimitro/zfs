@@ -1,4 +1,4 @@
-use crate::zettacache::ZCacheDBHandle;
+use crate::zettacache::zcdb::ZCacheDBHandle;
 
 // This file and its data structures exists solely to interact with the zcachedb
 // binary generated from the zcdb crate/directory. This way we don't have to
