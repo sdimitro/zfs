@@ -9,8 +9,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
 use log::*;
 use util::flush_stdout;
 use util::message::TYPE_ZCACHE_IOSTAT;
@@ -23,8 +22,6 @@ use util::zettacache_stats::*;
 use crate::remote_channel::RemoteChannel;
 use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
-
-static NAME: &str = "iostat";
 
 struct IoStatDisplay {
     show_active: bool,
@@ -396,87 +393,50 @@ impl IoStatDisplay {
     }
 }
 
-pub struct IoStat;
+#[derive(Parser)]
+#[clap(about = "Display I/O statistics.")]
+pub struct Iostat {
+    /// Include active queue statistics
+    #[clap(
+        short = 'a',
+        long,
+        conflicts_with = "latency-histogram",
+        conflicts_with = "request-size-histogram"
+    )]
+    active: bool,
+
+    /// Reports the statistics for individual devices in the zettacache
+    #[clap(short = 'd', long)]
+    devices: bool,
+
+    /// Display latency histograms
+    #[clap(short = 'l', long, conflicts_with = "request-size-histogram")]
+    latency_histogram: bool,
+
+    /// Display request size histograms for each I/O type
+    #[clap(short = 'r', long, conflicts_with = "latency-histogram")]
+    request_size_histogram: bool,
+
+    /// Display a timestamp on each line of iostats
+    #[clap(short = 't', long)]
+    timestamp: bool,
+
+    /// Statistics are printed every <interval> seconds
+    #[clap()]
+    interval: Option<f64>,
+
+    /// Stop after <count> reports have been displayed
+    #[clap()]
+    count: Option<u64>,
+}
 
 #[async_trait]
-impl ZcacheSubCommand for IoStat {
-    fn subcommand(&self) -> clap::App<'static, 'static> {
-        fn valid_interval(value: String) -> Result<(), String> {
-            match value.parse::<f64>() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-
-        fn valid_count(value: String) -> Result<(), String> {
-            match value.parse::<u64>() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-
-        SubCommand::with_name(NAME)
-            .about("Display I/O statistics.")
-            .arg(
-                Arg::with_name("active")
-                    .long("active")
-                    .short("a")
-                    .help("Include active queue statistics")
-                    .conflicts_with("latency-histogram")
-                    .conflicts_with("request-size-histogram"),
-            )
-            .arg(
-                Arg::with_name("devices")
-                    .long("devices")
-                    .short("d")
-                    .help("Reports the statistics for individual devices in the zettacache"),
-            )
-            .arg(
-                Arg::with_name("latency-histogram")
-                    .long("latency-histogram")
-                    .short("l")
-                    .help("Display latency histograms")
-                    .conflicts_with("request-size-histogram"),
-            )
-            .arg(
-                Arg::with_name("request-size-histogram")
-                    .long("request-size-histogram")
-                    .short("r")
-                    .help("Display request size histograms for each I/O type"),
-            )
-            .arg(
-                Arg::with_name("timestamp")
-                    .long("timestamp")
-                    .short("t")
-                    .help("Display a timestamp on each line of iostats"),
-            )
-            .arg(
-                Arg::with_name("interval")
-                    .validator(valid_interval)
-                    .help("Statistics are printed every interval seconds"),
-            )
-            .arg(
-                Arg::with_name("count")
-                    .validator(valid_count)
-                    .help("Stop after count reports have been displayed"),
-            )
-    }
-
-    fn name(&self) -> String {
-        NAME.to_string()
-    }
-
-    async fn invoke(&mut self, args: &clap::ArgMatches) -> Result<()> {
-        let interval = args
-            .value_of("interval")
-            .map(|interval| Duration::from_secs_f64(interval.parse().unwrap_or(0.0)));
-        let count = args
-            .value_of("count")
-            .map(|count| count.parse().unwrap_or(0));
-
-        let histogram_name = if args.is_present("latency-histogram") {
+impl ZcacheSubCommand for Iostat {
+    async fn invoke(&self) -> Result<()> {
+        let interval = self.interval.map(Duration::from_secs_f64);
+        let histogram_name = if self.latency_histogram {
             Some("latency".to_string())
-        } else if args.is_present("request-size-histogram") {
+        } else if self.request_size_histogram {
             Some("req-size".to_string())
         } else {
             None
@@ -488,13 +448,13 @@ impl ZcacheSubCommand for IoStat {
             .unwrap_or_default();
 
         IoStatDisplay {
-            show_time: args.is_present("timestamp"),
-            show_active: args.is_present("active"),
-            show_devices: args.is_present("devices"),
+            show_time: self.timestamp,
+            show_active: self.active,
+            show_devices: self.devices,
             max_name_length,
             histogram_name,
             interval,
-            count,
+            count: self.count,
             interval_is_subsecond: interval.map_or(false, |d| d.as_secs() < 1),
         }
         .display_io_stats()

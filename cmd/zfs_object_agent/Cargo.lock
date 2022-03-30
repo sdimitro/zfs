@@ -2886,7 +2886,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
- "clap 2.34.0",
+ "clap 3.1.6",
  "exitcode",
  "log",
  "more-asserts",

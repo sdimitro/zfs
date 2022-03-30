@@ -8,8 +8,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
 use log::*;
 use num_traits::cast::ToPrimitive;
 use util::flush_stdout;
@@ -24,8 +23,6 @@ use util::zettacache_stats::*;
 use crate::remote_channel::RemoteChannel;
 use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
-
-static NAME: &str = "stats";
 
 struct StatsDisplay {
     show_time: bool,
@@ -345,122 +342,74 @@ impl StatsDisplay {
     }
 }
 
-pub struct Stats;
+#[derive(Parser)]
+#[clap(about = "Display cache statistics.")]
+#[clap(after_help = "TERMINOLOGY:\n\
+    When we look for a block in the zettacache, we must first look\n\
+    in the index to determine if it's present and if so where it is\n\
+    on disk.  The following layers of caching are checked in order:\n\
+    \n\
+    pendch: index entry found in pending changes (new blocks or atime \
+            updates not yet reflected in main on-disk index)\n\
+    entry$: index entry found in the entry cache\n\
+    chunk$: entry (or lack thereof) found in chunk cache\n\
+      disk: a chunk of the main index was read from disk to find this \
+            entry (or lack thereof)\n\
+    ")]
+pub struct Stats {
+    /// Display a timestamp on each line of stats
+    #[clap(short = 't', long)]
+    timestamp: bool,
+
+    /// Display additional cache insert details
+    #[clap(short = 'i', long, conflicts_with = "all")]
+    insert_detail: bool,
+
+    /// Display additional cache lookup details
+    #[clap(short = 'l', long, conflicts_with = "all")]
+    lookup_detail: bool,
+
+    /// Display additional block allocator details
+    #[clap(short = 'b', long, conflicts_with = "all")]
+    block_allocator: bool,
+
+    /// Display extended statistics
+    #[clap(short = 'x', long, conflicts_with = "all")]
+    extended: bool,
+
+    /// Display numbers in parsable (exact) values
+    #[clap(short = 'p', long)]
+    parsable: bool,
+
+    /// Display all possible columns (i.e. alias to -biltx)
+    #[clap(short = 'a', long)]
+    all: bool,
+
+    /// Statistics are printed every <interval> seconds"
+    #[clap()]
+    // XXX could this be a duration here?
+    interval: Option<f64>,
+
+    /// Stop after <count> reports have been displayed
+    #[clap()]
+    count: Option<u64>,
+}
 
 #[async_trait]
 impl ZcacheSubCommand for Stats {
-    fn subcommand(&self) -> clap::App<'static, 'static> {
-        fn valid_interval(value: String) -> Result<(), String> {
-            match value.parse::<f64>() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-
-        fn valid_count(value: String) -> Result<(), String> {
-            match value.parse::<u64>() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
-            }
-        }
-
-        SubCommand::with_name(NAME)
-            .about("Display cache statistics.")
-            .after_help(
-                "TERMINOLOGY:\n\
-                When we look for a block in the zettacache, we must first look\n\
-                in the index to determine if it's present and if so where it is\n\
-                on disk.  The following layers of caching are checked in order:\n\
-                \n\
-                pendch: index entry found in pending changes (new blocks or atime \
-                        updates not yet reflected in main on-disk index)\n\
-                entry$: index entry found in the entry cache\n\
-                chunk$: entry (or lack thereof) found in chunk cache\n\
-                  disk: a chunk of the main index was read from disk to find this \
-                        entry (or lack thereof)\n\
-                ",
-            )
-            .arg(
-                Arg::with_name("timestamp")
-                    .long("timestamp")
-                    .short("t")
-                    .help("Display a timestamp on each line of stats"),
-            )
-            .arg(
-                Arg::with_name("insert-detail")
-                    .long("insert-detail")
-                    .short("i")
-                    .help("Display additional cache insert details")
-                    .conflicts_with("all"),
-            )
-            .arg(
-                Arg::with_name("lookup-detail")
-                    .long("lookup-detail")
-                    .short("l")
-                    .help("Display additional cache lookup details")
-                    .conflicts_with("all"),
-            )
-            .arg(
-                Arg::with_name("block-allocator")
-                    .long("block-allocator")
-                    .short("b")
-                    .help("Display additional block allocator details")
-                    .conflicts_with("all"),
-            )
-            .arg(
-                Arg::with_name("extended")
-                    .long("extended")
-                    .short("x")
-                    .help("Display extended statistics")
-                    .conflicts_with("all"),
-            )
-            .arg(
-                Arg::with_name("parsable")
-                    .long("parsable")
-                    .short("p")
-                    .help("Display numbers in parsable (exact) values"),
-            )
-            .arg(
-                Arg::with_name("all")
-                    .long("all")
-                    .short("a")
-                    .help("Display all possible columns (alias to -biltx)"),
-            )
-            .arg(
-                Arg::with_name("interval")
-                    .validator(valid_interval)
-                    .help("Statistics are printed every <interval> seconds"),
-            )
-            .arg(
-                Arg::with_name("count")
-                    .validator(valid_count)
-                    .help("Stop after <count> reports have been displayed"),
-            )
-    }
-
-    fn name(&self) -> String {
-        NAME.to_string()
-    }
-
-    async fn invoke(&mut self, args: &clap::ArgMatches) -> Result<()> {
-        let interval = args
-            .value_of("interval")
-            .map(|interval| Duration::from_secs_f64(interval.parse().unwrap_or(0.0)));
-        let count = args
-            .value_of("count")
-            .map(|count| count.parse().unwrap_or(0));
-        let all = args.is_present("all");
+    async fn invoke(&self) -> Result<()> {
+        let interval = self.interval.map(Duration::from_secs_f64);
 
         StatsDisplay {
-            show_time: all || args.is_present("timestamp"),
-            show_extended: all || args.is_present("extended"),
-            show_insert_detail: all || args.is_present("insert-detail"),
-            show_lookup_detail: all || args.is_present("lookup-detail"),
-            show_block_allocator: all || args.is_present("block-allocator"),
-            show_exact_values: args.is_present("parsable"),
+            show_time: self.all || self.timestamp,
+            show_extended: self.all || self.extended,
+            show_insert_detail: self.all || self.insert_detail,
+            show_lookup_detail: self.all || self.lookup_detail,
+            show_block_allocator: self.all || self.block_allocator,
+            show_exact_values: self.parsable,
             interval_is_subsecond: interval.map_or(false, |d| d.as_secs() < 1),
             interval,
-            count,
+            count: self.count,
         }
         .display_stats()
         .await

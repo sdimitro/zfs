@@ -1,3 +1,5 @@
+//! `zcache hits` subcommand
+
 use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
@@ -6,9 +8,9 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
 use chrono::Local;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
 use num_traits::cast::ToPrimitive;
+use util::message::TYPE_CLEAR_HIT_DATA;
 use util::message::TYPE_REPORT_HITS;
 use util::nice_p2size;
 use util::write_stdout;
@@ -18,8 +20,6 @@ use util::From64;
 use crate::remote_channel::RemoteChannel;
 use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
-
-static NAME: &str = "report_hits";
 
 struct SizeHistogram {
     start: SystemTime,
@@ -161,52 +161,49 @@ impl SizeHistogram {
     }
 }
 
-pub struct ReportHits;
+#[derive(Parser)]
+#[clap(about = "Print out the current hit-by-size histogram.")]
+#[clap(alias = "report_hits")]
+pub struct Hits {
+    /// Divide hit data into this many buckets
+    #[clap(short = 'q', long, default_value = "20", conflicts_with = "clear")]
+    quantiles: usize,
+
+    /// Don't accumulate hits from previous quantiles
+    #[clap(short = 'n', long, conflicts_with = "clear")]
+    non_cumulative: bool,
+
+    /// Don't show ghost hit data
+    #[clap(short = 'o', long, conflicts_with = "clear")]
+    only_live_hits: bool,
+
+    /// Clear the current hit-by-size histogram
+    #[clap(short = 'c', long)]
+    clear: bool,
+}
 
 #[async_trait]
-impl ZcacheSubCommand for ReportHits {
-    fn subcommand(&self) -> clap::App<'static, 'static> {
-        fn valid_int(v: String) -> Result<(), String> {
-            match v.parse::<usize>() {
-                Ok(_) => Ok(()),
-                Err(e) => Err(e.to_string()),
+impl ZcacheSubCommand for Hits {
+    async fn invoke(&self) -> Result<()> {
+        let mut remote = RemoteChannel::new(self.clear).await?;
+
+        // a request to clear hit data
+        if self.clear {
+            match remote.call(TYPE_CLEAR_HIT_DATA, None).await {
+                Ok(_) => {
+                    writeln_stdout!("Hits-by-size data cleared");
+                }
+                Err(RemoteError::ResultError(_)) => {
+                    writeln_stdout!("No cache found, so no hits-by-size data present");
+                }
+                Err(RemoteError::Other(e)) => return Err(e),
             }
+            return Ok(());
         }
 
-        SubCommand::with_name(NAME)
-            .about("Print out the current hit-by-size histogram.")
-            .arg(
-                Arg::with_name("quantiles")
-                    .long("quantiles")
-                    .short("q")
-                    .default_value("20")
-                    .validator(valid_int)
-                    .help("Divide report data into this many buckets"),
-            )
-            .arg(
-                Arg::with_name("non-cumulative")
-                    .long("non-cumulative")
-                    .short("n")
-                    .help("Don't accumulate hits from previous quantiles"),
-            )
-            .arg(
-                Arg::with_name("only-live-hits")
-                    .long("only-live-hits")
-                    .short("o")
-                    .help("Don't show ghost hit data"),
-            )
-    }
-
-    fn name(&self) -> String {
-        NAME.to_string()
-    }
-
-    async fn invoke(&mut self, args: &clap::ArgMatches) -> Result<()> {
-        let quantiles = args.value_of("quantiles").unwrap().parse()?;
-        let cumulative = !args.is_present("non-cumulative");
-        let ghost = !args.is_present("only-live-hits");
-
-        let mut remote = RemoteChannel::new(false).await?;
+        let quantiles = self.quantiles;
+        let cumulative = !self.non_cumulative;
+        let ghost = !self.only_live_hits;
         match remote.call(TYPE_REPORT_HITS, None).await {
             Ok(response) => {
                 let hits_by_size = SizeHistogram {
@@ -225,5 +222,25 @@ impl ZcacheSubCommand for ReportHits {
             Err(RemoteError::Other(e)) => return Err(e),
         }
         Ok(())
+    }
+}
+
+/// Legacy CLI for clearing hit data (deprecated and hidden)
+#[derive(Parser, Debug)]
+#[clap(about = "Clear the current hit-by-size histogram")]
+#[clap(hide = true)]
+// XXX can't seem to apply the 'snake_case' here so it is applied in enum Commands
+pub struct ClearHitData;
+
+#[async_trait]
+impl ZcacheSubCommand for ClearHitData {
+    async fn invoke(&self) -> Result<()> {
+        let hits = Hits {
+            quantiles: 0,
+            non_cumulative: false,
+            only_live_hits: false,
+            clear: true,
+        };
+        hits.invoke().await
     }
 }

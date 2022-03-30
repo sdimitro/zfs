@@ -1,4 +1,4 @@
-//! zcache list_devices subcommand
+//! `zcache list` subcommand
 
 use std::fs;
 use std::path::Path;
@@ -8,8 +8,7 @@ use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
 use util::message::TYPE_LIST_DEVICES;
 use util::nice_p2size;
 use util::write_stdout;
@@ -21,16 +20,35 @@ use crate::remote_channel::RemoteChannel;
 use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
 
-static NAME: &str = "list_devices";
-
-struct DeviceDisplay {
-    real_paths: bool,
+#[derive(Parser)]
+#[clap(about = "Display zettacache devices")]
+#[clap(alias = "list_devices")]
+pub struct List {
+    /// Display full paths for device instead of only the last component of the path.
+    /// This can be used in conjunction with the real-paths (-r) flag.
+    #[clap(short = 'f', long)]
     full_paths: bool,
-    show_size: bool,
-    json_output: bool,
+
+    /// Display real paths for devices resolving all symbolic links.
+    #[clap(short = 'r', long)]
+    real_paths: bool,
+
+    /// Display device capacity in human readable form.
+    #[clap(short = 's', long)]
+    size: bool,
+
+    /// Use JSON output format.
+    #[clap(
+        short = 'j',
+        long,
+        conflicts_with = "full-paths",
+        conflicts_with = "real-paths",
+        conflicts_with = "size"
+    )]
+    json: bool,
 }
 
-impl DeviceDisplay {
+impl List {
     /// Derive the device name to display based on command input flags.
     fn derive_name(&self, path: &str) -> String {
         let path_buf: PathBuf;
@@ -65,7 +83,7 @@ impl DeviceDisplay {
 
         for device in &devices.devices {
             write_stdout!("{:<1$}  ", self.derive_name(&device.name), name_width);
-            if self.show_size {
+            if self.size {
                 write_stdout!("{:>6}", nice_p2size(device.size));
             }
             writeln_stdout!();
@@ -80,7 +98,7 @@ impl DeviceDisplay {
                 let devices_json = response.lookup_string("devices_json")?;
                 let devices: DeviceList = serde_json::from_str(devices_json.to_str()?)?;
 
-                if self.json_output {
+                if self.json {
                     writeln_stdout!("{}", serde_json::to_string_pretty(&devices)?)
                 } else {
                     self.display_devices(&devices);
@@ -97,57 +115,9 @@ impl DeviceDisplay {
     }
 }
 
-pub struct ListDevices;
-
 #[async_trait]
-impl ZcacheSubCommand for ListDevices {
-    fn subcommand(&self) -> clap::App<'static, 'static> {
-        SubCommand::with_name(NAME)
-            .about("Display zettacache devices.")
-            .arg(
-                Arg::with_name("full-paths")
-                    .long("full-paths")
-                    .short("f")
-                    .help(
-                        "Display full paths for device instead of only the last component of \
-                        the path. This can be used in conjunction with the real-paths (-r) flag.",
-                    ),
-            )
-            .arg(
-                Arg::with_name("real-paths")
-                    .long("real-paths")
-                    .short("r")
-                    .help("Display real paths for devices resolving all symbolic links."),
-            )
-            .arg(
-                Arg::with_name("size")
-                    .long("size")
-                    .short("s")
-                    .help("Display device capacity in human readable form."),
-            )
-            .arg(
-                Arg::with_name("json")
-                    .long("json")
-                    .short("j")
-                    .help("Use JSON output format.")
-                    .conflicts_with("full-paths")
-                    .conflicts_with("real-paths")
-                    .conflicts_with("size"),
-            )
-    }
-
-    fn name(&self) -> String {
-        NAME.to_string()
-    }
-
-    async fn invoke(&mut self, args: &clap::ArgMatches) -> Result<()> {
-        DeviceDisplay {
-            real_paths: args.is_present("real-paths"),
-            full_paths: args.is_present("full-paths"),
-            show_size: args.is_present("size"),
-            json_output: args.is_present("json"),
-        }
-        .list_devices()
-        .await
+impl ZcacheSubCommand for List {
+    async fn invoke(&self) -> Result<()> {
+        self.list_devices().await
     }
 }
