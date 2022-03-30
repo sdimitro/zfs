@@ -1,8 +1,6 @@
-use clap::AppSettings;
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
+use clap::Subcommand;
 use git_version::git_version;
-use util::writeln_stdout;
 use zettacache::DumpSlabsOptions;
 use zettacache::DumpStructuresOptions;
 use zettacache::ZettaCacheDBCommand;
@@ -13,6 +11,66 @@ static GIT_VERSION: &str = git_version!(
         None => "unknown",
     }
 );
+
+#[derive(Parser)]
+#[clap(version=GIT_VERSION)]
+#[clap(name = "zcachedb")]
+#[clap(about = "ZFS ZettaCache Debugger")]
+#[clap(propagate_version = true)]
+struct Cli {
+    /// File/device to use for ZettaCache
+    #[clap(short = 'c', long, value_name = "PATH", required = true)]
+    cache_device: Vec<String>,
+
+    #[clap(subcommand)]
+    command: Commands,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// print out on-disk structures
+    Logs {
+        /// skip all structures that are printed by default
+        #[clap(short = 'n', long)]
+        nodefaults: bool,
+
+        /// dump block allocator spacemaps
+        #[clap(long)]
+        spacemap: bool,
+
+        /// dump operation log
+        #[clap(long)]
+        operation: bool,
+
+        /// dump index log
+        #[clap(long)]
+        index: bool,
+
+        /// dump rebalance log
+        #[clap(long)]
+        rebalance: bool,
+
+        /// dump atime histogram of index
+        #[clap(long)]
+        atime_histogram: bool,
+    },
+
+    /// dump the superblock contents of the specified disks
+    Superblocks,
+
+    /// dump slab info
+    Slabs {
+        /// Sets the level of verbosity
+        #[clap(short = 'v', parse(from_occurrences))]
+        verbosity: u64,
+    },
+
+    /// dump space usage statistics
+    Space,
+
+    /// verify index histogram
+    Index,
+}
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -26,113 +84,52 @@ async fn main() -> Result<(), anyhow::Error> {
         libc::signal(libc::SIGPIPE, libc::SIG_DFL);
     }
 
-    let matches = clap::App::new("zcachedb")
-        .setting(AppSettings::SubcommandRequiredElseHelp)
-        .about("ZFS ZettaCache Debugger")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::with_name("cache-device")
-                .short("c")
-                .long("cache-device")
-                .value_name("PATH")
-                .help("File/device to use for ZettaCache")
-                .required(true)
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1),
-        )
-        .subcommand(
-            SubCommand::with_name("dump-structures")
-                .about("print out on-disk structures")
-                .arg(
-                    Arg::with_name("nodefaults")
-                        .long("nodefaults")
-                        .short("n")
-                        .help("skip all structures that are printed by default"),
-                )
-                .arg(
-                    Arg::with_name("spacemaps")
-                        .long("spacemaps")
-                        .short("s")
-                        .help("dump block allocator spacemaps"),
-                )
-                .arg(
-                    Arg::with_name("operation-log-raw")
-                        .long("operation-log-raw")
-                        .help("dump operation log"),
-                )
-                .arg(
-                    Arg::with_name("index-log-raw")
-                        .long("index-log-raw")
-                        .help("dump index log"),
-                )
-                .arg(
-                    Arg::with_name("rebalance-log-raw")
-                        .long("rebalance-log-raw")
-                        .help("dump rebalance log"),
-                )
-                .arg(
-                    Arg::with_name("atime-histogram")
-                        .long("atime-histogram")
-                        .help("dump atime histogram of index"),
-                ),
-        )
-        .subcommand(
-            SubCommand::with_name("dump-superblocks")
-                .about("dump the superblock contents of the specified disks"),
-        )
-        .subcommand(
-            SubCommand::with_name("slabs").about("dump slab info").arg(
-                Arg::with_name("v")
-                    .short("v")
-                    .multiple(true)
-                    .help("sets the level of verbosity"),
-            ),
-        )
-        .subcommand(SubCommand::with_name("space-usage").about("dump space usage statistics"))
-        .subcommand(SubCommand::with_name("verify-index").about("verify index histogram"))
-        .get_matches();
+    let cli = Cli::parse();
 
-    let cache_paths = matches.values_of("cache-device").unwrap().collect();
-    match matches.subcommand() {
-        ("dump-structures", Some(subcommand_matches)) => {
+    let paths = cli
+        .cache_device
+        .iter()
+        .map(AsRef::as_ref)
+        .collect::<Vec<_>>();
+
+    match cli.command {
+        Commands::Logs {
+            nodefaults,
+            spacemap: spacemaps,
+            operation: operation_log_raw,
+            index: index_log_raw,
+            rebalance: rebalance_log_raw,
+            atime_histogram,
+        } => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpStructures(
                     DumpStructuresOptions::default()
-                        .defaults(!subcommand_matches.is_present("nodefaults"))
-                        .spacemaps(subcommand_matches.is_present("spacemaps"))
-                        .operation_log_raw(subcommand_matches.is_present("operation-log-raw"))
-                        .index_log_raw(subcommand_matches.is_present("index-log-raw"))
-                        .rebalance_log_raw(subcommand_matches.is_present("rebalance-log-raw"))
-                        .atime_histogram(subcommand_matches.is_present("atime-histogram")),
+                        .defaults(!nodefaults)
+                        .spacemaps(spacemaps)
+                        .operation_log_raw(operation_log_raw)
+                        .index_log_raw(index_log_raw)
+                        .rebalance_log_raw(rebalance_log_raw)
+                        .atime_histogram(atime_histogram),
                 ),
-                cache_paths,
+                paths,
             )
             .await
         }
-        ("dump-superblocks", Some(_)) => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, cache_paths)
-                .await
+        Commands::Superblocks => {
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, paths).await
         }
-        ("slabs", Some(subcommand_matches)) => {
+        Commands::Slabs { verbosity } => {
             ZettaCacheDBCommand::issue_command(
-                ZettaCacheDBCommand::DumpSlabs(
-                    DumpSlabsOptions::default().verbosity(subcommand_matches.occurrences_of("v")),
-                ),
-                cache_paths,
+                ZettaCacheDBCommand::DumpSlabs(DumpSlabsOptions { verbosity }),
+                paths,
             )
             .await
         }
-        ("space-usage", Some(_)) => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, cache_paths)
-                .await
+        Commands::Space => {
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, paths).await
         }
-        ("verify-index", Some(_)) => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, cache_paths).await
-        }
-        _ => {
-            writeln_stdout!("{}", matches.usage());
-            std::process::exit(exitcode::USAGE);
+        Commands::Index => {
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, paths).await
         }
     }
 }
