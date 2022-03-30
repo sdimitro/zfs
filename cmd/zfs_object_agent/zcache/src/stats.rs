@@ -56,9 +56,9 @@ impl StatsDisplay {
             write_stdout!("{:0}\t", value);
         } else if value == 0 {
             // Intentionally avoid displaying "0.00B" when 0
-            write_stdout!("{:>6}  ", "0");
+            write_stdout!("{:>6} ", "0");
         } else {
-            write_stdout!("{:>6}  ", nice_p2size(value));
+            write_stdout!("{:>6} ", nice_p2size(value));
         }
     }
 
@@ -68,9 +68,9 @@ impl StatsDisplay {
             write_stdout!("{:0}\t", value);
         } else if count == 0.0 {
             // Intentionally avoid displaying "0.00" when 0
-            write_stdout!("{:>6}  ", "0");
+            write_stdout!("{:>6} ", "0");
         } else {
-            write_stdout!("{:>6}  ", nice_number_count(count));
+            write_stdout!("{:>6} ", nice_number_count(count));
         }
     }
 
@@ -84,9 +84,9 @@ impl StatsDisplay {
         if self.show_exact_values {
             write_stdout!("{:0.0}\t", percent.round());
         } else if !(0.05..99.95).contains(&percent) {
-            write_stdout!("{:>5.0}%  ", percent.round());
+            write_stdout!("{:>5.0}% ", percent.round());
         } else {
-            write_stdout!("{:>5.1}%  ", percent);
+            write_stdout!("{:>5.1}% ", percent);
         }
     }
 
@@ -102,27 +102,27 @@ impl StatsDisplay {
                 // e.g. "05:43:54"
                 Local::now().format("%H:%M:%S")
             };
-            write_stdout!("{0:>1$}  ", time, self.time_width());
+            write_stdout!("{0:>1$} ", time, self.time_width());
         }
     }
 
     fn display_dashes(width: usize) {
-        write_stdout!("{0:-<1$}  ", "-", width);
+        write_stdout!("{0:-<1$} ", "-", width);
     }
 
     fn display_headers_impl(&self, top: Vec<(&str, usize)>, bottom: Vec<&str>) {
         if self.show_time {
-            write_stdout!("{0:^1$}  ", "TIMESTAMP", self.time_width());
+            write_stdout!("{0:^1$} ", "TIMESTAMP", self.time_width());
         }
         for (header, n) in top.iter() {
-            let width = (n * (StatsDisplay::VALUE_WIDTH + 2)) - 2;
-            write_stdout!("{0:^1$}  ", header, width);
+            let width = (n * (StatsDisplay::VALUE_WIDTH + 1)) - 1;
+            write_stdout!("{0:^1$} ", header, width);
         }
         writeln_stdout!();
 
         if self.show_time {
             write_stdout!(
-                "{0:>1$}  ",
+                "{0:>1$} ",
                 format!("{}", Local::now().format("%Y-%m-%d")),
                 self.time_width()
             );
@@ -132,9 +132,9 @@ impl StatsDisplay {
                 // Adjust spacing to accommodate column headers that are > 6 characters
                 h.len() - StatsDisplay::VALUE_WIDTH
             } else {
-                2 // default is two spaces
+                1 // default is one space
             };
-            write_stdout!("{0:^1$}{2:3$}", h, StatsDisplay::VALUE_WIDTH, "", spacing);
+            write_stdout!("{0:>1$}{2:3$}", h, StatsDisplay::VALUE_WIDTH, "", spacing);
         }
         writeln_stdout!();
 
@@ -152,19 +152,19 @@ impl StatsDisplay {
     fn display_headers(&self) {
         // Produces header output like below. There can be additional opt-in headers.
         //
-        // TIMESTAMP    CACHE-LOOKUP     CACHE-MISS     CACHE-INSERT
-        // 2022-01-12  count   bytes   count   ratio   count   bytes
-        // ----------  ------  ------  ------  ------  ------  ------
+        //    LOOKUPS     ----HITS---     INSERTS
+        // count  bytes  count  ratio  count  bytes
+        // ------ ------ ------ ------ ------ ------
 
         // Top headers is a vector of tuples: (header-title, column-count)
         let mut top_header: Vec<(&str, usize)> =
-            vec![("CACHE-LOOKUP", 2), ("CACHE-HITS", 2), ("CACHE-INSERT", 2)];
+            vec![("LOOKUPS", 2), ("----HITS---", 2), ("INSERTS", 2)];
         // Bottom headers is a vector of: header-column-name
         let mut bottom_header = vec!["count", "bytes", "count", "ratio", "count", "bytes"];
 
         if self.show_lookup_detail {
             // Slot in right after "CACHE-LOOKUP" column
-            top_header.insert(1, ("--------INDEX-ACCESS--------", 4));
+            top_header.insert(1, ("--------INDEX-ACCESS-------", 4));
             bottom_header.insert(2, "pendch");
             bottom_header.insert(3, "entry$");
             bottom_header.insert(4, "chunk$");
@@ -179,15 +179,15 @@ impl StatsDisplay {
         }
 
         if self.show_extended {
-            top_header.append(&mut vec![("BUF-BYTES-USED", 2)]);
+            top_header.append(&mut vec![("BUFFER-USED", 2)]);
             bottom_header.append(&mut vec!["demand", "spec"]);
-            top_header.append(&mut vec![("CACHE-OTHER", 3)]);
-            bottom_header.append(&mut vec!["evicts", "pending", "healed"]);
+            top_header.append(&mut vec![("OTHER", 2)]);
+            bottom_header.append(&mut vec!["evicts", "pendch"]);
         }
 
         if self.show_block_allocator {
             // Append after all other columns
-            top_header.append(&mut vec![("ALLOCATOR", 2), ("ALLOCATOR-FREE", 2)]);
+            top_header.append(&mut vec![("ALLOCATOR", 2), ("AVAILABLE", 2)]);
             bottom_header.append(&mut vec!["alloc", "avail", "space", "slabs"]);
         }
 
@@ -256,7 +256,6 @@ impl StatsDisplay {
             self.display_count(values.value(Evictions) as f64 * scale);
             // Note - PendingChanges stat is instantaneous so no need to scale
             self.display_count(values.value(PendingChanges) as f64);
-            self.display_count(values.value(HealedBlocks) as f64 * scale);
         }
 
         // BLOCK-ALLOCATOR (optional)
