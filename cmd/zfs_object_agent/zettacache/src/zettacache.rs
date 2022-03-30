@@ -1749,6 +1749,33 @@ impl ZettaCache {
         }
     }
 
+    async fn insert_impl(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
+        let len = bytes.len() as u64;
+        // Insert to the cache in the current checkpoint (allocate a block, add to
+        // pending_changes and outstanding_writes).
+        let fut = measure!()
+            .fut(lock_non_send(&self.state))
+            .await
+            .insert(locked_key, bytes);
+        match measure!().fut(fut).await {
+            Ok(_) => {
+                self.stats.track_bytes(InsertBytes, len);
+                self.stats.track_count(match source {
+                    InsertSource::Heal => InsertForHeal,
+                    InsertSource::Read => InsertForRead,
+                    InsertSource::SpeculativeRead => InsertForSpeculativeRead,
+                    InsertSource::Write => InsertForWrite,
+                });
+            }
+            Err(InsertError::Allocation) => {
+                self.stats.track_count(InsertDropCacheFull);
+            }
+            Err(InsertError::PendingChanges) => {
+                self.stats.track_count(InsertDropCacheFull);
+            }
+        }
+    }
+
     /// Initiates insertion of this block; doesn't wait for the write to disk.  The `bytes_fn`
     /// closure returns the AlignedBytes to insert.  This is useful if it's expensive to compute
     /// (e.g. we need to memcpy() it), as we won't invoke it if the block is not actually
@@ -1769,7 +1796,7 @@ impl ZettaCache {
         {
             Some(permit) => permit,
             None => {
-                self.stats.track_count(InsertDropQueueFull);
+                self.stats.track_count(InsertDropBufferFull);
                 return;
             }
         };
@@ -1777,23 +1804,9 @@ impl ZettaCache {
         let bytes = bytes_fn();
         assert_eq!(bytes.len(), bytes_len);
 
-        self.stats.track_bytes(InsertBytes, bytes.len() as u64);
-        self.stats.track_count(match source {
-            InsertSource::Heal => InsertForHeal,
-            InsertSource::Read => InsertForRead,
-            InsertSource::SpeculativeRead => InsertForSpeculativeRead,
-            InsertSource::Write => InsertForWrite,
-        });
-
-        let state = self.state.clone();
+        let cache = self.clone();
         measure!("ZettaCache::insert()").spawn(async move {
-            // Insert to the cache in the current checkpoint (allocate a block, add to
-            // pending_changes and outstanding_writes).
-            let fut = measure!()
-                .fut(lock_non_send(&state))
-                .await
-                .insert(locked_key, bytes);
-            measure!().fut(fut).await;
+            cache.insert_impl(locked_key, bytes, source).await;
             // We want to hold onto the insert_permit until the write completes
             // because it represents the memory that's required to buffer this
             // insertion, which isn't released until the io completes.
@@ -1821,7 +1834,7 @@ impl ZettaCache {
             None => {
                 // Pretend that it's bytes so we can add many at once
                 self.stats
-                    .track_bytes(InsertDropQueueFull, blocks.len() as u64);
+                    .track_bytes(InsertDropBufferFull, blocks.len() as u64);
                 return;
             }
         };
@@ -1851,22 +1864,7 @@ impl ZettaCache {
                     .await;
 
                 if !present {
-                    let len = aligned_bytes.len();
-
-                    // Insert to the cache in the current checkpoint (allocate a block, add to
-                    // pending_changes and outstanding_writes).
-                    let fut = lock_non_send(&cache.state)
-                        .await
-                        .insert(locked_key, aligned_bytes);
-                    measure!().fut(fut).await;
-
-                    cache.stats.track_bytes(InsertBytes, len as u64);
-                    cache.stats.track_count(match source {
-                        InsertSource::Heal => InsertForHeal,
-                        InsertSource::Read => InsertForRead,
-                        InsertSource::SpeculativeRead => InsertForSpeculativeRead,
-                        InsertSource::Write => InsertForWrite,
-                    });
+                    cache.insert_impl(locked_key, aligned_bytes, source).await;
                 }
             };
             with_alloctag_hf("ZettaCache::ingest_all FuturesUnordered.push()", || {
@@ -1939,6 +1937,11 @@ impl ValidIndexValue {
     pub fn extent(&self) -> Extent {
         self.0.extent().unwrap()
     }
+}
+
+enum InsertError {
+    Allocation,
+    PendingChanges,
 }
 
 impl ZettaCacheState {
@@ -2100,8 +2103,11 @@ impl ZettaCacheState {
     /// Insert this block to the cache, if space and performance parameters
     /// allow.  It may be a recent cache miss, or a recently-written block.
     /// Returns a Future to be executed after the state lock has been dropped.
-    fn insert(&mut self, locked_key: LockedKey, bytes: AlignedBytes) -> impl Future {
-        let noop = future::Either::Left(async {});
+    fn insert(
+        &mut self,
+        locked_key: LockedKey,
+        bytes: AlignedBytes,
+    ) -> impl Future<Output = Result<(), InsertError>> {
         let pending_len = self.pending_changes.len()
             + self
                 .merge
@@ -2114,13 +2120,13 @@ impl ZettaCacheState {
                 pending_len,
                 locked_key.key()
             );
-            return noop;
+            return future::Either::Left(future::ready(Err(InsertError::PendingChanges)));
         }
 
         let buf_size = bytes.len();
         let location = match self.allocate_block(u32::try_from(buf_size).unwrap()) {
             Some(location) => location,
-            None => return noop,
+            None => return future::Either::Left(future::ready(Err(InsertError::Allocation))),
         };
 
         // XXX if this is past the last block of the main index, we can write it
@@ -2180,6 +2186,8 @@ impl ZettaCacheState {
 
             // It's now OK to read from this location.
             drop(locked_key);
+
+            Ok(())
         })
     }
 

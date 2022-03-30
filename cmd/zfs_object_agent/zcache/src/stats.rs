@@ -175,7 +175,7 @@ impl StatsDisplay {
 
         if self.show_insert_detail {
             top_header.append(&mut vec![("INSERT-SOURCE", 3), ("INSERT-DROPS", 2)]);
-            bottom_header.append(&mut vec!["read", "write", "spec-r", "full-q", "lkbusy"]);
+            bottom_header.append(&mut vec!["read", "write", "spec-r", "buffer", "alloc"]);
         }
 
         if self.show_extended {
@@ -245,8 +245,8 @@ impl StatsDisplay {
                 values.value(InsertForSpeculativeRead) as f64 * scale,
                 inserts,
             );
-            self.display_count(values.value(InsertDropQueueFull) as f64 * scale);
-            self.display_count(values.value(InsertDropLockBusy) as f64 * scale);
+            self.display_count(values.value(InsertDropBufferFull) as f64 * scale);
+            self.display_count(values.value(InsertDropCacheFull) as f64 * scale);
         }
 
         // EXTENDED (optional)
