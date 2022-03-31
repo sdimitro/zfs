@@ -139,6 +139,9 @@ tunable! {
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
     static ref LOOKUP_FAIL_RANDOM: u32 = 0;
+
+    static ref ATIME_INTERVAL: Duration = Duration::from_secs(10);
+    static ref STATS_INTERVAL: Duration = Duration::from_secs(1);
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1234,12 +1237,7 @@ impl ZettaCache {
         };
 
         // Now that BlockAllocator is open grab its size stats (these will be updated periodically)
-        stats.track_instantaneous(BlockAllocatorSize, state.block_allocator.size());
-        stats.track_instantaneous(BlockAllocatorAvailable, state.block_allocator.available());
-        stats.track_instantaneous(
-            BlockAllocatorFreeSlabsSize,
-            state.block_allocator.free_slabs_size(),
-        );
+        state.update_stats();
 
         if size_changed {
             // The hit data isn't accurate across cache size changes, so clear
@@ -1292,11 +1290,32 @@ impl ZettaCache {
             // accesses, so each histogram bucket starts with the same count.
             // We could then add an auxiliary structure saying what wall clock
             // time each atime value corresponds to.
-            let mut interval = tokio::time::interval(Duration::from_secs(10));
+            let mut interval = tokio::time::interval(*ATIME_INTERVAL);
             loop {
                 interval.tick().await;
                 let mut state = state.lock().await;
                 state.atime = state.atime.next();
+            }
+        });
+
+        let state = this.state.clone();
+        let cache = this.clone();
+        measure!("stats interval").spawn(async move {
+            let mut interval = tokio::time::interval(*STATS_INTERVAL);
+            loop {
+                interval.tick().await;
+
+                cache.stats.track_instantaneous(
+                    SpeculativeBufferBytesAvailable,
+                    CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64()
+                        - cache.speculative_buffer_bytes_available.available_permits() as u64,
+                );
+                cache.stats.track_instantaneous(
+                    DemandBufferBytesAvailable,
+                    CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64()
+                        - cache.demand_buffer_bytes_available.available_permits() as u64,
+                );
+                measure!().fut(lock_non_send(&state)).await.update_stats();
             }
         });
 
@@ -1706,43 +1725,28 @@ impl ZettaCache {
         bytes: usize,
         source: InsertSource,
     ) -> Option<OwnedSemaphorePermit> {
-        let (buffer, size, stat, wait_insert) = match source {
-            InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => (
-                &self.speculative_buffer_bytes_available,
-                CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64(),
-                SpeculativeBufferBytesAvailable,
-                false,
-            ),
+        let (buffer, wait_insert) = match source {
+            InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => {
+                (self.speculative_buffer_bytes_available.clone(), false)
+            }
             InsertSource::Read => (
-                &self.demand_buffer_bytes_available,
-                CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64(),
-                DemandBufferBytesAvailable,
+                self.demand_buffer_bytes_available.clone(),
                 *CACHE_WAIT_INSERT,
             ),
         };
 
         if wait_insert {
             let permit = buffer
-                .clone()
                 .acquire_many_owned(u32::try_from(bytes).unwrap())
                 .await
                 .expect("error from acquire_many_owned");
-            self.stats
-                .track_instantaneous(stat, size - buffer.available_permits() as u64);
             Some(permit)
         } else {
             // The permit should be dropped when the write to disk completes. It serves to limit the
             // number of insert()'s that we can buffer before dropping (ignoring)
             // insertion requests.
-            match buffer
-                .clone()
-                .try_acquire_many_owned(u32::try_from(bytes).unwrap())
-            {
-                Ok(permit) => {
-                    self.stats
-                        .track_instantaneous(stat, size - buffer.available_permits() as u64);
-                    Some(permit)
-                }
+            match buffer.try_acquire_many_owned(u32::try_from(bytes).unwrap()) {
+                Ok(permit) => Some(permit),
                 Err(tokio::sync::TryAcquireError::NoPermits) => None,
                 Err(e) => panic!("unexpected error from try_acquire_many_owned: {:?}", e),
             }
@@ -2044,7 +2048,6 @@ impl ZettaCacheState {
                     });
                     self.atime_histogram.remove(old_value);
                     self.atime_histogram.insert(new_value);
-                    self.update_pending_stats();
                 } else {
                     trace!(
                         "pending changes limit reached (now {}), refusing UpdateAtime for {:?}",
@@ -2087,17 +2090,6 @@ impl ZettaCacheState {
             // XXX we can easily handle an io error here by returning None
             Some(bytes)
         }
-    }
-
-    fn update_pending_stats(&self) {
-        let old_pending = match &self.merge {
-            Some(ms) => ms.old_pending_changes.len() as u64,
-            None => 0,
-        };
-        self.stats.track_instantaneous(
-            PendingChanges,
-            old_pending + self.pending_changes.len() as u64,
-        );
     }
 
     /// Insert this block to the cache, if space and performance parameters
@@ -2162,7 +2154,6 @@ impl ZettaCacheState {
             self.atime_histogram.remove(old_value);
         }
         self.atime_histogram.insert(value);
-        self.update_pending_stats();
 
         super_trace!("adding Insert to operation_log {:?} {:?}", key, value);
         self.operation_log
@@ -2211,14 +2202,6 @@ impl ZettaCacheState {
         debug!(
             "flushing checkpoint {:?}",
             self.primary.checkpoint_id.next()
-        );
-        self.stats
-            .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
-        self.stats
-            .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
-        self.stats.track_instantaneous(
-            BlockAllocatorFreeSlabsSize,
-            self.block_allocator.free_slabs_size(),
         );
 
         let begin_checkpoint = Instant::now();
@@ -2502,14 +2485,6 @@ impl ZettaCacheState {
             nice_p2size(self.block_allocator.freeing()),
             nice_p2size(self.atime_histogram.sum_live()),
         );
-        self.stats
-            .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
-        self.stats
-            .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
-        self.stats.track_instantaneous(
-            BlockAllocatorFreeSlabsSize,
-            self.block_allocator.free_slabs_size(),
-        );
 
         let eviction_atime = self
             .atime_histogram
@@ -2677,5 +2652,24 @@ impl ZettaCacheState {
             cache_capacity - self.block_allocator.size(),
             *QUANTILES_IN_SIZE_HISTOGRAM,
         )
+    }
+
+    fn update_stats(&self) {
+        self.stats
+            .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
+        self.stats
+            .track_instantaneous(BlockAllocatorAvailable, self.block_allocator.available());
+        self.stats.track_instantaneous(
+            BlockAllocatorFreeSlabsSize,
+            self.block_allocator.free_slabs_size(),
+        );
+        let old_pending = match &self.merge {
+            Some(ms) => ms.old_pending_changes.len() as u64,
+            None => 0,
+        };
+        self.stats.track_instantaneous(
+            PendingChanges,
+            old_pending + self.pending_changes.len() as u64,
+        );
     }
 }
