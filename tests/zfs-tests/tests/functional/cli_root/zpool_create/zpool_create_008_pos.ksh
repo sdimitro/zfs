@@ -84,11 +84,11 @@ destroy_pool $TESTPOOL
 
 log_must zpool create -f $TESTPOOL $DISK0
 destroy_pool $TESTPOOL
-create_pool -p $TESTPOOL -d "$DISK0 $DISK1"
+create_pool -p $TESTPOOL -d "$DISK0 $DISK1" -e "-f"
 log_must zpool export $TESTPOOL
 exported_pool=true
 log_mustnot zpool create $TESTPOOL1 $DISK1 spare $DISK2
-create_pool -p $TESTPOOL1 -d "$DISK1 spare $DISK2"
+create_pool -p $TESTPOOL1 -d "$DISK1 spare $DISK2" -e "-f"
 force_pool=true
 destroy_pool $TESTPOOL1
 

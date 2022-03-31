@@ -1,16 +1,20 @@
+use std::cmp::max;
+use std::error::Error;
+use std::string::String;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use futures::future;
 use futures::stream;
-use futures::{future, StreamExt};
+use futures::StreamExt;
 use log::*;
 use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
 use metered::time_source::StdInstantMicros;
-use std::cmp::max;
-use std::error::Error;
-use std::string::String;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
-use zettaobject::{ObjectAccess, ObjectAccessOpType};
+use zettaobject::ObjectAccess;
+use zettaobject::ObjectAccessOpType;
 
 enum WriteTestBounds {
     Time(Duration),

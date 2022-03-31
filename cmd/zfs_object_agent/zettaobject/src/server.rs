@@ -7,40 +7,48 @@
 //! modify the connection-specific state).  See the method-level documentation
 //! for more details.
 
-use anyhow::anyhow;
-use anyhow::Result;
-use bytes::Bytes;
-use futures::{future, Future, FutureExt};
-use lazy_static::lazy_static;
-use log::*;
-use nvpair::{NvEncoding, NvList};
-use safer_ffi::prelude::*;
-use semver::Version;
-use semver::VersionReq;
-use serde::Serialize;
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
 use std::pin::Pin;
 use std::sync::Arc;
+
+use anyhow::anyhow;
+use anyhow::Result;
+use bytes::Bytes;
+use futures::future;
+use futures::Future;
+use futures::FutureExt;
+use log::*;
+use nvpair::NvEncoding;
+use nvpair::NvList;
+use safer_ffi::prelude::*;
+use semver::Version;
+use semver::VersionReq;
+use serde::Serialize;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 use tokio::io::BufReader;
 use tokio::io::BufWriter;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::{UnixListener, UnixStream};
+use tokio::net::UnixListener;
+use tokio::net::UnixStream;
 use tokio::sync::mpsc;
-use util::get_tunable;
+use util::lazy_static_ptr;
+use util::lazy_static_ptr::DebugPointerSet;
 use util::maybe_die_with;
+use util::measure;
 use util::message::*;
+use util::read_buf_exact_len;
 use util::super_trace;
+use util::tunable;
 use util::with_alloctag_hf;
 use util::AlignedVec;
 
-lazy_static! {
+tunable! {
     // max zfs block size is 16MB
-    pub static ref UNREASONABLE_REQUEST_SIZE: u32 =
-        get_tunable("unreasonable_request_size", 20_000_000);
+    pub static ref UNREASONABLE_REQUEST_SIZE: u32 = 20_000_000;
 }
 
 // Ss: ServerState (consumer's state associated with the server)
@@ -208,14 +216,12 @@ where
         let struct_slice = &mut struct_array[..header.struct_len as usize];
         input.read_exact(struct_slice).await?;
 
+        let payload_len = header.payload_len as usize;
         let mut payload_vec = with_alloctag_hf("get_next_request()", || {
             // XXX hardcoded 512; should be based on zettacache sector size
-            AlignedVec::with_capacity(header.payload_len as usize, 512)
+            AlignedVec::with_capacity(payload_len, 512)
         });
-        // XXX Would be nice if we didn't have to zero it out.
-        // probably need to use OwnedReadHalf::try_read_buf()?
-        payload_vec.resize(header.payload_len as usize);
-        input.read_exact(payload_vec.as_mut_slice()).await?;
+        read_buf_exact_len(input, &mut payload_vec, payload_len).await?;
 
         Ok((
             header.message_type,
@@ -416,20 +422,53 @@ impl Responder {
         }
     }
 
-    async fn response_task(
+    fn response_task(
         output: OwnedWriteHalf,
-        mut rx: mpsc::UnboundedReceiver<ResponseMessage>,
-    ) {
-        let mut output = BufWriter::with_capacity(1024 * 1024, output);
-        while let Some(message) = rx.recv().await {
-            Self::write_response(&mut output, message).await;
+        rx: mpsc::UnboundedReceiver<ResponseMessage>,
+    ) -> impl Future<Output = ()> {
+        let output = BufWriter::with_capacity(1024 * 1024, output);
 
-            // drain the channel before flushing
-            while let Some(Some(message)) = rx.recv().now_or_never() {
-                Self::write_response(&mut output, message).await;
+        // It would improve readability if we used a struct rather than a tuple for the state we
+        // are saving in the DebugPointerSet.  However, the debugger can't cast to a struct type
+        // defined here, because the fully-qualified type name would contain {braces}.  The
+        // alternative would be to declare the struct at the top level, but having the internal
+        // details of this method spread to the surrounding state seems worse than the tuple.
+        //
+        // Similarly, declaring RESPOND_RECEIVERS inside an async closure or function would cause
+        // its fully-qualified symbol name to contain `{{closure}}`, so we couldn't name it in
+        // the debugger.
+        lazy_static_ptr! {
+            static ref RESPOND_RECEIVERS:
+                DebugPointerSet<(
+                    mpsc::UnboundedReceiver<ResponseMessage>,
+                    BufWriter<OwnedWriteHalf>
+                )> = Default::default();
+        }
+
+        // Save our rx and output in the global debug state, so that we can find them from the
+        // debugger.
+        let mut state = RESPOND_RECEIVERS.insert((rx, output));
+
+        async move {
+            // destructure the tuple back into the rx/output
+            let (rx, output) = &mut *state;
+            while let Some(message) = measure!("Responder::response_task() recv")
+                .fut(rx.recv())
+                .await
+            {
+                let m = measure!("Responder::response_task() write_response");
+                m.fut(Self::write_response(output, message)).await;
+
+                // drain the channel before flushing
+                while let Some(Some(message)) = rx.recv().now_or_never() {
+                    m.fut(Self::write_response(output, message)).await;
+                }
+
+                measure!("Responder::response_task() flush")
+                    .fut(output.flush())
+                    .await
+                    .unwrap();
             }
-
-            output.flush().await.unwrap();
         }
     }
 }

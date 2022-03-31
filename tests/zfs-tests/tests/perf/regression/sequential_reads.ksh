@@ -40,9 +40,6 @@
 
 function cleanup
 {
-	# kill fio and iostat
-	pkill fio
-	pkill iostat
 	destroy_perf_pool
 }
 
@@ -79,7 +76,7 @@ fill_zetta_cache 1800
 # Add test specific data collection scripts to the defaults
 if is_linux; then
 	PERF_COLLECT_SCRIPTS+=(
-	    "$PERF_SCRIPTS/prefetch_io.sh $PERFPOOL 1" "prefetch"
+	    "$PERF_SCRIPTS/prefetch_io.sh $PERFPOOL 1 $PERF_RUNTIME" "prefetch"
 	)
 	export PERF_COLLECT_SCRIPTS
 fi

@@ -12,31 +12,36 @@
 //! call sites.  Therefore you don't need to worry about adding a high-frequency
 //! caller and having it "always" die on that caller.
 
-use crate::get_tunable;
+use std::collections::HashSet;
+use std::ffi::OsStr;
+use std::fmt::Display;
+use std::panic::Location;
+use std::path::Path;
+use std::sync::RwLock;
+use std::time::Duration;
+use std::time::Instant;
+
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
 use log::*;
-use std::{
-    collections::HashSet,
-    ffi::OsStr,
-    fmt::Display,
-    panic::Location,
-    path::Path,
-    sync::RwLock,
-    time::{Duration, Instant},
-};
+
+use crate::tunable;
+
+tunable! {
+    static ref DIE_MTBF: Option<Duration> = None;
+    // tunable should be the "basename" (e.g. zettacache.rs)
+    static ref DIE_FILE: Option<String> = None;
+    static ref DIE_LINE: Option<u32> = None;
+}
 
 lazy_static! {
-    // RUN_TIME is a random amount between 0 and 2x the configured MTBF (Mean
-    // Time Between Failures)
-    // XXX use humantime::parse_duration so it can be hours, etc?
-    static ref RUN_TIME: Option<Duration> = get_tunable("die_mtbf_secs", None)
-        .map(|secs: f64| Duration::from_secs_f64(secs * rand::random::<f64>() * 2.0));
     static ref LOCATIONS: RwLock<HashSet<&'static Location<'static>>> = Default::default();
     static ref BEGIN: Instant = Instant::now();
-    // tunable should be the "basename" (e.g. zettacache.rs)
-    static ref DIE_FILE: Option<String> = get_tunable("die_file", None);
-    static ref DIE_LINE: Option<u32> = get_tunable("die_line", None);
+    // RUN_TIME is a random amount between 0 and 2x the configured MTBF (Mean
+    // Time Between Failures)
+    static ref RUN_TIME: Option<Duration> = DIE_MTBF
+        .as_ref()
+        .map(|mtbf| Duration::from_secs_f64(mtbf.as_secs_f64() * rand::random::<f64>() * 2.0));
 }
 
 // Instead of taking a string (or Display) to print, this takes a function which

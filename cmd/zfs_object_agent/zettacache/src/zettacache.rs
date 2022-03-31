@@ -1,8 +1,63 @@
-use crate::atime_histogram::{AtimeHistogram, AtimeHistogramPhys};
+pub mod zcdb;
+
+use std::collections::btree_map;
+use std::collections::BTreeMap;
+use std::collections::HashMap;
+use std::convert::TryFrom;
+use std::mem;
+use std::ops::Bound::Excluded;
+use std::ops::Bound::Included;
+use std::ops::Bound::Unbounded;
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
+
+use anyhow::Result;
+use bytes::Bytes;
+use bytesize::ByteSize;
+use derivative::Derivative;
+use either::Either;
+use futures::future;
+use futures::stream::*;
+use futures::Future;
+use log::*;
+use lru::LruCache;
+use more_asserts::*;
+use rand::Rng;
+use serde::Deserialize;
+use serde::Serialize;
+use sysinfo::System;
+use sysinfo::SystemExt;
+use tokio::sync::mpsc;
+use tokio::sync::OwnedSemaphorePermit;
+use tokio::sync::Semaphore;
+use tokio::time::sleep_until;
+use tokio::time::timeout_at;
+use util::concurrent_batch::ConcurrentBatch;
+use util::lock_non_send;
+use util::maybe_die_with;
+use util::measure;
+use util::nice_p2size;
+use util::super_trace;
+use util::tunable;
+use util::tunable::LayeredTunable;
+use util::tunable::Percent;
+use util::with_alloctag;
+use util::with_alloctag_hf;
+use util::zettacache_stats::CacheStatCounter::*;
+use util::zettacache_stats::CacheStats;
+use util::zettacache_stats::DiskIoType;
+use util::AlignedBytes;
+use util::From64;
+use util::LockSet;
+use util::LockedItem;
+use uuid::Uuid;
+
+use crate::atime_histogram::AtimeHistogram;
+use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
 use crate::block_access::*;
-use crate::block_allocator::zcachedb_dump_slabs;
-use crate::block_allocator::zcachedb_dump_spacemaps;
 use crate::block_allocator::BlockAllocator;
 use crate::block_allocator::BlockAllocatorPhys;
 use crate::block_based_log::*;
@@ -13,68 +68,35 @@ use crate::extent_allocator::DEFAULT_EXTENT_SIZE;
 use crate::features::check_features;
 use crate::features::SUPPORTED_FEATURES;
 use crate::index::*;
+use crate::pool_id::PoolGuidMapping;
+use crate::pool_id::PoolGuidMappingPhys;
 use crate::size_histogram::SizeHistogramPhys;
 use crate::superblock::DiskPhys;
 use crate::superblock::PrimaryPhys;
-use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
-use crate::DumpSlabsOptions;
-use crate::DumpStructuresOptions;
-use anyhow::Result;
-use bytes::Bytes;
-use conv::ConvUtil;
-use either::Either;
-use futures::future;
-use futures::stream::*;
-use futures::Future;
-use lazy_static::lazy_static;
-use log::*;
-use lru::LruCache;
-use more_asserts::*;
-use rand::Rng;
-use serde::{Deserialize, Serialize};
-use std::collections::btree_map;
-use std::collections::BTreeMap;
-use std::collections::HashMap;
-use std::convert::TryFrom;
-use std::mem;
-use std::ops::Bound::{Excluded, Included, Unbounded};
-use std::sync::Arc;
-use std::time::Duration;
-use std::time::Instant;
-use sysinfo::System;
-use sysinfo::SystemExt;
-use tokio::sync::mpsc;
-use tokio::sync::OwnedSemaphorePermit;
-use tokio::sync::Semaphore;
-use tokio::time::{sleep_until, timeout_at};
-use util::get_tunable;
-use util::lock_non_send;
-use util::maybe_die_with;
-use util::nice_p2size;
-use util::super_trace;
-use util::with_alloctag;
-use util::with_alloctag_hf;
-use util::writeln_stderr;
-use util::writeln_stdout;
-use util::zettacache_stats::CacheStatCounter::*;
-use util::zettacache_stats::*;
-use util::AlignedBytes;
-use util::From64;
-use util::LockSet;
-use util::LockedItem;
-use uuid::Uuid;
 
-lazy_static! {
-    static ref DEFAULT_CHECKPOINT_SIZE_PCT: f64 = get_tunable("default_checkpoint_size_pct", 0.1);
+#[derive(Debug)]
+struct GhostCacheSizePct(Percent);
+impl LayeredTunable for GhostCacheSizePct {
+    type Input = Percent;
+    fn convert(input: Self::Input) -> Result<Self> {
+        // This value needs to stay < 200 to safely avoid using up all available metadata space
+        // in the cache.
+        Ok(GhostCacheSizePct(Percent::new(
+            input.as_percent().min(200.0),
+        )))
+    }
+}
+tunable! { static ref GHOST_CACHE_SIZE_PCT: GhostCacheSizePct = GhostCacheSizePct(Percent::new(100.0)); }
+
+tunable! {
+    static ref DEFAULT_CHECKPOINT_SIZE_PCT: Percent = Percent::new(0.1);
 
     // Assuming a worst case of a 2K average block size, the index should stay within about 1% of
     // the total cache size. As long as the ghost entry "addition" is reasonable (say < 2x) then
     // we should be able to stay within 6% space utilization. An additional 4% is reserved for
     // the meta data for block storage (the block allocator's space maps).
-    static ref DEFAULT_METADATA_SIZE_PCT: f64 = get_tunable("default_metadata_size_pct", 10.0);
-    // This value needs to stay < 200 to safely avoid using up all available meta data space in the cache
-    static ref GHOST_CACHE_SIZE_PCT: u64 = std::cmp::min(get_tunable("ghost_cache_size_pct", 100), 200);
+    static ref DEFAULT_METADATA_SIZE_PCT: Percent = Percent::new(10.0);
 
     // In order to keep enough free space available in the cache to ingest data during a merge,
     // keep at least 2% of the cache "free". Set the target at 97% and trigger eviction if we
@@ -82,45 +104,41 @@ lazy_static! {
     // rate of a 1% cache size increase during merges. We need to have slop for the rabalance code
     // to be able to consolidate slabs (to create empty slabs) to accomodate block size changes in
     // the workload.
-    static ref TARGET_CACHE_SIZE_PCT: u64 = get_tunable("target_cache_size_pct", 97);
-    static ref HIGH_WATER_CACHE_SIZE_PCT: u64 = get_tunable("high_water_cache_size_pct", 98);
+    static ref TARGET_CACHE_SIZE_PCT: Percent = Percent::new(97.0);
+    static ref HIGH_WATER_CACHE_SIZE_PCT: Percent = Percent::new(98.0);
 
-    // Keep the total footprint for the pending changes and index cache data at about 12% of total memory.
-    // The above tuning for eviction provides a 1TB "buffer" for insertions (on a 100TB config) during a
-    // merge. Using 5% for pending changes provides sufficient memory to absorb the same 1TB of insertions
-    // (on a 128GB config).
-    static ref PENDING_CHANGES_MEM_PCT: f64 = get_tunable("pending_changes_mem_pct", 5.0);
-    static ref INDEX_CACHE_ENTRIES_MEM_PCT: usize = get_tunable("index_cache_entries_mem_pct", 7);
+    // Keep the total footprint for the pending changes and index cache data at about 12% of
+    // total memory.  The above tuning for eviction provides a 1TB "buffer" for insertions (on a
+    // 100TB config) during a merge. Using 5% for pending changes provides sufficient memory to
+    // absorb the same 1TB of insertions (on a 128GB config).
+    static ref PENDING_CHANGES_MEM_PCT: Percent = Percent::new(5.0);
+    static ref INDEX_CACHE_ENTRIES_MEM_PCT: Percent = Percent::new(7.0);
 
-    static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(get_tunable("checkpoint_interval_secs", 60));
+    static ref CHECKPOINT_INTERVAL: Duration = Duration::from_secs(60);
 
-    static ref MERGE_PROGRESS_CHUNK: usize = get_tunable("merge_progress_chunk", 1_000_000);
+    static ref MERGE_PROGRESS_CHUNK: usize = 1_000_000;
 
-    static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = get_tunable("quantiles_in_size_histogram", 100);
+    static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = 100;
 
-    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The "speculative"
-    // buffer is for blocks being written. Note that ingesting a single block from an object can result
-    // in "inflation" since the entire object must be held in memory. But this is mitigated by the fact
-    // that we typically ingest the entire object on writes, and make a copy of the block to ingest on
-    // read (so we don't hold the object).
-    static ref CACHE_INSERT_DEMAND_BUFFER_BYTES: usize = get_tunable("cache_insert_demand_buffer_bytes", 256 * 1024 * 1024);
-    static ref CACHE_INSERT_SPECULATIVE_BUFFER_BYTES: usize = get_tunable("cache_insert_speculative_buffer_bytes", 256 * 1024 * 1024);
-    static ref CACHE_WAIT_INSERT: bool = get_tunable("cache_wait_insert", false);
+    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The
+    // "speculative" buffer is for blocks being written. Note that ingesting a single block from
+    // an object can result in "inflation" since the entire object must be held in memory. But
+    // this is mitigated by the fact that we typically ingest the entire object on writes, and
+    // make a copy of the block to ingest on read (so we don't hold the object).
+    static ref CACHE_INSERT_DEMAND_BUFFER_SIZE: ByteSize = ByteSize::mib(256);
+    static ref CACHE_INSERT_SPECULATIVE_BUFFER_SIZE: ByteSize = ByteSize::mib(256);
+    static ref CACHE_WAIT_INSERT: bool = false;
 
-    static ref DISK_EXPAND_MIN_PCT: f64 = get_tunable("disk_expand_min_pct", 10.0);
+    static ref DISK_EXPAND_MIN_PCT: Percent = Percent::new(10.0);
 
-    // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size instances/disks on gp3; because gp3 has ~1ms latency for each operation,
-    // and each closure this limit applies to, performs 2 operations (one read, and one write). Additionally, this is half the limit of outstanding writes.
-    static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = get_tunable("cache_rebalance_concurrency_limit", 8);
+    // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size
+    // instances/disks on gp3; because gp3 has ~1ms latency for each operation, and each closure
+    // this limit applies to, performs 2 operations (one read, and one write). Additionally, this
+    // is half the limit of outstanding writes.
+    static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = 8;
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
-    static ref LOOKUP_FAIL_RANDOM: u32 = get_tunable("lookup_fail_random", 0);
-
-    // How many allocations we can have outstanding and not yet written (per disk).  This is a
-    // balance between higher ingest throughput, and longer time to wait for the
-    // outstanding_writes lock in flush_checkpoint() (with the state lock held).  Should be more
-    // than DISK_WRITE_MAX_QUEUE_DEPTH, otherwise we're leaving writer threads idle.
-    static ref OUTSTANDING_ALLOCATIONS_PER_DISK: usize = get_tunable("outstanding_allocations_per_disk", 500);
+    static ref LOOKUP_FAIL_RANDOM: u32 = 0;
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -130,11 +148,13 @@ struct MergeProgressPhys {
     new_index: IndexRunPhys,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
+#[derive(Serialize, Deserialize, Derivative)]
+#[derivative(Debug)]
 struct ZettaCheckpointPhys {
     generation: CheckpointId,
-    pool_guids: Vec<PoolGuid>,
+    pool_guids: PoolGuidMappingPhys,
     extent_allocator: ExtentAllocatorPhys,
+    #[derivative(Debug = "ignore")]
     block_allocator: BlockAllocatorPhys,
     last_atime: Atime,
     old_index: IndexRunPhys,
@@ -182,7 +202,15 @@ enum PendingChange {
 struct UpdateAtime(IndexValue, Atime);
 
 #[derive(Clone)]
-pub struct ZettaCache {
+pub struct ZettaCache(Arc<Inner>);
+impl Deref for ZettaCache {
+    type Target = Inner;
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+pub struct Inner {
     block_access: Arc<BlockAccess>,
 
     // lock ordering: index first then state
@@ -195,8 +223,8 @@ pub struct ZettaCache {
     timebase: Instant, // used when collecting stats
     demand_buffer_bytes_available: Arc<Semaphore>,
     speculative_buffer_bytes_available: Arc<Semaphore>,
-    write_slots: Arc<Semaphore>,
     cache_runtime_id: Uuid,
+    pool_guids: PoolGuidMapping,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -291,10 +319,12 @@ impl RebalanceState {
             if old.contains(&extent) {
                 match new {
                     Some(new_location) => {
-                        // This represents the offset of the passed in extent, into the extent that was moved as part
-                        // of the rebalance operation. For example, multiple contiguously allocated blocks maybe have
-                        // been moved via a single extent. Thus, to remap one of those blocks' to it's new location on
-                        // disk, we need this offset (this offset is maintained when the blocks are copied).
+                        // This represents the offset of the passed in extent, into the extent
+                        // that was moved as part of the rebalance operation. For example,
+                        // multiple contiguously allocated blocks maybe have been moved via a
+                        // single extent. Thus, to remap one of those blocks' to it's new
+                        // location on disk, we need this offset (this offset is maintained when
+                        // the blocks are copied).
                         let offset = extent.location - old.location;
 
                         return Some(DiskLocation::new(
@@ -303,17 +333,19 @@ impl RebalanceState {
                         ));
                     }
                     None => {
-                        // This means the extent was part of a rebalance operation, but when attempting to remap
-                        // the old location to a new location, the allocation failed. Thus, the old extent does not
-                        // have new location, and it will be invalid after the rebalance completes.
+                        // This means the extent was part of a rebalance operation, but when
+                        // attempting to remap the old location to a new location, the allocation
+                        // failed. Thus, the old extent does not have new location, and it will
+                        // be invalid after the rebalance completes.
                         return None;
                     }
                 }
             }
         }
 
-        // If we reach this point, we didn't find an extent in the mapping that contains the passed in extent, which means
-        // the passed in extent was not remapped; thus, we simply return the old extent's location.
+        // If we reach this point, we didn't find an extent in the mapping that contains the passed
+        // in extent, which means the passed in extent was not remapped; thus, we simply
+        // return the old extent's location.
         Some(extent.location)
     }
 }
@@ -367,9 +399,9 @@ impl MergeState {
         );
     }
 
-    /// This function runs in an async task to merge a set of pending changes with the current on-disk
-    /// index in order to produce a new up-to-date on-disk index. It sends periodic "progress updates"
-    /// (including block frees) to the checkpoint task.
+    /// This function runs in an async task to merge a set of pending changes with the current
+    /// on-disk index in order to produce a new up-to-date on-disk index. It sends periodic
+    /// "progress updates" (including block frees) to the checkpoint task.
     async fn merge_task(
         &self,
         tx: mpsc::Sender<IndexMessage>,
@@ -377,8 +409,8 @@ impl MergeState {
         start_key: Option<IndexKey>,
         block_access: &BlockAccess,
     ) {
-        // We don't currently support concurrent free()'s while the rebalance is in-progress. Thus, we
-        // need to do the rebalance first, prior to moving forward with the merge.
+        // We don't currently support concurrent free()'s while the rebalance is in-progress. Thus,
+        // we need to do the rebalance first, prior to moving forward with the merge.
         self.rebalance(block_access).await;
 
         let begin = Instant::now();
@@ -420,7 +452,8 @@ impl MergeState {
             }
 
             /// As entries from the old index are processed (possibly added to the new index),
-            /// they are now "obsolete" in the old index, so need to be removed from the atime histogram.
+            /// they are now "obsolete" in the old index, so need to be removed from the atime
+            /// histogram.
             fn obsolete(&mut self, entry: IndexEntry) {
                 self.obsoleted.insert(entry.value);
             }
@@ -467,10 +500,10 @@ impl MergeState {
                     if let Some(rebalance) = &state.rebalance {
                         let remapped_location = rebalance.remap(extent);
                         if entry.value.location() != remapped_location {
-                            // The data for this entry has been moved due to a cache rebalance operation.
-                            // Update the entry using the new location for the data. Note: if rebalance
-                            // was unable to move the data (evicting the entry instead) the new location
-                            // will be None.
+                            // The data for this entry has been moved due to a cache rebalance
+                            // operation. Update the entry using the new location for the data.
+                            // Note: if rebalance was unable to move the data (evicting the entry
+                            // instead) the new location will be None.
                             entry.value.set_location(remapped_location);
                             self.cache_updates.push(entry);
                         }
@@ -582,7 +615,8 @@ impl MergeState {
         while let Some(chunk) = index_stream.next().await {
             for &entry in chunk.entries() {
                 // If the next index is already "started", advance the old index to the start point
-                // XXX - would be nice to simply *start* from the start_key, rather than iterate up to it
+                // XXX - would be nice to simply *start* from the start_key, rather than iterate up
+                // to it
                 if let Some(start_key) = start_key {
                     if entry.key <= start_key {
                         super_trace!("skipping index entry: {:?}", entry.key);
@@ -663,7 +697,8 @@ impl MergeState {
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
-                            // We shouldn't have skipped any, because there has to be a corresponding Index entry
+                            // We shouldn't have skipped any, because there has to be a
+                            // corresponding Index entry
                             assert_gt!(pc_key, entry.key);
                             progress.ingest(self, entry, IngestSource::Index).await;
                         }
@@ -692,7 +727,8 @@ impl MergeState {
             // that we can print them out when failing below.
             pending_changes_iter.next();
         }
-        // Other pending changes refer to existing index entries and therefore should have been processed above
+        // Other pending changes refer to existing index entries and therefore should have been
+        // processed above
         assert!(
             pending_changes_iter.peek().is_none(),
             "next={:?}",
@@ -753,7 +789,6 @@ struct ZettaCacheState {
     primary: PrimaryPhys,
     guid: u64,
     primary_disk: DiskId,
-    pool_guids: Vec<PoolGuid>,
     block_allocator: BlockAllocator,
     pending_changes: PendingChanges,
     pending_changes_trigger: usize,
@@ -766,17 +801,18 @@ struct ZettaCacheState {
     // need the lock inside it.  But hopefully we split up the big State lock
     // and then this is useful.  Same goes for block_access.
     extent_allocator: Arc<ExtentAllocator>,
-    atime_histogram: AtimeHistogram, // includes pending_changes, including AtimeUpdate which is not logged
+    // includes pending_changes, including AtimeUpdate which is not logged
+    atime_histogram: AtimeHistogram,
     size_histogram: SizeHistogramPhys,
     // XXX move this to its own file/struct with methods to load, etc?
     operation_log: BlockBasedLog<OperationLogEntry>,
     // This is needed to ensure that reads complete before we complete the next
     // checkpoint, so that we don't overwrite their locations on disk (if the
     // block is evicted and freed from the cache).
-    outstanding_reads: Arc<tokio::sync::RwLock<()>>,
+    outstanding_reads: ConcurrentBatch,
     // This is needed to ensure that writes complete before we complete the next
     // checkpoint, so that they are persisted to disk.
-    outstanding_writes: Arc<tokio::sync::RwLock<()>>,
+    outstanding_writes: ConcurrentBatch,
 
     atime: Atime,
     stats: Arc<CacheStats>,
@@ -804,10 +840,18 @@ pub enum InsertSource {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum LookupSource {
-    Write,
-    Read,
-    Evict,
+enum LookupCounting {
+    Off,
+    On,
+}
+
+impl LookupCounting {
+    fn is_on(self) -> bool {
+        match self {
+            LookupCounting::On => true,
+            LookupCounting::Off => false,
+        }
+    }
 }
 
 pub enum LookupOperation {
@@ -816,11 +860,8 @@ pub enum LookupOperation {
 }
 
 fn checkpoint_size(block_access: &BlockAccess) -> u64 {
-    block_access.round_up_to_sector(
-        (*DEFAULT_CHECKPOINT_SIZE_PCT / 100.0 * block_access.total_capacity() as f64)
-            .approx_as::<u64>()
-            .unwrap(),
-    )
+    block_access
+        .round_up_to_sector(DEFAULT_CHECKPOINT_SIZE_PCT.apply(block_access.total_capacity()))
 }
 
 impl ZettaCache {
@@ -828,17 +869,22 @@ impl ZettaCache {
     fn divide_new_capacity(
         new_capacity: Vec<Extent>,
         block_access: &BlockAccess,
-    ) -> (Extent, Vec<Extent>, Vec<Extent>) {
+    ) -> (Option<Extent>, Vec<Extent>, Vec<Extent>) {
         // The checkpoint is stored on the largest provided disk (when adding disks,
         // only the new disks are candidates). Its size is a percent of the whole
         // cache.
-        let checkpoint_capacity = new_capacity
+        let largest_extent = new_capacity
             .iter()
             .max_by_key(|extent| extent.size)
-            .unwrap()
-            .range(0, checkpoint_size(block_access));
+            .unwrap();
+        let checkpoint_size = checkpoint_size(block_access);
+        if largest_extent.size < checkpoint_size {
+            return (None, Vec::new(), Vec::new());
+        }
+        let checkpoint_capacity = largest_extent.range(0, checkpoint_size);
 
-        // metadata is stored on each disk, its size a percent of that disk, following the checkpoint (if any)
+        // metadata is stored on each disk, its size a percent of that disk, following the
+        // checkpoint (if any)
         let metadata_capacity = new_capacity
             .iter()
             .map(|&extent| {
@@ -848,11 +894,7 @@ impl ZettaCache {
                 }
                 .range(
                     0,
-                    block_access.round_up_to_sector(
-                        (*DEFAULT_METADATA_SIZE_PCT / 100.0 * extent.size as f64)
-                            .approx_as::<u64>()
-                            .unwrap(),
-                    ),
+                    block_access.round_up_to_sector(DEFAULT_METADATA_SIZE_PCT.apply(extent.size)),
                 )
             })
             .collect::<Vec<_>>();
@@ -864,10 +906,10 @@ impl ZettaCache {
             .map(|(new, metadata)| new.after(metadata).unwrap())
             .collect();
 
-        (checkpoint_capacity, metadata_capacity, data_capacity)
+        (Some(checkpoint_capacity), metadata_capacity, data_capacity)
     }
 
-    pub async fn create(block_access: &BlockAccess) {
+    async fn create(block_access: &BlockAccess) {
         let guid: u64 = rand::random();
 
         let total_capacity = block_access.total_capacity();
@@ -879,21 +921,20 @@ impl ZettaCache {
             .collect();
         let (checkpoint_capacity, metadata_capacity, data_capacity) =
             Self::divide_new_capacity(new_capacity, block_access);
+        let checkpoint_capacity = checkpoint_capacity.unwrap();
 
         let checkpoint = ZettaCheckpointPhys {
             generation: CheckpointId(0),
-            pool_guids: Vec::new(),
+            pool_guids: Default::default(),
             block_allocator: BlockAllocatorPhys::new(data_capacity),
             extent_allocator: ExtentAllocatorPhys::new(metadata_capacity),
             old_index: IndexRunPhys::new(Atime(0), Atime(0)),
             operation_log: Default::default(),
             last_atime: Atime(0),
             size_histogram: SizeHistogramPhys::new(
-                total_capacity + (total_capacity / 100 * *GHOST_CACHE_SIZE_PCT),
+                total_capacity + GHOST_CACHE_SIZE_PCT.0.apply(total_capacity),
                 total_capacity,
-                (total_capacity as f64 * *DEFAULT_METADATA_SIZE_PCT / 100.0)
-                    .approx_as::<u64>()
-                    .unwrap(),
+                DEFAULT_METADATA_SIZE_PCT.apply(total_capacity),
                 *QUANTILES_IN_SIZE_HISTOGRAM,
             ),
 
@@ -933,7 +974,7 @@ impl ZettaCache {
 
     fn index_cache_estimate_capacity(system_memory: usize) -> usize {
         // Calculate the maximum size for the index cache as a percentage of system memory
-        let target_index_cache_bytes = (*INDEX_CACHE_ENTRIES_MEM_PCT * system_memory) / 100;
+        let target_index_cache_bytes = INDEX_CACHE_ENTRIES_MEM_PCT.apply(system_memory);
 
         // Looking at the source of LruCache at the time of this writing we see that LruEntry<K,V>
         // is composed of the following elements: K, V, and 2 pointers. Thus, we use the following
@@ -945,11 +986,12 @@ impl ZettaCache {
         // Even when the cache is empty LruCache pre-allocates buckets inducing an overhead that is
         // separate from the actual per entry overhead yet tied to the number of entries that it can
         // hold.  The cache overhead consists of a tiny constant overhead for some of its metadata
-        // tracking (e.g. capacity, hasher fields, etc..) and per-entry overhead. At the time of this
-        // writing the LruCache uses a KeyRef<K> (8 bytes) for the key, and a Box<LruEntry> (8 bytes)
-        // as the value. Additionally assuming that HashBrown is used as the underlying HashMap we
-        // expect 8 + 1 bytes of overhead per entry. That would imply that the overhead be close to
-        // 3 * sizeof(usize) per entry but empirically we've found that it is closer to 5 * sizeof(usize).
+        // tracking (e.g. capacity, hasher fields, etc..) and per-entry overhead. At the time of
+        // this writing the LruCache uses a KeyRef<K> (8 bytes) for the key, and a
+        // Box<LruEntry> (8 bytes) as the value. Additionally assuming that HashBrown is
+        // used as the underlying HashMap we expect 8 + 1 bytes of overhead per entry. That
+        // would imply that the overhead be close to 3 * sizeof(usize) per entry but
+        // empirically we've found that it is closer to 5 * sizeof(usize).
         let index_cache_overhead_bytes = 5 * mem::size_of::<usize>();
 
         let index_cache_cap =
@@ -967,7 +1009,7 @@ impl ZettaCache {
         index_cache_cap
     }
 
-    pub async fn open(paths: Vec<&str>) -> Result<ZettaCache> {
+    pub async fn open(paths: Vec<&str>) -> Result<Self> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
             disks.push(Disk::new(path, false)?);
@@ -1026,10 +1068,12 @@ impl ZettaCache {
                 )
             }));
 
-            primary
-                .old_checkpoint_capacity
-                .push(primary.checkpoint_capacity);
-            primary.checkpoint_capacity = checkpoint_capacity;
+            if let Some(checkpoint_capacity) = checkpoint_capacity {
+                primary
+                    .old_checkpoint_capacity
+                    .push(primary.checkpoint_capacity);
+                primary.checkpoint_capacity = checkpoint_capacity;
+            }
             checkpoint.extent_allocator.extend(metadata_capacity);
             checkpoint.block_allocator.extend(data_capacity);
             size_changed = true;
@@ -1042,15 +1086,7 @@ impl ZettaCache {
                 let new_size = block_access.disk_size(disk);
                 if new_size > phys.size {
                     let added_bytes = new_size - phys.size;
-                    // Added space must be at least large enough for the checkpoint and one slab.
-                    if added_bytes
-                        > checkpoint_size(&block_access) + checkpoint.block_allocator.slab_size()
-                        && added_bytes as f64 > phys.size as f64 * *DISK_EXPAND_MIN_PCT / 100.0
-                    {
-                        Some(Extent::new(disk, phys.size, added_bytes))
-                    } else {
-                        None
-                    }
+                    Some(Extent::new(disk, phys.size, added_bytes))
                 } else {
                     None
                 }
@@ -1061,10 +1097,12 @@ impl ZettaCache {
             info!("expanding existing disks: {:?}", expanded_capacity);
             let (checkpoint_capacity, metadata_capacity, data_capacity) =
                 Self::divide_new_capacity(expanded_capacity, &block_access);
-            primary
-                .old_checkpoint_capacity
-                .push(primary.checkpoint_capacity);
-            primary.checkpoint_capacity = checkpoint_capacity;
+            if let Some(checkpoint_capacity) = checkpoint_capacity {
+                primary
+                    .old_checkpoint_capacity
+                    .push(primary.checkpoint_capacity);
+                primary.checkpoint_capacity = checkpoint_capacity;
+            }
             checkpoint.extent_allocator.extend(metadata_capacity);
             checkpoint.block_allocator.extend(data_capacity);
 
@@ -1098,7 +1136,8 @@ impl ZettaCache {
         )
         .await;
 
-        // Note, the old_index histogram covers only the part that doesn't overlap with the new_index.
+        // Note, the old_index histogram covers only the part that doesn't overlap with the
+        // new_index.
         let mut atime_histogram_phys = old_index.atime_histogram().clone();
         if let Some(merge_progress) = &checkpoint.merge_progress {
             assert_eq!(old_index.trim_key(), merge_progress.new_index.last_key());
@@ -1135,25 +1174,26 @@ impl ZettaCache {
         let system_memory = usize::from64(sysinfo.total_memory() * 1024);
 
         // Calculate a maximum size for the pending_changes as a percentage of system memory
-        // Note that during a merge, this space must also accomodate the space used by old_pending_changes
-        let pending_changes_max_bytes = (*PENDING_CHANGES_MEM_PCT * system_memory as f64)
-            .approx_as::<usize>()
-            .unwrap()
-            / 100;
-        // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data entries
+        // Note that during a merge, this space must also accomodate the space used by
+        // old_pending_changes
+        let pending_changes_max_bytes = PENDING_CHANGES_MEM_PCT.apply(system_memory);
+        // The BTreeMap type has about a 35% overhead, so we have a 65% usable capacity for data
+        // entries
         let pending_changes_entries_bytes = pending_changes_max_bytes * 65 / 100;
         // Each entry in the BTreeMap is comprised of a key (IndexKey) and a value (PendingChange)
         let pending_changes_entry_size =
             mem::size_of::<IndexKey>() + mem::size_of::<PendingChange>();
-        // Limit the number of pending change entries to not exceed the amount of memory being made available
+        // Limit the number of pending change entries to not exceed the amount of memory being made
+        // available
         let pending_changes_cap = pending_changes_entries_bytes / pending_changes_entry_size;
-        // In order to stay inside this desired cap, we need to be triggering a new merge before we are more
-        // than half way to the cap. Trigger at about 1/3 to provide some slop space.
+        // In order to stay inside this desired cap, we need to be triggering a new merge before we
+        // are more than half way to the cap. Trigger at about 1/3 to provide some slop
+        // space.
         let pending_changes_trigger = pending_changes_cap / 3;
         info!(
             "pending changes max length set to {} entries [{}% of {} = {} and entry size {}]",
             pending_changes_cap,
-            *PENDING_CHANGES_MEM_PCT,
+            PENDING_CHANGES_MEM_PCT.as_percent(),
             nice_p2size(system_memory as u64),
             nice_p2size(pending_changes_entries_bytes as u64),
             nice_p2size(pending_changes_entry_size as u64)
@@ -1172,7 +1212,7 @@ impl ZettaCache {
             pending_changes_trigger,
             merge: None,
             index_cache: with_alloctag("ZettaCacheState::index_cache hashtable", || {
-                LruCache::new(ZettaCache::index_cache_estimate_capacity(system_memory))
+                LruCache::new(Self::index_cache_estimate_capacity(system_memory))
             }),
             atime_histogram: AtimeHistogram::new(atime_histogram_phys),
             size_histogram: checkpoint.size_histogram,
@@ -1180,7 +1220,6 @@ impl ZettaCache {
             primary,
             primary_disk,
             guid,
-            pool_guids: checkpoint.pool_guids,
             outstanding_reads: Default::default(),
             outstanding_writes: Default::default(),
             atime: checkpoint.last_atime,
@@ -1209,25 +1248,23 @@ impl ZettaCache {
             state.clear_hit_data();
         }
 
-        let this = ZettaCache {
+        let this = Self(Arc::new(Inner {
             old_index: Arc::new(tokio::sync::RwLock::new(old_index)),
             new_index: Arc::new(tokio::sync::RwLock::new(new_index)),
             state: Arc::new(tokio::sync::Mutex::new(state)),
             outstanding_lookups: LockSet::new(),
-            demand_buffer_bytes_available: Arc::new(Semaphore::new(
-                *CACHE_INSERT_DEMAND_BUFFER_BYTES,
-            )),
-            speculative_buffer_bytes_available: Arc::new(Semaphore::new(
-                *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
-            )),
-            write_slots: Arc::new(Semaphore::new(
-                block_access.disks().count() * *OUTSTANDING_ALLOCATIONS_PER_DISK,
-            )),
+            demand_buffer_bytes_available: Arc::new(Semaphore::new(usize::from64(
+                CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64(),
+            ))),
+            speculative_buffer_bytes_available: Arc::new(Semaphore::new(usize::from64(
+                CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64(),
+            ))),
             block_access,
             stats,
             timebase: Instant::now(),
             cache_runtime_id: Uuid::new_v4(),
-        };
+            pool_guids: PoolGuidMapping::open(checkpoint.pool_guids),
+        }));
 
         let merging = match checkpoint.merge_progress {
             Some(progress) => Some(
@@ -1245,12 +1282,12 @@ impl ZettaCache {
         };
 
         let my_cache = this.clone();
-        tokio::spawn(async move {
+        measure!("checkpoint_task").spawn(async move {
             my_cache.checkpoint_task(merging).await;
         });
 
         let state = this.state.clone();
-        tokio::spawn(async move {
+        measure!("atime interval").spawn(async move {
             // XXX maybe we should bump the atime after a set number of
             // accesses, so each histogram bucket starts with the same count.
             // We could then add an auxiliary structure saying what wall clock
@@ -1283,7 +1320,8 @@ impl ZettaCache {
                         if let Some(PendingChange::Insert(old_value)) =
                             pending_changes.insert(key, PendingChange::Insert(value))
                         {
-                            // We are replacing an old value, adjust the histogram to reflect the change
+                            // We are replacing an old value, adjust the histogram to reflect the
+                            // change
                             atime_histogram.remove(old_value);
                         }
                         super_trace!("insert {:?} {:?}", key, value);
@@ -1303,12 +1341,13 @@ impl ZettaCache {
         pending_changes
     }
 
-    /// The checkpoint task is primarily responsible for writing out a persistent checkpoint every 60s.
-    /// It is also responsible for kicking off a merge task every time we accumulate enough pending change.
-    /// While a merge task is running, this task listens for and processes eviction requests from the merge task.
-    /// The active merge task state is also captured in each checkpoint so that it may be resumed from the
-    /// checkpoint if necessary. On resume the merge task is restarted during cache open and a channel to
-    /// task and the index phys for the current progress are passed in.
+    /// The checkpoint task is primarily responsible for writing out a persistent checkpoint every
+    /// 60s. It is also responsible for kicking off a merge task every time we accumulate enough
+    /// pending change. While a merge task is running, this task listens for and processes
+    /// eviction requests from the merge task. The active merge task state is also captured in
+    /// each checkpoint so that it may be resumed from the checkpoint if necessary. On resume
+    /// the merge task is restarted during cache open and a channel to task and the index phys
+    /// for the current progress are passed in.
     async fn checkpoint_task(
         &self,
         mut merging: Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)>,
@@ -1374,9 +1413,11 @@ impl ZettaCache {
                                 // because they could not be remapped.
                                 for entry in progress.cache_updates.into_iter() {
                                     match entry.value.location() {
-                                        // It's possible the key wasn't already in the cache, so this may add or update the key.
+                                        // It's possible the key wasn't already in the cache, so
+                                        // this may add or update the key.
                                         Some(_) => state.index_cache.put(entry.key, entry.value),
-                                        // It's possible the key isn't in the cache; .pop() doesn't fail in that case.
+                                        // It's possible the key isn't in the cache; .pop() doesn't
+                                        // fail in that case.
                                         None => state.index_cache.pop(&entry.key),
                                     };
                                 }
@@ -1434,18 +1475,11 @@ impl ZettaCache {
 
             // flush out a new checkpoint every CHECKPOINT_INTERVAL to capture the current state
             sleep_until(next_tick).await;
-            {
-                let old_index_phys = self.old_index.write().await.get_phys();
-                self.state
-                    .lock()
-                    .await
-                    .flush_checkpoint(
-                        old_index_phys,
-                        merging.as_mut().map(|(_, phys)| (phys.clone())),
-                        completed_merge,
-                    )
-                    .await;
-            }
+            self.flush_checkpoint(
+                merging.as_mut().map(|(_, phys)| (phys.clone())),
+                completed_merge,
+            )
+            .await;
             next_tick = std::cmp::max(
                 tokio::time::Instant::now(),
                 next_tick + *CHECKPOINT_INTERVAL,
@@ -1454,14 +1488,52 @@ impl ZettaCache {
         }
     }
 
-    pub async fn lookup(
-        &self,
-        guid: PoolGuid,
-        block: BlockId,
-        source: LookupSource,
-    ) -> LookupResponse {
-        let key = IndexKey::new(self.state.lock().await.map_pool_guid(guid), block);
-        let locked_key = LockedKey(self.outstanding_lookups.lock(key).await);
+    async fn flush_checkpoint(&self, new_index: Option<IndexRunPhys>, completed_merge: bool) {
+        {
+            // Wait for all outstanding reads, so that if we free the space they are reading, it
+            // can't be overwritten until after the read completes.  We wait without holding the
+            // state lock, and we replace the existing lock with a new one, so that new reads can
+            // start even while we are waiting for the previous batch to complete.
+            let begin = Instant::now();
+            // Bind to a variable here so that we can drop the state lock before waiting for the
+            // batch of reads to complete.
+            let outstanding_reads = lock_non_send(&self.state).await.outstanding_reads.rotate();
+            outstanding_reads.await;
+            debug!(
+                "waited for outstanding_reads in {}ms",
+                begin.elapsed().as_millis()
+            );
+        }
+
+        {
+            // Wait for all outstanding writes, so that if we crash, the blocks referenced by the
+            // index/operation_log will actually have the correct contents.  See above comments
+            // on how the ConcurrentBatch is manipulated.
+            let begin = Instant::now();
+            let outstanding_writes = lock_non_send(&self.state).await.outstanding_writes.rotate();
+            outstanding_writes.await;
+            debug!(
+                "waited for outstanding_writes in {}ms",
+                begin.elapsed().as_millis()
+            );
+        }
+
+        let old_index_phys = self.old_index.write().await.get_phys();
+        self.state
+            .lock()
+            .await
+            .flush_checkpoint(
+                old_index_phys,
+                new_index,
+                completed_merge,
+                self.pool_guids.to_phys(),
+            )
+            .await;
+    }
+
+    pub async fn lookup(&self, guid: PoolGuid, block: BlockId) -> LookupResponse {
+        let key = IndexKey::new(self.pool_guids.map_pool_guid(guid), block);
+        let locked_key = LockedKey(measure!().fut(self.outstanding_lookups.lock(key)).await);
 
         // In debug mode, return failure randomly every specified number of requests
         if *LOOKUP_FAIL_RANDOM != 0 && rand::thread_rng().gen_ratio(1, *LOOKUP_FAIL_RANDOM) {
@@ -1469,40 +1541,36 @@ impl ZettaCache {
         }
 
         let bytes = self
-            .lookup_impl(&locked_key, source, |state, value| {
-                if matches!(source, LookupSource::Read) {
-                    state.size_histogram.lookup();
-                }
+            .lookup_impl(&locked_key, LookupCounting::On, |state, value| {
+                state.size_histogram.lookup();
                 match value {
-                    Some(value) => future::Either::Left(state.lookup(&locked_key, value, source)),
+                    Some(value) => future::Either::Left(state.lookup(&locked_key, value)),
                     None => future::Either::Right(future::ready(None)),
                 }
             })
             .await;
 
-        let response = match bytes {
+        self.stats.track_count(Lookup);
+        match bytes {
             Some(bytes) => {
-                self.stats.track_bytes(LookupBytes, bytes.len() as u64);
                 super_trace!("cache hit for {:?}", key);
+                self.stats.track_bytes(LookupBytes, bytes.len() as u64);
                 self.stats.track_count(CacheHit);
                 LookupResponse::Present((bytes, locked_key))
             }
             None => LookupResponse::Absent(locked_key),
-        };
-
-        match source {
-            LookupSource::Write => self.stats.track_count(LookupForWrite),
-            LookupSource::Read => self.stats.track_count(LookupForRead),
-            LookupSource::Evict => {} // not possible for this code path
         }
-
-        response
     }
 
-    async fn lookup_impl<F, R, Fut>(&self, locked_key: &LockedKey, source: LookupSource, f: F) -> R
+    async fn lookup_impl<F, R, Fut>(
+        &self,
+        locked_key: &LockedKey,
+        counting: LookupCounting,
+        f: F,
+    ) -> R
     where
         F: FnOnce(&mut ZettaCacheState, Option<ValidIndexValue>) -> Fut,
-        Fut: Future<Output = R>,
+        Fut: Future<Output = R> + Send,
     {
         let key = locked_key.key();
         // Hold the index lock over the whole operation
@@ -1514,7 +1582,7 @@ impl ZettaCache {
         let fut_or_f = {
             // We don't want to hold the state lock while reading from disk so we
             // use lock_non_send() to ensure that we can't hold it across .await.
-            let mut state = lock_non_send(&self.state).await;
+            let mut state = measure!().fut(lock_non_send(&self.state)).await;
             match state.pending_changes.get(&key).copied() {
                 Some(pc) => {
                     match pc {
@@ -1523,7 +1591,7 @@ impl ZettaCache {
                             let validated = state.validate(value);
                             // All entries in the pending changes should be valid
                             assert!(validated.is_some());
-                            if matches!(source, LookupSource::Read) {
+                            if counting.is_on() {
                                 self.stats.track_count(IndexHitPendingChanges);
                             }
                             Either::Left(f(&mut state, validated))
@@ -1536,9 +1604,9 @@ impl ZettaCache {
                             match pc {
                                 PendingChange::Insert(value)
                                 | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                                    state.ghost_hit_check(value, source);
+                                    state.ghost_hit_check(value, counting);
                                     let validated = state.validate(value);
-                                    if matches!(source, LookupSource::Read) {
+                                    if counting.is_on() {
                                         self.stats.track_count(IndexHitPendingChanges);
                                     }
                                     Either::Left(f(&mut state, validated))
@@ -1547,9 +1615,9 @@ impl ZettaCache {
                         } else {
                             match state.index_cache.get(&key) {
                                 Some(&value) => {
-                                    state.ghost_hit_check(value, source);
+                                    state.ghost_hit_check(value, counting);
                                     let validated = state.validate(value);
-                                    if matches!(source, LookupSource::Read) {
+                                    if counting.is_on() {
                                         self.stats.track_count(IndexHitIndexCache);
                                     }
                                     Either::Left(f(&mut state, validated))
@@ -1560,9 +1628,9 @@ impl ZettaCache {
                     } else {
                         match state.index_cache.get(&key) {
                             Some(&value) => {
-                                state.ghost_hit_check(value, source);
+                                state.ghost_hit_check(value, counting);
                                 let validated = state.validate(value);
-                                if matches!(source, LookupSource::Read) {
+                                if counting.is_on() {
                                     self.stats.track_count(IndexHitIndexCache);
                                 }
                                 Either::Left(f(&mut state, validated))
@@ -1579,7 +1647,7 @@ impl ZettaCache {
                 // Got the index entry from pending state or index cache and
                 // already called f().  Now that we've dropped the state lock,
                 // run the future that it returned.
-                return fut.await;
+                return measure!().fut(fut).await;
             }
             Either::Right(f) => f,
         };
@@ -1599,10 +1667,10 @@ impl ZettaCache {
             }
         }
         let (entry_opt, chunk_cache_hit) = match index {
-            Either::Left(index) => index.lookup(key).await,
-            Either::Right(index) => index.lookup(key).await,
+            Either::Left(index) => measure!().fut(index.lookup(key)).await,
+            Either::Right(index) => measure!().fut(index.lookup(key)).await,
         };
-        if matches!(source, LookupSource::Read) {
+        if counting.is_on() {
             if chunk_cache_hit {
                 self.stats.track_count(IndexHitChunkCache);
             } else {
@@ -1613,8 +1681,8 @@ impl ZettaCache {
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
-                let mut state = lock_non_send(&self.state).await;
-                let value = state.lookup_with_value_from_index(&key, entry.value, source);
+                let mut state = measure!().fut(lock_non_send(&self.state)).await;
+                let value = state.lookup_with_value_from_index(&key, entry.value, counting);
                 if value.is_none() {
                     super_trace!(
                         "cache miss after reading index for {:?}, invalid entry",
@@ -1626,11 +1694,11 @@ impl ZettaCache {
             None => {
                 // key not in index
                 super_trace!("cache miss after reading index for {:?}", key);
-                let mut state = lock_non_send(&self.state).await;
+                let mut state = measure!().fut(lock_non_send(&self.state)).await;
                 f(&mut state, None)
             }
         };
-        fut.await
+        measure!().fut(fut).await
     }
 
     async fn reserve_buffer_space(
@@ -1641,13 +1709,13 @@ impl ZettaCache {
         let (buffer, size, stat, wait_insert) = match source {
             InsertSource::Heal | InsertSource::SpeculativeRead | InsertSource::Write => (
                 &self.speculative_buffer_bytes_available,
-                *CACHE_INSERT_SPECULATIVE_BUFFER_BYTES,
+                CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64(),
                 SpeculativeBufferBytesAvailable,
                 false,
             ),
             InsertSource::Read => (
                 &self.demand_buffer_bytes_available,
-                *CACHE_INSERT_DEMAND_BUFFER_BYTES,
+                CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64(),
                 DemandBufferBytesAvailable,
                 *CACHE_WAIT_INSERT,
             ),
@@ -1660,18 +1728,19 @@ impl ZettaCache {
                 .await
                 .expect("error from acquire_many_owned");
             self.stats
-                .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
+                .track_instantaneous(stat, size - buffer.available_permits() as u64);
             Some(permit)
         } else {
-            // The permit should be dropped when the write to disk completes. It serves to limit the number
-            // of insert()'s that we can buffer before dropping (ignoring) insertion requests.
+            // The permit should be dropped when the write to disk completes. It serves to limit the
+            // number of insert()'s that we can buffer before dropping (ignoring)
+            // insertion requests.
             match buffer
                 .clone()
                 .try_acquire_many_owned(u32::try_from(bytes).unwrap())
             {
                 Ok(permit) => {
                     self.stats
-                        .track_instantaneous(stat, (size - buffer.available_permits()) as u64);
+                        .track_instantaneous(stat, size - buffer.available_permits() as u64);
                     Some(permit)
                 }
                 Err(tokio::sync::TryAcquireError::NoPermits) => None,
@@ -1680,45 +1749,64 @@ impl ZettaCache {
         }
     }
 
-    /// Initiates insertion of this block; doesn't wait for the write to disk.
-    pub async fn insert(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
+    async fn insert_impl(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
+        let len = bytes.len() as u64;
+        // Insert to the cache in the current checkpoint (allocate a block, add to
+        // pending_changes and outstanding_writes).
+        let fut = measure!()
+            .fut(lock_non_send(&self.state))
+            .await
+            .insert(locked_key, bytes);
+        match measure!().fut(fut).await {
+            Ok(_) => {
+                self.stats.track_bytes(InsertBytes, len);
+                self.stats.track_count(match source {
+                    InsertSource::Heal => InsertForHeal,
+                    InsertSource::Read => InsertForRead,
+                    InsertSource::SpeculativeRead => InsertForSpeculativeRead,
+                    InsertSource::Write => InsertForWrite,
+                });
+            }
+            Err(InsertError::Allocation) => {
+                self.stats.track_count(InsertDropCacheFull);
+            }
+            Err(InsertError::PendingChanges) => {
+                self.stats.track_count(InsertDropCacheFull);
+            }
+        }
+    }
+
+    /// Initiates insertion of this block; doesn't wait for the write to disk.  The `bytes_fn`
+    /// closure returns the AlignedBytes to insert.  This is useful if it's expensive to compute
+    /// (e.g. we need to memcpy() it), as we won't invoke it if the block is not actually
+    /// inserted due to the insertion buffer being full.
+    pub async fn insert<F: FnOnce() -> AlignedBytes>(
+        &self,
+        locked_key: LockedKey,
+        bytes_len: usize,
+        bytes_fn: F,
+        source: InsertSource,
+    ) {
         // This permit will be dropped when the write to disk completes.  It
         // serves to limit the number of insert()'s that we can buffer before
         // dropping (ignoring) insertion requests.
-        let insert_permit = match self.reserve_buffer_space(bytes.len(), source).await {
+        let insert_permit = match measure!()
+            .fut(self.reserve_buffer_space(bytes_len, source))
+            .await
+        {
             Some(permit) => permit,
             None => {
-                self.stats.track_count(InsertDropQueueFull);
+                self.stats.track_count(InsertDropBufferFull);
                 return;
             }
         };
 
-        self.stats.track_bytes(InsertBytes, bytes.len() as u64);
-        self.stats.track_count(match source {
-            InsertSource::Heal => InsertForHealing,
-            InsertSource::Read => InsertForRead,
-            InsertSource::SpeculativeRead => InsertForSpeculativeRead,
-            InsertSource::Write => InsertForWrite,
-        });
+        let bytes = bytes_fn();
+        assert_eq!(bytes.len(), bytes_len);
 
-        let state = self.state.clone();
-        let write_slots = self.write_slots.clone();
-        tokio::spawn(async move {
-            // Get a permit to write to disk before waiting on the state lock.
-            // This ensures that once we assign this insertion to a checkpoint,
-            // the insertion will complete relatively quickly (e.g.
-            // milliseconds).  This way, we don't have outstanding_writes that
-            // take a long time to complete, preventing a checkpoint from making
-            // progress.  Acquiring the WritePermit may take a long time,
-            // because we have to wait for any in-progress insertions (up to
-            // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
-            let _write_permit = write_slots.acquire_owned().await.unwrap();
-
-            // Now that we are ready to issue the write to disk, insert to the
-            // cache in the current checkpoint (allocate a block, add to
-            // pending_changes and outstanding_writes).
-            let fut = lock_non_send(&state).await.insert(locked_key, bytes);
-            fut.await;
+        let cache = self.clone();
+        measure!("ZettaCache::insert()").spawn(async move {
+            cache.insert_impl(locked_key, bytes, source).await;
             // We want to hold onto the insert_permit until the write completes
             // because it represents the memory that's required to buffer this
             // insertion, which isn't released until the io completes.
@@ -1734,7 +1822,7 @@ impl ZettaCache {
         blocks: &HashMap<BlockId, Bytes>,
         source: InsertSource,
     ) {
-        let pool_id = self.state.lock().await.map_pool_guid(guid);
+        let pool_id = self.pool_guids.map_pool_guid(guid);
         let insert_permit = match self
             .reserve_buffer_space(
                 blocks.values().map(|bytes| bytes.len()).sum::<usize>(),
@@ -1746,7 +1834,7 @@ impl ZettaCache {
             None => {
                 // Pretend that it's bytes so we can add many at once
                 self.stats
-                    .track_bytes(InsertDropQueueFull, blocks.len() as u64);
+                    .track_bytes(InsertDropBufferFull, blocks.len() as u64);
                 return;
             }
         };
@@ -1767,46 +1855,23 @@ impl ZettaCache {
                 // system crashed or the pool was rewound, a BlockId that was
                 // already persisted to the cache may be reused.
 
-                let present = cache
-                    .lookup_impl(&locked_key, LookupSource::Write, |_state, value| {
-                        future::ready(value.is_some())
-                    })
+                let present = measure!()
+                    .fut(
+                        cache.lookup_impl(&locked_key, LookupCounting::Off, |_state, value| {
+                            future::ready(value.is_some())
+                        }),
+                    )
                     .await;
 
                 if !present {
-                    // Get a permit to write to disk before waiting on the state lock.
-                    // This ensures that once we assign this insertion to a checkpoint,
-                    // the insertion will complete relatively quickly (e.g.
-                    // milliseconds).  This way, we don't have outstanding_writes that
-                    // take a long time to complete, preventing a checkpoint from making
-                    // progress.  Acquiring the WritePermit may take a long time,
-                    // because we have to wait for any in-progress insertions (up to
-                    // CACHE_INSERT_MAX_BUFFER) to complete before we can write to disk.
-                    let _write_permit = cache.write_slots.acquire_owned().await.unwrap();
-                    let len = aligned_bytes.len();
-
-                    // Now that we are ready to issue the write to disk, insert to the
-                    // cache in the current checkpoint (allocate a block, add to
-                    // pending_changes and outstanding_writes).
-                    let fut = lock_non_send(&cache.state)
-                        .await
-                        .insert(locked_key, aligned_bytes);
-                    fut.await;
-
-                    cache.stats.track_bytes(InsertBytes, len as u64);
-                    cache.stats.track_count(match source {
-                        InsertSource::Heal => InsertForHealing,
-                        InsertSource::Read => InsertForRead,
-                        InsertSource::SpeculativeRead => InsertForSpeculativeRead,
-                        InsertSource::Write => InsertForWrite,
-                    });
+                    cache.insert_impl(locked_key, aligned_bytes, source).await;
                 }
             };
             with_alloctag_hf("ZettaCache::ingest_all FuturesUnordered.push()", || {
                 futures.push(fut)
             });
         }
-        tokio::spawn(async move {
+        measure!("ZettaCache::insert_all()").spawn(async move {
             futures.for_each(|_| async {}).await;
             // We want to hold onto the insert_permit until the write completes
             // because it represents the memory that's required to buffer this
@@ -1816,19 +1881,24 @@ impl ZettaCache {
     }
 
     pub async fn heal(&self, guid: PoolGuid, block: BlockId, object_bytes: AlignedBytes) {
-        if let LookupResponse::Present((cache_bytes, locked_key)) =
-            self.lookup(guid, block, LookupSource::Write).await
-        {
-            // For (hopefully) obvious reasons, we only need to do the heal when the bytes contained in the cache differ
-            // from the bytes contained in the object store. The bytes contained in the object store are always preferred
-            // over the bytes contained in the cache; we assume the bytes passed were retrieved from the object store.
+        if let LookupResponse::Present((cache_bytes, locked_key)) = self.lookup(guid, block).await {
+            // For (hopefully) obvious reasons, we only need to do the heal when the bytes
+            // contained in the cache differ from the bytes contained in the object store. The
+            // bytes contained in the object store are always preferred over the bytes contained
+            // in the cache; we assume the bytes passed were retrieved from the object store.
             if *cache_bytes != *object_bytes {
                 self.stats.track_count(HealedBlocks);
-                debug!("Healing cache: {:?}", locked_key.key());
-                // Note: this will result in a second insert for the same key in the index. This will be resolved either
-                // in the insert code (if the first insert is in pending_changes) or later during the next merge.
-                self.insert(locked_key, object_bytes, InsertSource::Heal)
-                    .await;
+                debug!("healing cache: {:?}", locked_key.key());
+                // Note: this will result in a second insert for the same key in the index. This
+                // will be resolved either in the insert code (if the first insert is in
+                // pending_changes) or later during the next merge.
+                self.insert(
+                    locked_key,
+                    object_bytes.len(),
+                    || object_bytes,
+                    InsertSource::Heal,
+                )
+                .await;
             }
         }
     }
@@ -1861,312 +1931,17 @@ impl ZettaCache {
     }
 }
 
-pub struct ZCacheDBHandle {
-    block_access: Arc<BlockAccess>,
-    primary: PrimaryPhys,
-    primary_disk: DiskId,
-    guid: u64,
-    checkpoint: Arc<ZettaCheckpointPhys>,
-    extent_allocator: Arc<ExtentAllocator>,
-}
-
-impl ZCacheDBHandle {
-    pub async fn dump_superblocks(paths: Vec<&str>) -> Result<()> {
-        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in paths {
-            match Disk::new(path, true) {
-                Ok(disk) => disks.push(disk),
-                Err(err) => writeln_stderr!("error: {}", err),
-            }
-        }
-        if disks.is_empty() {
-            return Ok(());
-        }
-        let block_access = BlockAccess::new(disks, true);
-        SuperblockPhys::dump_all(&block_access).await;
-        Ok(())
-    }
-
-    pub async fn open(paths: Vec<&str>) -> Result<ZCacheDBHandle> {
-        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in paths {
-            disks.push(Disk::new(path, true)?);
-        }
-        let block_access = Arc::new(BlockAccess::new(disks, true));
-
-        let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
-        let checkpoint =
-            Arc::new(ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await);
-
-        let mut builder = ExtentAllocatorBuilder::new(&checkpoint.extent_allocator);
-        // We should be able to get away without claiming the metadata space,
-        // since we aren't allocating anything, but we may also want to do this
-        // for verification (e.g. that there aren't overlapping Extents).
-        checkpoint.claim(&mut builder);
-        let extent_allocator = Arc::new(ExtentAllocator::open(builder));
-
-        Ok(ZCacheDBHandle {
-            block_access,
-            primary,
-            primary_disk,
-            guid,
-            checkpoint,
-            extent_allocator,
-        })
-    }
-
-    pub async fn dump_free_space(&self) {
-        writeln_stdout!("Superblock");
-        writeln_stdout!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
-        writeln_stdout!();
-
-        writeln_stdout!("Checkpoint Region");
-        writeln_stdout!("  {:?}", self.primary.checkpoint_capacity);
-        writeln_stdout!(
-            "  checkpoint: {} used out of {} ({:.1}%, must be <50%)",
-            nice_p2size(self.primary.checkpoint.size),
-            nice_p2size(self.primary.checkpoint_capacity.size),
-            self.primary.checkpoint.size as f64 * 100.0
-                / self.primary.checkpoint_capacity.size as f64
-        );
-        writeln_stdout!();
-
-        writeln_stdout!("Old Checkpoint Regions");
-        let mut unused_checkpoint_space = 0;
-        for region in self.primary.old_checkpoint_capacity.iter() {
-            unused_checkpoint_space += region.size;
-            writeln_stdout!("  {:?}", region);
-        }
-        writeln_stdout!("  ----------------------");
-        writeln_stdout!("  total: {}", nice_p2size(unused_checkpoint_space));
-        writeln_stdout!();
-
-        writeln_stdout!("Metadata Region");
-        let mut total_used_bytes = 0;
-        let mut total_allocated_bytes = 0;
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "operation log",
-            nice_p2size(self.checkpoint.operation_log.bytes()),
-            nice_p2size(self.checkpoint.operation_log.capacity_bytes())
-        );
-        total_used_bytes += self.checkpoint.operation_log.bytes();
-        total_allocated_bytes += self.checkpoint.operation_log.capacity_bytes();
-
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "spacemap",
-            nice_p2size(self.checkpoint.block_allocator.spacemap_bytes()),
-            nice_p2size(self.checkpoint.block_allocator.spacemap_capacity_bytes())
-        );
-        total_used_bytes += self.checkpoint.block_allocator.spacemap_bytes();
-        total_allocated_bytes += self.checkpoint.block_allocator.spacemap_capacity_bytes();
-
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "spacemap_next",
-            nice_p2size(self.checkpoint.block_allocator.spacemap_next_bytes()),
-            nice_p2size(
-                self.checkpoint
-                    .block_allocator
-                    .spacemap_next_capacity_bytes()
-            )
-        );
-        total_used_bytes += self.checkpoint.block_allocator.spacemap_next_bytes();
-        total_allocated_bytes += self
-            .checkpoint
-            .block_allocator
-            .spacemap_next_capacity_bytes();
-
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "index log",
-            nice_p2size(self.checkpoint.old_index.log_bytes()),
-            nice_p2size(self.checkpoint.old_index.log_capacity_bytes())
-        );
-        total_used_bytes += self.checkpoint.old_index.log_bytes();
-        total_allocated_bytes += self.checkpoint.old_index.log_capacity_bytes();
-
-        if let Some(progress) = self.checkpoint.merge_progress.clone() {
-            writeln_stdout!(
-                "  {:>13} - {:>6} used out of {:>6} allocated",
-                "progress log",
-                nice_p2size(progress.operation_log.bytes()),
-                nice_p2size(progress.operation_log.capacity_bytes())
-            );
-            total_used_bytes += progress.operation_log.bytes();
-            total_allocated_bytes += progress.operation_log.capacity_bytes();
-            writeln_stdout!(
-                "  {:>13} - {:>6} used out of {:>6} allocated",
-                "progress index",
-                nice_p2size(progress.new_index.log_bytes()),
-                nice_p2size(progress.new_index.log_capacity_bytes())
-            );
-            total_used_bytes += progress.new_index.log_bytes();
-            total_allocated_bytes += progress.new_index.log_capacity_bytes();
-        }
-        writeln_stdout!("  ----------------------");
-        let metadata_region_size = self
-            .checkpoint
-            .extent_allocator
-            .capacity
-            .iter()
-            .map(|extent| extent.size)
-            .sum();
-        writeln_stdout!(
-            "  {:>13} - {} ({:.1}%) used, {} ({:.1}%) allocated out of {:>6} total",
-            "total",
-            nice_p2size(total_used_bytes),
-            total_used_bytes as f64 * 100.0 / metadata_region_size as f64,
-            nice_p2size(total_allocated_bytes),
-            total_allocated_bytes as f64 * 100.0 / metadata_region_size as f64,
-            nice_p2size(metadata_region_size)
-        );
-        writeln_stdout!("  ----------------------");
-        for (disk, (used, total)) in self.extent_allocator.zcachedb_metadata_per_disk() {
-            writeln_stdout!(
-                "  {:?} - {:>6} allocated out of {:>6} total",
-                disk,
-                nice_p2size(used),
-                nice_p2size(total)
-            );
-        }
-        writeln_stdout!();
-
-        let balloc_size = self
-            .checkpoint
-            .block_allocator
-            .capacity()
-            .iter()
-            .map(|extent| extent.size)
-            .sum();
-        writeln_stdout!("{:>6} User Data Region", nice_p2size(balloc_size));
-    }
-
-    pub async fn dump_structures(&self, opts: DumpStructuresOptions) {
-        if opts.dump_defaults {
-            writeln_stdout!("{:#?}", self.primary);
-            writeln_stdout!("{:#?}", self.checkpoint);
-        }
-
-        if opts.dump_atime_histogram {
-            writeln_stdout!("DUMP INDEX ATIME HISTOGRAM");
-            writeln_stdout!("{}", self.checkpoint.old_index.atime_histogram());
-
-            if let Some(progress) = &self.checkpoint.merge_progress {
-                writeln_stdout!("DUMP MERGE INDEX ATIME HISTOGRAM");
-                writeln_stdout!("{}", progress.new_index.atime_histogram());
-            }
-        }
-
-        if opts.dump_spacemaps {
-            zcachedb_dump_spacemaps(
-                self.checkpoint.block_allocator.clone(),
-                self.block_access.clone(),
-                self.extent_allocator.clone(),
-            )
-            .await;
-        }
-
-        if opts.dump_operation_log_raw {
-            self.checkpoint
-                .operation_log
-                .iter_chunks(self.block_access.clone())
-                .for_each(|chunk| async move {
-                    writeln_stdout!("{:#?}", chunk);
-                })
-                .await;
-            if let Some(mpp) = &self.checkpoint.merge_progress {
-                writeln_stdout!("\nold operation log from MergeProgressPhys:");
-                mpp.operation_log
-                    .iter_chunks(self.block_access.clone())
-                    .for_each(|chunk| async move {
-                        writeln_stdout!("{:#?}", chunk);
-                    })
-                    .await;
-            }
-        }
-
-        if opts.dump_index_log_raw {
-            self.checkpoint
-                .old_index
-                .iter_chunks(self.block_access.clone())
-                .for_each(|chunk| async move {
-                    writeln_stdout!("{:#?}", chunk);
-                })
-                .await;
-
-            self.checkpoint
-                .old_index
-                .iter_summary_chunks(self.block_access.clone())
-                .for_each(|chunk| async move {
-                    writeln_stdout!("{:#?}", chunk);
-                })
-                .await;
-
-            if let Some(mpp) = &self.checkpoint.merge_progress {
-                writeln_stdout!("\nnew index from MergeProgressPhys:");
-                mpp.new_index
-                    .iter_chunks(self.block_access.clone())
-                    .for_each(|chunk| async move {
-                        writeln_stdout!("{:#?}", chunk);
-                    })
-                    .await;
-                mpp.new_index
-                    .iter_summary_chunks(self.block_access.clone())
-                    .for_each(|chunk| async move {
-                        writeln_stdout!("{:#?}", chunk);
-                    })
-                    .await;
-            }
-        }
-
-        if opts.dump_rebalance_log_raw {
-            if let Some(progress) = &self.checkpoint.merge_progress {
-                if let Some(log) = progress.rebalance_log.as_ref() {
-                    log.iter_chunks(self.block_access.clone())
-                        .for_each(|chunk| async move {
-                            writeln_stdout!("{:#?}", chunk);
-                        })
-                        .await;
-                }
-            }
-        }
-    }
-
-    pub async fn dump_slabs(&self, opts: DumpSlabsOptions) {
-        zcachedb_dump_slabs(
-            self.block_access.clone(),
-            self.extent_allocator.clone(),
-            self.checkpoint.block_allocator.clone(),
-            opts,
-        )
-        .await;
-    }
-
-    pub async fn verify_index(&self) {
-        writeln_stdout!("iterating current (old) index to verify histogram...");
-        self.checkpoint
-            .old_index
-            .verify_histogram(self.block_access.clone())
-            .await;
-
-        if let Some(mpp) = &self.checkpoint.merge_progress {
-            writeln_stdout!("iterating merge (new) index to verify histogram...");
-            mpp.new_index
-                .verify_histogram(self.block_access.clone())
-                .await;
-        }
-        writeln_stdout!("histograms correct");
-    }
-}
-
 pub struct ValidIndexValue(IndexValue);
 
 impl ValidIndexValue {
     pub fn extent(&self) -> Extent {
         self.0.extent().unwrap()
     }
+}
+
+enum InsertError {
+    Allocation,
+    PendingChanges,
 }
 
 impl ZettaCacheState {
@@ -2186,7 +1961,7 @@ impl ZettaCacheState {
         }
     }
 
-    fn ghost_hit_check(&mut self, value: IndexValue, source: LookupSource) {
+    fn ghost_hit_check(&mut self, value: IndexValue, counting: LookupCounting) {
         let (live_cutoff, ghost_cutoff) = match &self.merge {
             Some(ms) => (ms.eviction_cutoff, ms.ghost_cutoff),
             None => (
@@ -2195,37 +1970,18 @@ impl ZettaCacheState {
             ),
         };
 
-        if value.atime() >= ghost_cutoff
-            && value.atime() < live_cutoff
-            && matches!(source, LookupSource::Read)
-        {
+        if value.atime() >= ghost_cutoff && value.atime() < live_cutoff && counting.is_on() {
             // This is a hit in the ghost hit-by-size histogram
             let size = self.atime_histogram.size_at(value.atime());
             self.size_histogram.ghost_hit(size);
         }
     }
 
-    /// Returns the Id (index) associated with the pool GUID.
-    /// If not found, the GUID is added to the known set and a new Id generated.
-    fn map_pool_guid(&mut self, guid: PoolGuid) -> PoolId {
-        // XXX - this is an O(n) algorithm, which is fine for a small number of pools,
-        // but we may want to use a hashmap for this if there are lots of pools.
-        for (id, mapped_guid) in self.pool_guids.iter().enumerate() {
-            if *mapped_guid == guid {
-                return PoolId(u8::try_from(id).unwrap());
-            }
-        }
-        let id = u8::try_from(self.pool_guids.len()).unwrap();
-        debug!("New {:?} added with {:?}", guid, PoolId(id));
-        self.pool_guids.push(guid);
-        PoolId(id)
-    }
-
     fn lookup_with_value_from_index(
         &mut self,
         key: &IndexKey,
         value_from_index: IndexValue,
-        source: LookupSource,
+        counting: LookupCounting,
     ) -> Option<ValidIndexValue> {
         // Note: we're here because there was no PendingChange for this key, but
         // since we dropped the lock, a PendingChange may have been inserted
@@ -2238,7 +1994,7 @@ impl ZettaCacheState {
             | Some(PendingChange::UpdateAtime(UpdateAtime(value_ref, _))) => *value_ref,
             None => value_from_index,
         };
-        self.ghost_hit_check(value, source);
+        self.ghost_hit_check(value, counting);
         self.validate(value)
     }
 
@@ -2246,19 +2002,16 @@ impl ZettaCacheState {
         &mut self,
         locked_key: &LockedKey,
         valid_value: ValidIndexValue,
-        source: LookupSource,
     ) -> impl Future<Output = Option<AlignedBytes>> {
         let key = locked_key.key();
         let old_value = valid_value.0;
         let old_atime = old_value.atime();
         super_trace!("cache hit: reading {:?} from {:?}", key, old_value);
 
-        if matches!(source, LookupSource::Read) {
-            // Add an entry to the hit-by-size histogram
-            let size = self.atime_histogram.size_at(old_atime);
-            super_trace!("cache size {} at {:?}", size, old_atime);
-            self.size_histogram.live_hit(size);
-        }
+        // Add an entry to the hit-by-size histogram
+        let size = self.atime_histogram.size_at(old_atime);
+        super_trace!("cache size {} at {:?}", size, old_atime);
+        self.size_histogram.live_hit(size);
 
         assert_le!(old_atime, self.atime);
         let new_value = IndexValue::new(old_value.location(), old_value.size(), self.atime);
@@ -2275,9 +2028,10 @@ impl ZettaCacheState {
             btree_map::Entry::Vacant(ve) => {
                 // Only in Index, not pending_changes.
                 if pending_len < self.pending_changes_cap {
-                    // Perserve the original atime (from the Index) in case we "replace" this block and
-                    // need to reset the histogram for the original block (i.e. when we find the old block
-                    // during the merge, we can decrement the atime histogram)
+                    // Perserve the original atime (from the Index) in case we "replace" this block
+                    // and need to reset the histogram for the original block
+                    // (i.e. when we find the old block during the merge, we can
+                    // decrement the atime histogram)
                     super_trace!(
                         "adding PendingChanges::UpdateAtime({:?}) for {:?}",
                         new_value,
@@ -2318,7 +2072,7 @@ impl ZettaCacheState {
         // There can't be a write lock on the outstanding_reads because it's
         // only held for write when the state lock is also held, and we have the
         // state lock.
-        let read_permit = self.outstanding_reads.clone().try_read_owned().unwrap();
+        let read_permit = self.outstanding_reads.acquire();
 
         let block_access = self.block_access.clone();
 
@@ -2349,8 +2103,11 @@ impl ZettaCacheState {
     /// Insert this block to the cache, if space and performance parameters
     /// allow.  It may be a recent cache miss, or a recently-written block.
     /// Returns a Future to be executed after the state lock has been dropped.
-    fn insert(&mut self, locked_key: LockedKey, bytes: AlignedBytes) -> impl Future {
-        let noop = future::Either::Left(async {});
+    fn insert(
+        &mut self,
+        locked_key: LockedKey,
+        bytes: AlignedBytes,
+    ) -> impl Future<Output = Result<(), InsertError>> {
         let pending_len = self.pending_changes.len()
             + self
                 .merge
@@ -2363,13 +2120,13 @@ impl ZettaCacheState {
                 pending_len,
                 locked_key.key()
             );
-            return noop;
+            return future::Either::Left(future::ready(Err(InsertError::PendingChanges)));
         }
 
         let buf_size = bytes.len();
         let location = match self.allocate_block(u32::try_from(buf_size).unwrap()) {
             Some(location) => location,
-            None => return noop,
+            None => return future::Either::Left(future::ready(Err(InsertError::Allocation))),
         };
 
         // XXX if this is past the last block of the main index, we can write it
@@ -2382,10 +2139,7 @@ impl ZettaCacheState {
             self.pending_changes
                 .insert(key, PendingChange::Insert(value))
         }) {
-            debug!(
-                "Inserting {:?} over existing entry {:?}, should be heal",
-                value, pc
-            );
+            debug!("{key:?}: inserting {value:?} over existing entry {pc:?}, should be heal");
             let old_value = match pc {
                 PendingChange::Insert(old_value) => {
                     // Free the old extent for the previous insert. This is safe because the
@@ -2414,7 +2168,7 @@ impl ZettaCacheState {
         self.operation_log
             .push(OperationLogEntry::Insert(key, value));
 
-        let write_permit = self.outstanding_writes.clone().try_read_owned().unwrap();
+        let write_permit = self.outstanding_writes.acquire();
 
         let block_access = self.block_access.clone();
         future::Either::Right(async move {
@@ -2432,6 +2186,8 @@ impl ZettaCacheState {
 
             // It's now OK to read from this location.
             drop(locked_key);
+
+            Ok(())
         })
     }
 
@@ -2450,6 +2206,7 @@ impl ZettaCacheState {
         old_index: IndexRunPhys,
         new_index: Option<IndexRunPhys>,
         completed_merge: bool,
+        pool_guids: PoolGuidMappingPhys,
     ) {
         debug!(
             "flushing checkpoint {:?}",
@@ -2465,25 +2222,6 @@ impl ZettaCacheState {
         );
 
         let begin_checkpoint = Instant::now();
-
-        // Wait for all outstanding reads, so that if we free the space they are
-        // reading, it can't be overwritten until after the read completes.
-        let begin = Instant::now();
-        self.outstanding_reads.write().await;
-        debug!(
-            "waited for outstanding_reads in {}ms",
-            begin.elapsed().as_millis()
-        );
-
-        // Wait for all outstanding writes, so that if we crash, the blocks
-        // referenced by the index/operation_log will actually have the correct
-        // contents.
-        let begin = Instant::now();
-        self.outstanding_writes.write().await;
-        debug!(
-            "waited for outstanding_writes in {}ms",
-            begin.elapsed().as_millis()
-        );
 
         debug!(
             "{:?} pending changes at checkpoint",
@@ -2517,7 +2255,7 @@ impl ZettaCacheState {
 
         let checkpoint = ZettaCheckpointPhys {
             generation: self.primary.checkpoint_id.next(),
-            pool_guids: self.pool_guids.clone(),
+            pool_guids,
             extent_allocator: self.extent_allocator.get_phys(),
             old_index,
             operation_log: operation_log_phys,
@@ -2539,7 +2277,7 @@ impl ZettaCacheState {
             checkpoint.claim(&mut checkpoint_extents);
             let checkpoint_bytes = checkpoint_extents.allocatable_bytes();
             let allocator_bytes = self.extent_allocator.allocatable_bytes();
-            if allocator_bytes + *DEFAULT_EXTENT_SIZE * 4 < checkpoint_bytes {
+            if allocator_bytes + DEFAULT_EXTENT_SIZE.as_u64() * 4 < checkpoint_bytes {
                 warn!("possible leak of metadata space: {} available according to checkpoint but not in memory",
                     nice_p2size(checkpoint_bytes - allocator_bytes));
             }
@@ -2626,8 +2364,8 @@ impl ZettaCacheState {
         mut next_index: IndexRun,
     ) -> mpsc::Receiver<MergeMessage> {
         // The checkpoint task will be constantly reading from the channel, so we don't really need
-        // much of a buffer here. We use 100 because we might accumulate some messages while actually
-        // flushing out the checkpoint.
+        // much of a buffer here. We use 100 because we might accumulate some messages while
+        // actually flushing out the checkpoint.
         let (index_tx, checkpoint_rx) = mpsc::channel(100);
         let (merge_tx, index_rx) = mpsc::channel(100);
 
@@ -2635,18 +2373,19 @@ impl ZettaCacheState {
         let spawn_merge = merge.clone();
         let start_key = next_index.last_key();
 
-        tokio::spawn(async move {
+        measure!("MergeState::merge_task()").spawn(async move {
             spawn_merge
                 .merge_task(merge_tx, old_index, start_key, &block_access)
                 .await;
         });
 
-        tokio::spawn(async move {
+        measure!("MergeState::next_index_task()").spawn(async move {
             merge
                 .next_index_task(index_rx, index_tx.clone(), &mut next_index)
                 .await;
 
-            // We drop this before sending the Complete message, so that rotate_index() can unwrap the Arc.
+            // We drop this before sending the Complete message, so that rotate_index() can unwrap
+            // the Arc.
             drop(merge);
             // XXX - wait for the merge_task to complete as well?
 
@@ -2710,34 +2449,58 @@ impl ZettaCacheState {
         )
     }
 
+    fn need_merge(&self) -> bool {
+        let mut need_merge = false;
+
+        {
+            let used = self.pending_changes.len();
+            let max = self.pending_changes_trigger;
+            if used > max {
+                debug!("starting merge due to pending changes trigger {used} > {max}");
+                need_merge = true;
+            }
+        }
+
+        {
+            let used = self.block_allocator.size() - self.block_allocator.available();
+            let max = HIGH_WATER_CACHE_SIZE_PCT.apply(self.block_allocator.size());
+            if used > max {
+                debug!("starting merge due to high water cache size {used} > {max}");
+                need_merge = true;
+            }
+        }
+
+        {
+            let slabs = self.block_allocator.num_slabs_to_rebalance();
+            if slabs > 0 {
+                debug!("starting merge due to rebalance of {slabs} slabs");
+                need_merge = true;
+            }
+        }
+
+        need_merge
+    }
+
     /// Start a new merge task if there are enough pending changes
     async fn try_start_merge_task(
         &mut self,
         old_index: Arc<tokio::sync::RwLock<IndexRun>>,
     ) -> Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)> {
-        if self.pending_changes.len() < self.pending_changes_trigger
-            && self.block_allocator.size() - self.block_allocator.available()
-                < (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT
-            && !self.block_allocator.rebalance_needed()
-        {
-            trace!(
-                "not starting new merge, only {} pending changes",
-                self.pending_changes.len()
-            );
+        if !self.need_merge() {
             return None;
         }
 
         let used = self.block_allocator.size() - self.block_allocator.available();
-        let target_size = (self.block_allocator.size() / 100) * *TARGET_CACHE_SIZE_PCT;
+        let target_size = TARGET_CACHE_SIZE_PCT.apply(self.block_allocator.size());
         let target_reduction = used.checked_sub(target_size).unwrap_or_default();
         info!(
-            "target cache size for storage size {}GB is {}GB; {}MB used; {}MB high-water; {}MB freeing; histogram covers {}MB",
-            self.block_allocator.size() / 1024 / 1024 / 1024,
-            target_size / 1024 / 1024 / 1024,
-            used / 1024 / 1024,
-            (self.block_allocator.size() / 100) * *HIGH_WATER_CACHE_SIZE_PCT / 1024 / 1024,
-            self.block_allocator.freeing() / 1024 / 1024,
-            self.atime_histogram.sum_live() / 1024 / 1024,
+            "target cache size for storage size {} is {}; {} used; {} high-water; {} freeing; histogram covers {}",
+            nice_p2size(self.block_allocator.size()),
+            nice_p2size(target_size),
+            nice_p2size(used),
+            nice_p2size(HIGH_WATER_CACHE_SIZE_PCT.apply(self.block_allocator.size())),
+            nice_p2size(self.block_allocator.freeing()),
+            nice_p2size(self.atime_histogram.sum_live()),
         );
         self.stats
             .track_instantaneous(BlockAllocatorSize, self.block_allocator.size());
@@ -2753,7 +2516,7 @@ impl ZettaCacheState {
             .atime_for_eviction_target(target_reduction);
 
         let ghost_size = self.atime_histogram.sum_ghost() + target_reduction;
-        let ghost_target = (self.block_allocator.size() / 100) * *GHOST_CACHE_SIZE_PCT;
+        let ghost_target = GHOST_CACHE_SIZE_PCT.0.apply(self.block_allocator.size());
         let ghost_reduction = ghost_size.checked_sub(ghost_target).unwrap_or_default();
         let ghost_atime = self.atime_histogram.atime_for_ghost_target(ghost_reduction);
         debug!(
@@ -2797,6 +2560,19 @@ impl ZettaCacheState {
 
                 let log_phys = log.flush().await;
 
+                // We need to ensure that rebalance() won't copy from blocks that we're still in
+                // the middle of writing.  To solve a similar problem, we use the LockedKey to
+                // ensure that the reads from lookup() see new writes from insert().  We can't
+                // use that method here because we don't yet know what keys correspond to the map
+                // entries.  Here we simpy wait for all outstanding writes, which is not ideal to
+                // be doing with the state lock held, but it works.
+                let begin = Instant::now();
+                self.outstanding_writes.rotate().await;
+                debug!(
+                    "rebalance waited for outstanding_writes in {}ms",
+                    begin.elapsed().as_millis()
+                );
+
                 Some(RebalanceState { map, log_phys })
             }
         };
@@ -2836,17 +2612,20 @@ impl ZettaCacheState {
             for (key, pc) in self.pending_changes.iter_mut() {
                 match pc {
                     PendingChange::Insert(value) => {
-                        // Inserts in the "pending changes" list will never be moved as part of a rebalance.
+                        // Inserts in the "pending changes" list will never be moved as part of a
+                        // rebalance.
                         let extent = value.extent().unwrap();
                         assert_eq!(rebalance.remap(extent).unwrap(), extent.location);
                     }
                     PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                        // If a lookup occurs on a block that is being moved as part of rebalancing, the lookup will
-                        // return the "old" location of the block (which is valid while we are merging) and will be
-                        // stored in an UpdateAtime record in pending_changes. Now that the merge is complete, we need
-                        // to either: 1) remap these old locations to their "new" rebalanced locations, or 2) remove
-                        // the UpdateAtime due to rebalancing having had to evict the entry from the cache (i.e. due
-                        // to an allocation failure when attempting to allocate the new disk location).
+                        // If a lookup occurs on a block that is being moved as part of
+                        // rebalancing, the lookup will return the "old" location of the block
+                        // (which is valid while we are merging) and will be stored in an
+                        // UpdateAtime record in pending_changes. Now that the merge is complete,
+                        // we need to either: 1) remap these old locations to their "new"
+                        // rebalanced locations, or 2) remove the UpdateAtime due to rebalancing
+                        // having had to evict the entry from the cache (i.e. due to an
+                        // allocation failure when attempting to allocate the new disk location).
                         match rebalance.remap(value.extent().unwrap()) {
                             Some(location) => {
                                 value.set_location(Some(location));
@@ -2893,7 +2672,7 @@ impl ZettaCacheState {
     fn clear_hit_data(&mut self) {
         let cache_capacity = self.block_access.total_capacity();
         self.size_histogram = SizeHistogramPhys::new(
-            cache_capacity + cache_capacity / 100 * *GHOST_CACHE_SIZE_PCT,
+            cache_capacity + GHOST_CACHE_SIZE_PCT.0.apply(cache_capacity),
             cache_capacity,
             cache_capacity - self.block_allocator.size(),
             *QUANTILES_IN_SIZE_HISTOGRAM,

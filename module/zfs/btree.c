@@ -53,11 +53,7 @@ kmem_cache_t *zfs_btree_leaf_cache;
  * (while the asymptotic complexity of the other steps is the same, the
  * importance of the constant factors cannot be denied).
  */
-#ifdef ZFS_DEBUG
-int zfs_btree_verify_intensity = 5;
-#else
 int zfs_btree_verify_intensity = 0;
-#endif
 
 /*
  * A convenience function to silence warnings from memmove's return value and
@@ -163,7 +159,7 @@ zfs_btree_create(zfs_btree_t *tree, int (*compar) (const void *, const void *),
 	 */
 	ASSERT3U(size, <=, (BTREE_LEAF_SIZE - sizeof (zfs_btree_hdr_t)) / 4);
 
-	bzero(tree, sizeof (*tree));
+	memset(tree, 0, sizeof (*tree));
 	tree->bt_compar = compar;
 	tree->bt_elem_size = size;
 	tree->bt_height = -1;
@@ -381,7 +377,7 @@ bt_shift_core(zfs_btree_t *tree, zfs_btree_core_t *node, uint64_t idx,
 	int sign = (dir == BSD_LEFT ? -1 : +1);
 	uint8_t *e_out = e_start + sign * off * size;
 	uint64_t e_count = count;
-	bcopy(e_start, e_out, e_count * size);
+	bmov(e_start, e_out, e_count * size);
 
 	zfs_btree_hdr_t **c_start = node->btc_children + idx +
 	    (shape == BSS_TRAPEZOID ? 0 : 1);
@@ -540,7 +536,6 @@ zfs_btree_insert_into_parent(zfs_btree_t *tree, zfs_btree_hdr_t *old_node,
 	ASSERT3P(old_node->bth_parent, ==, new_node->bth_parent);
 	uint64_t size = tree->bt_elem_size;
 	zfs_btree_core_t *parent = old_node->bth_parent;
-	zfs_btree_hdr_t *par_hdr = &parent->btc_hdr;
 
 	/*
 	 * If this is the root node we were splitting, we create a new root
@@ -572,6 +567,7 @@ zfs_btree_insert_into_parent(zfs_btree_t *tree, zfs_btree_hdr_t *old_node,
 	 * Since we have the new separator, binary search for where to put
 	 * new_node.
 	 */
+	zfs_btree_hdr_t *par_hdr = &parent->btc_hdr;
 	zfs_btree_index_t idx;
 	ASSERT(par_hdr->bth_core);
 	VERIFY3P(zfs_btree_find_in_buf(tree, parent->btc_elems,
@@ -1902,7 +1898,8 @@ static uint64_t
 zfs_btree_verify_counts_helper(zfs_btree_t *tree, zfs_btree_hdr_t *hdr)
 {
 	if (!hdr->bth_core) {
-		if (tree->bt_root != hdr && hdr != &tree->bt_bulk->btl_hdr) {
+		if (tree->bt_root != hdr && tree->bt_bulk &&
+		    hdr != &tree->bt_bulk->btl_hdr) {
 			uint64_t capacity = P2ALIGN((BTREE_LEAF_SIZE -
 			    sizeof (zfs_btree_hdr_t)) / tree->bt_elem_size, 2);
 			VERIFY3U(hdr->bth_count, >=, (capacity / 2) - 1);

@@ -69,7 +69,7 @@ function setup_filesystem #disklist #pool #fs #mntpoint #type #vdev
 	fi
 
 	poolexists $pool || \
-		create_pool -p $pool -d "$vdev $disklist"
+		create_pool -p $pool -d "$vdev $disklist" -e "-f"
 
 	datasetexists $pool/$fs && \
 		log_must cleanup_filesystem $pool $fs

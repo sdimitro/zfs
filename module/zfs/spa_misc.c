@@ -537,7 +537,7 @@ spa_config_write_wanted(spa_t *spa, int locks)
  * will not check for any waiting writers and could lead to starvation.
  */
 void
-spa_config_enter_read_priority(spa_t *spa, int locks, const void *tag)
+spa_config_enter_read_priority(spa_t *spa, int locks)
 {
 	ASSERT3U(SCL_LOCKS, <, sizeof (int) * NBBY);
 
@@ -1555,8 +1555,7 @@ spa_strdup(const char *s)
 
 	len = strlen(s);
 	new = kmem_alloc(len + 1, KM_SLEEP);
-	bcopy(s, new, len);
-	new[len] = '\0';
+	memcpy(new, s, len + 1);
 
 	return (new);
 }
@@ -2644,7 +2643,7 @@ spa_scan_get_stats(spa_t *spa, pool_scan_stat_t *ps)
 
 	if (scn == NULL || scn->scn_phys.scn_func == POOL_SCAN_NONE)
 		return (SET_ERROR(ENOENT));
-	bzero(ps, sizeof (pool_scan_stat_t));
+	memset(ps, 0, sizeof (pool_scan_stat_t));
 
 	/* data stored on disk */
 	ps->pss_func = scn->scn_phys.scn_func;

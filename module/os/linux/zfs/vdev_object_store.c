@@ -62,8 +62,8 @@ int vdev_object_store_max_frees = 100000;
 /*
  * Counters for tracking partial writes and retries.
  */
-static int partial_write_counter = 0;
-static int write_retry_counter = 0;
+static uint64_t partial_write_counter = 0;
+static uint64_t write_retry_counter = 0;
 
 /* Taskq used for agent_resume. */
 taskq_t *resume_taskq;
@@ -319,7 +319,7 @@ zfs_object_store_receive(vdev_object_store_t *vos, kvec_t *iov,
 		return (SET_ERROR(-ENOTCONN));
 	}
 
-	size_t recvd = ksock_receive(vos->vos_sock, &msg, iov, iovcnt,
+	ssize_t recvd = ksock_receive(vos->vos_sock, &msg, iov, iovcnt,
 	    size, flags);
 	rw_exit(&vos->vos_sock_rwlock);
 	return (recvd);
@@ -343,8 +343,7 @@ zfs_object_store_send(vdev_object_store_t *vos, kvec_t *iov, int iovcnt,
 }
 
 static int
-agent_read_all(vdev_object_store_t *vos, void *buf,
-    size_t len)
+agent_read_all(vdev_object_store_t *vos, void *buf, size_t len)
 {
 	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
 	size_t recvd_total = 0;
@@ -368,26 +367,22 @@ agent_read_all(vdev_object_store_t *vos, void *buf,
 		if (!locked)
 			mutex_exit(&vos->vos_lock);
 
-		size_t recvd = zfs_object_store_receive(vos,
+		ssize_t recvd = zfs_object_store_receive(vos,
 		    &iov, 1, len - recvd_total, 0);
 		if (recvd > 0) {
 			recvd_total += recvd;
 			if (recvd_total < len &&
 			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
 				zfs_dbgmsg("incomplete recvmsg but trying for "
-				    "more len=%d recvd=%d recvd_total=%d",
-				    (int)len,
-				    (int)recvd,
-				    (int)recvd_total);
+				    "more len=%zu recvd=%zd  "
+				    "recvd_total=%zu",
+				    len, recvd, recvd_total);
 			}
 		} else {
 			zfs_dbgmsg("got wrong length from agent socket: "
-			    "for total size %d, already received %d, "
-			    "expected up to %d got %d",
-			    (int)len,
-			    (int)recvd_total,
-			    (int)(len - recvd_total),
-			    (int)recvd);
+			    "for total size %zu, already received %zu, "
+			    "expected up to %zu got %zd",
+			    len, recvd_total, (len - recvd_total), recvd);
 			/* XXX - Do we need to check for errors too? */
 			if (recvd == 0)
 				return (SET_ERROR(EAGAIN));
@@ -439,9 +434,9 @@ static int
 agent_write_all(vdev_object_store_t *vos, message_header_t *header,
     void *struct_buf, void *payload_buf)
 {
-	uint64_t total_size = sizeof (*header) +
+	size_t total_size = sizeof (*header) +
 	    header->struct_len + header->payload_len;
-	uint64_t write_total = 0;
+	size_t write_total = 0;
 	kvec_t iov[3] = {};
 	boolean_t locked = MUTEX_HELD(&vos->vos_lock);
 
@@ -450,7 +445,7 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 	while (write_total < total_size) {
 		int iov_count;
 		if (write_total < sizeof (*header)) {
-			uint64_t already_written = write_total;
+			size_t already_written = write_total;
 			iov_count = 3;
 			iov[0].iov_base = ((char *)header) + already_written;
 			iov[0].iov_len = sizeof (*header) - already_written;
@@ -460,7 +455,7 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 			iov[2].iov_len = header->payload_len;
 		} else if (write_total <
 		    sizeof (*header) + header->struct_len) {
-			uint64_t already_written =
+			size_t already_written =
 			    write_total - sizeof (*header);
 			iov_count = 2;
 			iov[0].iov_base = struct_buf + already_written;
@@ -468,7 +463,7 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 			iov[1].iov_base = payload_buf;
 			iov[1].iov_len = header->payload_len;
 		} else {
-			uint64_t already_written =
+			size_t already_written =
 			    write_total - sizeof (*header) - header->struct_len;
 			iov_count = 1;
 			iov[0].iov_base = payload_buf + already_written;
@@ -498,11 +493,11 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 					write_retry_counter++;
 					zfs_dbgmsg("got ERESTARTSYS "
 					    "writing to socket, "
-					    "write_retry_counter: %d",
-					    write_retry_counter);
+					    "write_retry_counter: %llu",
+					    (u_longlong_t)write_retry_counter);
 				} else {
 					zfs_dbgmsg("error sending message to "
-					    "agent socket: %d", (int)sent);
+					    "agent socket: %zd", sent);
 				}
 			}
 		} while (sent == -ERESTARTSYS);
@@ -511,25 +506,20 @@ agent_write_all(vdev_object_store_t *vos, message_header_t *header,
 			if ((write_total < total_size) &&
 			    (zfs_flags & ZFS_DEBUG_OBJECT_STORE)) {
 				partial_write_counter++;
-				zfs_dbgmsg("incomplete ksock_send len=%d "
-				    "sent=%d write_total=%d "
-				    "partial_write_counter=%d",
-				    (int)total_size,
-				    (int)sent,
-				    (int)write_total,
-				    (int)partial_write_counter);
+				zfs_dbgmsg("incomplete ksock_send len=%zu "
+				    "sent=%zd write_total=%zu "
+				    "partial_write_counter=%llu",
+				    total_size, sent, write_total,
+				    (u_longlong_t)partial_write_counter);
 			}
 		} else if (sent == 0) {
-			zfs_dbgmsg("agent restarted when writing len=%d, "
-			    "write_total=%d",
-			    (int)total_size,
-			    (int)write_total);
+			zfs_dbgmsg("agent restarted when writing len=%zu, "
+			    "write_total=%zu", total_size, write_total);
 			return (SET_ERROR(EAGAIN));
 		} else {
 			zfs_dbgmsg("error sending message to agent socket: "
-			    "for total_size=%d, got %d",
-			    (int)total_size,
-			    (int)sent);
+			    "for total_size=%zu, got %zd",
+			    total_size, sent);
 			return (SET_ERROR(EAGAIN));
 		}
 	}
@@ -1052,7 +1042,7 @@ agent_resume_state_check(vdev_t *vd)
 		return (0);
 	}
 
-	if (bcmp(&vd->vdev_spa->spa_ubsync, &vos->vos_uberblock,
+	if (memcmp(&vd->vdev_spa->spa_ubsync, &vos->vos_uberblock,
 	    sizeof (uberblock_t)) == 0) {
 		return (0);
 	}
@@ -1063,7 +1053,7 @@ agent_resume_state_check(vdev_t *vd)
 		 * continue by sending the "end txg" command again, without
 		 * doing "resume txg".
 		 */
-		if (bcmp(&vd->vdev_spa->spa_uberblock, &vos->vos_uberblock,
+		if (memcmp(&vd->vdev_spa->spa_uberblock, &vos->vos_uberblock,
 		    sizeof (uberblock_t)) == 0) {
 			zfs_dbgmsg("resume: uberblock matches spa_uberblock; "
 			    "calling TXG_END again");
@@ -1648,7 +1638,7 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 			    AGENT_UBERBLOCK, &arr, &len);
 			if (err == 0) {
 				ASSERT3U(len, <=, sizeof (uberblock_t));
-				bcopy(arr, &vos->vos_uberblock, len);
+				memcpy(&vos->vos_uberblock, arr, len);
 
 				/*
 				 * We may be opening an uberblock from a pool
@@ -1658,8 +1648,8 @@ agent_nvlist_response(vdev_object_store_t *vos, nvlist_t *nv)
 				 * written.
 				 */
 				if (len < sizeof (uberblock_t)) {
-					bzero(&vos->vos_uberblock + len,
-					    sizeof (uberblock_t) - len);
+					memset(&vos->vos_uberblock + len,
+					    0, sizeof (uberblock_t) - len);
 				}
 				VERIFY0(nvlist_lookup_uint8_array(nv,
 				    AGENT_CONFIG, &arr, &len));
@@ -2019,6 +2009,7 @@ pending_stats_compare(const void *x1, const void *x2)
 static int
 vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 {
+	(void) spa;
 	vdev_object_store_t *vos;
 	char *val = NULL;
 
@@ -2300,10 +2291,10 @@ vdev_object_store_io_start(zio_t *zio)
 	mutex_exit(&vos->vos_sock_lock);
 }
 
-/* ARGSUSED */
 static void
 vdev_object_store_io_done(zio_t *zio)
 {
+	(void) zio;
 }
 
 static void
@@ -2328,6 +2319,7 @@ static void
 vdev_object_store_metaslab_init(vdev_t *vd, metaslab_t *msp,
     uint64_t *ms_start, uint64_t *ms_size)
 {
+	(void) ms_start, (void) ms_size;
 	vdev_object_store_t *vos = vd->vdev_tsd;
 	msp->ms_lbas[0] = vos->vos_next_block;
 }

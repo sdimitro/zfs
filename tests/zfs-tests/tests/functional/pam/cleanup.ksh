@@ -22,6 +22,11 @@
 
 . $STF_SUITE/tests/functional/pam/utilities.kshlib
 
+# Do not cleanup if setup was not successfull
+if ! which pamtester; then
+        log_unsupported "pam tests require the pamtester utility to be installed"
+fi
+
 rmconfig
 destroy_pool $TESTPOOL
 del_user ${username}

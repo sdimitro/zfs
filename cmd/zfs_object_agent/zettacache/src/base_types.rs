@@ -1,11 +1,14 @@
-use more_asserts::*;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::borrow::Borrow;
 use std::fmt::*;
 use std::num::NonZeroU64;
 use std::ops::Add;
 use std::ops::Sub;
+
+use more_asserts::*;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
+use util::From64;
 
 /*
  * Things that are stored on disk.
@@ -22,10 +25,6 @@ impl Display for PoolGuid {
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
-pub struct PoolId(pub u8);
-impl OnDisk for PoolId {}
-
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct BlockId(pub u64);
 impl OnDisk for BlockId {}
 impl Display for BlockId {
@@ -36,6 +35,20 @@ impl Display for BlockId {
 impl BlockId {
     pub fn next(&self) -> BlockId {
         BlockId(self.0 + 1)
+    }
+}
+impl Sub<BlockId> for BlockId {
+    type Output = usize;
+
+    fn sub(self, rhs: BlockId) -> Self::Output {
+        usize::from64(self.0 - rhs.0)
+    }
+}
+impl Add<usize> for BlockId {
+    type Output = Self;
+
+    fn add(self, rhs: usize) -> Self::Output {
+        Self(self.0 + rhs as u64)
     }
 }
 
@@ -53,7 +66,7 @@ impl DiskId {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 #[repr(packed)]
 pub struct DiskLocation(NonZeroU64);
 impl DiskLocation {
@@ -104,6 +117,14 @@ impl Sub<DiskLocation> for DiskLocation {
     fn sub(self, rhs: DiskLocation) -> Self::Output {
         assert_eq!(self.disk(), rhs.disk());
         self.offset() - rhs.offset()
+    }
+}
+impl Debug for DiskLocation {
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result {
+        f.debug_struct("DiskLocation")
+            .field("disk", &self.disk())
+            .field("offset", &self.offset())
+            .finish()
     }
 }
 

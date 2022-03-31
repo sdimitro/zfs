@@ -124,9 +124,9 @@ typeset -i guid_bit=0
 typeset basedir
 
 if use_object_store; then
-	typeset -A opts ""
+	set -A opts ""
 else
-	typeset -A opts "" "-Df"
+	set -A opts "" "-Df"
 fi
 
 for option in "${opts[*]}"; do
@@ -171,14 +171,14 @@ for option in "${opts[*]}"; do
 					fi
 					log_note "Import with $nfs_flag and " \
 					    "$guid_flag"
-					zpool import $option ${devs[i]} \
-					    ${options[j]} $target
+					import_pool -s "${devs[i]}" -e "$option ${options[j]}" \
+					    -p "$target"
 					#import by GUID if import by pool name fails
 					if [[ $? != 0 ]]; then
 						log_note "Possible pool name" \
 						    "duplicates. Try GUID import"
 						target=$guid
-						log_must import_pool -s "-d ${devs[i]}" \
+						log_must import_pool -s "${devs[i]}" \
 							-e "$option ${options[j]}" \
 							-p $target
 					fi

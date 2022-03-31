@@ -1,17 +1,20 @@
-use crate::base_types::ObjectId;
-use crate::data_object::DataObject;
-use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
-use crate::ObjectAccess;
+use std::collections::VecDeque;
+use std::sync::Arc;
+use std::time::Instant;
+
 use derivative::Derivative;
 use futures::stream;
 use log::info;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::VecDeque;
-use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::mpsc;
+use util::measure;
 use zettacache::base_types::PoolGuid;
+
+use crate::base_types::ObjectId;
+use crate::data_object::DataObject;
+use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
+use crate::ObjectAccess;
 
 pub struct ObjectDeleter {
     // objects to delete at the end of this txg
@@ -77,7 +80,7 @@ impl ObjectDeleter {
         };
 
         if !object_access.readonly() {
-            tokio::spawn(Self::delete_task(
+            measure!("ObjectDeleter::delete_task()").spawn(Self::delete_task(
                 object_access,
                 guid,
                 initiation_rx,
@@ -114,8 +117,8 @@ impl ObjectDeleter {
         )
     }
 
-    /// Notify that the txg has been synced, so we can now start deleting the objects that were pushed.
-    /// Panics if called with a readonly ObjectAccess.
+    /// Notify that the txg has been synced, so we can now start deleting the objects that were
+    /// pushed. Panics if called with a readonly ObjectAccess.
     pub fn sync_done(&mut self) {
         if let Some(objects_to_delete) = self.objects_to_delete.take() {
             self.obsolete_objects.extend(&objects_to_delete);

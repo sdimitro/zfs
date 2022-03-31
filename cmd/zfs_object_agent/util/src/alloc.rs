@@ -1,13 +1,27 @@
-use crate::get_tunable;
-use backtrace::Backtrace;
-use lazy_static::lazy_static;
-use std::alloc::{GlobalAlloc, Layout, System};
+use std::alloc::GlobalAlloc;
+use std::alloc::Layout;
+use std::alloc::System;
 use std::cell::Cell;
 use std::collections::HashMap;
-use std::fmt::{self, Display};
+use std::fmt;
+use std::fmt::Display;
 use std::hash::Hash;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::sync::Mutex;
+
+use backtrace::Backtrace;
+use lazy_static::lazy_static;
+
+use crate::tunable::get_tunable;
+
+lazy_static! {
+    pub static ref ALLOCATOR_PRINT_MIN_BYTES: u64 =
+        get_tunable("allocator_print_min_bytes", 1024 * 1024);
+    pub static ref ALLOCATOR_PRINT_MIN_ALLOCS: u64 =
+        get_tunable("allocator_print_min_allocs", 1_000_000);
+}
 
 pub struct TrackingAllocator;
 thread_local! {
@@ -131,7 +145,8 @@ impl PerAllocInfo {
                         if gather_backtrace {
                             Key::from_backtrace(&Backtrace::new_unresolved())
                         } else {
-                            // Computing the backtrace is too expensive; don't track this allocation.
+                            // Computing the backtrace is too expensive; don't track this
+                            // allocation.
                             return Default::default();
                         }
                     } else if ALLOC_TAG_OTHER.load(Ordering::Relaxed) {
@@ -197,7 +212,7 @@ unsafe impl GlobalAlloc for TrackingAllocator {
         // Note: allocating memory here could result in infinite recursion, and must be avoided.
         let (new_layout, info_offset) = new_layout(layout);
         let info_ptr = ptr.offset(info_offset) as *const PerAllocInfo;
-        (&*info_ptr).decrement(layout);
+        (*info_ptr).decrement(layout);
 
         System.dealloc(ptr, new_layout)
     }

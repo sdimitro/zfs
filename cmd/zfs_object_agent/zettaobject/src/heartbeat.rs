@@ -1,30 +1,38 @@
-use crate::object_access::{OAError, ObjectAccess, ObjectAccessOpType};
-use crate::pool::CLAIM_DURATION;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Weak;
+use std::time::Duration;
+use std::time::Instant;
+use std::time::SystemTime;
+
 use anyhow::Context;
 use lazy_static::lazy_static;
-use log::{debug, error, info, trace, warn};
-use serde::{Deserialize, Serialize};
-use std::{
-    collections::{hash_map::Entry, HashMap},
-    sync::{Arc, Weak},
-    time::{Duration, Instant, SystemTime},
-};
-use tokio::sync::watch::{self, Receiver};
-use util::get_tunable;
+use log::debug;
+use log::error;
+use log::info;
+use log::trace;
+use log::warn;
+use serde::Deserialize;
+use serde::Serialize;
+use tokio::sync::watch;
+use tokio::sync::watch::Receiver;
 use util::maybe_die_with;
+use util::tunable;
 use uuid::Uuid;
 
-lazy_static! {
-    pub static ref LEASE_DURATION: Duration =
-        Duration::from_millis(get_tunable("lease_duration_ms", 50_000));
-    pub static ref HEARTBEAT_INTERVAL: Duration =
-        Duration::from_millis(get_tunable("heartbeat_interval_ms", 1_000));
-    pub static ref WRITE_TIMEOUT: Duration =
-        Duration::from_millis(get_tunable("write_timeout_ms", 2_000));
-    pub static ref HEARTBEAT_PANIC: bool = get_tunable("heartbeat_panic", true);
-    pub static ref INTERVAL_PANIC: bool = get_tunable("interval_panic", false);
-    pub static ref HEARTBEAT_TIMEOUT: Duration =
-        get_tunable("heartbeat_timeout", *LEASE_DURATION / 5);
+use crate::object_access::OAError;
+use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessOpType;
+use crate::pool::CLAIM_DURATION;
+
+tunable! {
+    pub static ref LEASE_DURATION: Duration = Duration::from_secs(50);
+    pub static ref HEARTBEAT_INTERVAL: Duration = Duration::from_secs(1);
+    pub static ref WRITE_TIMEOUT: Duration = Duration::from_secs(2);
+    pub static ref HEARTBEAT_PANIC: bool = true;
+    pub static ref INTERVAL_PANIC: bool = false;
+    pub static ref HEARTBEAT_TIMEOUT: Duration = *LEASE_DURATION / 5;
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
@@ -42,7 +50,7 @@ impl HeartbeatPhys {
 
     pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
         let buf = object_access
-            .get_object_from_s3(Self::key(id), ObjectAccessOpType::MetadataGet, None)
+            .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;
         let this: Self = serde_json::from_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
@@ -63,7 +71,8 @@ impl HeartbeatPhys {
             .put_object_timed(
                 Self::key(self.id),
                 buf.into(),
-                // XXX should this be its own stat type so that it has its own queue in the ObjectAccess layer?
+                // XXX should this be its own stat type so that it has its own queue in the
+                // ObjectAccess layer?
                 ObjectAccessOpType::MetadataPut,
                 timeout,
             )
@@ -86,10 +95,10 @@ pub struct HeartbeatGuard {
     /*
      * When we're resuming the agent after a crash, this field will be set if we go more than
      * LEASE_TIMEOUT without sending a heartbeat. When the agent's heartbeat stops for more than
-     * that time, other systems may start the claim process on pools owned by this agent. When the
-     * heartbeat restarts after the agent starts again, new claim attempts that come in will fail,
-     * but in progress ones may succeed. We don't consider the news about the agent's revival fully
-     * propogated until the valid_time.
+     * that time, other systems may start the claim process on pools owned by this agent. When
+     * the heartbeat restarts after the agent starts again, new claim attempts that come in
+     * will fail, but in progress ones may succeed. We don't consider the news about the
+     * agent's revival fully propogated until the valid_time.
      */
     pub valid_after: Option<Instant>,
 }
@@ -127,7 +136,8 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
                     .unwrap()
                     .insert(key.clone(), rx.clone());
                 (
-                    // We will update this hiccup time once we've managed to write our first heartbeat.
+                    // We will update this hiccup time once we've managed to write our first
+                    // heartbeat.
                     HeartbeatGuard {
                         _key: value,
                         valid_after: None,
@@ -143,8 +153,8 @@ pub async fn start_heartbeat(object_access: Arc<ObjectAccess>, id: Uuid) -> Hear
                     None => {
                         /*
                          * In this case, there is already a heartbeat thread that would terminate
-                         * on its next iteration. Replace the existing weak ref with a new one, and
-                         * let it keep running.
+                         * on its next iteration. Replace the existing weak ref with a new one,
+                         * and let it keep running.
                          */
                         let value = Arc::new(());
                         let time = *hiccup_time;

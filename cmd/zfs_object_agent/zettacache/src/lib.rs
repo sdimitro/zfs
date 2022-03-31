@@ -13,17 +13,18 @@ mod block_based_log;
 mod extent_allocator;
 mod features;
 mod index;
+mod pool_id;
 mod size_histogram;
 mod space_map;
 mod superblock;
 mod zcachedb;
 mod zettacache;
 
-pub use crate::zettacache::InsertSource;
-pub use crate::zettacache::LookupOperation;
-pub use crate::zettacache::LookupResponse;
-pub use crate::zettacache::LookupSource;
-pub use crate::zettacache::ZettaCache;
 pub use zcachedb::DumpSlabsOptions;
 pub use zcachedb::DumpStructuresOptions;
 pub use zcachedb::ZettaCacheDBCommand;
+
+pub use crate::zettacache::InsertSource;
+pub use crate::zettacache::LookupOperation;
+pub use crate::zettacache::LookupResponse;
+pub use crate::zettacache::ZettaCache;

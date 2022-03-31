@@ -31,27 +31,33 @@ export PERF_FIO_FORMAT=${PERF_FIO_FORMAT:-'json'}
 export PERF_FS_OPTS=${PERF_FS_OPTS:-'-o recsize=8k -o compress=lz4' \
     ' -o checksum=sha256 -o redundant_metadata=most'}
 
-# Set up the scripts and output files that will log performance data.
+# Set up the scripts and output files that will log performance data. Each
+# script specified here must include a means by which to terminate after
+# $PERF_RUNTIME seconds have elapsed.
 if is_linux; then
         export default_collect_scripts=(
-	    "zpool iostat -Td -lpvyL $PERFPOOL 1" "zpool.iostat"
-	    "vmstat -t 1" "vmstat"
-	    "mpstat -P ALL -o JSON 1" "mpstat"
-	    "iostat -ptdxyz -o JSON 1" "iostat"
-	    "arcstat 1" "arcstat"
-	    "dstat -at --nocolor 1" "dstat"
+	    "zpool iostat -Td -lpvyL $PERFPOOL 1 $PERF_RUNTIME" "zpool.iostat"
+	    "vmstat -t 1 $PERF_RUNTIME" "vmstat"
+	    "mpstat -P ALL -o JSON 1 $PERF_RUNTIME" "mpstat"
+	    "iostat -ptdxyz -o JSON 1 $PERF_RUNTIME" "iostat"
+	    "arcstat 1 $PERF_RUNTIME" "arcstat"
+	    "dstat -at --nocolor 1 $PERF_RUNTIME" "dstat"
 	    "$PERF_RECORD_CMD" "perf"
 	)
 	if use_object_store; then
 		default_collect_scripts+=(
-		    "zcache iostat -adt 1" "zcache.iostat.adt"
-		    "zcache iostat -ldt 1" "zcache.iostat.ldt"
-		    "zcache iostat -rdt 1" "zcache.iostat.rdt"
-		    "zcache stats -ap 1" "zcache.stats.ap"
-		    "zpool iostat -Td -py -ol $PERFPOOL 1" "zpool.iostat.ol"
-		    "zpool iostat -Td -py -oq $PERFPOOL 1" "zpool.iostat.oq"
-		    "zpool iostat -Td -py -or $PERFPOOL 1" "zpool.iostat.or"
-		    "zpool iostat -Td -py -ow $PERFPOOL 1" "zpool.iostat.ow"
+		    "zcache iostat -adt 1 $PERF_RUNTIME" "zcache.iostat.adt"
+		    "zcache iostat -ldt 1 $PERF_RUNTIME" "zcache.iostat.ldt"
+		    "zcache iostat -rdt 1 $PERF_RUNTIME" "zcache.iostat.rdt"
+		    "zcache stats -ap 1 $PERF_RUNTIME" "zcache.stats.ap"
+		    "zpool iostat -Td -py -ol $PERFPOOL 1 $PERF_RUNTIME"
+		        "zpool.iostat.ol"
+		    "zpool iostat -Td -py -oq $PERFPOOL 1 $PERF_RUNTIME"
+		        "zpool.iostat.oq"
+		    "zpool iostat -Td -py -or $PERFPOOL 1 $PERF_RUNTIME"
+		        "zpool.iostat.or"
+		    "zpool iostat -Td -py -ow $PERFPOOL 1 $PERF_RUNTIME"
+		        "zpool.iostat.ow"
 		)
 	fi
 fi
@@ -286,14 +292,9 @@ function do_collect_scripts
 		typeset tag="${default_collect_scripts[$idx + 1]}"
 		typeset outfile="$logbase.$tag.$suffix"
 
-		timeout $PERF_RUNTIME \
-		    ${default_collect_scripts[$idx]} >$outfile 2>&1 &
+		${default_collect_scripts[$idx]} >$outfile 2>&1 &
 		((idx += 2))
 	done
-
-	# Need to explicitly return 0 because timeout(1) will kill
-	# a child process and cause us to return non-zero.
-	return 0
 }
 
 # Find a place to deposit performance data collected while under load.

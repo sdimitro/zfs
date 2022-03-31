@@ -32,9 +32,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <sys/types.h>
 
 /* Set to non-zero to avoid abort()ing on an assertion failure */
-extern int libspl_assert_ok;
+extern void libspl_set_assert_ok(boolean_t val);
 
 /* printf version of libspl_assert */
 extern void libspl_assertf(const char *file, const char *func, int line,
@@ -110,14 +111,6 @@ do {									\
 #ifdef assert
 #undef assert
 #endif
-
-/* Compile time assert */
-#define	CTASSERT_GLOBAL(x)		_CTASSERT(x, __LINE__)
-#define	CTASSERT(x)			{ _CTASSERT(x, __LINE__); }
-#define	_CTASSERT(x, y)			__CTASSERT(x, y)
-#define	__CTASSERT(x, y)						\
-	typedef char __attribute__((unused))				\
-	__compile_time_assertion__ ## y[(x) ? 1 : -1]
 
 #ifdef NDEBUG
 #define	ASSERT3B(x, y, z)						\

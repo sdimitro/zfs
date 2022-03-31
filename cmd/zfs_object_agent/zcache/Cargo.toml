@@ -11,9 +11,8 @@ publish = false
 anyhow = "1.0"
 chrono = "0.4"
 async-trait = "0.1.51"
-clap = "2"
+clap={version="3.1.6",features=["derive"]}
 exitcode = "1.1.2"
-libc = "0.2"
 log = "0.4"
 more-asserts = "0.2.1"
 num-traits = "0.2.14"

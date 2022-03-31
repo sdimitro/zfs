@@ -39,8 +39,8 @@ fi
 # CI runs are returning a single device `sda` which
 # seems to be inuse and can't be partitioned
 #
-if [ -n "$CI" ] && [ "$CI" == "true" ]; then
-    log_unsupported "Test not supported for CI based run"
+if [ -n "$GITHUB_WORKFLOW" ]; then
+    log_unsupported "Test not supported for Github workflow based run"
 fi
 
 if grep -q "/dev/loop" <<< "$AVAILABLE_DEVICES"; then

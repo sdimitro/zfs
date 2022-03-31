@@ -50,13 +50,14 @@ function get_async_upgrade_sync
 	echo "$sync_wait"
 }
 
-if [ $# -ne 2 ]
+if [ $# -lt 2 ]
 then
-	echo "Usage: ${0##*/} poolname interval" >&2
+	echo "Usage: ${0##*/} poolname interval [count]" >&2
 	exit 1
 fi
 
 interval=$2
+count=$3
 prefetch_ios=$(get_prefetch_ios)
 prefetched_demand_reads=$(get_prefetched_demand_reads)
 async_upgrade_sync=$(get_async_upgrade_sync)
@@ -77,6 +78,15 @@ do
 	printf '%-24s\t%u\n' "async_upgrade_sync" \
 	    $(( new_async_upgrade_sync - async_upgrade_sync ))
 	async_upgrade_sync=$new_async_upgrade_sync
+
+	if [ -n "$count" ]
+	then
+		count=$((count - 1))
+		if [ "$count" -eq 0 ]
+		then
+			break
+		fi
+	fi
 
 	sleep "$interval"
 done

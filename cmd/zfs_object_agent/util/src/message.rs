@@ -1,6 +1,11 @@
+use std::mem::size_of;
+use std::ptr;
+use std::slice;
+
 use safer_ffi::prelude::*;
-use std::{mem::size_of, ptr, slice};
-use tokio::io::{self, AsyncReadExt, AsyncWriteExt};
+use tokio::io;
+use tokio::io::AsyncReadExt;
+use tokio::io::AsyncWriteExt;
 
 #[derive(Debug, Eq, PartialEq, Hash)]
 #[derive_ReprC]

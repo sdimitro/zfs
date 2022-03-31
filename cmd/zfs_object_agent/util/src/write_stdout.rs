@@ -11,18 +11,43 @@ to stdout/stderr returns an error (like `EPIPE`) rather than cause a panic.
 These replacement macros also introduce buffering when stdout is not pointing to
 tty, significantly improving the performance of utilities that redirect their
 output to files.
-
-DISCLAIMER: When the utility macros below are used to write to stdout it is
-important to call flush_stdout!() before the program exits successfully to flush
-any leftover data to non-tty endpoints (like pipes and regular files).
 !*/
 
+use std::io::BufWriter;
+use std::io::Write;
+use std::sync::Mutex;
+
 use lazy_static::lazy_static;
-use std::{io::BufWriter, sync::Mutex};
+use libc::atexit;
 
 lazy_static! {
-    pub static ref BUFFERED_STDOUT_HANDLE: Mutex<BufWriter<std::io::Stdout>> =
-        Mutex::new(BufWriter::new(std::io::stdout()));
+    pub static ref STDOUT: Mutex<Box<dyn std::io::Write + Send>> = {
+        if atty::is(atty::Stream::Stdout) {
+            Mutex::new(Box::new(std::io::stdout()))
+        } else {
+            // Ensure that any leftover data in the buffer are flushed before
+            // terminating the process.
+            unsafe { atexit(flush_stdout_atexit) };
+            Mutex::new(Box::new(BufWriter::new(std::io::stdout())))
+        }
+    };
+}
+
+extern "C" fn flush_stdout_atexit() {
+    match STDOUT.try_lock() {
+        Ok(mut hdl) => {
+            if let Err(e) = hdl.flush() {
+                crate::writeln_stderr!("{}", e);
+                std::process::exit(0);
+            }
+        }
+        Err(_) => {
+            crate::writeln_stderr!(
+                "CANNOT FLUSH STDOUT BUFFER BECAUSE ITS LOCK IS HELD BY ANOTHER THREAD"
+            );
+            std::process::exit(0);
+        }
+    };
 }
 
 pub extern crate atty;
@@ -33,13 +58,7 @@ pub extern crate atty;
 macro_rules! write_stdout {
     ($($arg:tt)*) => {{
         use std::io::Write;
-        let res = if $crate::write_stdout::atty::is($crate::write_stdout::atty::Stream::Stdout) {
-            write!(std::io::stdout(), $($arg)*)
-        } else {
-            let mut hdl = $crate::write_stdout::BUFFERED_STDOUT_HANDLE.lock().unwrap();
-            write!(hdl, $($arg)*)
-        };
-        if res.is_err() {
+        if let Err(_) = write!($crate::write_stdout::STDOUT.lock().unwrap(), $($arg)*) {
             std::process::exit(0)
         }
     }}
@@ -51,34 +70,14 @@ macro_rules! write_stdout {
 macro_rules! writeln_stdout {
 	($($arg:tt)*) => {{
         use std::io::Write;
-        let res = if $crate::write_stdout::atty::is($crate::write_stdout::atty::Stream::Stdout) {
-            writeln!(std::io::stdout(), $($arg)*)
-        } else {
-            let mut hdl = $crate::write_stdout::BUFFERED_STDOUT_HANDLE.lock().unwrap();
-            writeln!(hdl, $($arg)*)
-        };
-        if res.is_err() {
+        if let Err(_) = writeln!($crate::write_stdout::STDOUT.lock().unwrap(), $($arg)*) {
             std::process::exit(0)
         }
 	}}
 }
 
-/// Conventionally used at the end of main() so leftover buffer data are flushed
-/// to stdout. The macro terminates the process on write errors (does not panic).
-#[macro_export]
-macro_rules! flush_stdout {
-    () => {{
-        use std::io::Write;
-        let res = if !$crate::write_stdout::atty::is($crate::write_stdout::atty::Stream::Stdout) {
-            let mut hdl = $crate::write_stdout::BUFFERED_STDOUT_HANDLE.lock().unwrap();
-            hdl.flush()
-        } else {
-            Ok(())
-        };
-        if res.is_err() {
-            std::process::exit(0)
-        }
-    }};
+pub fn flush_stdout() -> Result<(), std::io::Error> {
+    crate::write_stdout::STDOUT.lock().unwrap().flush()
 }
 
 /// Similar to `eprint!` macro, except it terminates the process on write errors (does not panic).

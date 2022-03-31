@@ -1,15 +1,21 @@
-use serde::{Deserialize, Serialize};
 use std::time::SystemTime;
+
+use derivative::Derivative;
+use serde::Deserialize;
+use serde::Serialize;
 use util::From64;
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Clone, Derivative)]
+#[derivative(Debug)]
 pub struct SizeHistogramPhys {
     start: SystemTime,
     pub lookups: u64,
     pub cache_capacity: u64,
     pub meta_overhead: u64,
     pub bucket_size: u64,
+    #[derivative(Debug(format_with = "util::tersevec"))]
     pub live_histogram: Vec<u64>,
+    #[derivative(Debug(format_with = "util::tersevec"))]
     pub ghost_histogram: Vec<u64>,
 }
 
@@ -33,7 +39,8 @@ impl SizeHistogramPhys {
         }
     }
 
-    /// Record a "hit" in the appropriate size bucket (taking into account the cache metadata overhead)
+    /// Record a "hit" in the appropriate size bucket (taking into account the cache metadata
+    /// overhead)
     pub fn live_hit(&mut self, size_at_hit: u64) {
         let index = usize::from64((size_at_hit + self.meta_overhead) / self.bucket_size);
         // The histogram may not be large enough if we've expanded the capacity

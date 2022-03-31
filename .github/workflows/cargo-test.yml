@@ -1,0 +1,22 @@
+name: cargo-test
+on: [push, pull_request]
+jobs:
+  cargo-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+      - uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+      - run: |
+          sudo apt-get update
+          xargs --arg-file=${{ github.workspace }}/.github/workflows/build-dependencies.txt sudo apt-get install -qq
+          sudo apt-get clean
+
+          ./autogen.sh
+          ./configure --enable-debug --enable-debuginfo
+          make -j$(nproc) --no-print-directory --silent pkg-utils pkg-kmod
+
+          sudo dpkg -i *.deb
+      - run: cargo test
+        working-directory: ./cmd/zfs_object_agent

@@ -1,40 +1,44 @@
-use crate::base_types::*;
-use crate::features::FeatureError;
-use crate::object_access::{ObjectAccess, StatMapValue};
-use crate::pool::*;
-use crate::pool_destroy;
-use crate::server::return_result;
-use crate::server::ConnectionState;
-use crate::server::HandlerReturn;
-use crate::server::Responder;
-use crate::server::SerialHandlerReturn;
-use crate::server::Server;
-use crate::server::{handler_return_ok, FailureMessage};
+use std::collections::HashMap;
+use std::fmt::Debug;
+use std::sync::Arc;
+
 use anyhow::anyhow;
 use anyhow::Result;
 use bytes::Bytes;
 use derivative::Derivative;
 use futures::future;
-use lazy_static::lazy_static;
 use log::*;
 use nvpair::NvList;
 use semver::Version;
 use serde::Deserialize;
 use serde::Serialize;
-use std::collections::HashMap;
-use std::fmt::Debug;
-use std::sync::Arc;
 use util::maybe_die_with;
+use util::measure;
 use util::message::*;
+use util::super_trace;
+use util::tunable;
 use util::AlignedVec;
-use util::{get_tunable, super_trace};
 use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
-lazy_static! {
-    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 =
-        get_tunable("die_before_end_txg_response_pct", 0.0);
+use crate::base_types::*;
+use crate::features::FeatureError;
+use crate::object_access::ObjectAccess;
+use crate::object_access::StatMapValue;
+use crate::pool::*;
+use crate::pool_destroy;
+use crate::server::handler_return_ok;
+use crate::server::return_result;
+use crate::server::ConnectionState;
+use crate::server::FailureMessage;
+use crate::server::HandlerReturn;
+use crate::server::Responder;
+use crate::server::SerialHandlerReturn;
+use crate::server::Server;
+
+tunable! {
+    pub static ref DIE_BEFORE_END_TXG_RESPONSE_PCT: f64 = 0.0;
 }
 
 pub struct RootServerState {
@@ -183,7 +187,7 @@ impl RootConnectionState {
                     hostname: String,
                 },
                 Feature {
-                    invalid_features: Vec<String>,
+                    invalid_features: HashMap<String, String>,
                     can_readonly: bool,
                 },
                 Io {
@@ -208,7 +212,10 @@ impl RootConnectionState {
                     features,
                     can_readonly,
                 })) => Err(Failure::Feature {
-                    invalid_features: features.into_iter().map(|feature| feature.name).collect(),
+                    invalid_features: features
+                        .into_iter()
+                        .map(|feature| (feature.name, "".to_string()))
+                        .collect(),
                     can_readonly,
                 }),
                 Err(PoolOpenError::Get(e)) => {
@@ -312,7 +319,8 @@ impl RootConnectionState {
         #[derivative(Debug)]
         struct EndTxgRequest<'a> {
             #[serde(with = "serde_bytes")]
-            // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid filling the log unnecessarily.
+            // We're careful here to avoid dumping the "uberblock" and "config" fields to avoid
+            // filling the log unnecessarily.
             #[derivative(Debug = "ignore")]
             uberblock: &'a [u8],
             #[serde(with = "serde_bytes")]
@@ -378,14 +386,17 @@ impl RootConnectionState {
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
 
-        tokio::spawn(async move {
-            pool.write_block(BlockId(request.block), data.into()).await;
-            let response = WriteBlockResponse {
-                block: request.block,
-                token: request.token,
-            };
-            responder.respond_with_struct(MessageType::WriteBlock, &response, Bytes::new());
-        });
+        pool.write_block(
+            BlockId(request.block),
+            data.into(),
+            Box::new(move || {
+                let response = WriteBlockResponse {
+                    block: request.block,
+                    token: request.token,
+                };
+                responder.respond_with_struct(MessageType::WriteBlock, &response, Bytes::new());
+            }),
+        );
         Ok(())
     }
 
@@ -419,12 +430,12 @@ impl RootConnectionState {
             .as_ref()
             .ok_or_else(|| anyhow!("no pool open"))?
             .clone();
-        tokio::spawn(async move {
+        measure!("RootConnectionState::read_block").spawn(async move {
             let mut data = pool.read_block(BlockId(request.block), heal).await;
 
             //
-            // If the cache has the wrong content/size for this BlockId, then proactively do a healing read
-            // from the object store.
+            // If the cache has the wrong content/size for this BlockId, then proactively do a
+            // healing read from the object store.
             //
             if !heal && data.len() != request.size as usize {
                 debug!(

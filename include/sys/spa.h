@@ -977,7 +977,7 @@ extern int spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw);
 extern void spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw);
 extern void spa_config_exit(spa_t *spa, int locks, const void *tag);
 extern int spa_config_held(spa_t *spa, int locks, krw_t rw);
-extern void spa_config_enter_read_priority(spa_t *, int, const void *);
+extern void spa_config_enter_read_priority(spa_t *, int);
 extern int spa_config_write_wanted(spa_t *, int locks);
 
 /* Pool vdev add/remove lock */
@@ -1188,6 +1188,11 @@ extern int spa_wait_tag(const char *name, zpool_wait_activity_t activity,
     uint64_t tag, boolean_t *waited);
 extern void spa_notify_waiters(spa_t *spa);
 extern void spa_wake_waiters(spa_t *spa);
+
+extern void spa_import_os(spa_t *spa);
+extern void spa_export_os(spa_t *spa);
+extern void spa_activate_os(spa_t *spa);
+extern void spa_deactivate_os(spa_t *spa);
 
 /* module param call functions */
 int param_set_deadman_ziotime(ZFS_MODULE_PARAM_ARGS);

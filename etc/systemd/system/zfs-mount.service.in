@@ -9,6 +9,7 @@ ConditionPathIsDirectory=/sys/module/zfs
 [Service]
 Type=oneshot
 RemainAfterExit=yes
+EnvironmentFile=-@initconfdir@/zfs
 ExecStart=@sbindir@/zfs mount -a
 ExecStop=@sbindir@/zfs umount -a
 

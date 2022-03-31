@@ -1,17 +1,20 @@
-use crate::base_types::*;
-use crate::object_based_log::ObjectBasedLog;
-use crate::object_based_log::ObjectBasedLogEntry;
-use futures::future;
-use futures::StreamExt;
-use log::*;
-use more_asserts::*;
-use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use std::ops::Bound::*;
 use std::sync::RwLock;
 use std::time::Instant;
+
+use futures::future;
+use futures::StreamExt;
+use log::*;
+use more_asserts::*;
+use serde::Deserialize;
+use serde::Serialize;
 use util::with_alloctag;
 use zettacache::base_types::*;
+
+use crate::base_types::*;
+use crate::object_based_log::ObjectBasedLog;
+use crate::object_based_log::ObjectBasedLogEntry;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 // XXX make this private and make methods for everything that uses it

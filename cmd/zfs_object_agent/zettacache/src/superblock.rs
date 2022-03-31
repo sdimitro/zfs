@@ -1,18 +1,20 @@
 use std::collections::BTreeMap;
 
-use crate::base_types::*;
-use crate::block_access::*;
-use crate::features::FeatureName;
 use anyhow::anyhow;
 use anyhow::Result;
 use futures::stream::*;
 use log::*;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
+use serde::Serialize;
 use util::maybe_die_with;
 use util::nice_p2size;
 use util::writeln_stderr;
 use util::writeln_stdout;
 use util::zettacache_stats::DiskIoType;
+
+use crate::base_types::*;
+use crate::block_access::*;
+use crate::features::FeatureName;
 
 pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
 

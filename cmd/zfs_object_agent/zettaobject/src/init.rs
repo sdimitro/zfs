@@ -1,16 +1,21 @@
-use crate::pool_destroy;
-use crate::public_connection::PublicServerState;
-use crate::root_connection::RootServerState;
-use fs2::FileExt;
-use log::*;
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::fs::OpenOptions;
+use std::io::Read;
+use std::io::Write;
 use std::mem;
 use std::path::Path;
 use std::process;
+
+use fs2::FileExt;
+use log::*;
 use tokio::runtime::Runtime;
+use util::register_siguser1_to_dump_tracing;
 use uuid::Uuid;
 use zettacache::ZettaCache;
+
+use crate::pool_destroy;
+use crate::public_connection::PublicServerState;
+use crate::root_connection::RootServerState;
 
 fn lock_socket_dir(socket_dir: &str) {
     let lock_file = format!("{}/zoa.lock", socket_dir);
@@ -28,9 +33,10 @@ fn lock_socket_dir(socket_dir: &str) {
                     file.write_all(pid.as_bytes()).unwrap();
 
                     /*
-                     * The exclusive lock on the file is held until it is closed. Since we want to hold that lock until
-                     * this process exits, we need to hold on to the file. But since we don't need to access the file
-                     * anymore, we just "forget" about the file without running its destructor.
+                     * The exclusive lock on the file is held until it is closed. Since we want
+                     * to hold that lock until this process exits, we need to hold on to the
+                     * file. But since we don't need to access the file anymore, we just "forget"
+                     * about the file without running its destructor.
                      */
                     mem::forget(file);
                 }
@@ -68,6 +74,8 @@ pub fn start(
     cache_paths: Vec<&str>,
     runtime: Runtime,
 ) -> Result<(), anyhow::Error> {
+    register_siguser1_to_dump_tracing()?;
+
     /*
      * Take an exclusive lock on a lock file. This prevents multiple agent
      * processes from operating out of the same socket_dir.

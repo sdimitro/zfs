@@ -1,18 +1,21 @@
 use std::sync::Arc;
 
-use log::{debug, error};
+use log::debug;
+use log::error;
 use nix::errno::Errno;
-use nvpair::{NvList, NvListRef};
+use nvpair::NvList;
+use nvpair::NvListRef;
 use serde::Serialize;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 use zettacache::base_types::PoolGuid;
 
-use crate::{
-    base_types::Txg,
-    pool::{self, Pool, PoolPhys, UberblockPhys},
-    ObjectAccess,
-};
+use crate::base_types::Txg;
+use crate::pool;
+use crate::pool::Pool;
+use crate::pool::PoolPhys;
+use crate::pool::UberblockPhys;
+use crate::ObjectAccess;
 
 pub struct DebugHandle {
     runtime: Handle,

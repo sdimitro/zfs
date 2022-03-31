@@ -1656,6 +1656,7 @@ static void
 vdev_draid_metaslab_init(vdev_t *vd, metaslab_t *msp, uint64_t *ms_start,
     uint64_t *ms_size)
 {
+	(void) msp;
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
 
 	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_ops);
@@ -1726,7 +1727,7 @@ vdev_draid_spare_create(nvlist_t *nvroot, vdev_t *vd, uint64_t *ndraidp,
 		uint64_t nparity = vdc->vdc_nparity;
 
 		for (uint64_t spare_id = 0; spare_id < nspares; spare_id++) {
-			bzero(path, sizeof (path));
+			memset(path, 0, sizeof (path));
 			(void) snprintf(path, sizeof (path) - 1,
 			    "%s%llu-%llu-%llu", VDEV_TYPE_DRAID,
 			    (u_longlong_t)nparity,
@@ -2187,6 +2188,7 @@ vdev_draid_xlate(vdev_t *cvd, const range_seg64_t *logical_rs,
 static void
 vdev_draid_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
+	(void) getstats;
 	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_ops);
 	vdev_draid_config_t *vdc = vd->vdev_tsd;
 
@@ -2798,6 +2800,7 @@ vdev_draid_spare_fini(vdev_t *vd)
 static void
 vdev_draid_spare_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 {
+	(void) getstats;
 	vdev_draid_spare_t *vds = vd->vdev_tsd;
 
 	ASSERT3P(vd->vdev_ops, ==, &vdev_draid_spare_ops);

@@ -69,6 +69,7 @@ ksock_receive(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
 int
 ksock_create(int domain, int type, int protocol, ksocket_t *sock)
 {
+	(void) domain;
 	*sock = socket(PF_UNIX, type, protocol);
 	if (*sock == -1) {
 		return (errno);
@@ -99,6 +100,7 @@ ssize_t
 ksock_send(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size)
 {
+	(void) msg, (void) total_size;
 	return (writev(sock, iov, iovcnt));
 }
 
@@ -106,6 +108,7 @@ ssize_t
 ksock_receive(ksocket_t sock, struct msghdr *msg, kvec_t *iov,
     int iovcnt, int total_size, int flags)
 {
+	(void) msg, (void) total_size, (void) flags;
 	return (readv(sock, iov, iovcnt));
 }
 

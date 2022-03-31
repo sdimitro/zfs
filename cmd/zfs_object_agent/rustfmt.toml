@@ -1,1 +1,11 @@
-# use all defaults
+# Allow use of the below features which require the nightly toolchain
+unstable_features = true
+
+# Wrap comments to 100 columns.
+wrap_comments = true
+comment_width = 100
+
+# Standardize imports with one per line, which makes it easier to
+# resolve merge conflicts.
+imports_granularity = "Item"
+group_imports = "StdExternalCrate"

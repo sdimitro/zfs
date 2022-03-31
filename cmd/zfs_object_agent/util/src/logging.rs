@@ -1,47 +1,67 @@
-use crate::tunable::log_tunable_config;
-use crate::{get_tunable, with_alloctag_hf};
+use std::collections::VecDeque;
+use std::fs::OpenOptions;
+use std::io::BufWriter;
+use std::io::Write;
+use std::panic;
+use std::panic::PanicInfo;
+use std::process;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread;
+
+use atomic_counter::AtomicCounter;
+use atomic_counter::RelaxedCounter;
 use backtrace::Backtrace;
 use lazy_static::lazy_static;
+pub use log::log;
 use log::*;
 use log4rs::append::console::ConsoleAppender;
 use log4rs::append::file::FileAppender;
 use log4rs::append::Append;
-use log4rs::config::{Appender, Config, Root};
-use log4rs::config::{Deserialize, Deserializers, Logger};
+use log4rs::config::Appender;
+use log4rs::config::Config;
+use log4rs::config::Deserialize;
+use log4rs::config::Deserializers;
+use log4rs::config::Logger;
+use log4rs::config::Root;
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::filter::threshold::ThresholdFilter;
-use std::collections::VecDeque;
-use std::fs::OpenOptions;
-use std::io::Write;
-use std::panic::PanicInfo;
-use std::sync::atomic::{AtomicBool, AtomicPtr, Ordering};
-use std::{panic, process, ptr, thread};
+use signal_hook::consts::SIGUSR1;
+use signal_hook::iterator::exfiltrator::SignalOnly;
+use signal_hook::iterator::SignalsInfo;
+use signal_hook::low_level::emulate_default_handler;
 
-static LOG_MESSAGES_PTR: AtomicPtr<std::sync::Mutex<VecDeque<String>>> =
-    AtomicPtr::new(ptr::null_mut());
+use crate::lazy_static_ptr;
+use crate::measure;
+use crate::tunable;
+use crate::with_alloctag_hf;
+use crate::TrackingAllocator;
+use crate::ALLOCATOR_PRINT_MIN_ALLOCS;
+use crate::ALLOCATOR_PRINT_MIN_BYTES;
 
 type PanicHook = Box<dyn Fn(&panic::PanicInfo) + Sync + Send>;
 
+lazy_static_ptr! {
+    static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<String>> = Default::default();
+}
+
+tunable! {
+    static ref MAX_LOG_MESSAGES: usize = 100_000;
+    static ref PANIC_LOG_FOLDER: String = "/var/log/zoa".to_string();
+    pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool = AtomicBool::new(false);
+}
+
 lazy_static! {
     static ref LOG_PATTERN: String = "[{d(%Y-%m-%d %H:%M:%S%.3f)}][{t}][{l}] {m}{n}".to_string();
-    static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<String>> = {
-        let mut inner = Default::default();
-        LOG_MESSAGES_PTR.store(&mut inner, Ordering::Relaxed);
-        inner
-    };
-    static ref MAX_LOG_MESSAGES: usize = get_tunable("max_log_messages", 100_000);
-    static ref PANIC_LOG_FOLDER: String =
-        get_tunable("panic_log_folder", "/var/log/zoa".to_string());
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
-    pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool =
-        AtomicBool::new(get_tunable("super_expensive_trace", false));
+    static ref PANIC_COUNTER: RelaxedCounter = RelaxedCounter::new(0);
 }
 
 #[macro_export]
 macro_rules! super_trace {
     ($($arg:tt)+) => ({
         if $crate::SUPER_EXPENSIVE_TRACE.load(std::sync::atomic::Ordering::Relaxed) {
-            log!(log::Level::Trace, $($arg)+)
+            $crate::log!(log::Level::Trace, $($arg)+)
         }
     })
 }
@@ -85,25 +105,40 @@ impl Append for BufferAppender {
 }
 
 impl BufferAppender {
-    fn get_writer() -> Box<dyn Write> {
-        match OpenOptions::new().append(true).create(true).open(format!(
-            "{}/panic_{}.log",
-            PANIC_LOG_FOLDER.as_str(),
-            process::id()
-        )) {
-            Ok(file) => Box::new(file) as Box<dyn Write>,
+    fn get_writer(filename: String) -> Box<dyn Write> {
+        let writer_path = format!("{}/{}", *PANIC_LOG_FOLDER, filename);
+        match OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(&writer_path)
+        {
+            Ok(file) => {
+                info!("dumping info to {}", writer_path);
+                Box::new(BufWriter::new(file)) as Box<dyn Write>
+            }
             Err(_) => Box::new(std::io::stderr()),
+        }
+    }
+
+    fn dump_log_messages<W>(mut writer: W)
+    where
+        W: Write,
+    {
+        if let Ok(messages) = LOG_MESSAGES.lock() {
+            for message in messages.iter() {
+                writeln!(writer, "{}", message).unwrap();
+            }
         }
     }
 
     /// Dump log messages in memory to a file or stderr.
     pub fn dump(info: &PanicInfo) {
-        let mut output = Self::get_writer();
-        if let Ok(messages) = LOG_MESSAGES.lock() {
-            for message in messages.iter() {
-                writeln!(output, "{}", message).unwrap();
-            }
-        }
+        let mut output = Self::get_writer(format!(
+            "panic_pid{}_{}.out",
+            process::id(),
+            PANIC_COUNTER.inc()
+        ));
+        Self::dump_log_messages(&mut output);
 
         let location = info.location().unwrap();
         let msg = match info.payload().downcast_ref::<&'static str>() {
@@ -122,6 +157,7 @@ impl BufferAppender {
         )
         .unwrap();
         writeln!(output, "stack backtrace:\n{:?}", Backtrace::new()).unwrap();
+        output.flush().ok();
     }
 }
 
@@ -279,6 +315,51 @@ pub fn setup_logging(
         super_trace!("logging super expensive TRACE enabled");
 
         // Log all the tunables.
-        log_tunable_config();
+        tunable::log_config();
     }
+}
+
+/// Dump trace logs and memory tracking stats when receiving SIGUSR1
+pub fn register_siguser1_to_dump_tracing() -> Result<(), std::io::Error> {
+    let mut signals = SignalsInfo::<SignalOnly>::new(&[SIGUSR1])?;
+    std::thread::spawn(move || {
+        for signum in &mut signals {
+            match signum {
+                SIGUSR1 => {
+                    let info_path = format!(
+                        "SIGUSR1_pid{}_{}.out",
+                        process::id(),
+                        chrono::Local::now().format("%Y-%m-%d-%H:%M:%S%.3f"),
+                    );
+                    let mut out = BufferAppender::get_writer(info_path);
+
+                    writeln!(out, "=== Log Traces").ok();
+                    BufferAppender::dump_log_messages(&mut out);
+
+                    writeln!(out, "\n=== Memory Statistics").ok();
+                    writeln!(
+                        out,
+                        "{}",
+                        TrackingAllocator::format(
+                            *ALLOCATOR_PRINT_MIN_ALLOCS,
+                            *ALLOCATOR_PRINT_MIN_BYTES
+                        )
+                    )
+                    .ok();
+
+                    writeln!(out, "\n=== Measurements").ok();
+                    writeln!(out, "{}", measure::dump()).ok();
+
+                    out.flush().ok();
+                }
+                _ => {
+                    // This should never be executed as we are registered for
+                    // SIGUSER1 only.
+                    eprintln!("Got an unexpected signal: {:?}", signum);
+                    emulate_default_handler(signum).unwrap();
+                }
+            }
+        }
+    });
+    Ok(())
 }

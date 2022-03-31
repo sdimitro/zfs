@@ -1,27 +1,32 @@
-use crate::base_types::*;
-use crate::object_access::{ObjectAccess, ObjectAccessOpType};
-use crate::pool::PoolSharedState;
-use anyhow::{Context, Result};
-use futures::future;
-use futures::future::join;
-use futures::future::join_all;
-use futures::stream::{self, StreamExt};
-use futures_core::Stream;
-use lazy_static::lazy_static;
-use log::*;
-use serde::de::DeserializeOwned;
-use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::sync::Arc;
 use std::time::Instant;
+
+use anyhow::Context;
+use anyhow::Result;
+use futures::future;
+use futures::future::join;
+use futures::future::join_all;
+use futures::stream;
+use futures::stream::StreamExt;
+use futures_core::Stream;
+use log::*;
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::task::JoinHandle;
-use util::get_tunable;
+use util::measure;
+use util::tunable;
 use zettacache::base_types::*;
 
-lazy_static! {
-    pub static ref ENTRIES_PER_OBJECT: usize = get_tunable("entries_per_object", 100_000);
-    pub static ref OBJECT_LOG_ITERATE_QUEUE_DEPTH: usize =
-        get_tunable("object_log_iterate_queue_depth", 100);
+use crate::base_types::*;
+use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessOpType;
+use crate::pool::PoolSharedState;
+
+tunable! {
+    pub static ref ENTRIES_PER_OBJECT: usize = 100_000;
+    pub static ref OBJECT_LOG_ITERATE_QUEUE_DEPTH: usize = 100;
 }
 
 /*
@@ -285,7 +290,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
         // reference them from the spawned task (use Arc)
         let shared_state = self.shared_state.clone();
         let name = self.name.clone();
-        let handle = tokio::spawn(async move {
+        let handle = measure!("ObjectBasedLog::initiate_flush()").spawn(async move {
             chunk.put(&shared_state.object_access, &name).await;
         });
         self.pending_flushes.push(handle);

@@ -1,48 +1,60 @@
-use anyhow::{anyhow, Context, Result};
+use core::time::Duration;
+use std::collections::HashMap;
+use std::error::Error;
+use std::fmt::Display;
+use std::fmt::Formatter;
+use std::iter;
+use std::ops::Range;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::Instant;
+
+use anyhow::anyhow;
+use anyhow::Context;
+use anyhow::Result;
 use arr_macro::arr;
 use async_stream::stream;
-use bytes::{Bytes, BytesMut};
-use core::time::Duration;
-use enum_map::{Enum, EnumMap};
-use futures::future::Either;
+use bytes::Bytes;
+use bytes::BytesMut;
+use enum_map::Enum;
+use enum_map::EnumMap;
+use futures::future;
 use futures::stream;
-use futures::{future, Future, StreamExt, TryStreamExt};
+use futures::Future;
+use futures::FutureExt;
+use futures::StreamExt;
+use futures::TryStreamExt;
 use futures_core::Stream;
 use http::StatusCode;
 use lazy_static::lazy_static;
 use log::*;
-use lru::LruCache;
+use more_asserts::assert_le;
 use rand::prelude::*;
-use rusoto_core::{ByteStream, RusotoError};
-use rusoto_credential::{ChainProvider, InstanceMetadataProvider, ProfileProvider};
-use rusoto_s3::{
-    Delete, DeleteObjectsRequest, GetObjectRequest, HeadObjectOutput, HeadObjectRequest,
-    ListObjectsV2Request, ObjectIdentifier, PutObjectError, PutObjectOutput, PutObjectRequest,
-    S3Client, S3,
-};
-use std::error::Error;
-use std::fmt::Formatter;
-use std::iter;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
-use std::time::Instant;
-use std::{collections::HashMap, fmt::Display};
+use rusoto_core::ByteStream;
+use rusoto_core::RusotoError;
+use rusoto_credential::ChainProvider;
+use rusoto_credential::InstanceMetadataProvider;
+use rusoto_credential::ProfileProvider;
+use rusoto_s3::Delete;
+use rusoto_s3::DeleteObjectsRequest;
+use rusoto_s3::GetObjectRequest;
+use rusoto_s3::HeadObjectOutput;
+use rusoto_s3::HeadObjectRequest;
+use rusoto_s3::ListObjectsV2Request;
+use rusoto_s3::ObjectIdentifier;
+use rusoto_s3::PutObjectError;
+use rusoto_s3::PutObjectOutput;
+use rusoto_s3::PutObjectRequest;
+use rusoto_s3::S3Client;
+use rusoto_s3::S3;
 use tokio::sync::Semaphore;
 use tokio::time::error::Elapsed;
-use util::{get_tunable, super_trace, watch_once, with_alloctag};
-
-struct ObjectCache {
-    // XXX cache key should include Bucket
-    cache: LruCache<String, Bytes>,
-    // key -> (cacheable, Receiver<value>)
-    reading: HashMap<String, (bool, watch_once::Receiver<Bytes>)>,
-}
+use util::measure;
+use util::tunable;
+use util::with_alloctag;
 
 lazy_static! {
-    static ref CACHE: std::sync::Mutex<ObjectCache> = std::sync::Mutex::new(ObjectCache {
-        cache: LruCache::new(*OBJECT_CACHE_SIZE),
-        reading: HashMap::new(),
-    });
     static ref NON_RETRYABLE_ERRORS: Vec<StatusCode> = vec![
         StatusCode::BAD_REQUEST,
         StatusCode::FORBIDDEN,
@@ -51,14 +63,17 @@ lazy_static! {
         StatusCode::PRECONDITION_FAILED,
         StatusCode::PAYLOAD_TOO_LARGE,
     ];
-    // log operations that take longer than this with info!()
-    static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(get_tunable("long_operation_secs", 2));
+}
 
-    pub static ref OBJECT_DELETION_BATCH_SIZE: usize = get_tunable("object_deletion_batch_size", 1000);
-    pub static ref OBJECT_CACHE_IS_BYPASSABLE: bool = get_tunable("object_cache_is_bypassable", false);
-    pub static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = get_tunable("object_queue_depth_per_type", 100);
-    pub static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(get_tunable("per_request_timeout_secs", 2));
-    static ref OBJECT_CACHE_SIZE: usize = get_tunable("object_cache_size", 100);
+tunable! {
+    // log operations that take longer than this with info!()
+    static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(2);
+    static ref XLONG_OPERATION_DURATION: Duration = Duration::from_secs(60);
+    static ref PANIC_ON_XLONG_OPERATION: bool = false;
+
+    pub static ref OBJECT_DELETION_BATCH_SIZE: usize = 1000;
+    static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = 100;
+    static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 }
 
 #[derive(Debug, Enum, Copy, Clone)]
@@ -277,16 +292,17 @@ impl<E> From<RusotoError<E>> for OAError<E> {
 
 async fn retry_impl<F, O, E>(
     msg: &str,
-    timeout_opt: Option<Duration>,
+    timeout_opt_initial: Option<Duration>,
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: core::fmt::Debug,
+    E: std::error::Error + 'static,
     F: Future<Output = Result<O, OAError<E>>>,
 {
     let mut time_skew_retried = false;
     let mut expired_token_retried = false;
     let mut delay = Duration::from_secs_f64(thread_rng().gen_range(0.001..0.2));
+    let mut timeout_opt = timeout_opt_initial;
     loop {
         let begin = Instant::now();
         let result = match timeout_opt {
@@ -296,7 +312,7 @@ where
             },
             None => f().await,
         };
-        match result {
+        let e = match result {
             res @ Ok(_) => return res,
             res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
             res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
@@ -305,8 +321,9 @@ where
                 if bhr.status == StatusCode::BAD_REQUEST
                     && bhr.body_as_str().contains("ExpiredToken")
                 {
-                    // Tokens are refreshed on expiry. But if a request is delivered late, the token might have expired
-                    // by the time it is processsed. We retry once in the event of this error.
+                    // Tokens are refreshed on expiry. But if a request is delivered late, the
+                    // token might have expired by the time it is processsed. We retry once in
+                    // the event of this error.
                     if !expired_token_retried {
                         info!(
                             "Retrying on ExpiredToken error; request took {} secs.",
@@ -324,9 +341,11 @@ where
                 if bhr.status == StatusCode::FORBIDDEN
                     && bhr.body_as_str().contains("RequestTimeTooSkewed")
                 {
-                    // If the request is delivered late, it is rejected by the S3 server. In the event of this error,
-                    // a request is retried. If the system time is too skewed (15 minutes for Amazon S3), requests will
-                    // get rejected repeatedly and will never succeed. To avoid this, we retry just once and then give up.
+                    // If the request is delivered late, it is rejected by the S3 server. In the
+                    // event of this error, a request is retried. If the system time is too
+                    // skewed (15 minutes for Amazon S3), requests will get rejected repeatedly
+                    // and will never succeed. To avoid this, we retry just once and then give
+                    // up.
                     if !time_skew_retried {
                         info!(
                             "Retrying on RequestTimeTooSkewed error; request took {} secs.",
@@ -344,49 +363,51 @@ where
                 if NON_RETRYABLE_ERRORS.contains(&bhr.status) {
                     return Err(OAError::RequestError(RusotoError::Unknown(bhr)));
                 }
+                OAError::RequestError(RusotoError::Unknown(bhr))
             }
-            Err(e) => {
-                debug!(
-                    "{} returned: {:?}; retrying in {}ms",
-                    msg,
-                    e,
-                    delay.as_millis()
-                );
-                if delay > *LONG_OPERATION_DURATION {
-                    info!(
-                        "long retry: {} returned: {:?}; retrying in {:?}",
-                        msg, e, delay
-                    );
-                }
+            Err(e @ OAError::TimeoutError(_)) => {
+                timeout_opt = timeout_opt
+                    .map(|d| d.checked_mul(2).unwrap_or_else(|| Duration::from_secs(60)));
+                e
             }
+            Err(e) => e,
+        };
+        debug!(
+            "{} returned: {}; retrying in {}ms",
+            msg,
+            e,
+            delay.as_millis()
+        );
+        if delay > *LONG_OPERATION_DURATION {
+            info!(
+                "long retry: {} returned: {}; retrying in {:?}",
+                msg, e, delay
+            );
         }
         tokio::time::sleep(delay).await;
         delay = delay.mul_f64(thread_rng().gen_range(1.5..2.5));
     }
 }
 
-/// `timeout_opt` controls whether the overall request will be
-/// cancelled after a certain amount of time. This is useful
-/// for requests that have complex retry logic or need to
-/// complete quickly for correctness reasons.
-/// If a timeout is not specified, a default per-request timeout
-/// will be used. This helps avoid problems where the object
-/// store backend drops some requests on the floor. This
-/// per-request timeout will be retried indefinitely, so
-/// Err(TimeoutError) doesn't need to be handled gracefully
-/// unless `timeout_opt` is specified.
+/// `timeout_opt` controls whether the overall request will be cancelled after a certain amount
+/// of time. This is useful for requests that have complex retry logic or need to complete
+/// quickly for correctness reasons.  If a timeout is not specified, a default per-request
+/// timeout will be used. This helps avoid problems where the object store backend drops some
+/// requests on the floor. This per-request timeout will be retried indefinitely, so
+/// Err(TimeoutError) doesn't need to be handled gracefully unless `timeout_opt` is specified.
 async fn retry<F, O, E>(
     msg: &str,
     timeout_opt: Option<Duration>,
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: core::fmt::Debug,
+    E: std::error::Error + 'static,
     F: Future<Output = Result<O, OAError<E>>>,
 {
     trace!("{}: begin", msg);
     let begin = Instant::now();
-    // Because of the `xor` here, exactly one of timeout_opt and retry_timeout_opt will be None and the other will be Some.
+    // Because of the `xor` here, exactly one of timeout_opt and retry_timeout_opt will be None and
+    // the other will be Some.
     let retry_timeout_opt = timeout_opt.xor(Some(*PER_REQUEST_TIMEOUT));
     let result = match timeout_opt {
         Some(timeout) => {
@@ -399,7 +420,13 @@ where
     };
     let elapsed = begin.elapsed();
     trace!("{}: returned in {}ms", msg, elapsed.as_millis());
-    if elapsed > *LONG_OPERATION_DURATION {
+    if elapsed > *XLONG_OPERATION_DURATION && *PANIC_ON_XLONG_OPERATION {
+        panic!(
+            "extremely long operation: {}, returned in {:.1}s",
+            msg,
+            elapsed.as_secs_f64()
+        );
+    } else if elapsed > *LONG_OPERATION_DURATION {
         info!(
             "long completion: {}: returned in {:.1}s",
             msg,
@@ -437,7 +464,8 @@ impl ObjectAccess {
         rusoto_s3::S3Client::new_with(http_client, creds, region)
     }
 
-    /// Get client using the instance metadata provider and ignoring all other sources of credentials.
+    /// Get client using the instance metadata provider and ignoring all other sources of
+    /// credentials.
     pub fn get_client_with_instance_profile(endpoint: &str, region_str: &str) -> S3Client {
         let http_client = rusoto_core::HttpClient::new().unwrap();
         let creds = InstanceMetadataProvider::new();
@@ -520,19 +548,42 @@ impl ObjectAccess {
         })
     }
 
-    pub async fn get_object_from_s3(
+    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
+        self.get_object_impl(key, stat_type, None).boxed().await
+    }
+
+    pub async fn get_object_range(
         &self,
         key: String,
         stat_type: ObjectAccessOpType,
-        timeout: Option<Duration>,
+        range: Range<usize>,
+    ) -> Result<Bytes> {
+        measure!()
+            .fut(self.get_object_impl(key, stat_type, Some(range)))
+            .boxed()
+            .await
+    }
+
+    // Note: this generates a large future (~3KB), but it's used relatively infrequently, so it
+    // should always be boxed() to avoid increasing the future size for the hot path (e.g.
+    // RootConnectionState::read_block()).
+    async fn get_object_impl(
+        &self,
+        key: String,
+        stat_type: ObjectAccessOpType,
+        range: Option<Range<usize>>,
     ) -> Result<Bytes> {
         let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
         let op = self.access_stats.begin(stat_type);
         let msg = format!("get {}", key);
-        let bytes = retry(&msg, timeout, || async {
+        let range_string = range
+            .as_ref()
+            .map(|r| format!("bytes={}-{}", r.start, r.end - 1));
+        let bytes = retry(&msg, None, || async {
             let req = GetObjectRequest {
                 bucket: self.bucket_str.clone(),
                 key: key.clone(),
+                range: range_string.clone(),
                 ..Default::default()
             };
             let output = self.client.get_object(req).await?;
@@ -547,9 +598,8 @@ impl ObjectAccess {
                 .body
                 .unwrap()
                 .try_for_each(|b| {
-                    // XXX This memory copy is expensive.  Redesign this to
-                    // return a bytes::Buf that chains together all of the Bytes
-                    // provided here?
+                    // XXX This memory copy is expensive.  Redesign this to return a bytes::Buf
+                    // that chains together all of the Bytes provided here?
                     v.extend_from_slice(&b);
                     count += 1;
                     future::ready(Ok(()))
@@ -562,12 +612,16 @@ impl ObjectAccess {
                 }
                 Ok(_) => {
                     trace!(
-                        "{}: got {} bytes of data in {} chunks in {}ms",
+                        "{}: got {} bytes of data ({:?}) in {} chunks in {}ms",
                         msg,
                         v.len(),
+                        output.content_range,
                         count,
                         begin.elapsed().as_millis()
                     );
+                    if let Some(range) = &range {
+                        assert_le!(v.len(), range.end - range.start);
+                    }
                     Ok(v)
                 }
             }
@@ -577,121 +631,6 @@ impl ObjectAccess {
 
         op.end(bytes.len() as u64);
         Ok(bytes.into())
-    }
-
-    pub async fn get_object_uncached(
-        &self,
-        key: String,
-        stat_type: ObjectAccessOpType,
-    ) -> Result<Bytes> {
-        if *OBJECT_CACHE_IS_BYPASSABLE {
-            let bytes = self
-                .get_object_from_s3(key.clone(), stat_type, None)
-                .await?;
-            // Note: we *should* have the same data from S3 (in the `vec`) and in
-            // the cache, so this invalidation is normally not necessary.  However,
-            // in case a bug (or undetected RAM error) resulted in incorrect cached
-            // data, we want to invalidate the cache so that we won't get the bad
-            // cached data again.
-            Self::invalidate_cache(key);
-            Ok(bytes)
-        } else {
-            self.get_object(key, stat_type).await
-        }
-    }
-
-    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
-        // Recursive async functions require Box-ing their future, even if we
-        // "tail call".  Use a loop to retry instead.
-        loop {
-            // XXX copying key
-            if let Some(result) = self.get_object_cached(key.clone(), stat_type).await {
-                return result;
-            }
-        }
-    }
-
-    // None means we need to retry.  Some(Err) means that S3 returned a non-retryable error (e.g.
-    // object does not exist).
-    async fn get_object_cached(
-        &self,
-        key: String,
-        stat_type: ObjectAccessOpType,
-    ) -> Option<Result<Bytes>> {
-        let either = {
-            // need this block separate so that we can drop the mutex before the .await
-            let mut c = CACHE.lock().unwrap();
-            match c.cache.get(&key) {
-                Some(bytes) => {
-                    super_trace!("found {} in cache", key);
-                    return Some(Ok(bytes.clone()));
-                }
-                None => match c.reading.get(&key) {
-                    None => {
-                        let (tx, rx) = watch_once::channel::<Bytes>();
-                        c.reading.insert(key.clone(), (true, rx));
-                        Either::Left(async move {
-                            let result =
-                                self.get_object_from_s3(key.clone(), stat_type, None).await;
-
-                            // We need to remove the `reading` entry regardless of the result.
-                            let mut myc = CACHE.lock().unwrap();
-                            let (cacheable, _) = myc.reading.remove(&key).unwrap();
-                            match result {
-                                Ok(bytes) => {
-                                    // This GET may have been marked non-cacheable by
-                                    // invalidate_cache().  In that case, the object's contents
-                                    // have been changed by a concurrent PUT, but since we
-                                    // initiated our GET before the PUT, the old value is
-                                    // sufficient for us.  But we don't want other GET's (which
-                                    // may have been initiated after the PUT completed) to see
-                                    // the potentially-old value that we got, so we don't add it
-                                    // to the cache or send it to other waiting GET's.
-                                    if cacheable {
-                                        myc.cache.put(key, bytes.clone());
-                                        // We removed and dropped the rx, so there may be no more
-                                        // receivers, so we can't unwrap().
-                                        tx.send(bytes.clone()).ok();
-                                    }
-                                    Some(Ok(bytes))
-                                }
-                                Err(e) => Some(Err(e)),
-                            }
-                        })
-                    }
-                    // If the in-progress GET is not cacheable, it won't send us the value.
-                    // However, there can be only one (potentially-cacheable) GET in progress at
-                    // a time, so we can't start another one until it completes.
-                    Some((_, rx)) => {
-                        trace!("{}: found GET in progress, waiting", key);
-                        let rx = rx.clone();
-                        Either::Right(async move {
-                            match rx.recv().await {
-                                Ok(bytes) => Some(Ok(bytes)),
-                                // Sender doesn't have a value for us. The caller will retry.
-                                Err(_) => {
-                                    debug!("{}: waited for failed GET, retrying", key);
-                                    None
-                                }
-                            }
-                        })
-                    }
-                },
-            }
-        };
-        either.await
-    }
-
-    fn invalidate_cache(key: String) {
-        let mut cache = CACHE.lock().unwrap();
-        cache.cache.pop(&key);
-        // If there's a concurrent GET going on, it may see the old value, which is fine.  But we
-        // can't allow new readers to see the old value, either via the watch channel or by
-        // finding it in the cache later.  We mark the in-progress GET as non-cacheable so that
-        // the getter will not send the stale value or add it to the cache.
-        if let Some((cacheable, _)) = cache.reading.get_mut(&key) {
-            *cacheable = false;
-        }
     }
 
     fn list_impl(
@@ -860,17 +799,9 @@ impl ObjectAccess {
     }
 
     pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessOpType) {
-        // Note that we need to PutObject before invalidating the cache.  If a
-        // get_object() is called while put_object() is in progress, it may see
-        // the old or new value, which is fine.  After put_object() returns,
-        // get_object() must return the new value.  If we invalidated before the
-        // PutObject, a concurrent get_object() could retrieve the old value and
-        // add it to the cache, allowing the old value to be read (from the
-        // cache) after put_object() returns.
         self.put_object_impl(key.clone(), data, stat_type, None)
             .await
             .unwrap();
-        Self::invalidate_cache(key);
     }
 
     pub async fn put_object_stream<F>(
@@ -884,7 +815,6 @@ impl ObjectAccess {
         self.put_object_stream_impl(key.clone(), streamfunc, stat_type, None)
             .await
             .unwrap();
-        Self::invalidate_cache(key);
     }
 
     pub async fn put_object_timed(
@@ -897,7 +827,6 @@ impl ObjectAccess {
         let result = self
             .put_object_impl(key.clone(), data, stat_type, timeout)
             .await;
-        Self::invalidate_cache(key);
         result
     }
 
