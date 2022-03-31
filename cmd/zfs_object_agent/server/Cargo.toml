@@ -9,7 +9,7 @@ publish = false
 
 [dependencies]
 chrono = "0.4"
-clap = "2"
+clap = { version = "3.1.6", features = ["derive"] }
 git-version = "0.3.5"
 lazy_static = "1.4.0"
 log = "0.4"
