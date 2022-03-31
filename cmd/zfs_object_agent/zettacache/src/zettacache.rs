@@ -1845,27 +1845,31 @@ impl ZettaCache {
 
         let futures = FuturesUnordered::new();
 
-        for (block, bytes) in blocks.iter() {
+        for (&block, bytes) in blocks.iter() {
             let cache = self.clone();
-            let block = *block;
             let aligned_bytes = AlignedBytes::from((*bytes).clone());
             let fut = async move {
                 let key = IndexKey::new(pool_id, block);
                 let locked_key = LockedKey(cache.outstanding_lookups.lock(key).await);
 
-                // We need to check for presence in the cache even for
-                // InsertSource::Write, where we expect to be writing a "new"
-                // BlockId that's never been written before, because if the
-                // system crashed or the pool was rewound, a BlockId that was
-                // already persisted to the cache may be reused.
-
-                let present = measure!()
-                    .fut(
-                        cache.lookup_impl(&locked_key, LookupCounting::Off, |_state, value| {
-                            future::ready(value.is_some())
-                        }),
-                    )
-                    .await;
+                let present = match source {
+                    // Since block contents can't logically change, writes are normally to
+                    // BlockId's that the zettacache has never seen before, so we don't bother
+                    // with the lookup.  It's unlikely, but there might be an entry for this
+                    // BlockId if the system crashed or the pool was rewound.  In that case, this
+                    // will logically overwrite it.  The double insertion will be resolved in the
+                    // next merge.
+                    InsertSource::Write => false,
+                    _ => {
+                        measure!()
+                            .fut(
+                                cache.lookup_impl(&locked_key, LookupCounting::Off, |_, value| {
+                                    future::ready(value.is_some())
+                                }),
+                            )
+                            .await
+                    }
+                };
 
                 if !present {
                     cache.insert_impl(locked_key, aligned_bytes, source).await;
