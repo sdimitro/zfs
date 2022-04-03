@@ -22,6 +22,14 @@ struct Cli {
     #[clap(short = 'c', long, value_name = "PATH", required = true)]
     cache_device: Vec<String>,
 
+    /// Sets the verbosity level for logging and debugging
+    #[clap(short = 'v', long, parse(from_occurrences), global = true)]
+    verbose: u64,
+
+    /// File to log debugging output to
+    #[clap(long, requires = "verbose", value_name = "FILE", global = true)]
+    log_file: Option<String>,
+
     #[clap(subcommand)]
     command: Commands,
 }
@@ -86,6 +94,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
     let cli = Cli::parse();
 
+    // Set up logging macros
+    util::setup_logging(cli.verbose, cli.log_file.as_deref(), None, true);
+
+    // Set up cache paths
     let paths = cli
         .cache_device
         .iter()
