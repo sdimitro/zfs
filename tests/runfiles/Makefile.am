@@ -1,6 +1,7 @@
 pkgdatadir = $(datadir)/@PACKAGE@/runfiles
 dist_pkgdata_DATA = \
 	common.run \
+	dlpx_functional.run
 	freebsd.run \
 	linux.run \
 	longevity.run \
