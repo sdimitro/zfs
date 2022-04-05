@@ -62,6 +62,7 @@ lazy_static! {
         StatusCode::METHOD_NOT_ALLOWED,
         StatusCode::PRECONDITION_FAILED,
         StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::RANGE_NOT_SATISFIABLE,
     ];
 }
 
