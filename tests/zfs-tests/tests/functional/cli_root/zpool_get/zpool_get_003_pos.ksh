@@ -52,8 +52,8 @@ typeset tmpfile=$(mktemp)
 
 for prop in $(get_pool_props); do
 	log_must eval "zpool get $prop $TESTPOOL > $tmpfile"
+	log_must grep -q "^NAME " $tmpfile
 	log_must grep -q "$prop" $tmpfile
-	log_must grep -q "^NAME" $tmpfile
 done
 
 log_pass "Zpool get returns values for all known properties"

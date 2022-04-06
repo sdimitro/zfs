@@ -171,10 +171,9 @@ for option in "${opts[*]}"; do
 					fi
 					log_note "Import with $nfs_flag and " \
 					    "$guid_flag"
-					import_pool -s "${devs[i]}" -e "$option ${options[j]}" \
-					    -p "$target"
-					#import by GUID if import by pool name fails
-					if [[ $? != 0 ]]; then
+					if ! import_pool -s "${devs[i]}" \
+					    -e "$option ${options[j]}" -p "$target"; then
+						# import by GUID if import by pool name fails
 						log_note "Possible pool name" \
 						    "duplicates. Try GUID import"
 						target=$guid

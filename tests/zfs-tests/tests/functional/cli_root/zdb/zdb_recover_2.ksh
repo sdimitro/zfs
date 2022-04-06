@@ -47,7 +47,7 @@ verify_runnable "global"
 
 default_setup_noexit "$DISKS"
 file_write -o create -w -f $init_data -b $blksize -c $write_count
-log_must echo "zfs" >> $init_data
+echo "zfs" >> $init_data
 sync_pool $TESTPOOL
 
 output=$(run_zdb -e "-r" -p "$TESTPOOL/$TESTFS file1 $tmpfile")

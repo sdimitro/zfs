@@ -69,18 +69,18 @@ done
 log_mustnot import_pool -s "-d $DEVICE_DIR" -p $TESTPOOL1
 
 # error message should not mention "readonly"
-log_mustnot eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 | grep readonly"
+log_mustnot eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 | grep -q readonly"
 log_mustnot poolexists $TESTPOOL1
 
 for feature in $active_features; do
 	log_must eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 \
-	    | grep $feature"
+	    | grep -q $feature"
 	log_mustnot poolexists $TESTPOOL1
 done
 
 for feature in $enabled_features; do
 	log_mustnot eval "import_pool -s '-d $DEVICE_DIR' -p $TESTPOOL1 \
-	    | grep $feature"
+	    | grep -q $feature"
 	log_mustnot poolexists $TESTPOOL1
 done
 
