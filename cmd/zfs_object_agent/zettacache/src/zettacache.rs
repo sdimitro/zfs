@@ -21,6 +21,7 @@ use either::Either;
 use futures::future;
 use futures::stream::*;
 use futures::Future;
+use futures::FutureExt;
 use log::*;
 use lru::LruCache;
 use more_asserts::*;
@@ -842,26 +843,6 @@ pub enum InsertSource {
     Write,
 }
 
-#[derive(Clone, Copy, Debug)]
-enum LookupCounting {
-    Off,
-    On,
-}
-
-impl LookupCounting {
-    fn is_on(self) -> bool {
-        match self {
-            LookupCounting::On => true,
-            LookupCounting::Off => false,
-        }
-    }
-}
-
-pub enum LookupOperation {
-    Lookup,
-    Evict,
-}
-
 fn checkpoint_size(block_access: &BlockAccess) -> u64 {
     block_access
         .round_up_to_sector(DEFAULT_CHECKPOINT_SIZE_PCT.apply(block_access.total_capacity()))
@@ -1550,6 +1531,30 @@ impl ZettaCache {
             .await;
     }
 
+    /// Look up this block in the zettacache, without updating its LRU order (i.e. its atime).
+    /// No on-disk state will change as a result of this call.
+    pub async fn peek(&self, guid: PoolGuid, block: BlockId) -> LookupResponse {
+        let key = IndexKey::new(self.pool_guids.map_pool_guid(guid), block);
+        let locked_key = LockedKey(measure!().fut(self.outstanding_lookups.lock(key)).await);
+
+        let bytes = self
+            .lookup_impl(&locked_key, true, false, |state, value| match value {
+                Some(value) => state.peek(&locked_key, value).left_future(),
+                None => future::ready(None).right_future(),
+            })
+            .await;
+
+        self.stats.track_count(Lookup);
+        match bytes {
+            Some(bytes) => {
+                self.stats.track_bytes(LookupBytes, bytes.len() as u64);
+                self.stats.track_count(CacheHit);
+                LookupResponse::Present((bytes, locked_key))
+            }
+            None => LookupResponse::Absent(locked_key),
+        }
+    }
+
     pub async fn lookup(&self, guid: PoolGuid, block: BlockId) -> LookupResponse {
         let key = IndexKey::new(self.pool_guids.map_pool_guid(guid), block);
         let locked_key = LockedKey(measure!().fut(self.outstanding_lookups.lock(key)).await);
@@ -1560,11 +1565,11 @@ impl ZettaCache {
         }
 
         let bytes = self
-            .lookup_impl(&locked_key, LookupCounting::On, |state, value| {
+            .lookup_impl(&locked_key, true, true, |state, value| {
                 state.size_histogram.lookup();
                 match value {
-                    Some(value) => future::Either::Left(state.lookup(&locked_key, value)),
-                    None => future::Either::Right(future::ready(None)),
+                    Some(value) => state.lookup(&locked_key, value).left_future(),
+                    None => future::ready(None).right_future(),
                 }
             })
             .await;
@@ -1584,7 +1589,8 @@ impl ZettaCache {
     async fn lookup_impl<F, R, Fut>(
         &self,
         locked_key: &LockedKey,
-        counting: LookupCounting,
+        count_index_hits: bool,
+        count_ghost_hits: bool,
         f: F,
     ) -> R
     where
@@ -1602,58 +1608,43 @@ impl ZettaCache {
             // We don't want to hold the state lock while reading from disk so we
             // use lock_non_send() to ensure that we can't hold it across .await.
             let mut state = measure!().fut(lock_non_send(&self.state)).await;
-            match state.pending_changes.get(&key).copied() {
-                Some(pc) => {
-                    match pc {
-                        PendingChange::Insert(value)
-                        | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                            let validated = state.validate(value);
-                            // All entries in the pending changes should be valid
-                            assert!(validated.is_some());
-                            if counting.is_on() {
-                                self.stats.track_count(IndexHitPendingChanges);
-                            }
-                            Either::Left(f(&mut state, validated))
-                        }
-                    }
+
+            let got_value = |state: &mut ZettaCacheState, f: F, counter, value| {
+                if count_ghost_hits {
+                    state.ghost_hit_check(value);
                 }
+                if count_index_hits {
+                    self.stats.track_count(counter);
+                }
+                let validated = state.validate(value);
+                Either::Left(f(state, validated))
+            };
+
+            match state.pending_changes.get(&key).copied() {
+                Some(pc) => match pc {
+                    PendingChange::Insert(value)
+                    | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
+                        got_value(&mut state, f, IndexHitPendingChanges, value)
+                    }
+                },
                 None => {
                     if let Some(ms) = &state.merge {
                         if let Some(pc) = ms.old_pending_changes.get(&key).copied() {
                             match pc {
                                 PendingChange::Insert(value)
                                 | PendingChange::UpdateAtime(UpdateAtime(value, _)) => {
-                                    state.ghost_hit_check(value, counting);
-                                    let validated = state.validate(value);
-                                    if counting.is_on() {
-                                        self.stats.track_count(IndexHitPendingChanges);
-                                    }
-                                    Either::Left(f(&mut state, validated))
+                                    got_value(&mut state, f, IndexHitPendingChanges, value)
                                 }
                             }
                         } else {
                             match state.index_cache.get(&key) {
-                                Some(&value) => {
-                                    state.ghost_hit_check(value, counting);
-                                    let validated = state.validate(value);
-                                    if counting.is_on() {
-                                        self.stats.track_count(IndexHitIndexCache);
-                                    }
-                                    Either::Left(f(&mut state, validated))
-                                }
+                                Some(&value) => got_value(&mut state, f, IndexHitIndexCache, value),
                                 None => Either::Right(f),
                             }
                         }
                     } else {
                         match state.index_cache.get(&key) {
-                            Some(&value) => {
-                                state.ghost_hit_check(value, counting);
-                                let validated = state.validate(value);
-                                if counting.is_on() {
-                                    self.stats.track_count(IndexHitIndexCache);
-                                }
-                                Either::Left(f(&mut state, validated))
-                            }
+                            Some(&value) => got_value(&mut state, f, IndexHitIndexCache, value),
                             None => Either::Right(f),
                         }
                     }
@@ -1671,10 +1662,7 @@ impl ZettaCache {
             Either::Right(f) => f,
         };
 
-        super_trace!(
-            "lookup has no pending_change for {:?} and it's absent from the index-cache; checking index",
-            key
-        );
+        super_trace!("lookup {key:?}: no PendingChange, no index_cache; reading index");
 
         let mut index = Either::Left(&*old_index_guard);
         if let Some(new_index) = &*new_index_guard {
@@ -1689,7 +1677,7 @@ impl ZettaCache {
             Either::Left(index) => measure!().fut(index.lookup(key)).await,
             Either::Right(index) => measure!().fut(index.lookup(key)).await,
         };
-        if counting.is_on() {
+        if count_index_hits {
             if chunk_cache_hit {
                 self.stats.track_count(IndexHitChunkCache);
             } else {
@@ -1701,18 +1689,22 @@ impl ZettaCache {
                 // Again, we don't want to hold the state lock while reading from disk so
                 // we use lock_non_send() to ensure that we can't hold it across .await.
                 let mut state = measure!().fut(lock_non_send(&self.state)).await;
-                let value = state.lookup_with_value_from_index(&key, entry.value, counting);
-                if value.is_none() {
-                    super_trace!(
-                        "cache miss after reading index for {:?}, invalid entry",
-                        key
-                    );
+
+                // The LockedKey prevents an entry for this key from being inserted while we
+                // weren't holding the state lock.
+                assert!(state.pending_changes.get(&key).is_none());
+                if count_ghost_hits {
+                    state.ghost_hit_check(entry.value);
                 }
-                f(&mut state, value)
+                let validated = state.validate(entry.value);
+                if validated.is_none() {
+                    super_trace!("lookup {key:?}: cache miss after reading index, invalid entry");
+                }
+                f(&mut state, validated)
             }
             None => {
                 // key not in index
-                super_trace!("cache miss after reading index for {:?}", key);
+                super_trace!("lookup {key:?}: cache miss after reading index");
                 let mut state = measure!().fut(lock_non_send(&self.state)).await;
                 f(&mut state, None)
             }
@@ -1862,11 +1854,9 @@ impl ZettaCache {
                     InsertSource::Write => false,
                     _ => {
                         measure!()
-                            .fut(
-                                cache.lookup_impl(&locked_key, LookupCounting::Off, |_, value| {
-                                    future::ready(value.is_some())
-                                }),
-                            )
+                            .fut(cache.lookup_impl(&locked_key, false, false, |_, value| {
+                                future::ready(value.is_some())
+                            }))
                             .await
                     }
                 };
@@ -1889,11 +1879,11 @@ impl ZettaCache {
     }
 
     pub async fn heal(&self, guid: PoolGuid, block: BlockId, object_bytes: AlignedBytes) {
-        if let LookupResponse::Present((cache_bytes, locked_key)) = self.lookup(guid, block).await {
-            // For (hopefully) obvious reasons, we only need to do the heal when the bytes
-            // contained in the cache differ from the bytes contained in the object store. The
-            // bytes contained in the object store are always preferred over the bytes contained
-            // in the cache; we assume the bytes passed were retrieved from the object store.
+        if let LookupResponse::Present((cache_bytes, locked_key)) = self.peek(guid, block).await {
+            // We only need to do the heal when the bytes contained in the cache differ from the
+            // bytes contained in the object store. The bytes contained in the object store are
+            // always preferred over the bytes contained in the cache; we assume the bytes passed
+            // were retrieved from the object store.
             if *cache_bytes != *object_bytes {
                 self.stats.track_count(HealedBlocks);
                 debug!("healing cache: {:?}", locked_key.key());
@@ -1969,7 +1959,7 @@ impl ZettaCacheState {
         }
     }
 
-    fn ghost_hit_check(&mut self, value: IndexValue, counting: LookupCounting) {
+    fn ghost_hit_check(&mut self, value: IndexValue) {
         let (live_cutoff, ghost_cutoff) = match &self.merge {
             Some(ms) => (ms.eviction_cutoff, ms.ghost_cutoff),
             None => (
@@ -1978,32 +1968,37 @@ impl ZettaCacheState {
             ),
         };
 
-        if value.atime() >= ghost_cutoff && value.atime() < live_cutoff && counting.is_on() {
+        if value.atime() >= ghost_cutoff && value.atime() < live_cutoff {
             // This is a hit in the ghost hit-by-size histogram
-            let size = self.atime_histogram.size_at(value.atime());
-            self.size_histogram.ghost_hit(size);
+            self.size_histogram
+                .ghost_hit(self.atime_histogram.size_at(value.atime()));
         }
     }
 
-    fn lookup_with_value_from_index(
-        &mut self,
-        key: &IndexKey,
-        value_from_index: IndexValue,
-        counting: LookupCounting,
-    ) -> Option<ValidIndexValue> {
-        // Note: we're here because there was no PendingChange for this key, but
-        // since we dropped the lock, a PendingChange may have been inserted
-        // since then.  So we need to check for a PendingChange before using the
-        // value from the index.
-        // XXX is this still true, given that now we have the LockedKey
-        // (outstanding_lookups lock)?
-        let value = match self.pending_changes.get(key) {
-            Some(PendingChange::Insert(value_ref))
-            | Some(PendingChange::UpdateAtime(UpdateAtime(value_ref, _))) => *value_ref,
-            None => value_from_index,
-        };
-        self.ghost_hit_check(value, counting);
-        self.validate(value)
+    /// Read the value from disk, without updating its LRU order (i.e. its atime).  No on-disk
+    /// state will change as a result of this call.
+    fn peek(
+        &self,
+        locked_key: &LockedKey,
+        valid_value: ValidIndexValue,
+    ) -> impl Future<Output = Option<AlignedBytes>> {
+        super_trace!(
+            "cache hit: reading {:?} from {:?}",
+            locked_key.key(),
+            valid_value.0
+        );
+
+        let read_permit = self.outstanding_reads.acquire();
+        let block_access = self.block_access.clone();
+        async move {
+            let bytes = block_access
+                .read_raw(valid_value.extent(), DiskIoType::ReadDataForLookup)
+                .await;
+
+            // It's now OK for a checkpoint to complete, potentially freeing this block.
+            drop(read_permit);
+            Some(bytes)
+        }
     }
 
     fn lookup(
@@ -2014,7 +2009,6 @@ impl ZettaCacheState {
         let key = locked_key.key();
         let old_value = valid_value.0;
         let old_atime = old_value.atime();
-        super_trace!("cache hit: reading {:?} from {:?}", key, old_value);
 
         // Add an entry to the hit-by-size histogram
         let size = self.atime_histogram.size_at(old_atime);
@@ -2070,30 +2064,7 @@ impl ZettaCacheState {
             },
         }
 
-        // Note: it's unlikely but possible that this lookup is for a block that
-        // was just inserted, and whose write has not yet completed.  In this
-        // case we may read stale data from disk.  The real fix would be to know
-        // which Atime's have been persisted by the last checkpoint, and if the
-        // entry is too new, to treat it as a cache miss.
-
-        // There can't be a write lock on the outstanding_reads because it's
-        // only held for write when the state lock is also held, and we have the
-        // state lock.
-        let read_permit = self.outstanding_reads.acquire();
-
-        let block_access = self.block_access.clone();
-
-        async move {
-            let bytes = block_access
-                .read_raw(valid_value.extent(), DiskIoType::ReadDataForLookup)
-                .await;
-
-            // It's now OK for a checkpoint to complete, potentially freeing this block.
-            drop(read_permit);
-
-            // XXX we can easily handle an io error here by returning None
-            Some(bytes)
-        }
+        self.peek(locked_key, valid_value)
     }
 
     /// Insert this block to the cache, if space and performance parameters
@@ -2116,13 +2087,13 @@ impl ZettaCacheState {
                 pending_len,
                 locked_key.key()
             );
-            return future::Either::Left(future::ready(Err(InsertError::PendingChanges)));
+            return future::ready(Err(InsertError::PendingChanges)).left_future();
         }
 
         let buf_size = bytes.len();
         let location = match self.allocate_block(u32::try_from(buf_size).unwrap()) {
             Some(location) => location,
-            None => return future::Either::Left(future::ready(Err(InsertError::Allocation))),
+            None => return future::ready(Err(InsertError::Allocation)).left_future(),
         };
 
         // XXX if this is past the last block of the main index, we can write it
@@ -2166,7 +2137,7 @@ impl ZettaCacheState {
         let write_permit = self.outstanding_writes.acquire();
 
         let block_access = self.block_access.clone();
-        future::Either::Right(async move {
+        async move {
             block_access
                 .write_raw(location, bytes, DiskIoType::WriteDataForInsert)
                 .await;
@@ -2183,7 +2154,8 @@ impl ZettaCacheState {
             drop(locked_key);
 
             Ok(())
-        })
+        }
+        .right_future()
     }
 
     /// returns offset, or None if there's no space

@@ -25,6 +25,5 @@ pub use zcachedb::DumpStructuresOptions;
 pub use zcachedb::ZettaCacheDBCommand;
 
 pub use crate::zettacache::InsertSource;
-pub use crate::zettacache::LookupOperation;
 pub use crate::zettacache::LookupResponse;
 pub use crate::zettacache::ZettaCache;
