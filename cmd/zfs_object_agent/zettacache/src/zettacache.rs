@@ -1547,7 +1547,7 @@ impl ZettaCache {
         self.stats.track_count(Lookup);
         match bytes {
             Some(bytes) => {
-                self.stats.track_bytes(LookupBytes, bytes.len() as u64);
+                self.stats.track_bytes(CacheHitBytes, bytes.len() as u64);
                 self.stats.track_count(CacheHit);
                 LookupResponse::Present((bytes, locked_key))
             }
@@ -1578,7 +1578,7 @@ impl ZettaCache {
         match bytes {
             Some(bytes) => {
                 super_trace!("cache hit for {:?}", key);
-                self.stats.track_bytes(LookupBytes, bytes.len() as u64);
+                self.stats.track_bytes(CacheHitBytes, bytes.len() as u64);
                 self.stats.track_count(CacheHit);
                 LookupResponse::Present((bytes, locked_key))
             }

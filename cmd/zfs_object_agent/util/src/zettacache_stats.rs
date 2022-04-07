@@ -364,7 +364,6 @@ impl IoStats {
 pub enum CacheStatCounter {
     // These stats are collected as part of the ZettaCache.stats struct.
     // They are consumed in the StatsDisplay.display_stat_values() function.
-    LookupBytes,
     Lookup,
     CacheMissLockBusy, // pending, DOSE-905
     IndexHitPendingChanges,
@@ -372,6 +371,7 @@ pub enum CacheStatCounter {
     IndexHitChunkCache,
     IndexHitDisk,
     CacheHit,
+    CacheHitBytes,
     InsertBytes,
     InsertForRead,
     InsertForWrite,
