@@ -18,12 +18,27 @@ allow = [
 	"CC0-1.0",
 	"BSD-2-Clause",
 	"MPL-2.0",
+	"OpenSSL",
 ]
 #
 # XXX This is here because our packages are currently unlicensed; when they
 # are licensed and published, we should remove this line.
 #
 private = { ignore = true }
+
+[[licenses.clarify]]
+name = "encoding_rs"
+expression = "Apache-2.0 AND BSD-3-Clause AND CC0-1.0"
+license-files = [
+	{ path = "COPYRIGHT", hash = 0x39f8ad31 }
+]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [
+    { path = "LICENSE", hash = 0xbd0eed23 }
+]
 
 [sources.allow-org]
 github = ["delphix"]

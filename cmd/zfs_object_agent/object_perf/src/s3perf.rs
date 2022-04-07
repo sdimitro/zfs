@@ -13,8 +13,8 @@ use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
 use metered::time_source::StdInstantMicros;
-use zettaobject::ObjectAccess;
-use zettaobject::ObjectAccessOpType;
+use zettaobject::access_stats::ObjectAccessOpType;
+use zettaobject::object_access::ObjectAccess;
 
 enum WriteTestBounds {
     Time(Duration),

@@ -58,6 +58,7 @@ use zettacache::InsertSource;
 use zettacache::LookupResponse;
 use zettacache::ZettaCache;
 
+use crate::access_stats::ObjectAccessOpType;
 use crate::base_types::*;
 use crate::data_object::DataObject;
 use crate::features;
@@ -70,7 +71,7 @@ use crate::heartbeat::HEARTBEAT_INTERVAL;
 use crate::heartbeat::LEASE_DURATION;
 use crate::object_access::OAError;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessOpType;
+use crate::object_access::PutError;
 use crate::object_based_log::*;
 use crate::object_block_map::ObjectBlockMap;
 use crate::object_block_map::StorageObjectLogEntry;
@@ -161,7 +162,7 @@ impl PoolOwnerPhys {
         &self,
         object_access: &ObjectAccess,
         timeout: Option<Duration>,
-    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+    ) -> Result<(), OAError<PutError>> {
         maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
@@ -344,7 +345,7 @@ impl PoolPhys {
         &self,
         object_access: &ObjectAccess,
         timeout: Option<Duration>,
-    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+    ) -> Result<(), OAError<PutError>> {
         maybe_die_with(|| format!("before putting {:#?}", self));
         debug!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();
@@ -862,7 +863,7 @@ impl Pool {
         object_access: &ObjectAccess,
         name: &str,
         guid: PoolGuid,
-    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+    ) -> Result<(), OAError<PutError>> {
         let phys = PoolPhys {
             guid,
             name: name.to_string(),

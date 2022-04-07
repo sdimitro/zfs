@@ -21,9 +21,10 @@ use util::maybe_die_with;
 use util::tunable;
 use uuid::Uuid;
 
+use crate::access_stats::ObjectAccessOpType;
 use crate::object_access::OAError;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessOpType;
+use crate::object_access::PutError;
 use crate::pool::CLAIM_DURATION;
 
 tunable! {
@@ -63,7 +64,7 @@ impl HeartbeatPhys {
         &self,
         object_access: &ObjectAccess,
         timeout: Option<Duration>,
-    ) -> Result<rusoto_s3::PutObjectOutput, OAError<rusoto_s3::PutObjectError>> {
+    ) -> Result<(), OAError<PutError>> {
         maybe_die_with(|| format!("before putting {:#?}", self));
         trace!("putting {:#?}", self);
         let buf = serde_json::to_vec(&self).unwrap();

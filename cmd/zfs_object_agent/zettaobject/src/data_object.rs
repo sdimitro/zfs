@@ -28,9 +28,9 @@ use util::with_alloctag;
 use util::From64;
 use zettacache::base_types::*;
 
+use crate::access_stats::ObjectAccessOpType;
 use crate::base_types::*;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessOpType;
 
 // This is part of the on-disk format.
 pub const NUM_DATA_PREFIXES: u64 = 64;
