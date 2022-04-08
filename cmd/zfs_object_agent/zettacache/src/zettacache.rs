@@ -901,7 +901,13 @@ impl ZettaCache {
 
         let new_capacity = block_access
             .disks()
-            .map(|disk| Extent::new(disk, SUPERBLOCK_SIZE, block_access.disk_size(disk)))
+            .map(|disk| {
+                Extent::new(
+                    disk,
+                    SUPERBLOCK_SIZE,
+                    block_access.disk_size(disk) - SUPERBLOCK_SIZE,
+                )
+            })
             .collect();
         let (checkpoint_capacity, metadata_capacity, data_capacity) =
             Self::divide_new_capacity(new_capacity, block_access);

@@ -293,7 +293,13 @@ impl Disk {
                     )
                 })
                 .unwrap();
-            assert_eq!(vec.len(), message.size);
+            assert_eq!(
+                vec.len(),
+                message.size,
+                "fd={}, offset={}",
+                file.as_raw_fd(),
+                message.offset
+            );
             op.end(message.size as u64);
             message.tx.send(vec.into()).unwrap();
         }
