@@ -61,15 +61,22 @@ pub struct RemoteChannel {
 impl RemoteChannel {
     async fn open(socket_path: &str) -> Result<UnixStream> {
         // Retry until a connection is established
-        // TODO for the initial command launch can we shorten this?
         let mut reconnect_retries = 0;
+        let nap = Duration::from_millis(500);
         loop {
             match UnixStream::connect(socket_path).await {
-                Ok(mut stream) => {
-                    let version = RemoteChannel::agent_version(&mut stream).await?;
-                    info!("opened socket {}, {:?}", socket_path, version);
-                    return Ok(stream);
-                }
+                Ok(mut stream) => match RemoteChannel::agent_version(&mut stream).await {
+                    Ok(version) => {
+                        info!("opened socket {}, {:?}", socket_path, version);
+                        return Ok(stream);
+                    }
+                    Err(e) => {
+                        info!("agent_version failed {}", e.to_string());
+                        sleep(nap);
+                        reconnect_retries += 1;
+                        continue;
+                    }
+                },
                 Err(e) => {
                     if reconnect_retries > ZOA_MAX_RETRIES {
                         info!(
@@ -81,7 +88,7 @@ impl RemoteChannel {
                         return Err(anyhow!(e));
                     }
                     info!("open socket failed {}", e.to_string());
-                    sleep(Duration::from_millis(500));
+                    sleep(nap);
                     reconnect_retries += 1;
                     continue;
                 }

@@ -394,7 +394,8 @@ tests = ['import_cachefile_device_added', 'import_cachefile_device_removed',
 	'zpool_import_encrypted_load', 'zpool_import_errata3',
 	'zpool_import_errata4', 'zpool_import_missing_001_pos',
 	'zpool_import_missing_002_pos', 'zpool_import_missing_003_pos',
-	'zpool_import_rename_001_pos']
+	'zpool_import_rename_001_pos', 'import_agent_stopped_multi_pools_object_store',
+	'import_agent_stopped_object_store', 'import_pools_with_same_name_object_store']
 tags = ['functional', 'cli_root', 'zpool_import']
 
 [tests/functional/cli_root/zpool_scrub]

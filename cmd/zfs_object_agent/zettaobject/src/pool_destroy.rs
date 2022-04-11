@@ -220,7 +220,7 @@ impl PoolDestroyer {
                         destroying_pool.cache_phys.state == PoolDestroyState::InProgress
                     })
                     .for_each(|(guid, destroying_pool)| {
-                        let object_access = ObjectAccess::new(
+                        let object_access = ObjectAccess::new_s3(
                             &destroying_pool.cache_phys.endpoint,
                             &destroying_pool.cache_phys.region,
                             &destroying_pool.cache_phys.bucket,

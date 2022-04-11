@@ -19,9 +19,9 @@ use util::measure;
 use util::tunable;
 use zettacache::base_types::*;
 
+use crate::access_stats::ObjectAccessOpType;
 use crate::base_types::*;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessOpType;
 use crate::pool::PoolSharedState;
 
 tunable! {

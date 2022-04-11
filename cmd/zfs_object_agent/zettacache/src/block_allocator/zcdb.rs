@@ -4,7 +4,6 @@ use std::collections::BTreeSet;
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use std::time::Instant;
 
 use bimap::BiBTreeMap;
 use util::nice_p2size;
@@ -55,11 +54,6 @@ async fn zcachedb_load_slab_state(
     extent_allocator: Arc<ExtentAllocator>,
     phys: BlockAllocatorPhys,
 ) -> Slabs {
-    writeln_stdout!(
-        "reading {} of spacemaps...",
-        nice_p2size(phys.spacemap.bytes() + phys.spacemap_next.bytes())
-    );
-    let begin = Instant::now();
     let spacemap = SpaceMap::open(
         block_access.clone(),
         extent_allocator.clone(),
@@ -83,11 +77,6 @@ async fn zcachedb_load_slab_state(
             .collect()
     };
     let slabs = Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await;
-    writeln_stdout!(
-        "processed {} spacemap entries in {:.2} seconds",
-        spacemap.total_entries() + spacemap_next.total_entries(),
-        begin.elapsed().as_secs_f32()
-    );
     slabs
 }
 

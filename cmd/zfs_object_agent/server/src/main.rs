@@ -1,7 +1,7 @@
 use std::time::Duration;
 
-use clap::Arg;
-use clap::SubCommand;
+use clap::Parser;
+use clap::Subcommand;
 use git_version::git_version;
 use log::*;
 use util::tunable;
@@ -24,152 +24,119 @@ tunable! {
     static ref ALLOCATOR_PRINT_DURATION: Duration = Duration::from_secs(60);
 }
 
+#[derive(Parser)]
+#[clap(version=GIT_VERSION)]
+#[clap(name = "ZFS Object Agent")]
+#[clap(about = "Enables the ZFS kernel module talk to S3-protocol object storage")]
+#[clap(propagate_version = true)]
+struct Cli {
+    /// Sets the level of logging verbosity
+    #[clap(short = 'v', parse(from_occurrences))]
+    verbosity: u64,
+
+    /// Directory for unix-domain sockets
+    #[clap(short = 'd', long, value_name = "DIR", default_value = "/etc/zfs")]
+    socket_dir: String,
+
+    /// File to log output to
+    #[clap(short = 'o', long, value_name = "FILE")]
+    output_file: Option<String>,
+
+    /// File/device to use for ZettaCache
+    #[clap(short = 'c', long, value_name = "PATH")]
+    cache_device: Vec<String>,
+
+    /// Configuration file to set tunables (toml/json/yaml)
+    #[clap(short = 't', long, value_name = "FILE")]
+    config_file: Option<String>,
+
+    /// Logging configuration yaml file
+    #[clap(
+        short = 'l',
+        long,
+        value_name = "FILE",
+        conflicts_with = "output-file",
+        conflicts_with = "verbosity"
+    )]
+    log_config: Option<String>,
+
+    #[clap(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// test connectivity
+    #[clap(alias = "test_connectivity")]
+    TestConnectivity {
+        /// S3 endpoint
+        #[clap(short = 'e', long)]
+        endpoint: String,
+
+        /// S3 region
+        #[clap(short = 'r', long)]
+        region: String,
+
+        /// S3 bucket
+        #[clap(short = 'b', long)]
+        bucket: String,
+
+        /// AWS access key id
+        #[clap(
+            short = 'i',
+            long,
+            alias = "aws_access_key_id",
+            requires = "aws-secret-access-key",
+            required_unless_present = "aws-instance-profile",
+            conflicts_with = "aws-instance-profile"
+        )]
+        aws_access_key_id: Option<String>,
+
+        /// AWS secret access key
+        #[clap(
+            short = 's',
+            long,
+            alias = "aws_secret_access_key",
+            requires = "aws-access-key-id",
+            required_unless_present = "aws-instance-profile",
+            conflicts_with = "aws-instance-profile"
+        )]
+        aws_secret_access_key: Option<String>,
+
+        /// Use AWS instance profile
+        #[clap(long, alias = "aws_instance_profile")]
+        aws_instance_profile: bool,
+    },
+}
+
 fn main() {
-    let matches = clap::App::new("ZFS Object Agent")
-        .about("Enables the ZFS kernel module talk to S3-protocol object storage")
-        .version(GIT_VERSION)
-        .arg(
-            Arg::with_name("verbosity")
-                .short("v")
-                .multiple(true)
-                .help("Sets the level of logging verbosity"),
-        )
-        .arg(
-            Arg::with_name("socket-dir")
-                .short("d")
-                .long("socket-dir")
-                .value_name("DIR")
-                .help("Directory for unix-domain sockets")
-                .takes_value(true)
-                .default_value("/etc/zfs"),
-        )
-        .arg(
-            Arg::with_name("output-file")
-                .short("o")
-                .long("output-file")
-                .value_name("FILE")
-                .help("File to log output to")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("cache-device")
-                .short("c")
-                .long("cache-device")
-                .value_name("PATH")
-                .help("File/device to use for ZettaCache")
-                .takes_value(true)
-                .multiple(true)
-                .number_of_values(1),
-        )
-        .arg(
-            Arg::with_name("config-file")
-                .short("t")
-                .long("config-file")
-                .value_name("FILE")
-                .help("Configuration file to set tunables (toml/json/yaml)")
-                .takes_value(true),
-        )
-        .arg(
-            Arg::with_name("log-config")
-                .short("l")
-                .long("log-config")
-                .value_name("FILE")
-                .help("Logging configuration yaml file")
-                .conflicts_with("output-file")
-                .conflicts_with("verbosity")
-                .takes_value(true),
-        )
-        .subcommand(
-            SubCommand::with_name("test_connectivity")
-                .about("test connectivity")
-                .arg(
-                    Arg::with_name("endpoint")
-                        .short("e")
-                        .long("endpoint")
-                        .help("S3 endpoint")
-                        .required(true)
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("region")
-                        .short("r")
-                        .long("region")
-                        .help("S3 region")
-                        .required(true)
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("bucket")
-                        .short("b")
-                        .long("bucket")
-                        .help("S3 bucket")
-                        .required(true)
-                        .takes_value(true),
-                )
-                .arg(
-                    Arg::with_name("aws_access_key_id")
-                        .short("i")
-                        .long("aws_access_key_id")
-                        .takes_value(true)
-                        .requires("aws_secret_access_key")
-                        .required_unless("aws_instance_profile")
-                        .conflicts_with("aws_instance_profile")
-                        .help("AWS access key id"),
-                )
-                .arg(
-                    Arg::with_name("aws_secret_access_key")
-                        .short("s")
-                        .long("aws_secret_access_key")
-                        .takes_value(true)
-                        .requires("aws_access_key_id")
-                        .required_unless("aws_instance_profile")
-                        .conflicts_with("aws_instance_profile")
-                        .help("AWS secret access key"),
-                )
-                .arg(
-                    Arg::with_name("aws_instance_profile")
-                        .long("aws_instance_profile")
-                        .takes_value(false)
-                        .help("Use AWS instance profile"),
-                ),
-        )
-        .get_matches();
+    let cli = Cli::parse();
 
-    match matches.subcommand() {
-        ("test_connectivity", Some(cmd_options)) => {
-            let endpoint = cmd_options.value_of("endpoint").unwrap().to_string();
-            let region = cmd_options.value_of("region").unwrap().to_string();
-            let bucket = cmd_options.value_of("bucket").unwrap().to_string();
-            let aws_access_key_id = cmd_options
-                .value_of("aws_access_key_id")
-                .map(str::to_string);
-            let aws_secret_access_key = cmd_options
-                .value_of("aws_secret_access_key")
-                .map(str::to_string);
-            let aws_instance_profile = cmd_options.is_present("aws_instance_profile");
+    match cli.command {
+        Some(Commands::TestConnectivity {
+            endpoint,
+            region,
+            bucket,
+            aws_access_key_id,
+            aws_secret_access_key,
+            aws_instance_profile,
+        }) => test_connectivity::test_connectivity(
+            endpoint,
+            region,
+            bucket,
+            aws_access_key_id,
+            aws_secret_access_key,
+            aws_instance_profile,
+        ),
 
-            test_connectivity::test_connectivity(
-                endpoint,
-                region,
-                bucket,
-                aws_access_key_id,
-                aws_secret_access_key,
-                aws_instance_profile,
-            );
-        }
-        _ => {
-            let socket_dir = matches.value_of("socket-dir").unwrap();
-            let cache_paths = matches
-                .values_of("cache-device")
-                .map_or(Vec::new(), |values| values.collect());
-            if let Some(file_name) = matches.value_of("config-file") {
-                util::tunable::read_config(file_name);
+        None => {
+            if let Some(file_name) = cli.config_file {
+                util::tunable::read_config(&file_name);
             }
-
             util::setup_logging(
-                matches.occurrences_of("verbosity"),
-                matches.value_of("output-file"),
-                matches.value_of("log-config"),
+                cli.verbosity,
+                cli.output_file.as_deref(),
+                cli.log_config.as_deref(),
                 false,
             );
 
@@ -205,10 +172,102 @@ fn main() {
                 }
             });
 
-            match zettaobject::init::start(socket_dir, cache_paths, runtime) {
+            match zettaobject::init::start(
+                &cli.socket_dir,
+                cli.cache_device.iter().map(AsRef::as_ref).collect(),
+                runtime,
+            ) {
                 Ok(()) => panic!("unreachable statement"),
                 Err(err) => eprintln!("error: couldn't start server: {}", err),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+
+    fn neg(s: &str) {
+        assert!(Cli::try_parse_from(s.split_whitespace()).is_err());
+    }
+
+    fn pos(s: &str) -> Cli {
+        Cli::try_parse_from(s.split_whitespace()).unwrap()
+    }
+
+    #[test]
+    fn verbosity() {
+        assert_eq!(pos("zfs_object_agent").verbosity, 0);
+        assert_eq!(pos("zfs_object_agent -v").verbosity, 1);
+        assert_eq!(pos("zfs_object_agent -v -v").verbosity, 2);
+        assert_eq!(pos("zfs_object_agent -vv").verbosity, 2);
+    }
+
+    #[test]
+    fn log_conflict() {
+        neg("zfs_object_agent -l -v");
+        neg("zfs_object_agent -l --output-file foo");
+    }
+
+    #[test]
+    fn test_connectivity_missing() {
+        neg("zfs_object_agent test_connectivity");
+        neg("zfs_object_agent test-connectivity");
+        neg("zfs_object_agent test-connectivity -e foo -r bar -b baz");
+    }
+
+    #[test]
+    fn test_connectivity_profile() {
+        let cli =
+            pos("zfs_object_agent test_connectivity -e foo -r bar -b baz --aws_instance_profile");
+        match cli.command {
+            Some(Commands::TestConnectivity {
+                endpoint,
+                region,
+                bucket,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_instance_profile,
+            }) => {
+                assert_eq!(&endpoint, "foo");
+                assert_eq!(&region, "bar");
+                assert_eq!(&bucket, "baz");
+                assert!(aws_access_key_id.is_none());
+                assert!(aws_secret_access_key.is_none());
+                assert!(aws_instance_profile);
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_connectivity_creds() {
+        let cli = pos("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd -s 1234");
+        match cli.command {
+            Some(Commands::TestConnectivity {
+                endpoint,
+                region,
+                bucket,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_instance_profile,
+            }) => {
+                assert_eq!(&endpoint, "foo");
+                assert_eq!(&region, "bar");
+                assert_eq!(&bucket, "baz");
+                assert_eq!(aws_access_key_id.unwrap(), "abcd");
+                assert_eq!(aws_secret_access_key.unwrap(), "1234");
+                assert!(!aws_instance_profile);
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_connectivity_neg() {
+        neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd");
+        neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd -s 1234 --aws_instance_profile");
+        neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd --aws_instance_profile");
     }
 }

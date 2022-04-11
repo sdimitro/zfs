@@ -15,6 +15,7 @@ use util::tunable;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
+use crate::object_access::s3::S3ObjectAccess;
 use crate::object_access::ObjectAccess;
 use crate::pool::*;
 use crate::pool_destroy;
@@ -97,12 +98,12 @@ impl PublicConnectionState {
         let endpoint_cstr = nvl.lookup_string("endpoint")?;
         let region_str = region_cstr.to_str()?;
         let endpoint = endpoint_cstr.to_str()?;
-        let readonly = nvl.exists("readonly");
+        let _readonly = nvl.exists("readonly");
         let credentials_profile: Option<String> = nvl
             .lookup_string("credentials_profile")
             .ok()
             .map(|s| s.to_string_lossy().to_string());
-        let client = ObjectAccess::get_client(endpoint, region_str, credentials_profile);
+        let client = S3ObjectAccess::get_client(endpoint, region_str, credentials_profile);
         let mut buckets = vec![];
         let bucket_result = nvl.lookup_string("bucket");
         if let Ok(bucket) = bucket_result {
@@ -123,10 +124,9 @@ impl PublicConnectionState {
         maybe_die_with(|| "in get_pools_impl");
         let response = Arc::new(Mutex::new(NvList::new_unique_names()));
         for buck in buckets {
-            let object_access = Arc::new(ObjectAccess::from_client(
+            let object_access = ObjectAccess::from_s3(S3ObjectAccess::from_client(
                 client.clone(),
                 buck.as_str(),
-                readonly,
                 endpoint,
                 region_str,
             ));

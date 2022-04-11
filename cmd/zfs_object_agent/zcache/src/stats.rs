@@ -158,17 +158,17 @@ impl StatsDisplay {
 
         // Top headers is a vector of tuples: (header-title, column-count)
         let mut top_header: Vec<(&str, usize)> =
-            vec![("LOOKUPS", 2), ("----HITS---", 2), ("INSERTS", 2)];
+            vec![("LOOKUP", 1), ("--------HITS--------", 3), ("INSERTS", 2)];
         // Bottom headers is a vector of: header-column-name
-        let mut bottom_header = vec!["count", "bytes", "count", "ratio", "count", "bytes"];
+        let mut bottom_header = vec!["count", "count", "bytes", "ratio", "count", "bytes"];
 
         if self.show_lookup_detail {
             // Slot in right after "CACHE-LOOKUP" column
             top_header.insert(1, ("--------INDEX-ACCESS-------", 4));
-            bottom_header.insert(2, "pendch");
-            bottom_header.insert(3, "entry$");
-            bottom_header.insert(4, "chunk$");
-            bottom_header.insert(5, "disk");
+            bottom_header.insert(1, "pendch");
+            bottom_header.insert(2, "entry$");
+            bottom_header.insert(3, "chunk$");
+            bottom_header.insert(4, "disk");
         }
 
         // the following optional headers are appended in the order presented here
@@ -209,23 +209,19 @@ impl StatsDisplay {
 
         // LOOKUPS
         let lookups = values.value(Lookup) as f64 * scale;
-        let pending_changes_hits = values.value(IndexHitPendingChanges) as f64 * scale;
-        let index_cache_hits = values.value(IndexHitIndexCache) as f64 * scale;
-        let chunk_cache_hits = values.value(IndexHitChunkCache) as f64 * scale;
-        let disk_hits = values.value(IndexHitDisk) as f64 * scale;
-        let hits = values.value(CacheHit) as f64 * scale;
-
         self.display_count(lookups);
-        self.display_bytes(values.value(LookupBytes) as f64 * scale);
+        // LOOKUP DETAILS (optional)
         if self.show_lookup_detail {
-            // LOOKUP DETAILS (optional)
-            self.display_percent(pending_changes_hits, lookups);
-            self.display_percent(index_cache_hits, lookups);
-            self.display_percent(chunk_cache_hits, lookups);
-            self.display_percent(disk_hits, lookups);
+            self.display_percent(values.value(IndexHitPendingChanges) as f64 * scale, lookups);
+            self.display_percent(values.value(IndexHitIndexCache) as f64 * scale, lookups);
+            self.display_percent(values.value(IndexHitChunkCache) as f64 * scale, lookups);
+            self.display_percent(values.value(IndexHitDisk) as f64 * scale, lookups);
         }
+
         // HITS
+        let hits = values.value(CacheHit) as f64 * scale;
         self.display_count(hits);
+        self.display_bytes(values.value(CacheHitBytes) as f64 * scale);
         self.display_percent(hits, lookups);
 
         // INSERTS

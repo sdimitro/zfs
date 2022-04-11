@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fmt::Display;
 use std::fs::File;
@@ -7,12 +8,15 @@ use std::os::unix::prelude::AsRawFd;
 use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::thread::sleep;
+use std::time::Duration;
 use std::time::Instant;
 
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use bincode::Options;
+use bytesize::ByteSize;
 use libc::c_void;
 use log::*;
 use nix::errno::Errno;
@@ -22,7 +26,9 @@ use num_traits::NumCast;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
+use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use util::iter_wrapping;
 use util::measure;
 use util::tunable;
 use util::with_alloctag;
@@ -41,6 +47,8 @@ use crate::base_types::Extent;
 tunable! {
     static ref MIN_SECTOR_SIZE: usize = 512;
     static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = 32;
+    static ref DISK_WRITE_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::mib(1);
+    static ref DISK_WRITE_QUEUE_EMPTY_DELAY: Duration = Duration::from_millis(1);
     static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize = 16;
     static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
 }
@@ -135,7 +143,7 @@ pub struct Disk {
     sector_size: usize,
     io_stats: &'static DiskIoStats,
     reader_tx: flume::Sender<ReadMessage>,
-    writer_tx: flume::Sender<WriteMessage>,
+    writer_txs: Vec<mpsc::UnboundedSender<WriteMessage>>,
     metadata_writer_tx: flume::Sender<WriteMessage>,
 }
 
@@ -218,7 +226,13 @@ impl Disk {
             .to_owned();
 
         let (reader_tx, reader_rx) = flume::unbounded();
-        let (writer_tx, writer_rx) = flume::unbounded();
+        let mut writer_txs = Vec::new();
+        let mut writer_rxs = Vec::new();
+        for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
+            let (tx, rx) = mpsc::unbounded_channel();
+            writer_txs.push(tx);
+            writer_rxs.push(rx);
+        }
         let (metadata_writer_tx, metadata_writer_rx) = flume::unbounded();
 
         let io_stats = &*Box::leak(Box::new(DiskIoStats::new(device)));
@@ -230,7 +244,7 @@ impl Disk {
             sector_size,
             io_stats,
             reader_tx,
-            writer_tx,
+            writer_txs,
             metadata_writer_tx,
         };
 
@@ -244,10 +258,9 @@ impl Disk {
             });
         }
         if !readonly {
-            for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
-                let rx = writer_rx.clone();
+            for rx in writer_rxs {
                 std::thread::spawn(move || {
-                    Self::writer_thread(file, io_stats, sector_size, rx);
+                    Self::aggregating_writer_thread(file, io_stats, sector_size, rx);
                 });
             }
             for _ in 0..*DISK_METADATA_WRITE_MAX_QUEUE_DEPTH {
@@ -280,7 +293,13 @@ impl Disk {
                     )
                 })
                 .unwrap();
-            assert_eq!(vec.len(), message.size);
+            assert_eq!(
+                vec.len(),
+                message.size,
+                "fd={}, offset={}",
+                file.as_raw_fd(),
+                message.offset
+            );
             op.end(message.size as u64);
             message.tx.send(vec.into()).unwrap();
         }
@@ -303,6 +322,102 @@ impl Disk {
         bytes
     }
 
+    fn aggregating_writer_thread(
+        file: &'static File,
+        io_stats: &'static DiskIoStats,
+        sector_size: usize,
+        mut rx: mpsc::UnboundedReceiver<WriteMessage>,
+    ) {
+        /// returns (offsets, total_bytes)
+        fn find_run<'a, I: Iterator<Item = (&'a u64, &'a WriteMessage)>>(
+            mut iter: I,
+        ) -> (Vec<u64>, usize) {
+            let (mut run, mut len) = if let Some((&offset, message)) = iter.next() {
+                (vec![offset], message.bytes.len())
+            } else {
+                return (Vec::new(), 0);
+            };
+            for (&offset, message) in iter {
+                if offset == run[0] + len as u64 {
+                    run.push(offset);
+                    len += message.bytes.len();
+                } else {
+                    break;
+                }
+            }
+            (run, len)
+        }
+
+        let mut sorted: BTreeMap<u64, WriteMessage> = BTreeMap::new();
+        let mut prev_offset = 0;
+
+        loop {
+            // Look for next run of messages in sorted queue
+            let (run, len) = find_run(iter_wrapping(&sorted, prev_offset));
+            if run.is_empty() {
+                // Nothing in `sorted`; wait for a message
+                let message = match rx.blocking_recv() {
+                    Some(message) => message,
+                    None => return,
+                };
+                sorted.insert(message.offset, message);
+                // Delay a bit to allow for more messages to arrive, to improve our chances of
+                // aggregation.
+                sleep(*DISK_WRITE_QUEUE_EMPTY_DELAY);
+            } else if run.len() == 1 {
+                // Run has just one block; issue this one write
+                let message = sorted.remove(&run[0]).unwrap();
+                let mut bytes = message.bytes;
+                // Directio requires the pointer to be sector-aligned
+                if bytes.alignment() % sector_size != 0 {
+                    // We need to copy AlignedBytes created from a plain Bytes (e.g. ingesting
+                    // from a cache miss where we read the object and then write its blocks to
+                    // the zettacache).
+                    bytes = AlignedBytes::copy_from_slice(&bytes, sector_size);
+                };
+                assert_eq!(bytes.alignment() % sector_size, 0);
+                assert_eq!(bytes.as_ptr() as usize % sector_size, 0);
+                let op = OpInProgress::new(&io_stats.stats[message.io_type]);
+                nix::sys::uio::pwrite(
+                    file.as_raw_fd(),
+                    &bytes,
+                    i64::try_from(message.offset).unwrap(),
+                )
+                .unwrap();
+                op.end(bytes.len() as u64);
+                message.tx.send(()).unwrap();
+                prev_offset = message.offset;
+            } else {
+                // Multi-block run; aggregate into a single write
+                let offset = run[0];
+                let mut aggregate = AlignedVec::with_capacity(len, sector_size);
+                let mut txs = Vec::with_capacity(run.len());
+                for offset in run {
+                    let message = sorted.remove(&offset).unwrap();
+                    aggregate.extend_from_slice(&message.bytes);
+                    txs.push(message.tx);
+                }
+                let op = OpInProgress::new(&io_stats.stats[DiskIoType::WriteDataForInsert]);
+                nix::sys::uio::pwrite(
+                    file.as_raw_fd(),
+                    aggregate.as_slice(),
+                    i64::try_from(offset).unwrap(),
+                )
+                .unwrap();
+                op.end(len as u64);
+                for tx in txs {
+                    tx.send(()).unwrap();
+                }
+                prev_offset = offset;
+            }
+
+            // Receive as many messages as we can without blocking
+            while let Ok(message) = rx.try_recv() {
+                sorted.insert(message.offset, message);
+            }
+        }
+    }
+
     fn writer_thread(
         file: &'static File,
         io_stats: &'static DiskIoStats,
@@ -311,15 +426,18 @@ impl Disk {
     ) {
         while let Ok(message) = rx.recv() {
             let offset = i64::try_from(message.offset).unwrap();
-            // Directio requires the pointer to be sector-aligned.  The message
-            // sender aligned it for us if necessary.
-            assert_eq!(message.bytes.alignment() % sector_size, 0);
-            assert_eq!(message.bytes.as_ptr() as usize % sector_size, 0);
+            let mut bytes = message.bytes;
+            // Directio requires the pointer to be sector-aligned
+            if bytes.alignment() % sector_size != 0 {
+                bytes = AlignedBytes::copy_from_slice(&bytes, sector_size);
+            };
+            assert_eq!(bytes.alignment() % sector_size, 0);
+            assert_eq!(bytes.as_ptr() as usize % sector_size, 0);
             let op = OpInProgress::new(&io_stats.stats[message.io_type]);
             measure!()
-                .func(|| nix::sys::uio::pwrite(file.as_raw_fd(), &message.bytes, offset))
+                .func(|| nix::sys::uio::pwrite(file.as_raw_fd(), &bytes, offset))
                 .unwrap();
-            op.end(message.bytes.len() as u64);
+            op.end(bytes.len() as u64);
             message.tx.send(()).unwrap();
         }
     }
@@ -327,7 +445,6 @@ impl Disk {
     async fn write(&self, offset: u64, bytes: AlignedBytes, io_type: DiskIoType) {
         self.verify_aligned(offset);
         self.verify_aligned(bytes.len());
-        self.verify_aligned(bytes.alignment());
 
         let (tx, rx) = oneshot::channel();
         let message = WriteMessage {
@@ -337,12 +454,27 @@ impl Disk {
             tx,
         };
 
-        let tx = match io_type {
-            DiskIoType::WriteDataForInsert => &self.writer_tx,
-            DiskIoType::MaintenanceWrite => &self.metadata_writer_tx,
+        match io_type {
+            DiskIoType::WriteDataForInsert => {
+                // Dispatch this write to a writer thread, determined based on its offset.  The
+                // first DISK_WRITE_MAX_AGGREGATION_SIZE (default 1MB) of the disk goes to the
+                // first thread, the second chunk to the second thread, and so on, wrapping back
+                // around to the first thread.  Note that each block allocator slab (16MB) is
+                // mapped to multiple threads, so the work is distributed to multiple threads
+                // even when it's concentrated among a small number of slabs.
+                let writer = usize::from64(
+                    offset / DISK_WRITE_MAX_AGGREGATION_SIZE.as_u64()
+                        % self.writer_txs.len() as u64,
+                );
+                self.writer_txs[writer]
+                    .send(message)
+                    .unwrap_or_else(|e| panic!("writer_txs[{}].send: {}", writer, e));
+            }
+            DiskIoType::MaintenanceWrite => {
+                self.metadata_writer_tx.send_async(message).await.unwrap()
+            }
             _ => panic!("invalid {:?} for write", io_type),
-        };
-        tx.send_async(message).await.unwrap();
+        }
         measure!().fut(rx).await.unwrap();
     }
 
@@ -436,7 +568,7 @@ impl BlockAccess {
     pub async fn write_raw(
         &self,
         location: DiskLocation,
-        mut bytes: AlignedBytes,
+        bytes: AlignedBytes,
         io_type: DiskIoType,
     ) {
         assert!(
@@ -445,10 +577,6 @@ impl BlockAccess {
         );
         self.verify_aligned(location.offset());
         self.verify_aligned(bytes.len());
-        if bytes.alignment() != self.round_up_to_sector(bytes.alignment()) {
-            // XXX copying, this happens for AlignedBytes created from a plain Bytes
-            bytes = AlignedBytes::copy_from_slice(&bytes, self.sector_size);
-        };
         self.disk(location.disk())
             .write(location.offset(), bytes, io_type)
             .await
