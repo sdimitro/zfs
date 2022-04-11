@@ -42,14 +42,14 @@ pub unsafe extern "C" fn libzoa_init(
     }
 
     if cache_path_ptr.is_null() {
-        if zettaobject::init::start(&socket_dir, Vec::new(), runtime).is_err() {
+        if zettaobject::init::start(&socket_dir, Vec::new(), false, runtime).is_err() {
             return -1;
         }
     } else {
         let cache = CStr::from_ptr(cache_path_ptr)
             .to_string_lossy()
             .into_owned();
-        if zettaobject::init::start(&socket_dir, vec![cache.as_str()], runtime).is_err() {
+        if zettaobject::init::start(&socket_dir, vec![cache.as_str()], false, runtime).is_err() {
             return -1;
         }
     }

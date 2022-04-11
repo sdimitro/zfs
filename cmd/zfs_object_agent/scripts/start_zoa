@@ -32,7 +32,7 @@ function wait_for_device() {
 }
 
 ZOA_LOG_CONFIG="${ZOA_LOG_CONFIG:-/etc/zfs/zoa_log4rs.yml}"
-PARAMS="-l ${ZOA_LOG_CONFIG}"
+PARAMS="-l ${ZOA_LOG_CONFIG} --clear-incompatible-cache"
 echo "Logging config: ${ZOA_LOG_CONFIG}"
 
 if [[ ! -z $ZOA_CONFIG ]]; then

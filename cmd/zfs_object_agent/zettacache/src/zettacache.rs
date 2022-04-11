@@ -13,6 +13,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::anyhow;
 use anyhow::Result;
 use bytes::Bytes;
 use bytesize::ByteSize;
@@ -999,7 +1000,7 @@ impl ZettaCache {
         index_cache_cap
     }
 
-    pub async fn open(paths: Vec<&str>) -> Result<Self> {
+    pub async fn open(paths: Vec<&str>, clear_incompatible_cache: bool) -> Result<Self> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
             disks.push(Disk::new(path, false)?);
@@ -1015,8 +1016,15 @@ impl ZettaCache {
             }
         };
         if let Err(feature_error) = check_features(&feature_flags) {
-            panic!("{}", feature_error)
-        };
+            if !clear_incompatible_cache {
+                error!("{}", feature_error);
+                return Err(anyhow!("{}", feature_error));
+            }
+            info!("Resetting cache - {}", feature_error);
+            Self::create(&block_access).await;
+            let features = PrimaryPhys::read_features(&block_access).await.unwrap();
+            assert!(check_features(&features).is_ok());
+        }
 
         let (mut primary, primary_disk, guid, extra_disks) =
             PrimaryPhys::read(&block_access).await.unwrap();

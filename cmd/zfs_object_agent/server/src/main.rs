@@ -50,6 +50,10 @@ struct Cli {
     #[clap(short = 't', long, value_name = "FILE")]
     config_file: Option<String>,
 
+    /// Clear the cache when it has incompatible features
+    #[clap(long)]
+    clear_incompatible_cache: bool,
+
     /// Logging configuration yaml file
     #[clap(
         short = 'l',
@@ -175,6 +179,7 @@ fn main() {
             match zettaobject::init::start(
                 &cli.socket_dir,
                 cli.cache_device.iter().map(AsRef::as_ref).collect(),
+                cli.clear_incompatible_cache,
                 runtime,
             ) {
                 Ok(()) => panic!("unreachable statement"),
