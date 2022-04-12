@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use rand::Rng;
 use serde::Deserialize;
+use util::writeln_stderr;
+use util::writeln_stdout;
 
 use crate::access_stats::ObjectAccessOpType;
 use crate::object_access::s3::S3ObjectAccess;
@@ -94,11 +96,11 @@ pub fn test_connectivity(
 
             std::process::exit(match do_test_connectivity(&object_access).await {
                 Err(err) => {
-                    eprintln!("{}", err);
+                    writeln_stderr!("{}", err);
                     1
                 }
                 Ok(_) => {
-                    println!("Connectivity test succeeded.");
+                    writeln_stdout!("Connectivity test succeeded.");
                     0
                 }
             });

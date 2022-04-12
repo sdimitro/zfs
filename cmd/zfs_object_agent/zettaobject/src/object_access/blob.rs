@@ -185,6 +185,8 @@ impl BlobObjectAccess {
         config_file: &str,
         credentials_profile: Option<String>,
     ) -> Result<Arc<StorageClient>, Box<dyn Error>> {
+        #![allow(clippy::print_stderr)] // XXX remove before production
+
         let http_client = azure_core::new_http_client();
         match fs::metadata(config_file) {
             Ok(file) => {

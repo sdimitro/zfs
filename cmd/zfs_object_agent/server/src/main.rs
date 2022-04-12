@@ -5,6 +5,7 @@ use clap::Subcommand;
 use git_version::git_version;
 use log::*;
 use util::tunable;
+use util::writeln_stderr;
 use util::TrackingAllocator;
 use util::ALLOCATOR_PRINT_MIN_ALLOCS;
 use util::ALLOCATOR_PRINT_MIN_BYTES;
@@ -183,7 +184,7 @@ fn main() {
                 runtime,
             ) {
                 Ok(()) => panic!("unreachable statement"),
-                Err(err) => eprintln!("error: couldn't start server: {}", err),
+                Err(err) => writeln_stderr!("error: couldn't start server: {}", err),
             }
         }
     }

@@ -1,3 +1,7 @@
+// This file is not used in production.
+#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stdout)]
+
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
