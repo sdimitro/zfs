@@ -75,12 +75,12 @@ impl MaybeFrom<HttpError> for GetError {
 
 impl MaybeFrom<HttpError> for PutError {
     fn maybe_from(value: HttpError) -> Result<Self, HttpError> {
-        if let HttpError::StatusCode { status, body: _ } = value {
-            if status.as_u16() / 100 == 4 {
-                return Ok(PutError {});
+        match value {
+            HttpError::StatusCode { status, body: _ } if status.is_client_error() => {
+                Ok(PutError {})
             }
+            _ => Err(value),
         }
-        Err(value)
     }
 }
 
@@ -371,7 +371,8 @@ impl ObjectAccessTrait for BlobObjectAccess {
         .await;
 
         op.end(result.as_ref().map(|len| *len).unwrap_or_default() as u64);
-        Ok(())
+
+        result.map(|_| ())
     }
 
     async fn delete_objects(&self, stream: &mut (dyn Stream<Item = String> + Send + Unpin)) {

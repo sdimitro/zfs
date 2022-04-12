@@ -57,6 +57,10 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
             "Connectivity test failed due to a service error: {}",
             err
         )),
+        Err(OAError::RequestError(RequestError::Credentials(err))) => Err(format!(
+            "Connectivity test failed due to a credentials error: {}",
+            err
+        )),
         Err(err) => Err(format!("Connectivity test failed: {}", err)),
         Ok(_) => {
             object_access.delete_object(file).await;

@@ -366,6 +366,10 @@ pub enum RequestError<E: Display> {
     Unknown(Response<Bytes>),
     /// An error occurred dispatching the HTTP request or processing the response
     InternalError(String),
+    /// An error was encountered while the fetching Credentials. This generally is
+    /// an error from one of the underlying libraries used by rusoto that is wrapped
+    /// up with this type.
+    Credentials(String),
     /// The credentials in use have expired
     ExpiredCredentials,
     /// The credentials in use are not valid
@@ -380,6 +384,7 @@ impl<E: Display> Display for RequestError<E> {
             RequestError::Service(e) => e.fmt(f),
             RequestError::Unknown(r) => f.write_str(std::str::from_utf8(r.body()).unwrap()),
             RequestError::InternalError(s) => s.fmt(f),
+            RequestError::Credentials(s) => s.fmt(f),
             RequestError::ExpiredCredentials => f.write_str("Expired credentials"),
             RequestError::InvalidCredentials => f.write_str("Invalid credentials"),
             RequestError::TimeSkew => f.write_str("Request time too skewed"),
@@ -441,6 +446,8 @@ where
         let e = match result {
             res @ Ok(_) => return res,
             res @ Err(OAError::RequestError(RequestError::Service(_))) => return res,
+            res @ Err(OAError::RequestError(RequestError::Credentials(_))) => return res,
+            res @ Err(OAError::RequestError(RequestError::InvalidCredentials)) => return res,
             res @ Err(OAError::RequestError(RequestError::ExpiredCredentials)) => {
                 let elapsed = begin.elapsed();
                 // Tokens are refreshed on expiry. But if a request is delivered late, the

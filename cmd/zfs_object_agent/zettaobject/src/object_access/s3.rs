@@ -75,7 +75,7 @@ impl<E: Display> From<RusotoError<E>> for RequestError<E> {
         match e {
             RusotoError::Service(e) => Self::Service(e),
             RusotoError::HttpDispatch(error) => Self::InternalError(error.to_string()),
-            RusotoError::Credentials(error) => Self::InternalError(error.to_string()),
+            RusotoError::Credentials(error) => Self::Credentials(error.to_string()),
             RusotoError::Validation(s) => Self::InternalError(s),
             RusotoError::ParseError(s) => Self::InternalError(s),
             RusotoError::Unknown(response) => {
@@ -122,6 +122,21 @@ pub struct S3ObjectAccess {
 }
 
 impl S3ObjectAccess {
+    fn convert_error<F: Display, T: Display>(e: RusotoError<F>) -> RequestError<T>
+    where
+        T: From<F> + Display,
+    {
+        match RequestError::from(e) {
+            RequestError::Service(err) => RequestError::Service(T::from(err)),
+            RequestError::Unknown(r) => RequestError::Unknown(r),
+            RequestError::InternalError(s) => RequestError::InternalError(s),
+            RequestError::Credentials(s) => RequestError::Credentials(s),
+            RequestError::ExpiredCredentials => RequestError::ExpiredCredentials,
+            RequestError::InvalidCredentials => RequestError::InvalidCredentials,
+            RequestError::TimeSkew => RequestError::TimeSkew,
+        }
+    }
+
     fn get_custom_region(endpoint: &str, region_str: &str) -> rusoto_core::Region {
         rusoto_core::Region::Custom {
             name: region_str.to_owned(),
@@ -367,12 +382,18 @@ impl ObjectAccessTrait for S3ObjectAccess {
                 body: Some(stream),
                 ..Default::default()
             };
-            // Note: Ok(...?) converts the RusotoError to an OAError for us
-            Ok((len, self.client.put_object(req).await?))
+            match self.client.put_object(req).await {
+                Err(e) => {
+                    debug!("error during put_block_s3 {:?}", e);
+                    Err(OAError::RequestError(Self::convert_error(e)))
+                }
+                Ok(_) => Ok(len),
+            }
         })
         .await;
-        op.end(result.as_ref().map(|(len, _)| *len).unwrap_or_default() as u64);
-        Ok(())
+        op.end(result.as_ref().map(|len| *len).unwrap_or_default() as u64);
+
+        result.map(|_| ())
     }
 
     // Note: Stream is of raw keys (with prefix)
