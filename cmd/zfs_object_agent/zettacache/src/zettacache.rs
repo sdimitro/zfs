@@ -133,11 +133,10 @@ tunable! {
 
     static ref DISK_EXPAND_MIN_PCT: Percent = Percent::new(10.0);
 
-    // A limit of 8 should be enough to get to the 16,000 IOPS limit of medium-size
-    // instances/disks on gp3; because gp3 has ~1ms latency for each operation, and each closure
-    // this limit applies to, performs 2 operations (one read, and one write). Additionally, this
-    // is half the limit of outstanding writes.
-    static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = 8;
+    // Limit this to half the read queue depth (per disk) so that we don't crowd
+    // out normal reads too much.  Note that since writes aggregate, they
+    // typically won't be the io bottleneck.
+    static ref CACHE_REBALANCE_CONCURRENCY_LIMIT: usize = *DISK_READ_MAX_QUEUE_DEPTH / 2;
 
     // If non-zero, the lookup() function will fail randomly every specified number of requests
     static ref LOOKUP_FAIL_RANDOM: u32 = 0;
@@ -762,7 +761,7 @@ impl MergeState {
 
         futures::stream::iter(map)
             .for_each_concurrent(
-                *CACHE_REBALANCE_CONCURRENCY_LIMIT,
+                *CACHE_REBALANCE_CONCURRENCY_LIMIT * block_access.disks().count(),
                 |(old, maybe_new)| async move {
                     if let Some(new) = maybe_new {
                         let bytes = block_access

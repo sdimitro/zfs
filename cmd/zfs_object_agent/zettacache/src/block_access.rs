@@ -50,7 +50,7 @@ tunable! {
     static ref DISK_WRITE_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::mib(1);
     static ref DISK_WRITE_QUEUE_EMPTY_DELAY: Duration = Duration::from_millis(1);
     static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize = 16;
-    static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
+    pub static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
 }
 
 #[derive(Serialize, Deserialize, Debug)]
