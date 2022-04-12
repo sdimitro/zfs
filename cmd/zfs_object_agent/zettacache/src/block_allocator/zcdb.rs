@@ -76,8 +76,7 @@ async fn zcachedb_load_slab_state(
             })
             .collect()
     };
-    let slabs = Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await;
-    slabs
+    Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size).await
 }
 
 struct AllocationBucketStatistics {

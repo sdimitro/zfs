@@ -8,8 +8,8 @@ use serde::Serialize;
 use crate::base_types::Extent;
 use crate::base_types::OnDisk;
 use crate::block_access::BlockAccess;
-use crate::block_allocator::SlabGeneration;
 use crate::block_allocator::SlabId;
+use crate::block_allocator::SlabPhysType;
 use crate::block_based_log::BlockBasedLog;
 use crate::block_based_log::BlockBasedLogEntry;
 use crate::block_based_log::BlockBasedLogPhys;
@@ -17,16 +17,16 @@ use crate::extent_allocator::ExtentAllocator;
 use crate::extent_allocator::ExtentAllocatorBuilder;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-pub struct MarkGenerationEntry {
+pub struct SlabInfoEntry {
     pub slab_id: SlabId,
-    pub generation: SlabGeneration,
+    pub slab_type: SlabPhysType,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub enum SpaceMapEntry {
     Alloc(Extent),
     Free(Extent),
-    MarkGeneration(MarkGenerationEntry),
+    SlabInfo(SlabInfoEntry),
 }
 impl OnDisk for SpaceMapEntry {}
 impl BlockBasedLogEntry for SpaceMapEntry {}
@@ -104,12 +104,11 @@ impl SpaceMap {
         }
     }
 
-    pub fn mark_generation(&mut self, slab_id: SlabId, generation: SlabGeneration) {
-        self.log
-            .push(SpaceMapEntry::MarkGeneration(MarkGenerationEntry {
-                slab_id,
-                generation,
-            }));
+    pub fn mark_slab_info(&mut self, slab_id: SlabId, slab_type: SlabPhysType) {
+        self.log.push(SpaceMapEntry::SlabInfo(SlabInfoEntry {
+            slab_id,
+            slab_type,
+        }));
     }
 
     pub async fn flush(&mut self) -> SpaceMapPhys {

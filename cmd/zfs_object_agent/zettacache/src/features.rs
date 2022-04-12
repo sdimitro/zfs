@@ -23,10 +23,15 @@ pub struct Feature {
 }
 
 lazy_static! {
-    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = []
-        .map(|feature: Feature| (feature.name, feature.info))
-        .into_iter()
-        .collect();
+    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> =
+        [SLAB_INFO_SPACEMAP_ENTRIES.clone()]
+            .map(|feature: Feature| (feature.name, feature.info))
+            .into_iter()
+            .collect();
+    pub static ref SLAB_INFO_SPACEMAP_ENTRIES: Feature = Feature {
+        name: FeatureName("com.delphix:slab_info_spacemap_entries".to_string()),
+        info: FeatureType::NonUpgradeable
+    };
 }
 
 #[derive(Debug)]

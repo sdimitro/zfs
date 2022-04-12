@@ -2255,9 +2255,15 @@ impl ZettaCacheState {
             }
         }
 
+        let begin_chunk_to_raw = Instant::now();
         let raw = self
             .block_access
             .chunk_to_raw(EncodeType::Json, &checkpoint);
+        info!(
+            "checkpoint chunk_to_raw: {} bytes in {}ms",
+            raw.len(),
+            begin_chunk_to_raw.elapsed().as_millis(),
+        );
 
         let mut checkpoint_extent = if self
             .primary
