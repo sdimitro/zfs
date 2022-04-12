@@ -1,10 +1,14 @@
+// This file is not used in production.
+#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stdout)]
+
 use std::time::Duration;
 
 use clap::Parser;
 use clap::Subcommand;
 use git_version::git_version;
 use uuid::Uuid;
-use zettaobject::ObjectAccess;
+use zettaobject::object_access::ObjectAccess;
 mod s3perf;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
@@ -100,7 +104,7 @@ async fn main() {
         cli.endpoint, cli.region, cli.bucket, cli.profile
     );
 
-    let object_access = ObjectAccess::new(
+    let object_access = ObjectAccess::new_s3(
         &cli.endpoint,
         &cli.region,
         &cli.bucket,

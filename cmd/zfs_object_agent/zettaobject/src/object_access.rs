@@ -2,57 +2,42 @@ use core::time::Duration;
 use std::collections::HashMap;
 use std::error::Error;
 use std::fmt::Display;
-use std::fmt::Formatter;
 use std::iter;
+use std::marker::Send;
 use std::ops::Range;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
-use anyhow::anyhow;
-use anyhow::Context;
 use anyhow::Result;
-use arr_macro::arr;
-use async_stream::stream;
+use async_trait::async_trait;
 use bytes::Bytes;
-use bytes::BytesMut;
-use enum_map::Enum;
-use enum_map::EnumMap;
-use futures::future;
+use chrono::DateTime;
+use chrono::FixedOffset;
 use futures::stream;
 use futures::Future;
 use futures::FutureExt;
+use futures::Stream;
 use futures::StreamExt;
-use futures::TryStreamExt;
-use futures_core::Stream;
+use http::Response;
 use http::StatusCode;
 use lazy_static::lazy_static;
+use log::trace;
 use log::*;
-use more_asserts::assert_le;
 use rand::prelude::*;
 use rusoto_core::ByteStream;
-use rusoto_core::RusotoError;
-use rusoto_credential::ChainProvider;
-use rusoto_credential::InstanceMetadataProvider;
-use rusoto_credential::ProfileProvider;
-use rusoto_s3::Delete;
-use rusoto_s3::DeleteObjectsRequest;
-use rusoto_s3::GetObjectRequest;
-use rusoto_s3::HeadObjectOutput;
-use rusoto_s3::HeadObjectRequest;
-use rusoto_s3::ListObjectsV2Request;
-use rusoto_s3::ObjectIdentifier;
-use rusoto_s3::PutObjectError;
-use rusoto_s3::PutObjectOutput;
-use rusoto_s3::PutObjectRequest;
-use rusoto_s3::S3Client;
-use rusoto_s3::S3;
-use tokio::sync::Semaphore;
 use tokio::time::error::Elapsed;
 use util::measure;
 use util::tunable;
 use util::with_alloctag;
+
+use crate::access_stats::ObjectAccessOpType;
+use crate::access_stats::StatMapValue;
+use crate::object_access::blob::BlobObjectAccess;
+use crate::object_access::s3::S3ObjectAccess;
+
+pub mod blob;
+pub mod s3;
 
 lazy_static! {
     static ref NON_RETRYABLE_ERRORS: Vec<StatusCode> = vec![
@@ -62,6 +47,7 @@ lazy_static! {
         StatusCode::METHOD_NOT_ALLOWED,
         StatusCode::PRECONDITION_FAILED,
         StatusCode::PAYLOAD_TOO_LARGE,
+        StatusCode::RANGE_NOT_SATISFIABLE,
     ];
 }
 
@@ -70,202 +56,353 @@ tunable! {
     static ref LONG_OPERATION_DURATION: Duration = Duration::from_secs(2);
     static ref XLONG_OPERATION_DURATION: Duration = Duration::from_secs(60);
     static ref PANIC_ON_XLONG_OPERATION: bool = false;
-
     pub static ref OBJECT_DELETION_BATCH_SIZE: usize = 1000;
-    static ref OBJECT_QUEUE_DEPTH_PER_TYPE: usize = 100;
     static ref PER_REQUEST_TIMEOUT: Duration = Duration::from_secs(2);
 }
 
-#[derive(Debug, Enum, Copy, Clone)]
-pub enum ObjectAccessOpType {
-    ReadsGet,
-    TxgSyncPut,
-    ReclaimGet,
-    ReclaimPut,
-    MetadataGet,
-    MetadataPut,
-    ObjectDelete,
-}
+#[derive(Debug)]
+pub struct GetError(String);
 
-#[derive(Debug, Enum)]
-enum LatencyHistogramType {
-    Gets,
-    Puts,
-    Deletes,
-}
-
-#[derive(Debug, Enum)]
-enum RequestSizeHistogramType {
-    Gets,
-    Puts,
-    Deletes,
-}
-
-impl Display for ObjectAccessOpType {
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "{:?}", self)
+impl Display for GetError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
     }
 }
-
-impl Display for LatencyHistogramType {
-    // Note: display here is also used as our nvlist key
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "LatencyHistogram{:?}", self)
-    }
-}
-
-impl Display for RequestSizeHistogramType {
-    // Note: display here is also used as our nvlist key
-    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
-        write!(f, "RequestHistogram{:?}", self)
-    }
-}
-
-// These are equivalent to VDEV_L_HISTO_BUCKETS and VDEV_RQ_HISTO_BUCKETS in zfs.h
-pub const LATENCY_HISTOGRAM_BUCKETS: u32 = 37;
-pub const REQUEST_SIZE_HISTOGRAM_BUCKETS: u32 = 25;
-
-struct LatencyHistogram(pub [AtomicU64; LATENCY_HISTOGRAM_BUCKETS as usize]);
-struct RequestSizeHistogram(pub [AtomicU64; REQUEST_SIZE_HISTOGRAM_BUCKETS as usize]);
-
-impl Default for LatencyHistogram {
-    fn default() -> Self {
-        LatencyHistogram(arr![AtomicU64::default(); 37])
-    }
-}
-
-impl Default for RequestSizeHistogram {
-    fn default() -> Self {
-        RequestSizeHistogram(arr![AtomicU64::default(); 25])
-    }
-}
-
-#[derive(Default)]
-struct StatTypeCounts {
-    operations: AtomicU64,
-    total_bytes: AtomicU64,
-    active_count: AtomicU64,
-}
-
-struct ObjectAccessStats {
-    timebase: Instant,
-    counters: EnumMap<ObjectAccessOpType, StatTypeCounts>,
-    latency_histograms: EnumMap<LatencyHistogramType, LatencyHistogram>,
-    request_size_histograms: EnumMap<RequestSizeHistogramType, RequestSizeHistogram>,
-}
-
-#[must_use]
-struct OpInProgress<'a> {
-    stat_type: ObjectAccessOpType,
-    begin: Instant,
-    stats: &'a ObjectAccessStats,
-}
-
-impl<'a> OpInProgress<'a> {
-    fn new(stat_type: ObjectAccessOpType, stats: &'a ObjectAccessStats) -> Self {
-        stats.counters[stat_type]
-            .active_count
-            .fetch_add(1, Ordering::Relaxed);
-        OpInProgress {
-            stat_type,
-            begin: Instant::now(),
-            stats,
-        }
-    }
-
-    fn end_impl(self, bytes: u64, operations: u64) {
-        let latency = self.begin.elapsed().as_nanos();
-        let counters = &self.stats.counters[self.stat_type];
-        counters.operations.fetch_add(operations, Ordering::Relaxed);
-        counters.total_bytes.fetch_add(bytes, Ordering::Relaxed);
-
-        // This bucket mapping is equivalent to L_HISTO() macro in zfs.h
-        let latency_bucket = std::cmp::min(
-            latency.next_power_of_two().trailing_zeros(),
-            LATENCY_HISTOGRAM_BUCKETS - 1,
-        ) as usize;
-
-        // This bucket mapping is equivalent to RQ_HISTO() macro in zfs.h
-        let request_bucket = std::cmp::min(
-            bytes.next_power_of_two().trailing_zeros(),
-            REQUEST_SIZE_HISTOGRAM_BUCKETS - 1,
-        ) as usize;
-
-        // Map the ObjectAccessStatType to the corresponding histogram type
-        let (latency_type, request_type) = match self.stat_type {
-            ObjectAccessOpType::ReadsGet
-            | ObjectAccessOpType::ReclaimGet
-            | ObjectAccessOpType::MetadataGet => {
-                (LatencyHistogramType::Gets, RequestSizeHistogramType::Gets)
-            }
-            ObjectAccessOpType::TxgSyncPut
-            | ObjectAccessOpType::ReclaimPut
-            | ObjectAccessOpType::MetadataPut => {
-                (LatencyHistogramType::Puts, RequestSizeHistogramType::Puts)
-            }
-            ObjectAccessOpType::ObjectDelete => (
-                LatencyHistogramType::Deletes,
-                RequestSizeHistogramType::Deletes,
-            ),
-        };
-        self.stats.latency_histograms[latency_type].0[latency_bucket]
-            .fetch_add(operations, Ordering::Relaxed);
-        self.stats.request_size_histograms[request_type].0[request_bucket]
-            .fetch_add(1, Ordering::Relaxed);
-    }
-
-    fn end(self, bytes: u64) {
-        self.end_impl(bytes, 1)
-    }
-
-    fn end_multiple(self, bytes: u64, operations: u64) {
-        self.end_impl(bytes, operations)
-    }
-}
-
-impl<'a> Drop for OpInProgress<'a> {
-    fn drop(&mut self) {
-        let counters = &self.stats.counters[self.stat_type];
-        counters.active_count.fetch_sub(1, Ordering::Relaxed);
-    }
-}
-
-impl ObjectAccessStats {
-    fn begin(&self, stat_type: ObjectAccessOpType) -> OpInProgress<'_> {
-        OpInProgress::new(stat_type, self)
-    }
-}
+impl Error for GetError {}
 
 #[derive(Debug)]
-pub enum StatMapValue {
-    Counter(u64),
-    CounterMap(HashMap<String, u64>),
-    Histogram(Vec<u64>),
+pub struct PutError {}
+
+impl Display for PutError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("put error")
+    }
+}
+impl Error for PutError {}
+
+#[derive(Debug)]
+pub struct ObjectStoreError(String);
+
+impl Display for ObjectStoreError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.0.fmt(f)
+    }
+}
+impl Error for ObjectStoreError {}
+
+#[derive(Debug)]
+pub struct ObjectStat {
+    pub last_modified: Option<DateTime<FixedOffset>>,
+}
+
+enum ObjectAccessEnum {
+    S3(S3ObjectAccess),
+    Azure(BlobObjectAccess),
 }
 
 pub struct ObjectAccess {
-    client: rusoto_s3::S3Client,
-    bucket_str: String,
+    // XXX we can probably replace this with `Box<dyn ObjectAccessTrait>`
+    inner: ObjectAccessEnum,
     readonly: bool,
-    region_str: String,
-    endpoint_str: String,
-    credentials_profile: Option<String>,
-    access_stats: ObjectAccessStats,
-    outstanding_ops: EnumMap<ObjectAccessOpType, OutstandingOps>,
 }
 
-struct OutstandingOps(Semaphore);
-impl Default for OutstandingOps {
-    fn default() -> Self {
-        Self(Semaphore::new(*OBJECT_QUEUE_DEPTH_PER_TYPE))
+impl ObjectAccess {
+    pub fn readonly(&self) -> bool {
+        self.readonly
+    }
+
+    pub fn new_s3(
+        endpoint: &str,
+        region_str: &str,
+        bucket: &str,
+        credentials_profile: Option<String>,
+        readonly: bool,
+    ) -> Arc<Self> {
+        let oa = S3ObjectAccess::new(endpoint, region_str, bucket, credentials_profile);
+        Arc::new(ObjectAccess {
+            inner: ObjectAccessEnum::S3(oa),
+            readonly,
+        })
+    }
+
+    pub async fn new_azure(
+        bucket: &str,
+        credentials_profile: Option<String>,
+        readonly: bool,
+    ) -> Arc<Self> {
+        let oa = BlobObjectAccess::new(bucket, credentials_profile).await;
+        Arc::new(ObjectAccess {
+            inner: ObjectAccessEnum::Azure(oa),
+            readonly,
+        })
+    }
+
+    pub fn from_s3(oa: S3ObjectAccess) -> Arc<Self> {
+        Arc::new(ObjectAccess {
+            inner: ObjectAccessEnum::S3(oa),
+            readonly: false, // XXX
+        })
+    }
+
+    pub fn from_azure(oa: BlobObjectAccess) -> Arc<Self> {
+        Arc::new(ObjectAccess {
+            inner: ObjectAccessEnum::Azure(oa),
+            readonly: false, // XXX
+        })
+    }
+
+    pub fn bucket(&self) -> String {
+        match &self.inner {
+            ObjectAccessEnum::S3(oa) => oa.bucket(),
+            ObjectAccessEnum::Azure(oa) => oa.bucket(),
+        }
+    }
+
+    pub fn region(&self) -> String {
+        match &self.inner {
+            ObjectAccessEnum::S3(oa) => oa.region(),
+            ObjectAccessEnum::Azure(_) => panic!("Azure containers do not have a region"),
+        }
+    }
+
+    pub fn endpoint(&self) -> String {
+        match &self.inner {
+            ObjectAccessEnum::S3(oa) => oa.endpoint(),
+            ObjectAccessEnum::Azure(oa) => format!("https://{}.blob.core.windows.net", oa.bucket()),
+        }
+    }
+
+    pub fn credentials_profile(&self) -> Option<String> {
+        match &self.inner {
+            ObjectAccessEnum::S3(oa) => oa.credentials_profile(),
+            ObjectAccessEnum::Azure(oa) => oa.credentials_profile(),
+        }
+    }
+
+    fn as_trait(&self) -> &dyn ObjectAccessTrait {
+        match &self.inner {
+            ObjectAccessEnum::S3(oa) => oa,
+            ObjectAccessEnum::Azure(oa) => oa,
+        }
+    }
+
+    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
+        self.as_trait()
+            .get_object(key, stat_type, None)
+            .boxed()
+            .await
+    }
+
+    pub async fn get_object_range(
+        &self,
+        key: String,
+        stat_type: ObjectAccessOpType,
+        range: Range<usize>,
+    ) -> Result<Bytes> {
+        measure!()
+            .fut(self.as_trait().get_object(key, stat_type, Some(range)))
+            .boxed()
+            .await
+    }
+
+    pub async fn object_exists(&self, key: String) -> bool {
+        self.stat_object(key).await.is_some()
+    }
+
+    pub async fn stat_object(&self, key: String) -> Option<ObjectStat> {
+        self.as_trait().stat_object(key).await
+    }
+
+    pub async fn put_object_stream<F>(
+        &self,
+        key: String,
+        streamfunc: F,
+        stat_type: ObjectAccessOpType,
+    ) where
+        F: Fn() -> (ByteStream, usize) + Send + Sync,
+    {
+        assert!(!self.readonly);
+        self.as_trait()
+            .put_object_stream(key.clone(), &streamfunc, stat_type, None)
+            .await
+            .unwrap();
+    }
+
+    async fn put_object_impl(
+        &self,
+        key: String,
+        bytes: Bytes,
+        stat_type: ObjectAccessOpType,
+        timeout: Option<Duration>,
+    ) -> Result<(), OAError<PutError>> {
+        self.as_trait()
+            .put_object_stream(
+                key,
+                &|| {
+                    let my_bytes = bytes.clone();
+                    with_alloctag(
+                    "ObjectAccess::put_object_impl() ByteStream::new_with_size() Box::pin(stream)",
+                    || {
+                        (
+                            ByteStream::new_with_size(
+                                stream::iter(iter::once(Ok(my_bytes))),
+                                bytes.len(),
+                            ),
+                            bytes.len(),
+                        )
+                    },
+                )
+                },
+                stat_type,
+                timeout,
+            )
+            .await
+    }
+
+    pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessOpType) {
+        // Note that we need to PutObject before invalidating the cache.  If a
+        // get_object() is called while put_object() is in progress, it may see
+        // the old or new value, which is fine.  After put_object() returns,
+        // get_object() must return the new value.  If we invalidated before the
+        // PutObject, a concurrent get_object() could retrieve the old value and
+        // add it to the cache, allowing the old value to be read (from the
+        // cache) after put_object() returns.
+        self.put_object_impl(key.clone(), data, stat_type, None)
+            .await
+            .unwrap();
+    }
+
+    pub async fn put_object_timed(
+        &self,
+        key: String,
+        data: Bytes,
+        stat_type: ObjectAccessOpType,
+        timeout: Option<Duration>,
+    ) -> Result<(), OAError<PutError>> {
+        self.put_object_impl(key.clone(), data, stat_type, timeout)
+            .await
+    }
+
+    pub async fn delete_object(&self, key: String) {
+        assert!(!self.readonly);
+        self.delete_objects(stream::iter(iter::once(key))).await;
+    }
+
+    pub async fn delete_objects<S>(&self, mut stream: S)
+    where
+        S: Stream<Item = String> + Send + Unpin,
+    {
+        assert!(!self.readonly);
+        self.as_trait().delete_objects(&mut stream).await
+    }
+
+    pub fn list_objects(
+        &self,
+        prefix: String,
+        start_after: Option<String>,
+        use_delimiter: bool,
+    ) -> impl Stream<Item = String> + Send {
+        self.as_trait()
+            .list(prefix, start_after, use_delimiter, false)
+    }
+
+    pub async fn collect_objects(
+        &self,
+        prefix: String,
+        start_after: Option<String>,
+    ) -> Vec<String> {
+        self.list_objects(prefix, start_after, true).collect().await
+    }
+
+    pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> {
+        self.as_trait().list(prefix, None, true, true)
+    }
+
+    pub fn collect_stats(&self) -> HashMap<String, StatMapValue> {
+        self.as_trait().collect_stats()
+    }
+}
+
+#[async_trait]
+pub trait ObjectAccessTrait: Send + Sync {
+    fn list(
+        &self,
+        prefix: String,
+        start_after: Option<String>,
+        use_delimiter: bool,
+        list_prefixes: bool,
+    ) -> Pin<Box<dyn Stream<Item = String> + Send>>;
+
+    async fn get_object(
+        &self,
+        key: String,
+        stat_type: ObjectAccessOpType,
+        range: Option<Range<usize>>,
+    ) -> Result<Bytes>;
+
+    async fn stat_object(&self, key: String) -> Option<ObjectStat>;
+
+    async fn put_object_stream(
+        &self,
+        key: String,
+        // We unfortunately can't take the ByteStream directly because we may
+        // need to iterate it multiple times, if we need to retry.  streamfunc
+        // returns (stream, stream_len_bytes).
+        streamfunc: &(dyn Fn() -> (ByteStream, usize) + Send + Sync),
+        stat_type: ObjectAccessOpType,
+        timeout: Option<Duration>,
+    ) -> Result<(), OAError<PutError>>;
+
+    async fn delete_objects(&self, stream: &mut (dyn Stream<Item = String> + Send + Unpin));
+
+    fn collect_stats(&self) -> HashMap<String, StatMapValue>;
+}
+
+#[derive(Debug)]
+pub enum RequestError<E: Display> {
+    /// A service-specific error occurred.
+    Service(E),
+    /// An unknown http error occurred.  The raw HTTP response is provided.
+    Unknown(Response<Bytes>),
+    /// An error occurred dispatching the HTTP request or processing the response
+    InternalError(String),
+    /// An error was encountered while the fetching Credentials. This generally is
+    /// an error from one of the underlying libraries used by rusoto that is wrapped
+    /// up with this type.
+    Credentials(String),
+    /// The credentials in use have expired
+    ExpiredCredentials,
+    /// The credentials in use are not valid
+    InvalidCredentials,
+    /// The request time and the server time were too far out of sync
+    TimeSkew,
+}
+
+impl<E: Display> Display for RequestError<E> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            RequestError::Service(e) => e.fmt(f),
+            RequestError::Unknown(r) => f.write_str(std::str::from_utf8(r.body()).unwrap()),
+            RequestError::InternalError(s) => s.fmt(f),
+            RequestError::Credentials(s) => s.fmt(f),
+            RequestError::ExpiredCredentials => f.write_str("Expired credentials"),
+            RequestError::InvalidCredentials => f.write_str("Invalid credentials"),
+            RequestError::TimeSkew => f.write_str("Request time too skewed"),
+        }
+    }
+}
+
+impl<E: Display> From<std::io::Error> for RequestError<E> {
+    fn from(err: std::io::Error) -> Self {
+        Self::InternalError(err.to_string())
     }
 }
 
 #[derive(Debug)]
 #[allow(clippy::upper_case_acronyms)]
-pub enum OAError<E> {
+pub enum OAError<E: Display> {
     TimeoutError(Elapsed),
-    RequestError(RusotoError<E>),
+    RequestError(RequestError<E>),
     Other(anyhow::Error),
 }
 
@@ -284,19 +421,13 @@ where
 
 impl<E> Error for OAError<E> where E: std::error::Error + 'static {}
 
-impl<E> From<RusotoError<E>> for OAError<E> {
-    fn from(e: RusotoError<E>) -> Self {
-        Self::RequestError(e)
-    }
-}
-
 async fn retry_impl<F, O, E>(
     msg: &str,
     timeout_opt_initial: Option<Duration>,
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: std::error::Error + 'static,
+    E: Error + 'static,
     F: Future<Output = Result<O, OAError<E>>>,
 {
     let mut time_skew_retried = false;
@@ -314,56 +445,56 @@ where
         };
         let e = match result {
             res @ Ok(_) => return res,
-            res @ Err(OAError::RequestError(RusotoError::Service(_))) => return res,
-            res @ Err(OAError::RequestError(RusotoError::Credentials(_))) => return res,
-            Err(OAError::RequestError(RusotoError::Unknown(bhr))) => {
+            res @ Err(OAError::RequestError(RequestError::Service(_))) => return res,
+            res @ Err(OAError::RequestError(RequestError::Credentials(_))) => return res,
+            res @ Err(OAError::RequestError(RequestError::InvalidCredentials)) => return res,
+            res @ Err(OAError::RequestError(RequestError::ExpiredCredentials)) => {
                 let elapsed = begin.elapsed();
-                if bhr.status == StatusCode::BAD_REQUEST
-                    && bhr.body_as_str().contains("ExpiredToken")
-                {
-                    // Tokens are refreshed on expiry. But if a request is delivered late, the
-                    // token might have expired by the time it is processsed. We retry once in
-                    // the event of this error.
-                    if !expired_token_retried {
-                        info!(
-                            "Retrying on ExpiredToken error; request took {} secs.",
-                            elapsed.as_secs()
-                        );
-                        expired_token_retried = true;
-                        continue;
-                    } else {
-                        error!(
-                            "ExpiredToken error hit repeatedly; request took {} secs.",
-                            elapsed.as_secs()
-                        );
-                    }
+                // Tokens are refreshed on expiry. But if a request is delivered late, the
+                // token might have expired by the time it is processsed. We retry once in
+                // the event of this error.
+                if !expired_token_retried {
+                    info!(
+                        "Retrying on ExpiredToken error; request took {} secs.",
+                        elapsed.as_secs()
+                    );
+                    expired_token_retried = true;
+                    continue;
+                } else {
+                    error!(
+                        "ExpiredToken error hit repeatedly; request took {} secs.",
+                        elapsed.as_secs()
+                    );
+                    return res;
                 }
-                if bhr.status == StatusCode::FORBIDDEN
-                    && bhr.body_as_str().contains("RequestTimeTooSkewed")
-                {
-                    // If the request is delivered late, it is rejected by the S3 server. In the
-                    // event of this error, a request is retried. If the system time is too
-                    // skewed (15 minutes for Amazon S3), requests will get rejected repeatedly
-                    // and will never succeed. To avoid this, we retry just once and then give
-                    // up.
-                    if !time_skew_retried {
-                        info!(
-                            "Retrying on RequestTimeTooSkewed error; request took {} secs.",
-                            elapsed.as_secs()
-                        );
-                        time_skew_retried = true;
-                        continue;
-                    } else {
-                        error!(
-                            "RequestTimeTooSkewed error hit repeatedly; request took {} secs.",
-                            elapsed.as_secs()
-                        );
-                    }
+            }
+            res @ Err(OAError::RequestError(RequestError::TimeSkew)) => {
+                let elapsed = begin.elapsed();
+                // If the request is delivered late, it is rejected by the S3 server. In the
+                // event of this error, a request is retried. If the system time is too
+                // skewed (15 minutes for Amazon S3), requests will get rejected repeatedly
+                // and will never succeed. To avoid this, we retry just once and then give
+                // up.
+                if !time_skew_retried {
+                    info!(
+                        "Retrying on RequestTimeTooSkewed error; request took {} secs.",
+                        elapsed.as_secs()
+                    );
+                    time_skew_retried = true;
+                    continue;
+                } else {
+                    error!(
+                        "RequestTimeTooSkewed error hit repeatedly; request took {} secs.",
+                        elapsed.as_secs()
+                    );
+                    return res;
                 }
-                if NON_RETRYABLE_ERRORS.contains(&bhr.status) {
-                    return Err(OAError::RequestError(RusotoError::Unknown(bhr)));
+            }
+            Err(OAError::RequestError(RequestError::Unknown(bhr))) => {
+                if NON_RETRYABLE_ERRORS.contains(&bhr.status()) {
+                    return Err(OAError::RequestError(RequestError::Unknown(bhr)));
                 }
-                OAError::RequestError(RusotoError::Unknown(bhr))
+                OAError::RequestError(RequestError::Unknown(bhr))
             }
             Err(e @ OAError::TimeoutError(_)) => {
                 timeout_opt = timeout_opt
@@ -401,7 +532,7 @@ async fn retry<F, O, E>(
     f: impl Fn() -> F,
 ) -> Result<O, OAError<E>>
 where
-    E: std::error::Error + 'static,
+    E: Error + 'static,
     F: Future<Output = Result<O, OAError<E>>>,
 {
     trace!("{}: begin", msg);
@@ -420,6 +551,7 @@ where
     };
     let elapsed = begin.elapsed();
     trace!("{}: returned in {}ms", msg, elapsed.as_millis());
+
     if elapsed > *XLONG_OPERATION_DURATION && *PANIC_ON_XLONG_OPERATION {
         panic!(
             "extremely long operation: {}, returned in {:.1}s",
@@ -434,560 +566,4 @@ where
         );
     }
     result
-}
-
-impl ObjectAccess {
-    fn get_custom_region(endpoint: &str, region_str: &str) -> rusoto_core::Region {
-        rusoto_core::Region::Custom {
-            name: region_str.to_owned(),
-            endpoint: endpoint.to_owned(),
-        }
-    }
-
-    pub fn get_client_with_creds(
-        endpoint: &str,
-        region_str: &str,
-        access_key_id: &str,
-        secret_access_key: &str,
-    ) -> S3Client {
-        info!("region: {:?}", region_str);
-        info!("Endpoint: {}", endpoint);
-
-        let http_client = rusoto_core::HttpClient::new().unwrap();
-        let creds = rusoto_core::credential::StaticProvider::new(
-            access_key_id.to_string(),
-            secret_access_key.to_string(),
-            None,
-            None,
-        );
-        let region = ObjectAccess::get_custom_region(endpoint, region_str);
-        rusoto_s3::S3Client::new_with(http_client, creds, region)
-    }
-
-    /// Get client using the instance metadata provider and ignoring all other sources of
-    /// credentials.
-    pub fn get_client_with_instance_profile(endpoint: &str, region_str: &str) -> S3Client {
-        let http_client = rusoto_core::HttpClient::new().unwrap();
-        let creds = InstanceMetadataProvider::new();
-        let region = ObjectAccess::get_custom_region(endpoint, region_str);
-        rusoto_s3::S3Client::new_with(http_client, creds, region)
-    }
-
-    /// Get client by checking in order, the following sources for credentials.
-    /// 1. Environment variables
-    /// 2. AWS credentials file
-    /// 3. IAM instance profile.
-    pub fn get_client(
-        endpoint: &str,
-        region_str: &str,
-        credentials_profile: Option<String>,
-    ) -> S3Client {
-        info!("region: {}", region_str);
-        info!("Endpoint: {}", endpoint);
-        info!("Profile: {:?}", credentials_profile);
-
-        let provider =
-            util::ResilientCredentialsProvider::new(ChainProvider::with_profile_provider(
-                ProfileProvider::with_default_credentials(
-                    credentials_profile.unwrap_or_else(|| "default".to_owned()),
-                )
-                .unwrap(),
-            ))
-            .unwrap();
-
-        let http_client = rusoto_core::HttpClient::new().unwrap();
-        let region = ObjectAccess::get_custom_region(endpoint, region_str);
-        rusoto_s3::S3Client::new_with(http_client, provider, region)
-    }
-
-    pub fn from_client(
-        client: rusoto_s3::S3Client,
-        bucket: &str,
-        readonly: bool,
-        endpoint: &str,
-        region: &str,
-    ) -> Arc<Self> {
-        Arc::new(ObjectAccess {
-            client,
-            bucket_str: bucket.to_string(),
-            readonly,
-            region_str: region.to_string(),
-            endpoint_str: endpoint.to_string(),
-            credentials_profile: None,
-            access_stats: ObjectAccessStats {
-                timebase: Instant::now(),
-                counters: Default::default(),
-                latency_histograms: Default::default(),
-                request_size_histograms: Default::default(),
-            },
-            outstanding_ops: Default::default(),
-        })
-    }
-
-    pub fn new(
-        endpoint: &str,
-        region_str: &str,
-        bucket: &str,
-        credentials_profile: Option<String>,
-        readonly: bool,
-    ) -> Arc<Self> {
-        Arc::new(ObjectAccess {
-            client: ObjectAccess::get_client(endpoint, region_str, credentials_profile.clone()),
-            bucket_str: bucket.to_string(),
-            readonly,
-            region_str: region_str.to_string(),
-            endpoint_str: endpoint.to_string(),
-            credentials_profile,
-            access_stats: ObjectAccessStats {
-                timebase: Instant::now(),
-                counters: Default::default(),
-                latency_histograms: Default::default(),
-                request_size_histograms: Default::default(),
-            },
-            outstanding_ops: Default::default(),
-        })
-    }
-
-    pub async fn get_object(&self, key: String, stat_type: ObjectAccessOpType) -> Result<Bytes> {
-        self.get_object_impl(key, stat_type, None).boxed().await
-    }
-
-    pub async fn get_object_range(
-        &self,
-        key: String,
-        stat_type: ObjectAccessOpType,
-        range: Range<usize>,
-    ) -> Result<Bytes> {
-        measure!()
-            .fut(self.get_object_impl(key, stat_type, Some(range)))
-            .boxed()
-            .await
-    }
-
-    // Note: this generates a large future (~3KB), but it's used relatively infrequently, so it
-    // should always be boxed() to avoid increasing the future size for the hot path (e.g.
-    // RootConnectionState::read_block()).
-    async fn get_object_impl(
-        &self,
-        key: String,
-        stat_type: ObjectAccessOpType,
-        range: Option<Range<usize>>,
-    ) -> Result<Bytes> {
-        let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
-        let op = self.access_stats.begin(stat_type);
-        let msg = format!("get {}", key);
-        let range_string = range
-            .as_ref()
-            .map(|r| format!("bytes={}-{}", r.start, r.end - 1));
-        let bytes = retry(&msg, None, || async {
-            let req = GetObjectRequest {
-                bucket: self.bucket_str.clone(),
-                key: key.clone(),
-                range: range_string.clone(),
-                ..Default::default()
-            };
-            let output = self.client.get_object(req).await?;
-            let begin = Instant::now();
-            let mut v = with_alloctag("ObjectAccess::get_object_impl()", || {
-                BytesMut::with_capacity(
-                    usize::try_from(output.content_length.unwrap_or(0)).unwrap(),
-                )
-            });
-            let mut count: u32 = 0;
-            match output
-                .body
-                .unwrap()
-                .try_for_each(|b| {
-                    // XXX This memory copy is expensive.  Redesign this to return a bytes::Buf
-                    // that chains together all of the Bytes provided here?
-                    v.extend_from_slice(&b);
-                    count += 1;
-                    future::ready(Ok(()))
-                })
-                .await
-            {
-                Err(e) => {
-                    debug!("{}: error while reading ByteStream: {}", msg, e);
-                    Err(OAError::RequestError(e.into()))
-                }
-                Ok(_) => {
-                    trace!(
-                        "{}: got {} bytes of data ({:?}) in {} chunks in {}ms",
-                        msg,
-                        v.len(),
-                        output.content_range,
-                        count,
-                        begin.elapsed().as_millis()
-                    );
-                    if let Some(range) = &range {
-                        assert_le!(v.len(), range.end - range.start);
-                    }
-                    Ok(v)
-                }
-            }
-        })
-        .await
-        .with_context(|| format!("Failed to {}", msg))?;
-
-        op.end(bytes.len() as u64);
-        Ok(bytes.into())
-    }
-
-    fn list_impl(
-        &self,
-        prefix: String,
-        start_after: Option<String>,
-        use_delimiter: bool,
-        list_prefixes: bool,
-    ) -> impl Stream<Item = String> {
-        let mut continuation_token = None;
-        // XXX ObjectAccess should really be refcounted (behind Arc)
-        let client = self.client.clone();
-        let bucket = self.bucket_str.clone();
-        let delimiter = match use_delimiter {
-            true => Some("/".to_string()),
-            false => None,
-        };
-        stream! {
-            loop {
-                let output = retry(
-                    &format!("list {} (after {:?})", prefix, start_after),
-                    None,
-                    || async {
-                        let req = ListObjectsV2Request {
-                            bucket: bucket.clone(),
-                            continuation_token: continuation_token.clone(),
-                            delimiter: delimiter.clone(),
-                            fetch_owner: Some(false),
-                            prefix: Some(prefix.clone()),
-                            start_after: start_after.clone(),
-                            ..Default::default()
-                        };
-                        // Note: Ok(...?) converts the RusotoError to an OAError for us
-                        Ok(client.list_objects_v2(req).await?)
-                    },
-                )
-                .await
-                .unwrap();
-
-                if list_prefixes {
-                    if let Some(prefixes) = output.common_prefixes {
-                        for prefix in prefixes {
-                            yield prefix.prefix.unwrap();
-                        }
-                    }
-                } else {
-                    if let Some(objects) = output.contents {
-                        for object in objects {
-                            yield object.key.unwrap();
-                        }
-                    }
-                }
-                if output.next_continuation_token.is_none() {
-                    break;
-                }
-                continuation_token = output.next_continuation_token;
-            }
-        }
-    }
-
-    pub fn list_objects(
-        &self,
-        prefix: String,
-        start_after: Option<String>,
-        use_delimiter: bool,
-    ) -> impl Stream<Item = String> {
-        self.list_impl(prefix, start_after, use_delimiter, false)
-    }
-
-    pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> {
-        self.list_impl(prefix, None, true, true)
-    }
-
-    pub async fn collect_objects(
-        &self,
-        prefix: String,
-        start_after: Option<String>,
-    ) -> Vec<String> {
-        self.list_objects(prefix, start_after, true).collect().await
-    }
-
-    pub async fn head_object(&self, key: String) -> Option<HeadObjectOutput> {
-        let res = retry(&format!("head {}", key), None, || async {
-            let req = HeadObjectRequest {
-                bucket: self.bucket_str.clone(),
-                key: key.clone(),
-                ..Default::default()
-            };
-            // Note: Ok(...?) converts the RusotoError to an OAError for us
-            Ok(self.client.head_object(req).await?)
-        })
-        .await;
-        res.ok()
-    }
-
-    pub async fn object_exists(&self, key: String) -> bool {
-        self.head_object(key).await.is_some()
-    }
-
-    async fn put_object_stream_impl<F>(
-        &self,
-        key: String,
-        // We unfortunately can't take the ByteStream directly because we may
-        // need to iterate it multiple times, if we need to retry.  streamfunc
-        // returns (stream, stream_len_bytes).
-        streamfunc: F,
-        stat_type: ObjectAccessOpType,
-        timeout: Option<Duration>,
-    ) -> Result<PutObjectOutput, OAError<PutObjectError>>
-    where
-        F: Fn() -> (ByteStream, usize),
-    {
-        assert!(!self.readonly);
-        let _permit = self.outstanding_ops[stat_type].0.acquire().await.unwrap();
-        let op = self.access_stats.begin(stat_type);
-
-        let result = retry(&format!("put {}", key), timeout, || async {
-            // We want to only call streamfunc() once in the common case,
-            // because for DataObject::put() it needs to clone (bump the
-            // refcount) of every block's Bytes.  Therefore we don't want to
-            // call streamfunc() for the sole purpuse of getting the size_hint.
-            // Instead, get it here and return it.
-            let (stream, len) = streamfunc();
-            let req = PutObjectRequest {
-                bucket: self.bucket_str.clone(),
-                key: key.clone(),
-                body: Some(stream),
-                ..Default::default()
-            };
-            // Note: Ok(...?) converts the RusotoError to an OAError for us
-            Ok((len, self.client.put_object(req).await?))
-        })
-        .await;
-        op.end(result.as_ref().map(|(len, _)| *len).unwrap_or_default() as u64);
-        result.map(|(_, output)| output)
-    }
-
-    async fn put_object_impl(
-        &self,
-        key: String,
-        bytes: Bytes,
-        stat_type: ObjectAccessOpType,
-        timeout: Option<Duration>,
-    ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
-        self.put_object_stream_impl(
-            key,
-            || {
-                let my_bytes = bytes.clone();
-                with_alloctag(
-                    "ObjectAccess::put_object_impl() ByteStream::new_with_size() Box::pin(stream)",
-                    || {
-                        (
-                            ByteStream::new_with_size(
-                                stream::iter(iter::once(Ok(my_bytes))),
-                                bytes.len(),
-                            ),
-                            bytes.len(),
-                        )
-                    },
-                )
-            },
-            stat_type,
-            timeout,
-        )
-        .await
-    }
-
-    pub async fn put_object(&self, key: String, data: Bytes, stat_type: ObjectAccessOpType) {
-        self.put_object_impl(key.clone(), data, stat_type, None)
-            .await
-            .unwrap();
-    }
-
-    pub async fn put_object_stream<F>(
-        &self,
-        key: String,
-        streamfunc: F,
-        stat_type: ObjectAccessOpType,
-    ) where
-        F: Fn() -> (ByteStream, usize),
-    {
-        self.put_object_stream_impl(key.clone(), streamfunc, stat_type, None)
-            .await
-            .unwrap();
-    }
-
-    pub async fn put_object_timed(
-        &self,
-        key: String,
-        data: Bytes,
-        stat_type: ObjectAccessOpType,
-        timeout: Option<Duration>,
-    ) -> Result<PutObjectOutput, OAError<PutObjectError>> {
-        let result = self
-            .put_object_impl(key.clone(), data, stat_type, timeout)
-            .await;
-        result
-    }
-
-    pub async fn delete_object(&self, key: String) {
-        self.delete_objects(stream::iter(iter::once(key))).await;
-    }
-
-    // Note: Stream is of raw keys (with prefix)
-    pub async fn delete_objects<S: Stream<Item = String>>(&self, stream: S) {
-        assert!(!self.readonly);
-        // Note: we intentionally issue the delete calls serially because it
-        // doesn't seem to improve performance if we issue them in parallel
-        // (using StreamExt::for_each_concurrent()).
-        stream
-            .chunks(*OBJECT_DELETION_BATCH_SIZE)
-            .for_each(|chunk| async move {
-                let msg = format!("delete {} objects including {}", chunk.len(), &chunk[0]);
-                assert!(!self.readonly);
-                let op = self.access_stats.begin(ObjectAccessOpType::ObjectDelete);
-
-                retry(&msg, None, || async {
-                    let req = DeleteObjectsRequest {
-                        bucket: self.bucket_str.clone(),
-                        delete: Delete {
-                            objects: chunk
-                                .iter()
-                                .map(|key| ObjectIdentifier {
-                                    key: key.clone(),
-                                    ..Default::default()
-                                })
-                                .collect(),
-                            quiet: Some(true),
-                        },
-                        ..Default::default()
-                    };
-                    let output = self.client.delete_objects(req).await?;
-                    match output.errors {
-                        Some(errs) => match errs.get(0) {
-                            Some(e) => Err(OAError::Other(anyhow!("{:?}", e))),
-                            None => Ok(()),
-                        },
-                        None => Ok(()),
-                    }
-                })
-                .await
-                .unwrap();
-                op.end_multiple(0, chunk.len() as u64);
-            })
-            .await;
-    }
-
-    pub fn bucket(&self) -> String {
-        self.bucket_str.clone()
-    }
-
-    pub fn region(&self) -> String {
-        self.region_str.clone()
-    }
-
-    pub fn endpoint(&self) -> String {
-        self.endpoint_str.clone()
-    }
-
-    pub fn credentials_profile(&self) -> Option<String> {
-        self.credentials_profile.clone()
-    }
-
-    pub fn readonly(&self) -> bool {
-        self.readonly
-    }
-
-    fn sum_stats(&self, stat_types: &[ObjectAccessOpType]) -> HashMap<String, u64> {
-        let mut total = HashMap::new();
-
-        total.insert(
-            "operations".into(),
-            stat_types
-                .iter()
-                .map(|&stat_type| {
-                    self.access_stats.counters[stat_type]
-                        .operations
-                        .load(Ordering::Relaxed)
-                })
-                .sum(),
-        );
-        total.insert(
-            "total_bytes".into(),
-            stat_types
-                .iter()
-                .map(|&stat_type| {
-                    self.access_stats.counters[stat_type]
-                        .total_bytes
-                        .load(Ordering::Relaxed)
-                })
-                .sum(),
-        );
-        total.insert(
-            "active".into(),
-            stat_types
-                .iter()
-                .map(|&stat_type| {
-                    self.access_stats.counters[stat_type]
-                        .active_count
-                        .load(Ordering::Relaxed)
-                })
-                .sum(),
-        );
-
-        total
-    }
-
-    pub fn collect_stats(&self) -> HashMap<String, StatMapValue> {
-        let mut outer = HashMap::new();
-        let order = Ordering::Relaxed;
-
-        // Note: try_from() will always succeed since 2^64 ns is 580 years, and it's
-        // inconceivable that the object agent could be running for that long.
-        let timestamp = u64::try_from(self.access_stats.timebase.elapsed().as_nanos()).unwrap();
-        outer.insert("Timestamp".into(), StatMapValue::Counter(timestamp));
-
-        // Add the named counters for each stat type
-        for (t, s) in self.access_stats.counters.iter() {
-            let mut inner = HashMap::new();
-            inner.insert("operations".into(), s.operations.load(order));
-            inner.insert("total_bytes".into(), s.total_bytes.load(order));
-            inner.insert("active".into(), s.active_count.load(order));
-            outer.insert(t.to_string(), StatMapValue::CounterMap(inner));
-        }
-
-        // Add the histograms
-        for (t, h) in self.access_stats.latency_histograms.iter() {
-            outer.insert(
-                t.to_string(),
-                StatMapValue::Histogram(h.0.iter().map(|v: &AtomicU64| v.load(order)).collect()),
-            );
-        }
-        for (t, h) in self.access_stats.request_size_histograms.iter() {
-            outer.insert(
-                t.to_string(),
-                StatMapValue::Histogram(h.0.iter().map(|v: &AtomicU64| v.load(order)).collect()),
-            );
-        }
-
-        // Sum the Gets and Puts into a total for each counter
-        outer.insert(
-            "TotalGet".into(),
-            StatMapValue::CounterMap(self.sum_stats(&[
-                ObjectAccessOpType::ReadsGet,
-                ObjectAccessOpType::MetadataGet,
-                ObjectAccessOpType::ReclaimGet,
-            ])),
-        );
-        outer.insert(
-            "TotalPut".into(),
-            StatMapValue::CounterMap(self.sum_stats(&[
-                ObjectAccessOpType::TxgSyncPut,
-                ObjectAccessOpType::MetadataPut,
-                ObjectAccessOpType::ReclaimPut,
-            ])),
-        );
-
-        outer
-    }
 }

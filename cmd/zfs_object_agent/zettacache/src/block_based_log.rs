@@ -29,7 +29,6 @@ use util::super_trace;
 use util::tunable;
 use util::with_alloctag;
 use util::zettacache_stats::DiskIoType;
-use util::AlignedVec;
 use util::From64;
 use util::LockSet;
 
@@ -354,7 +353,6 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         }
 
         let writes_stream = FuturesUnordered::new();
-        let mut pending_write: Option<(DiskLocation, AlignedVec)> = None;
         for pending_entries_chunk in self.pending_entries.chunks(*ENTRIES_PER_CHUNK) {
             let chunk = BlockBasedLogChunkBorrowed {
                 id: self.phys.next_chunk,
@@ -401,53 +399,17 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 raw_chunk.len(),
                 extent.location,
             );
-            match pending_write {
-                Some((pending_location, pending_vec))
-                    if extent.location != pending_location + pending_vec.len()
-                        || pending_vec.unused_capacity() < raw_chunk.len() =>
-                {
-                    writes_stream.push(self.block_access.write_raw(
-                        pending_location,
-                        pending_vec.into(),
-                        DiskIoType::MaintenanceWrite,
-                    ));
-                    pending_write = None;
-                }
-                _ => (),
-            }
-            let agg_size = usize::from64(WRITE_AGGREGATION_SIZE.as_u64());
-            if pending_write.is_none() && raw_chunk.len() < 2 * agg_size {
-                pending_write = Some((
-                    extent.location,
-                    with_alloctag("BlockBasedLog::flush_impl()", || {
-                        AlignedVec::with_capacity(agg_size, self.block_access.round_up_to_sector(1))
-                    }),
-                ));
-            }
-            match &mut pending_write {
-                Some((pending_location, pending_vec)) => {
-                    assert_eq!(*pending_location + pending_vec.len(), extent.location);
-                    pending_vec.extend_from_slice(&raw_chunk);
-                }
-                None => writes_stream.push(self.block_access.write_raw(
-                    extent.location,
-                    raw_chunk,
-                    DiskIoType::MaintenanceWrite,
-                )),
-            }
+            writes_stream.push(self.block_access.write_raw(
+                extent.location,
+                raw_chunk,
+                DiskIoType::MaintenanceWrite,
+            ));
 
             new_chunk_fn(chunk.id, chunk.offset, first_entry);
 
             self.phys.num_entries += chunk.entries.len() as u64;
             self.phys.next_chunk = self.phys.next_chunk.next();
             self.phys.next_chunk_offset.0 += raw_size;
-        }
-        if let Some((pending_location, pending_vec)) = pending_write {
-            writes_stream.push(self.block_access.write_raw(
-                pending_location,
-                pending_vec.into(),
-                DiskIoType::MaintenanceWrite,
-            ));
         }
         writes_stream.for_each(|_| async move {}).await;
         self.pending_entries.truncate(0);

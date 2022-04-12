@@ -5,13 +5,14 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 
+pub mod access_stats;
 pub mod base_types;
 pub mod data_object;
 pub mod debug;
 mod features;
 mod heartbeat;
 pub mod init;
-mod object_access;
+pub mod object_access;
 mod object_based_log;
 mod object_block_map;
 mod object_deleter;
@@ -20,10 +21,6 @@ mod pool_destroy;
 mod public_connection;
 mod root_connection;
 mod server;
-
-pub use object_access::OAError;
-pub use object_access::ObjectAccess;
-pub use object_access::ObjectAccessOpType;
-pub use object_access::StatMapValue;
-pub use pool::Pool;
 pub mod test_connectivity;
+
+pub use pool::Pool;

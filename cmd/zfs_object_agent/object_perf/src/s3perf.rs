@@ -1,3 +1,7 @@
+// This file is not used in production.
+#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stdout)]
+
 use std::cmp::max;
 use std::error::Error;
 use std::string::String;
@@ -13,8 +17,8 @@ use metered::common::*;
 use metered::hdr_histogram::AtomicHdrHistogram;
 use metered::metered;
 use metered::time_source::StdInstantMicros;
-use zettaobject::ObjectAccess;
-use zettaobject::ObjectAccessOpType;
+use zettaobject::access_stats::ObjectAccessOpType;
+use zettaobject::object_access::ObjectAccess;
 
 enum WriteTestBounds {
     Time(Duration),

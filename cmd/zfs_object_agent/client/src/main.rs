@@ -1,3 +1,7 @@
+// This file is not used in production.
+#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stdout)]
+
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
@@ -10,6 +14,11 @@ use std::time::Instant;
 
 use ::util::writeln_stderr;
 use ::util::writeln_stdout;
+use azure_storage_blobs::blob::responses::GetBlobResponse;
+use azure_storage_blobs::container::PublicAccess;
+use azure_storage_blobs::prelude::AsBlobClient;
+use azure_storage_blobs::prelude::AsBlobServiceClient;
+use azure_storage_blobs::prelude::AsContainerClient;
 use chrono::prelude::*;
 use chrono::DateTime;
 use clap::Parser;
@@ -29,13 +38,15 @@ use rusoto_credential::ProvideAwsCredentials;
 use rusoto_s3::*;
 use tokio::io::AsyncReadExt;
 use zettacache::base_types::*;
+use zettaobject::access_stats::ObjectAccessOpType;
 use zettaobject::base_types::*;
 use zettaobject::data_object::DataObject;
-use zettaobject::ObjectAccess;
-use zettaobject::ObjectAccessOpType;
+use zettaobject::object_access::blob::BlobObjectAccess;
+use zettaobject::object_access::s3::S3ObjectAccess;
 use zettaobject::Pool;
 mod client;
 use itertools::Itertools;
+use zettaobject::object_access::ObjectAccess;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
@@ -345,12 +356,11 @@ async fn find_old_pools(object_access: &ObjectAccess, min_age: Duration) -> Vec<
     let mut vec = Vec::new();
     for pool_key in pool_keys {
         match object_access
-            .head_object(format!("{}super", pool_key))
+            .stat_object(format!("{}super", pool_key))
             .await
         {
             Some(output) => {
-                let mod_time =
-                    DateTime::parse_from_rfc2822(output.last_modified.as_ref().unwrap()).unwrap();
+                let mod_time = output.last_modified.unwrap();
                 print_super(object_access, &pool_key, &mod_time).await;
                 if has_expired(&mod_time, min_age) {
                     vec.push(pool_key);
@@ -441,17 +451,108 @@ fn get_object_access(
     aws_secret_access_key: Option<&str>,
 ) -> Arc<ObjectAccess> {
     match aws_access_key_id {
-        None => ObjectAccess::new(endpoint, region, bucket, Some(profile.to_owned()), false),
+        None => ObjectAccess::new_s3(endpoint, region, bucket, Some(profile.to_owned()), false),
         Some(access_id) => {
             // If access_id is specified, aws_secret_access_key should also be specified.
             let secret_key = aws_secret_access_key.unwrap();
 
             let client =
-                ObjectAccess::get_client_with_creds(endpoint, region, access_id, secret_key);
+                S3ObjectAccess::get_client_with_creds(endpoint, region, access_id, secret_key);
 
-            ObjectAccess::from_client(client, bucket, false, endpoint, region)
+            ObjectAccess::from_s3(S3ObjectAccess::from_client(
+                client, bucket, endpoint, region,
+            ))
         }
     }
+}
+
+async fn do_blob() -> Result<(), Box<dyn Error>> {
+    let container_name = "zoatest";
+    let credentials_profile = Some("default".to_string());
+    let mut container_exists = false;
+
+    let storage_client =
+        match BlobObjectAccess::get_azure_storage_client(credentials_profile.clone()).await {
+            Ok(storage_client) => storage_client,
+            Err(err) => {
+                eprintln!("Error: {:?}", err);
+                return Err(err);
+            }
+        };
+
+    let blob_service = storage_client.as_blob_service_client();
+
+    let containers = blob_service.list_containers().execute().await.unwrap();
+
+    // List containers
+    containers.incomplete_vector.iter().for_each(|item| {
+        println!("container: {:20} {}", item.name, item.last_modified);
+        if item.name == container_name {
+            container_exists = true;
+        }
+    });
+
+    let container_client = storage_client.as_container_client(container_name);
+
+    if !container_exists {
+        container_client
+            .create()
+            .public_access(PublicAccess::None)
+            .timeout(Duration::from_secs(100))
+            .execute()
+            .await
+            .unwrap();
+        println!("Container {} created", container_name);
+    }
+
+    container_client
+        .as_blob_client("blob.txt")
+        .put_block_blob("somedata")
+        .content_type("text/plain")
+        .execute()
+        .await
+        .unwrap();
+
+    println!("\tPut blob: blob.txt");
+
+    let get_response: GetBlobResponse = container_client
+        .as_blob_client("blob.txt")
+        .get()
+        .execute()
+        .await
+        .unwrap();
+    println!("Get blob [blob.txt]: {:#?}", get_response);
+
+    let object_access = ObjectAccess::new_azure(container_name, credentials_profile, false).await;
+    let content = "I want to go to azure".as_bytes().to_vec();
+
+    object_access
+        .put_object_stream(
+            "blob2.txt".to_string(),
+            || (ByteStream::from(content.clone()), content.len()),
+            ObjectAccessOpType::MetadataPut,
+        )
+        .await;
+
+    let bytes = object_access
+        .get_object("blob2.txt".to_string(), ObjectAccessOpType::ReadsGet)
+        .await?;
+    println!("Get blob data [blob2.txt]: {:?}", bytes);
+
+    println!(
+        "List blobs {:?}",
+        object_access
+            .list_objects("".to_string(), None, true)
+            .collect::<Vec<String>>()
+            .await
+    );
+
+    object_access.delete_object("blob2.txt".to_string()).await;
+
+    container_client.delete().execute().await.unwrap();
+    println!("Container {} deleted", container_name);
+
+    Ok(())
 }
 
 #[derive(Parser)]
@@ -481,6 +582,7 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     S3Rusoto,
+    Blob,
     Create,
     Write,
     Read,
@@ -529,6 +631,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::S3Rusoto => do_s3_rusoto().await?,
+        Commands::Blob => do_blob().await?,
         Commands::Create => do_create().await?,
         Commands::Write => do_write().await?,
         Commands::Read => do_read().await?,

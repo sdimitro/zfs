@@ -22,10 +22,10 @@ use uuid::Uuid;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
+use crate::access_stats::StatMapValue;
 use crate::base_types::*;
 use crate::features::FeatureError;
 use crate::object_access::ObjectAccess;
-use crate::object_access::StatMapValue;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
@@ -95,7 +95,7 @@ struct ObjectAccessRequest {
 }
 impl ObjectAccessRequest {
     fn object_access(&self) -> Arc<ObjectAccess> {
-        ObjectAccess::new(
+        ObjectAccess::new_s3(
             &self.endpoint,
             &self.region,
             &self.bucket,

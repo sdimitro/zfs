@@ -11,11 +11,11 @@ use uuid::Uuid;
 use zettacache::base_types::PoolGuid;
 
 use crate::base_types::Txg;
+use crate::object_access::ObjectAccess;
 use crate::pool;
 use crate::pool::Pool;
 use crate::pool::PoolPhys;
 use crate::pool::UberblockPhys;
-use crate::ObjectAccess;
 
 pub struct DebugHandle {
     runtime: Handle,
@@ -31,7 +31,7 @@ fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
         .lookup_string("credentials_profile")
         .ok()
         .map(|s| s.to_string_lossy().to_string());
-    ObjectAccess::new(
+    ObjectAccess::new_s3(
         endpoint.to_str().unwrap(),
         region_str.to_str().unwrap(),
         bucket_name.to_str().unwrap(),

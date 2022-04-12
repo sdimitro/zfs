@@ -1,12 +1,15 @@
 use std::time::Duration;
 
 use rand::Rng;
-use rusoto_core::RusotoError;
 use serde::Deserialize;
+use util::writeln_stderr;
+use util::writeln_stdout;
 
-use crate::OAError;
-use crate::ObjectAccess;
-use crate::ObjectAccessOpType;
+use crate::access_stats::ObjectAccessOpType;
+use crate::object_access::s3::S3ObjectAccess;
+use crate::object_access::OAError;
+use crate::object_access::ObjectAccess;
+use crate::object_access::RequestError;
 
 #[derive(Debug, Deserialize)]
 struct Error {
@@ -31,8 +34,8 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
         )
         .await
     {
-        Err(OAError::RequestError(RusotoError::Unknown(bhr))) => {
-            match serde_xml_rs::from_str::<Error>(bhr.body_as_str()) {
+        Err(OAError::RequestError(RequestError::Unknown(response))) => {
+            match serde_xml_rs::from_str::<Error>(std::str::from_utf8(response.body()).unwrap()) {
                 Ok(error) => Err(format!(
                     "Connectivity test failed: {}: {}",
                     error.code, error.message
@@ -40,18 +43,21 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
                 Err(_) => {
                     // If the error string can not be deserialized as xml, return the enterity of
                     // the error back.
-                    Err(format!("Connectivity test failed: {}", bhr.body_as_str()))
+                    Err(format!(
+                        "Connectivity test failed: {}",
+                        std::str::from_utf8(response.body()).unwrap()
+                    ))
                 }
             }
         }
         Err(OAError::TimeoutError(_)) => {
             Err("Connectivity test failed with a timeout.".to_string())
         }
-        Err(OAError::RequestError(RusotoError::Service(err))) => Err(format!(
+        Err(OAError::RequestError(RequestError::Service(err))) => Err(format!(
             "Connectivity test failed due to a service error: {}",
             err
         )),
-        Err(OAError::RequestError(RusotoError::Credentials(err))) => Err(format!(
+        Err(OAError::RequestError(RequestError::Credentials(err))) => Err(format!(
             "Connectivity test failed due to a credentials error: {}",
             err
         )),
@@ -78,26 +84,27 @@ pub fn test_connectivity(
         .unwrap()
         .block_on(async move {
             let client = if aws_instance_profile {
-                ObjectAccess::get_client_with_instance_profile(&endpoint, &region)
+                S3ObjectAccess::get_client_with_instance_profile(&endpoint, &region)
             } else {
                 // Both aws_access_key_id and aws_secret_access_key should also be specified.
-                ObjectAccess::get_client_with_creds(
+                S3ObjectAccess::get_client_with_creds(
                     &endpoint,
                     &region,
                     aws_access_key_id.unwrap().as_str(),
                     aws_secret_access_key.unwrap().as_str(),
                 )
             };
-            let object_access =
-                ObjectAccess::from_client(client, &bucket, false, &endpoint, &region);
+            let object_access = ObjectAccess::from_s3(S3ObjectAccess::from_client(
+                client, &bucket, &endpoint, &region,
+            ));
 
             std::process::exit(match do_test_connectivity(&object_access).await {
                 Err(err) => {
-                    eprintln!("{}", err);
+                    writeln_stderr!("{}", err);
                     1
                 }
                 Ok(_) => {
-                    println!("Connectivity test succeeded.");
+                    writeln_stdout!("Connectivity test succeeded.");
                     0
                 }
             });

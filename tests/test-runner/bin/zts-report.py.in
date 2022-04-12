@@ -371,6 +371,12 @@ else:
             ['SKIP', block_devices_skip],
         'cli_root/zpool_destroy/zpool_resume_destroy_on_import_object_store':
             ['SKIP', block_devices_skip],
+        'cli_root/zpool_import/import_agent_stopped_object_store':
+            ['SKIP', block_devices_skip],
+        'cli_root/zpool_import/import_agent_stopped_multi_pools_object_store':
+            ['SKIP', block_devices_skip],
+        'cli_root/zpool_import/import_pools_with_same_name_object_store':
+            ['SKIP', block_devices_skip],
         'zcache_slog_sharing/setup': ['SKIP', block_devices_skip],
         'zcache_slog_sharing/zcache_slog_sharing_zpool_create_pos':
             ['SKIP', block_devices_skip],
@@ -497,6 +503,8 @@ if os.environ.get('ZTS_OBJECT_STORE') == 'true':
         'cli_root/zdb/zdb_decompress_zstd': ['FAIL', 'DOSE-738'],
         'cli_root/zdb/zdb_display_block': ['FAIL', 'DOSE-737'],
         'cli_root/zdb/zdb_objset_id': ['FAIL', 'DOSE-915'],
+        'cli_root/zpool_import/import_agent_stopped_object_store':
+            ['FAIL', known_reason],
         'zcache_slog_sharing/setup': ['SKIP', devices_not_available_reason],
         'zcache_slog_sharing/zcache_slog_sharing_zpool_create_pos':
             ['SKIP', devices_not_available_reason],

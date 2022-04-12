@@ -26,6 +26,7 @@ use lazy_static::lazy_static;
 use log::*;
 
 use crate::tunable;
+use crate::writeln_stderr;
 
 tunable! {
     static ref DIE_MTBF: Option<Duration> = None;
@@ -103,7 +104,7 @@ where
                 let msg = f();
                 let backtrace = Backtrace::new();
                 warn!("exiting to test failure handling: {} {:?}", msg, backtrace);
-                println!("exiting to test failure handling: {} {:?}", msg, backtrace);
+                writeln_stderr!("exiting to test failure handling: {} {:?}", msg, backtrace);
                 std::process::exit(0);
             }
         }

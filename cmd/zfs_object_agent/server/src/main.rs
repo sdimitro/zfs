@@ -1,10 +1,12 @@
 use std::time::Duration;
 
+use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use git_version::git_version;
 use log::*;
 use util::tunable;
+use util::writeln_stderr;
 use util::TrackingAllocator;
 use util::ALLOCATOR_PRINT_MIN_ALLOCS;
 use util::ALLOCATOR_PRINT_MIN_BYTES;
@@ -24,31 +26,15 @@ tunable! {
     static ref ALLOCATOR_PRINT_DURATION: Duration = Duration::from_secs(60);
 }
 
-#[derive(Parser)]
-#[clap(version=GIT_VERSION)]
-#[clap(name = "ZFS Object Agent")]
-#[clap(about = "Enables the ZFS kernel module talk to S3-protocol object storage")]
-#[clap(propagate_version = true)]
-struct Cli {
+#[derive(Args)]
+struct LoggingArgs {
     /// Sets the level of logging verbosity
     #[clap(short = 'v', parse(from_occurrences))]
     verbosity: u64,
 
-    /// Directory for unix-domain sockets
-    #[clap(short = 'd', long, value_name = "DIR", default_value = "/etc/zfs")]
-    socket_dir: String,
-
     /// File to log output to
     #[clap(short = 'o', long, value_name = "FILE")]
     output_file: Option<String>,
-
-    /// File/device to use for ZettaCache
-    #[clap(short = 'c', long, value_name = "PATH")]
-    cache_device: Vec<String>,
-
-    /// Configuration file to set tunables (toml/json/yaml)
-    #[clap(short = 't', long, value_name = "FILE")]
-    config_file: Option<String>,
 
     /// Logging configuration yaml file
     #[clap(
@@ -59,6 +45,32 @@ struct Cli {
         conflicts_with = "verbosity"
     )]
     log_config: Option<String>,
+}
+
+#[derive(Parser)]
+#[clap(version=GIT_VERSION)]
+#[clap(name = "ZFS Object Agent")]
+#[clap(about = "Enables the ZFS kernel module talk to S3-protocol object storage")]
+#[clap(propagate_version = true)]
+struct Cli {
+    #[clap(flatten)]
+    logging: LoggingArgs,
+
+    /// Configuration file to set tunables (toml/json/yaml)
+    #[clap(short = 't', long, value_name = "FILE")]
+    config_file: Option<String>,
+
+    /// Directory for unix-domain sockets
+    #[clap(short = 'd', long, value_name = "DIR", default_value = "/etc/zfs")]
+    socket_dir: String,
+
+    /// File/device to use for ZettaCache
+    #[clap(short = 'c', long, value_name = "PATH")]
+    cache_device: Vec<String>,
+
+    /// Clear the cache when it has incompatible features
+    #[clap(long)]
+    clear_incompatible_cache: bool,
 
     #[clap(subcommand)]
     command: Option<Commands>,
@@ -109,8 +121,24 @@ enum Commands {
     },
 }
 
+fn setup_logging(logging: LoggingArgs) {
+    util::setup_logging(
+        logging.verbosity,
+        logging.output_file.as_deref(),
+        logging.log_config.as_deref(),
+        false,
+    );
+}
+
 fn main() {
     let cli = Cli::parse();
+
+    if let Some(file_name) = cli.config_file {
+        util::tunable::read_config(&file_name);
+    }
+    if cli.command.is_none() || cli.logging.verbosity > 0 {
+        setup_logging(cli.logging);
+    }
 
     match cli.command {
         Some(Commands::TestConnectivity {
@@ -130,16 +158,6 @@ fn main() {
         ),
 
         None => {
-            if let Some(file_name) = cli.config_file {
-                util::tunable::read_config(&file_name);
-            }
-            util::setup_logging(
-                cli.verbosity,
-                cli.output_file.as_deref(),
-                cli.log_config.as_deref(),
-                false,
-            );
-
             // This has to be called after setting up tunables.  Allocations
             // that happen before this call will use the defaults hard-coded in
             // alloc.rs
@@ -175,10 +193,11 @@ fn main() {
             match zettaobject::init::start(
                 &cli.socket_dir,
                 cli.cache_device.iter().map(AsRef::as_ref).collect(),
+                cli.clear_incompatible_cache,
                 runtime,
             ) {
                 Ok(()) => panic!("unreachable statement"),
-                Err(err) => eprintln!("error: couldn't start server: {}", err),
+                Err(err) => writeln_stderr!("error: couldn't start server: {}", err),
             }
         }
     }
@@ -198,10 +217,10 @@ mod test {
 
     #[test]
     fn verbosity() {
-        assert_eq!(pos("zfs_object_agent").verbosity, 0);
-        assert_eq!(pos("zfs_object_agent -v").verbosity, 1);
-        assert_eq!(pos("zfs_object_agent -v -v").verbosity, 2);
-        assert_eq!(pos("zfs_object_agent -vv").verbosity, 2);
+        assert_eq!(pos("zfs_object_agent").logging.verbosity, 0);
+        assert_eq!(pos("zfs_object_agent -v").logging.verbosity, 1);
+        assert_eq!(pos("zfs_object_agent -v -v").logging.verbosity, 2);
+        assert_eq!(pos("zfs_object_agent -vv").logging.verbosity, 2);
     }
 
     #[test]

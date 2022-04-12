@@ -13,8 +13,8 @@ use zettacache::base_types::PoolGuid;
 
 use crate::base_types::ObjectId;
 use crate::data_object::DataObject;
+use crate::object_access::ObjectAccess;
 use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
-use crate::ObjectAccess;
 
 pub struct ObjectDeleter {
     // objects to delete at the end of this txg
