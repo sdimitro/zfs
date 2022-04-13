@@ -180,14 +180,6 @@ impl Borrow<DiskLocation> for Extent {
 }
 
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
-pub struct CheckpointId(pub u64);
-impl CheckpointId {
-    pub fn next(&self) -> CheckpointId {
-        CheckpointId(self.0 + 1)
-    }
-}
-
-#[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct Atime(pub u32);
 impl Atime {
     pub fn next(&self) -> Atime {

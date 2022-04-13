@@ -399,7 +399,15 @@ impl Disk {
                     &bytes,
                     i64::try_from(message.offset).unwrap(),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "pwrite(fd={} off={} len={}) failed: {}",
+                        file.as_raw_fd(),
+                        message.offset,
+                        bytes.len(),
+                        e
+                    )
+                });
                 op.end(bytes.len() as u64);
                 message.tx.send(()).unwrap();
                 prev_offset = message.offset;
@@ -419,7 +427,15 @@ impl Disk {
                     aggregate.as_slice(),
                     i64::try_from(offset).unwrap(),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "pwrite(fd={} off={} len={}) failed: {}",
+                        file.as_raw_fd(),
+                        offset,
+                        aggregate.len(),
+                        e
+                    )
+                });
                 op.end(len as u64);
                 for tx in txs {
                     tx.send(()).unwrap();
@@ -429,7 +445,9 @@ impl Disk {
 
             // Receive as many messages as we can without blocking
             while let Ok(message) = rx.try_recv() {
-                sorted.insert(message.offset, message);
+                let offset = message.offset;
+                let old = sorted.insert(offset, message);
+                assert!(old.is_none(), "duplicate offset {offset}");
             }
         }
     }

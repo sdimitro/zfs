@@ -8,13 +8,14 @@ use serde::Serialize;
 use crate::base_types::Extent;
 use crate::base_types::OnDisk;
 use crate::block_access::BlockAccess;
-use crate::block_allocator::SlabId;
 use crate::block_allocator::SlabPhysType;
 use crate::block_based_log::BlockBasedLog;
 use crate::block_based_log::BlockBasedLogEntry;
 use crate::block_based_log::BlockBasedLogPhys;
-use crate::extent_allocator::ExtentAllocator;
-use crate::extent_allocator::ExtentAllocatorBuilder;
+use crate::slab_allocator::SlabAccess;
+use crate::slab_allocator::SlabAllocator;
+use crate::slab_allocator::SlabAllocatorBuilder;
+use crate::slab_allocator::SlabId;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub struct SlabInfoEntry {
@@ -53,7 +54,7 @@ impl SpaceMapPhys {
         }
     }
 
-    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+    pub fn claim(&self, builder: &mut SlabAllocatorBuilder) {
         self.log.claim(builder);
     }
 
@@ -61,34 +62,38 @@ impl SpaceMapPhys {
         self.log.bytes()
     }
 
-    pub fn capacity_bytes(&self) -> u64 {
-        self.log.capacity_bytes()
+    pub fn total_entries(&self) -> u64 {
+        self.log.len()
+    }
+
+    pub async fn load<F>(
+        &self,
+        block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
+        mut import_cb: F,
+    ) where
+        F: FnMut(SpaceMapEntry),
+    {
+        self.log
+            .iter(block_access, slab_access)
+            .for_each(|entry| {
+                import_cb(entry);
+                future::ready(())
+            })
+            .await;
     }
 }
 
 impl SpaceMap {
     pub fn open(
         block_access: Arc<BlockAccess>,
-        extent_allocator: Arc<ExtentAllocator>,
+        slab_allocator: Arc<SlabAllocator>,
         phys: SpaceMapPhys,
     ) -> SpaceMap {
         SpaceMap {
-            log: BlockBasedLog::open(block_access, extent_allocator, phys.log),
+            log: BlockBasedLog::open(block_access, slab_allocator, phys.log),
             alloc_entries: phys.alloc_entries,
         }
-    }
-
-    pub async fn load<F>(&self, mut import_cb: F)
-    where
-        F: FnMut(SpaceMapEntry),
-    {
-        self.log
-            .iter()
-            .for_each(|entry| {
-                import_cb(entry);
-                future::ready(())
-            })
-            .await;
     }
 
     pub fn alloc(&mut self, extent: Extent) {

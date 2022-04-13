@@ -14,8 +14,11 @@ use util::zettacache_stats::DiskIoType;
 
 use crate::base_types::*;
 use crate::block_access::*;
+use crate::checkpoint::CheckpointId;
 use crate::features::FeatureName;
+use crate::features::SUPPORTED_FEATURES;
 
+// We assume that a single write of this size is atomic.
 pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
 
 /// State stored at the beginning of every disk
@@ -41,15 +44,22 @@ pub struct DiskPhys {
     // XXX put sector size in here too and verify it matches what the disk says now?
 }
 
+impl DiskPhys {
+    pub fn new(size: u64) -> Self {
+        Self { size }
+    }
+}
+
 /// State that's only needed on the primary disk (currently, always DiskId(0)).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrimaryPhys {
     pub checkpoint_id: CheckpointId,
-    pub checkpoint_capacity: Extent, // space available for checkpoints
-    pub checkpoint: Extent,          // space used by latest checkpoint
-    pub old_checkpoint_capacity: Vec<Extent>, // unused space, previously used for checkpoints
     pub feature_flags: Vec<FeatureName>,
     pub disks: BTreeMap<DiskId, DiskPhys>,
+
+    // Each extent is a single slab, but the last extent can be a fraction of a
+    // slab.  The remainder of that slab is uninitialized padding.
+    pub checkpoint: Vec<Extent>,
 }
 
 /// Subset of PrimaryPhys that's needed to get the feature flags.
@@ -59,6 +69,15 @@ pub struct PrimaryFeaturesPhys {
 }
 
 impl PrimaryPhys {
+    pub fn new(disks: BTreeMap<DiskId, DiskPhys>, checkpoint_extents: Vec<Extent>) -> Self {
+        PrimaryPhys {
+            checkpoint_id: CheckpointId(0),
+            feature_flags: SUPPORTED_FEATURES.keys().cloned().collect(),
+            disks,
+            checkpoint: checkpoint_extents,
+        }
+    }
+
     /// Write superblocks to all disks.
     pub async fn write_all(&self, primary_disk: DiskId, guid: u64, block_access: &BlockAccess) {
         // Write the non-primary disks first, so that newly-added disks will
@@ -79,7 +98,7 @@ impl PrimaryPhys {
                 phys.write(block_access, disk).await;
             })
             .collect::<FuturesUnordered<_>>()
-            .for_each(|_| async move {})
+            .count()
             .await;
 
         let phys = SuperblockPhys {

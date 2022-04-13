@@ -6,16 +6,16 @@ use util::nice_p2size;
 use util::writeln_stderr;
 use util::writeln_stdout;
 
-use super::ZettaCheckpointPhys;
+use super::CheckpointPhys;
 use crate::base_types::DiskId;
 use crate::block_access::BlockAccess;
 use crate::block_access::Disk;
 use crate::block_allocator::zcdb::zcachedb_dump_slabs;
 use crate::block_allocator::zcdb::zcachedb_dump_spacemaps;
-use crate::extent_allocator::ExtentAllocator;
-use crate::extent_allocator::ExtentAllocatorBuilder;
+use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::superblock::PrimaryPhys;
 use crate::superblock::SuperblockPhys;
+use crate::superblock::SUPERBLOCK_SIZE;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 
@@ -24,8 +24,8 @@ pub struct ZCacheDBHandle {
     primary: PrimaryPhys,
     primary_disk: DiskId,
     guid: u64,
-    checkpoint: Arc<ZettaCheckpointPhys>,
-    extent_allocator: Arc<ExtentAllocator>,
+    checkpoint: Arc<CheckpointPhys>,
+    slab_builder: SlabAllocatorBuilder,
 }
 
 impl ZCacheDBHandle {
@@ -53,15 +53,13 @@ impl ZCacheDBHandle {
         let block_access = Arc::new(BlockAccess::new(disks, true));
 
         let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
-        let checkpoint =
-            Arc::new(ZettaCheckpointPhys::read(&block_access, primary.checkpoint).await);
+        let checkpoint = Arc::new(CheckpointPhys::read(&block_access, &primary.checkpoint).await);
 
-        let mut builder = ExtentAllocatorBuilder::new(&checkpoint.extent_allocator);
+        let mut slab_builder = SlabAllocatorBuilder::new(checkpoint.slab_allocator.clone());
         // We should be able to get away without claiming the metadata space,
         // since we aren't allocating anything, but we may also want to do this
         // for verification (e.g. that there aren't overlapping Extents).
-        checkpoint.claim(&mut builder);
-        let extent_allocator = Arc::new(ExtentAllocator::open(builder));
+        checkpoint.claim(&mut slab_builder);
 
         Ok(ZCacheDBHandle {
             block_access,
@@ -69,136 +67,53 @@ impl ZCacheDBHandle {
             primary_disk,
             guid,
             checkpoint,
-            extent_allocator,
+            slab_builder,
         })
     }
 
-    pub async fn dump_free_space(&self) {
-        writeln_stdout!("Superblock");
+    pub async fn dump_space(&self) {
+        writeln_stdout!("Superblock: {}", nice_p2size(SUPERBLOCK_SIZE));
         writeln_stdout!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
         writeln_stdout!();
 
-        writeln_stdout!("Checkpoint Region");
-        writeln_stdout!("  {:?}", self.primary.checkpoint_capacity);
-        writeln_stdout!(
-            "  checkpoint: {} used out of {} ({:.1}%, must be <50%)",
-            nice_p2size(self.primary.checkpoint.size),
-            nice_p2size(self.primary.checkpoint_capacity.size),
-            self.primary.checkpoint.size as f64 * 100.0
-                / self.primary.checkpoint_capacity.size as f64
-        );
-        writeln_stdout!();
-
-        writeln_stdout!("Old Checkpoint Regions");
-        let mut unused_checkpoint_space = 0;
-        for region in self.primary.old_checkpoint_capacity.iter() {
-            unused_checkpoint_space += region.size;
-            writeln_stdout!("  {:?}", region);
-        }
-        writeln_stdout!("  ----------------------");
-        writeln_stdout!("  total: {}", nice_p2size(unused_checkpoint_space));
-        writeln_stdout!();
-
-        writeln_stdout!("Metadata Region");
-        let mut total_used_bytes = 0;
-        let mut total_allocated_bytes = 0;
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "operation log",
-            nice_p2size(self.checkpoint.operation_log.bytes()),
-            nice_p2size(self.checkpoint.operation_log.capacity_bytes())
-        );
-        total_used_bytes += self.checkpoint.operation_log.bytes();
-        total_allocated_bytes += self.checkpoint.operation_log.capacity_bytes();
-
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "spacemap",
-            nice_p2size(self.checkpoint.block_allocator.spacemap_bytes()),
-            nice_p2size(self.checkpoint.block_allocator.spacemap_capacity_bytes())
-        );
-        total_used_bytes += self.checkpoint.block_allocator.spacemap_bytes();
-        total_allocated_bytes += self.checkpoint.block_allocator.spacemap_capacity_bytes();
-
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "spacemap_next",
-            nice_p2size(self.checkpoint.block_allocator.spacemap_next_bytes()),
-            nice_p2size(
-                self.checkpoint
-                    .block_allocator
-                    .spacemap_next_capacity_bytes()
-            )
-        );
-        total_used_bytes += self.checkpoint.block_allocator.spacemap_next_bytes();
-        total_allocated_bytes += self
+        let slabs_capacity = self
             .checkpoint
-            .block_allocator
-            .spacemap_next_capacity_bytes();
-
-        writeln_stdout!(
-            "  {:>13} - {:>6} used out of {:>6} allocated",
-            "index log",
-            nice_p2size(self.checkpoint.old_index.log_bytes()),
-            nice_p2size(self.checkpoint.old_index.log_capacity_bytes())
-        );
-        total_used_bytes += self.checkpoint.old_index.log_bytes();
-        total_allocated_bytes += self.checkpoint.old_index.log_capacity_bytes();
-
-        if let Some(progress) = self.checkpoint.merge_progress.clone() {
-            writeln_stdout!(
-                "  {:>13} - {:>6} used out of {:>6} allocated",
-                "progress log",
-                nice_p2size(progress.operation_log.bytes()),
-                nice_p2size(progress.operation_log.capacity_bytes())
-            );
-            total_used_bytes += progress.operation_log.bytes();
-            total_allocated_bytes += progress.operation_log.capacity_bytes();
-            writeln_stdout!(
-                "  {:>13} - {:>6} used out of {:>6} allocated",
-                "progress index",
-                nice_p2size(progress.new_index.log_bytes()),
-                nice_p2size(progress.new_index.log_capacity_bytes())
-            );
-            total_used_bytes += progress.new_index.log_bytes();
-            total_allocated_bytes += progress.new_index.log_capacity_bytes();
-        }
-        writeln_stdout!("  ----------------------");
-        let metadata_region_size = self
-            .checkpoint
-            .extent_allocator
-            .capacity
-            .iter()
-            .map(|extent| extent.size)
-            .sum();
-        writeln_stdout!(
-            "  {:>13} - {} ({:.1}%) used, {} ({:.1}%) allocated out of {:>6} total",
-            "total",
-            nice_p2size(total_used_bytes),
-            total_used_bytes as f64 * 100.0 / metadata_region_size as f64,
-            nice_p2size(total_allocated_bytes),
-            total_allocated_bytes as f64 * 100.0 / metadata_region_size as f64,
-            nice_p2size(metadata_region_size)
-        );
-        writeln_stdout!("  ----------------------");
-        for (disk, (used, total)) in self.extent_allocator.zcachedb_metadata_per_disk() {
-            writeln_stdout!(
-                "  {:?} - {:>6} allocated out of {:>6} total",
-                disk,
-                nice_p2size(used),
-                nice_p2size(total)
-            );
-        }
-        writeln_stdout!();
-
-        let balloc_size = self
-            .checkpoint
-            .block_allocator
+            .slab_allocator
             .capacity()
             .iter()
             .map(|extent| extent.size)
             .sum();
-        writeln_stdout!("{:>6} User Data Region", nice_p2size(balloc_size));
+        writeln_stdout!("Slabs Region: {}", nice_p2size(slabs_capacity));
+        writeln_stdout!("-------------------------------");
+        let mut total_used_bytes = 0;
+        let mut print_meta = |name: &str, space: u64| {
+            writeln_stdout!("  {name:>20}:  {:>6}", nice_p2size(space));
+            total_used_bytes += space;
+        };
+
+        print_meta(
+            "checkpoint",
+            self.primary.checkpoint.iter().map(|e| e.size).sum(),
+        );
+        print_meta("spacemap", self.checkpoint.block_allocator.spacemap_bytes());
+        print_meta(
+            "next spacemap",
+            self.checkpoint.block_allocator.spacemap_next_bytes(),
+        );
+        print_meta("index", self.checkpoint.old_index.log_bytes());
+        print_meta("operation log", self.checkpoint.operation_log.bytes());
+
+        if let Some(progress) = self.checkpoint.merge_progress.clone() {
+            print_meta("next index", progress.new_index.log_bytes());
+            print_meta("next operation log", progress.operation_log.bytes());
+        }
+        writeln_stdout!("-------------------------------");
+        writeln_stdout!(
+            "  {:>20}:  {:>6} ({:.1}%)",
+            "total metadata",
+            nice_p2size(total_used_bytes),
+            total_used_bytes as f64 * 100.0 / slabs_capacity as f64,
+        );
     }
 
     pub async fn dump_structures(&self, opts: DumpStructuresOptions) {
@@ -221,7 +136,7 @@ impl ZCacheDBHandle {
             zcachedb_dump_spacemaps(
                 self.checkpoint.block_allocator.clone(),
                 self.block_access.clone(),
-                self.extent_allocator.clone(),
+                &self.slab_builder,
             )
             .await;
         }
@@ -229,7 +144,7 @@ impl ZCacheDBHandle {
         if opts.dump_operation_log_raw {
             self.checkpoint
                 .operation_log
-                .iter_chunks(self.block_access.clone())
+                .iter_chunks(self.block_access.clone(), self.slab_builder.access())
                 .for_each(|chunk| async move {
                     writeln_stdout!("{:#?}", chunk);
                 })
@@ -237,7 +152,7 @@ impl ZCacheDBHandle {
             if let Some(mpp) = &self.checkpoint.merge_progress {
                 writeln_stdout!("\nold operation log from MergeProgressPhys:");
                 mpp.operation_log
-                    .iter_chunks(self.block_access.clone())
+                    .iter_chunks(self.block_access.clone(), self.slab_builder.access())
                     .for_each(|chunk| async move {
                         writeln_stdout!("{:#?}", chunk);
                     })
@@ -248,7 +163,7 @@ impl ZCacheDBHandle {
         if opts.dump_index_log_raw {
             self.checkpoint
                 .old_index
-                .iter_chunks(self.block_access.clone())
+                .iter_chunks(self.block_access.clone(), self.slab_builder.access())
                 .for_each(|chunk| async move {
                     writeln_stdout!("{:#?}", chunk);
                 })
@@ -256,7 +171,7 @@ impl ZCacheDBHandle {
 
             self.checkpoint
                 .old_index
-                .iter_summary_chunks(self.block_access.clone())
+                .iter_summary_chunks(self.block_access.clone(), self.slab_builder.access())
                 .for_each(|chunk| async move {
                     writeln_stdout!("{:#?}", chunk);
                 })
@@ -265,13 +180,13 @@ impl ZCacheDBHandle {
             if let Some(mpp) = &self.checkpoint.merge_progress {
                 writeln_stdout!("\nnew index from MergeProgressPhys:");
                 mpp.new_index
-                    .iter_chunks(self.block_access.clone())
+                    .iter_chunks(self.block_access.clone(), self.slab_builder.access())
                     .for_each(|chunk| async move {
                         writeln_stdout!("{:#?}", chunk);
                     })
                     .await;
                 mpp.new_index
-                    .iter_summary_chunks(self.block_access.clone())
+                    .iter_summary_chunks(self.block_access.clone(), self.slab_builder.access())
                     .for_each(|chunk| async move {
                         writeln_stdout!("{:#?}", chunk);
                     })
@@ -282,7 +197,7 @@ impl ZCacheDBHandle {
         if opts.dump_rebalance_log_raw {
             if let Some(progress) = &self.checkpoint.merge_progress {
                 if let Some(log) = progress.rebalance_log.as_ref() {
-                    log.iter_chunks(self.block_access.clone())
+                    log.iter_chunks(self.block_access.clone(), self.slab_builder.access())
                         .for_each(|chunk| async move {
                             writeln_stdout!("{:#?}", chunk);
                         })
@@ -292,10 +207,10 @@ impl ZCacheDBHandle {
         }
     }
 
-    pub async fn dump_slabs(&self, opts: DumpSlabsOptions) {
+    pub async fn dump_slabs(&mut self, opts: DumpSlabsOptions) {
         zcachedb_dump_slabs(
             self.block_access.clone(),
-            self.extent_allocator.clone(),
+            &mut self.slab_builder,
             self.checkpoint.block_allocator.clone(),
             opts,
         )
@@ -306,13 +221,13 @@ impl ZCacheDBHandle {
         writeln_stdout!("iterating current (old) index to verify histogram...");
         self.checkpoint
             .old_index
-            .verify_histogram(self.block_access.clone())
+            .verify_histogram(self.block_access.clone(), self.slab_builder.access())
             .await;
 
         if let Some(mpp) = &self.checkpoint.merge_progress {
             writeln_stdout!("iterating merge (new) index to verify histogram...");
             mpp.new_index
-                .verify_histogram(self.block_access.clone())
+                .verify_histogram(self.block_access.clone(), self.slab_builder.access())
                 .await;
         }
         writeln_stdout!("histograms correct");
