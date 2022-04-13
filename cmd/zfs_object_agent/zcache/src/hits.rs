@@ -41,15 +41,6 @@ impl SizeHistogram {
     /// chunks and then adding the number of samples for the physical cache in the
     /// original histogram of these chunks together for each bucket in the new histogram.
     fn resample(&self, samples_in_capacity: usize, histogram: &[u64]) -> Vec<u64> {
-        // Given the desired number of samples for the cache capacity portion of the histogram,
-        // calculate the total number of samples needed for the capacity covered by the histogram.
-        let resample_bucket_size = self.cache_capacity / samples_in_capacity as u64;
-        let target_samples = (histogram.len() as f64 * self.bucket_size as f64
-            / resample_bucket_size as f64)
-            .ceil()
-            .to_usize()
-            .unwrap();
-
         let sub_samples_per_resample = usize::from64(self.cache_capacity / self.bucket_size);
         let mut sample_iter = histogram.iter();
         let mut sub_sample_value = 0.0;
@@ -75,7 +66,6 @@ impl SizeHistogram {
             }
             resample.push(accumulated_value.round().to_u64().unwrap());
         }
-        assert_eq!(resample.len(), target_samples);
         resample
     }
 
