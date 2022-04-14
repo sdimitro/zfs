@@ -1409,9 +1409,30 @@ impl ZettaCache {
         }
 
         let old_index_phys = self.old_index.write().await.get_phys();
-        self.state
-            .lock()
-            .await
+        let mut state = self.state.lock().await;
+
+        // Now that we have the state lock, we need to wait for outstanding i/os again, because
+        // more i/os could have been initiated while we were waiting above.  Those i/os will
+        // become part of this checkpoint, so we have to wait for them.
+        {
+            let begin = Instant::now();
+            state.outstanding_reads.rotate().await;
+            debug!(
+                "waited for outstanding_reads with lock held in {}ms",
+                begin.elapsed().as_millis()
+            );
+        }
+
+        {
+            let begin = Instant::now();
+            state.outstanding_writes.rotate().await;
+            debug!(
+                "waited for outstanding_writes with lock held in {}ms",
+                begin.elapsed().as_millis()
+            );
+        }
+
+        state
             .flush_checkpoint(
                 old_index_phys,
                 new_index,
