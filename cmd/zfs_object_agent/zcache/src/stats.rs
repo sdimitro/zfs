@@ -187,8 +187,8 @@ impl StatsDisplay {
 
         if self.show_block_allocator {
             // Append after all other columns
-            top_header.append(&mut vec![("ALLOCATOR", 2), ("AVAILABLE", 2)]);
-            bottom_header.append(&mut vec!["alloc", "avail", "space", "slabs"]);
+            top_header.append(&mut vec![("BLOCKS", 2), ("FREE-SPACE", 2)]);
+            bottom_header.append(&mut vec!["alloc", "avail", "blocks", "slabs"]);
         }
 
         self.display_headers_impl(top_header, bottom_header);
@@ -256,15 +256,16 @@ impl StatsDisplay {
 
         // BLOCK-ALLOCATOR (optional)
         if self.show_block_allocator {
-            let block_allocator_size = values.value(BlockAllocatorSize);
-            let free_slabs_size = values.value(BlockAllocatorFreeSlabsSize);
-            let block_allocator_free = values.value(BlockAllocatorAvailable);
-            let block_allocator_allocated = block_allocator_size - block_allocator_free;
+            let available_space = values.value(AvailableSpace);
+            let slab_capacity = values.value(SlabCapacity);
+            let free_blocks_size = values.value(AvailableBlocksSize);
+            let free_slabs_size = values.value(AvailableSlabsSize);
+            let block_allocator_allocated = slab_capacity - free_blocks_size - free_slabs_size;
 
             self.display_bytes(block_allocator_allocated as f64);
-            self.display_bytes(block_allocator_free as f64);
-            self.display_percent(block_allocator_free as f64, block_allocator_size as f64);
-            self.display_percent(free_slabs_size as f64, block_allocator_size as f64);
+            self.display_bytes(available_space as f64);
+            self.display_percent(free_blocks_size as f64, slab_capacity as f64);
+            self.display_percent(free_slabs_size as f64, slab_capacity as f64);
         }
 
         writeln_stdout!();

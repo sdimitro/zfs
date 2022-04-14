@@ -2,6 +2,8 @@ use std::time::Duration;
 
 use rand::Rng;
 use serde::Deserialize;
+use util::writeln_stderr;
+use util::writeln_stdout;
 
 use crate::access_stats::ObjectAccessOpType;
 use crate::object_access::s3::S3ObjectAccess;
@@ -55,6 +57,10 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
             "Connectivity test failed due to a service error: {}",
             err
         )),
+        Err(OAError::RequestError(RequestError::Credentials(err))) => Err(format!(
+            "Connectivity test failed due to a credentials error: {}",
+            err
+        )),
         Err(err) => Err(format!("Connectivity test failed: {}", err)),
         Ok(_) => {
             object_access.delete_object(file).await;
@@ -94,11 +100,11 @@ pub fn test_connectivity(
 
             std::process::exit(match do_test_connectivity(&object_access).await {
                 Err(err) => {
-                    eprintln!("{}", err);
+                    writeln_stderr!("{}", err);
                     1
                 }
                 Ok(_) => {
-                    println!("Connectivity test succeeded.");
+                    writeln_stdout!("Connectivity test succeeded.");
                     0
                 }
             });

@@ -805,8 +805,8 @@ impl PoolState {
         }
         join5(
             syncing_state.storage_object_log.cleanup(),
-            frees_log_stream.for_each(|_| future::ready(())),
-            size_log_stream.for_each(|_| future::ready(())),
+            frees_log_stream.count(),
+            size_log_stream.count(),
             self.cleanup_orphaned_logs(pending_frees_log_prefix, next_log_id),
             self.cleanup_orphaned_logs(object_size_log_prefix, next_log_id),
         )
@@ -1419,8 +1419,8 @@ impl Pool {
 
         join3(
             syncing_state.storage_object_log.flush(txg),
-            frees_log_stream.for_each(|_| future::ready(())),
-            size_log_stream.for_each(|_| future::ready(())),
+            frees_log_stream.count(),
+            size_log_stream.count(),
         )
         .await;
 
@@ -1645,7 +1645,7 @@ impl Pool {
             super_trace!("inserting {:?} to unordered pending writes", block);
             syncing_state
                 .pending_unordered_writes
-                .insert(block, (bytes.clone(), cb));
+                .insert(block, (bytes.as_bytes(), cb));
 
             Self::write_unordered_to_pending_object(
                 &self.state,

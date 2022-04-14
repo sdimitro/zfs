@@ -1,10 +1,17 @@
+use std::cmp::min;
 use std::fmt::Formatter;
 use std::fmt::Result;
+use std::marker::PhantomData;
+use std::mem;
+use std::ops::Bound;
 use std::ops::Deref;
+use std::ops::Range;
+use std::ops::RangeBounds;
 
 use bytes::buf::UninitSlice;
 use bytes::BufMut;
 use bytes::Bytes;
+use derivative::Derivative;
 use more_asserts::*;
 use tokio::io;
 use tokio::io::AsyncReadExt;
@@ -23,7 +30,7 @@ pub fn tersevec<E>(vec: &[E], fmt: &mut Formatter) -> Result {
     fmt.write_fmt(format_args!("[...{} elements...]", vec.len()))
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct AlignedBytes {
     alignment: usize,
     bytes: Bytes,
@@ -39,10 +46,25 @@ impl AlignedBytes {
     pub fn alignment(&self) -> usize {
         self.alignment
     }
+
+    pub fn slice_ref(&self, subset: &[u8]) -> Self {
+        assert!(subset.len() % self.alignment == 0);
+        let offset = subset.as_ptr() as usize - self.bytes.as_ref().as_ptr() as usize;
+        assert!(offset % self.alignment == 0);
+        let sub_bytes = self.bytes.slice_ref(subset);
+        Self {
+            alignment: self.alignment,
+            bytes: sub_bytes,
+        }
+    }
+
+    pub fn as_bytes(&self) -> Bytes {
+        self.bytes.clone()
+    }
 }
 
 impl Deref for AlignedBytes {
-    type Target = Bytes;
+    type Target = [u8];
     fn deref(&self) -> &Self::Target {
         &self.bytes
     }
@@ -200,4 +222,96 @@ where
         reader.read_buf(&mut buf).await?;
     }
     Ok(())
+}
+
+/// The VecMap provides similar functionality to a BTreeMap, but with a Vec as the underlying
+/// data structure.  For good performance, the keys must be dense integers.
+#[derive(Debug, Derivative)]
+#[derivative(Default(bound = ""))]
+pub struct VecMap<K, V> {
+    vec: Vec<Option<V>>,
+    num_entries: usize,
+    phantom: PhantomData<K>,
+}
+
+impl<K, V> VecMap<K, V>
+where
+    K: Into<usize> + Copy,
+{
+    /// Returns old value (or None if not present)
+    pub fn insert(&mut self, key: K, value: V) -> Option<V> {
+        let index = key.into();
+        if index >= self.vec.len() {
+            self.vec.resize_with(index + 1, || None);
+        }
+        if self.vec[index].is_none() {
+            self.num_entries += 1;
+        }
+        mem::replace(&mut self.vec[index], Some(value))
+    }
+
+    pub fn get(&self, key: K) -> Option<&V> {
+        let index = key.into();
+        if index >= self.vec.len() {
+            return None;
+        }
+        self.vec[index].as_ref()
+    }
+
+    pub fn get_mut(&mut self, key: K) -> Option<&mut V> {
+        let index = key.into();
+        if index >= self.vec.len() {
+            return None;
+        }
+        self.vec[index].as_mut()
+    }
+
+    /// Returns old value (or None if not present)
+    pub fn remove(&mut self, key: K) -> Option<V> {
+        let index = key.into();
+        if index >= self.vec.len() {
+            return None;
+        }
+        if self.vec[index].is_some() {
+            self.num_entries -= 1;
+        }
+        self.vec[index].take()
+    }
+
+    pub fn values(&self) -> impl Iterator<Item = &V> {
+        self.vec.iter().filter_map(|v| v.as_ref())
+    }
+
+    fn map_range<R: RangeBounds<K>>(&self, range: R) -> Range<usize> {
+        let start = match range.start_bound() {
+            Bound::Included(&k) => k.into(),
+            Bound::Excluded(&k) => k.into() + 1,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Included(&k) => k.into() + 1,
+            Bound::Excluded(&k) => k.into(),
+            Bound::Unbounded => self.vec.len(),
+        };
+        min(self.vec.len(), start)..min(self.vec.len(), end)
+    }
+
+    pub fn range<R: RangeBounds<K>>(&self, range: R) -> impl Iterator<Item = &V> {
+        let range = self.map_range(range);
+        self.vec[range].iter().filter_map(|v| v.as_ref())
+    }
+
+    pub fn range_mut<R: RangeBounds<K>>(&mut self, range: R) -> impl Iterator<Item = &mut V> {
+        let range = self.map_range(range);
+        self.vec[range].iter_mut().filter_map(|v| v.as_mut())
+    }
+
+    /// Returns the number of elements in the map.
+    pub fn len(&self) -> usize {
+        self.num_entries
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 }

@@ -136,11 +136,11 @@ impl ZettaCacheDBCommand {
         command: ZettaCacheDBCommand,
         paths: Vec<&str>,
     ) -> Result<(), anyhow::Error> {
-        let handle = ZCacheDBHandle::open(paths).await?;
+        let mut handle = ZCacheDBHandle::open(paths).await?;
         match command {
             ZettaCacheDBCommand::DumpStructures(opts) => handle.dump_structures(opts).await,
             ZettaCacheDBCommand::DumpSlabs(opts) => handle.dump_slabs(opts).await,
-            ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_free_space().await,
+            ZettaCacheDBCommand::DumpSpaceUsage => handle.dump_space().await,
             ZettaCacheDBCommand::VerifyIndex => handle.verify_index().await,
             ZettaCacheDBCommand::DumpSuperblocks => {
                 panic!("non-applicable command after opening whole pool state")

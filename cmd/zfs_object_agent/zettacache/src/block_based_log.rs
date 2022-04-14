@@ -1,9 +1,9 @@
+use std::cmp::max;
 use std::cmp::min;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::iter;
 use std::marker::PhantomData;
 use std::ops::Add;
-use std::ops::Bound::*;
 use std::ops::Sub;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -11,6 +11,7 @@ use std::time::Instant;
 
 use anyhow::Context;
 use bytesize::ByteSize;
+use derivative::Derivative;
 use futures::future::join;
 use futures::stream;
 use futures::stream::FuturesUnordered;
@@ -29,15 +30,16 @@ use util::super_trace;
 use util::tunable;
 use util::with_alloctag;
 use util::zettacache_stats::DiskIoType;
-use util::AlignedVec;
 use util::From64;
 use util::LockSet;
 
 use crate::base_types::*;
 use crate::block_access::BlockAccess;
 use crate::block_access::EncodeType;
-use crate::extent_allocator::ExtentAllocator;
-use crate::extent_allocator::ExtentAllocatorBuilder;
+use crate::slab_allocator::SlabAccess;
+use crate::slab_allocator::SlabAllocator;
+use crate::slab_allocator::SlabAllocatorBuilder;
+use crate::slab_allocator::SlabId;
 
 tunable! {
     // ENTRIES_PER_CHUNK is chosen so that chunks of the Index will be 8KB on disk, with a
@@ -59,7 +61,7 @@ tunable! {
     // only need as many chunks in the cache as the number of objects that we
     // might be processing concurrently.
     static ref CHUNK_CACHE_ENTRIES: usize = 128;
-    // This can be increased if we need to have multiple (128MB) extents being
+    // This can be increased if we need to have multiple (16MB) extents being
     // read at once.  Each one would typically be read from a different disk, so
     // this may be needed if we the throughput of multiple disks.
     static ref ITER_CONCURRENT_READS: usize = 1;
@@ -68,74 +70,63 @@ tunable! {
     static ref ITER_CHUNKS_TO_BUFFER: usize = 1000;
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Derivative, Serialize, Deserialize, Debug, Clone)]
+#[derivative(Default(bound = "T:"))]
 pub struct BlockBasedLogPhys<T: BlockBasedLogEntry> {
-    // XXX on-disk format could just be array of extents; offset can be derived
-    // from size of previous extents. We do need the btree in RAM though so that
-    // we can do random reads on the Index (unless the ChunkSummary points
-    // directly to the on-disk location)
-    extents: BTreeMap<LogOffset, Extent>, // offset -> disk_location, size
+    slabs: Vec<SlabId>,
     next_chunk: ChunkId,
     next_chunk_offset: LogOffset, // logical byte offset of next chunk to write
     num_entries: u64,
     entry_type: PhantomData<T>,
 }
 
-// Unfortunately, #[derive(Default)] doesn't generate exactly this code; it
-// requires that T: Default, which is not the case, and is not necessary here.
-// See https://github.com/rust-lang/rust/issues/26925
-impl<T: BlockBasedLogEntry> Default for BlockBasedLogPhys<T> {
-    fn default() -> Self {
-        Self {
-            extents: Default::default(),
-            next_chunk: Default::default(),
-            next_chunk_offset: Default::default(),
-            num_entries: Default::default(),
-            entry_type: PhantomData,
-        }
-    }
-}
-
 impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
-    pub fn clear(&mut self, extent_allocator: &ExtentAllocator) {
-        for extent in self.extents.values() {
-            extent_allocator.free(extent);
+    pub fn clear(&mut self, slab_allocator: &SlabAllocator) {
+        for &slab in &self.slabs {
+            slab_allocator.free(slab);
         }
         *self = Default::default();
     }
 
-    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
-        for extent in self.extents.values() {
-            builder.claim(extent);
+    pub fn claim(&self, builder: &mut SlabAllocatorBuilder) {
+        for &slab in &self.slabs {
+            builder.claim(slab);
         }
     }
 
-    // Since &self is not captured by the returned Stream (its extent list is
-    // cloned), callers must ensure that the disk space represented by the
-    // extents is not overwritten before the stream terminates.  i.e. do not
-    // call .clear().
+    // Since &self is not captured by the returned Stream (its extent list is cloned), callers
+    // must ensure that the disk space represented by the extents is not overwritten before the
+    // stream terminates.  i.e. do not call .clear().
     pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
     ) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        let extents = self.extents.clone();
-        let next_chunk = self.next_chunk;
-        let next_chunk_offset = self.next_chunk_offset;
+        let slab_size = slab_access.slab_size();
+        let extents = self
+            .slabs
+            .iter()
+            .enumerate()
+            .map(|(slab_index, &slab_id)| {
+                // truncate last extent to log size
+                let offset = LogOffset(slab_index as u64 * slab_size);
+                let extent = slab_access.slab_id_to_extent(slab_id);
+                extent.range(0, min(extent.size, self.next_chunk_offset - offset))
+            })
+            .collect::<Vec<_>>();
 
-        // Just buffer a single (128MB) extent between the two tasks.
+        // Just buffer a single (16MB) extent between the two tasks.
         let (extent_tx, mut extent_rx) = tokio::sync::mpsc::channel(1);
 
         {
             let block_access = block_access.clone();
             measure!("BlockBasedLogPhys::iter_chunks() reader").spawn(async move {
                 let block_access = &*block_access;
-                stream::iter(extents.into_iter().map(|(offset, extent)| async move {
-                    let truncated_extent =
-                        extent.range(0, min(extent.size, next_chunk_offset - offset));
-                    block_access
-                        .read_raw(truncated_extent, DiskIoType::MaintenanceRead)
-                        .await
-                }))
+                stream::iter(
+                    extents
+                        .into_iter()
+                        .map(|extent| block_access.read_raw(extent, DiskIoType::MaintenanceRead)),
+                )
                 .buffered(*ITER_CONCURRENT_READS)
                 .for_each(|extent_bytes| async {
                     extent_tx.send(extent_bytes).await.ok();
@@ -146,6 +137,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
         let (chunk_tx, chunk_rx) = tokio::sync::mpsc::channel(*ITER_CHUNKS_TO_BUFFER);
 
+        let next_chunk = self.next_chunk;
         measure!("BlockBasedLogPhys::iter_chunks() deserializer").spawn(async move {
             let mut chunk_id = ChunkId(0);
             while let Some(extent_bytes) = extent_rx.recv().await {
@@ -172,8 +164,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         ReceiverStream::new(chunk_rx)
     }
 
-    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
-        self.iter_chunks(block_access)
+    pub fn iter(
+        &self,
+        block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
+    ) -> impl Stream<Item = T> {
+        self.iter_chunks(block_access, slab_access)
             .flat_map(|chunk| stream::iter(chunk.entries.into_iter()))
     }
 
@@ -181,8 +177,25 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         self.next_chunk_offset.0
     }
 
-    pub fn capacity_bytes(&self) -> u64 {
-        self.extents.values().map(|x| x.size).sum()
+    pub fn len(&self) -> u64 {
+        self.num_entries
+    }
+
+    pub fn capacity_bytes(&self, slab_access: &SlabAccess) -> u64 {
+        self.slabs.len() as u64 * slab_access.slab_size()
+    }
+
+    fn next_write_location(&self, slab_allocator: &SlabAllocator) -> Option<Extent> {
+        self.slabs
+            .last()
+            .map(|&slab_id| {
+                let slab_offset =
+                    LogOffset((self.slabs.len() - 1) as u64 * slab_allocator.slab_size());
+                let offset_within_extent = self.next_chunk_offset - slab_offset;
+                let extent = slab_allocator.slab_id_to_extent(slab_id);
+                extent.range(offset_within_extent, extent.size - offset_within_extent)
+            })
+            .filter(|extent| extent.size > 0)
     }
 }
 
@@ -204,35 +217,41 @@ impl<T: BlockBasedLogEntry> Default for SummarizedBlockBasedLogPhys<T> {
 }
 
 impl<T: BlockBasedLogEntry> SummarizedBlockBasedLogPhys<T> {
-    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+    pub fn claim(&self, builder: &mut SlabAllocatorBuilder) {
         self.this.claim(builder);
         self.chunk_summary.claim(builder);
     }
 
-    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = T> {
-        self.this.iter(block_access)
+    pub fn iter(
+        &self,
+        block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
+    ) -> impl Stream<Item = T> {
+        self.this.iter(block_access, slab_access)
     }
 
     pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
     ) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        self.this.iter_chunks(block_access)
+        self.this.iter_chunks(block_access, slab_access)
     }
 
     pub fn iter_summary_chunks(
         &self,
         block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
     ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<T>>> {
-        self.chunk_summary.iter_chunks(block_access)
+        self.chunk_summary.iter_chunks(block_access, slab_access)
     }
 
     pub fn bytes(&self) -> u64 {
         self.chunk_summary.bytes() + self.this.bytes()
     }
 
-    pub fn capacity_bytes(&self) -> u64 {
-        self.chunk_summary.capacity_bytes() + self.this.capacity_bytes()
+    pub fn capacity_bytes(&self, slab_access: &SlabAccess) -> u64 {
+        self.chunk_summary.capacity_bytes(slab_access) + self.this.capacity_bytes(slab_access)
     }
 }
 
@@ -252,7 +271,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogEntry for BlockBasedLogChunkSummaryEntr
 
 pub struct BlockBasedLog<T: BlockBasedLogEntry> {
     block_access: Arc<BlockAccess>,
-    extent_allocator: Arc<ExtentAllocator>,
+    slab_allocator: Arc<SlabAllocator>,
     phys: BlockBasedLogPhys<T>,
     pending_entries: Vec<T>,
 }
@@ -265,6 +284,7 @@ pub struct SummarizedBlockBasedLog<T: BlockBasedLogEntry> {
 
 pub struct ReadOnlySummarizedBlockBasedLog<T: BlockBasedLogEntry> {
     block_access: Arc<BlockAccess>,
+    slab_allocator: Arc<SlabAllocator>,
     this: BlockBasedLogPhys<T>,
     chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
     chunks: Vec<BlockBasedLogChunkSummaryEntry<T>>,
@@ -296,12 +316,12 @@ pub struct BlockBasedLogChunkBorrowed<'a, T: BlockBasedLogEntry> {
 impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     pub fn open(
         block_access: Arc<BlockAccess>,
-        extent_allocator: Arc<ExtentAllocator>,
+        slab_allocator: Arc<SlabAllocator>,
         phys: BlockBasedLogPhys<T>,
     ) -> BlockBasedLog<T> {
         BlockBasedLog {
             block_access,
-            extent_allocator,
+            slab_allocator,
             phys,
             pending_entries: Vec::new(),
         }
@@ -349,139 +369,90 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     where
         F: FnMut(ChunkId, LogOffset, T),
     {
-        if self.pending_entries.is_empty() {
-            return;
-        }
-
         let writes_stream = FuturesUnordered::new();
-        let mut pending_write: Option<(DiskLocation, AlignedVec)> = None;
-        for pending_entries_chunk in self.pending_entries.chunks(*ENTRIES_PER_CHUNK) {
+
+        let mut remaining_entries = self.pending_entries.as_slice();
+        let mut max_entries = None;
+        while !remaining_entries.is_empty() {
+            // Calculate the minimum of these 2 or 3 values (depending on if max_entries is Some)
+            let num_entries = iter::once(remaining_entries.len())
+                .chain(iter::once(*ENTRIES_PER_CHUNK))
+                .chain(max_entries)
+                .min()
+                .unwrap();
+            assert_gt!(num_entries, 0);
+            max_entries = None;
+
+            let (head, tail) = remaining_entries.split_at(num_entries);
             let chunk = BlockBasedLogChunkBorrowed {
                 id: self.phys.next_chunk,
                 offset: self.phys.next_chunk_offset,
-                entries: pending_entries_chunk,
+                entries: head,
             };
-
-            let first_entry = *chunk.entries.first().unwrap();
 
             // XXX I think we only want to use Bincode for the main index?
             let raw_chunk = self.block_access.chunk_to_raw(EncodeType::Bincode, &chunk);
-            let raw_size = raw_chunk.len() as u64;
-            let extent = match self.next_write_location() {
-                Some(extent) if extent.size >= raw_size => extent,
-                Some(extent) => {
-                    // free the unused tail of this extent
-                    self.extent_allocator.free(&extent);
-                    if let Some((_, last_extent)) = self.phys.extents.iter_mut().next_back() {
-                        assert!(last_extent.contains(&extent));
-                        last_extent.size -= extent.size;
-                    };
-
-                    let extent = self.extent_allocator.allocate(raw_size);
-                    self.phys
-                        .extents
-                        .insert(self.phys.next_chunk_offset, extent);
-                    extent
+            let extent = match self.phys.next_write_location(&self.slab_allocator) {
+                Some(extent) if extent.size >= raw_chunk.len() as u64 => extent,
+                Some(_) => {
+                    // Not enough space at end of the current slab, try a smaller chunk.  We need
+                    // to fill the entire slab, otherwise iter_impl() won't know where to stop.
+                    // Note that we need to fit at least one entry in the smallest-size chunk (1
+                    // sector), so that we have a "first" entry to pass to new_chunk_fn().
+                    assert_gt!(num_entries, 1);
+                    max_entries = Some(max(1, num_entries / 2));
+                    continue;
                 }
                 None => {
-                    let extent = self.extent_allocator.allocate(raw_size);
-                    self.phys
-                        .extents
-                        .insert(self.phys.next_chunk_offset, extent);
-                    extent
+                    // Last slab has been fully written, allocate a new one
+                    let slab = self.slab_allocator.allocate_reserved();
+                    self.phys.slabs.push(slab);
+                    self.slab_allocator.slab_id_to_extent(slab)
                 }
             };
+            let raw_size = raw_chunk.len() as u64;
             assert_ge!(extent.size, raw_size);
-            // XXX add name of this log for debug purposes?
-            super_trace!(
-                "flushing BlockBasedLog: writing {:?} ({:?}) with {} entries ({} bytes) to {:?}",
-                chunk.id,
-                chunk.offset,
-                chunk.entries.len(),
-                raw_chunk.len(),
-                extent.location,
+
+            new_chunk_fn(
+                self.phys.next_chunk,
+                self.phys.next_chunk_offset,
+                *head.first().unwrap(),
             );
-            match pending_write {
-                Some((pending_location, pending_vec))
-                    if extent.location != pending_location + pending_vec.len()
-                        || pending_vec.unused_capacity() < raw_chunk.len() =>
-                {
-                    writes_stream.push(self.block_access.write_raw(
-                        pending_location,
-                        pending_vec.into(),
-                        DiskIoType::MaintenanceWrite,
-                    ));
-                    pending_write = None;
-                }
-                _ => (),
-            }
-            let agg_size = usize::from64(WRITE_AGGREGATION_SIZE.as_u64());
-            if pending_write.is_none() && raw_chunk.len() < 2 * agg_size {
-                pending_write = Some((
-                    extent.location,
-                    with_alloctag("BlockBasedLog::flush_impl()", || {
-                        AlignedVec::with_capacity(agg_size, self.block_access.round_up_to_sector(1))
-                    }),
-                ));
-            }
-            match &mut pending_write {
-                Some((pending_location, pending_vec)) => {
-                    assert_eq!(*pending_location + pending_vec.len(), extent.location);
-                    pending_vec.extend_from_slice(&raw_chunk);
-                }
-                None => writes_stream.push(self.block_access.write_raw(
-                    extent.location,
-                    raw_chunk,
-                    DiskIoType::MaintenanceWrite,
-                )),
-            }
 
-            new_chunk_fn(chunk.id, chunk.offset, first_entry);
-
-            self.phys.num_entries += chunk.entries.len() as u64;
+            self.phys.num_entries += head.len() as u64;
             self.phys.next_chunk = self.phys.next_chunk.next();
             self.phys.next_chunk_offset.0 += raw_size;
-        }
-        if let Some((pending_location, pending_vec)) = pending_write {
+
             writes_stream.push(self.block_access.write_raw(
-                pending_location,
-                pending_vec.into(),
+                extent.location,
+                raw_chunk,
                 DiskIoType::MaintenanceWrite,
             ));
+
+            // head is consumed
+            remaining_entries = tail;
         }
-        writes_stream.for_each(|_| async move {}).await;
+
+        writes_stream.count().await;
         self.pending_entries.truncate(0);
     }
 
     pub fn clear(&mut self) {
         self.pending_entries.clear();
-        self.phys.clear(&self.extent_allocator);
-    }
-
-    fn next_write_location(&self) -> Option<Extent> {
-        self.phys
-            .extents
-            .iter()
-            .next_back()
-            .map(|(&offset, extent)| {
-                // There shouldn't be any extents after the last (partially-full) one.
-                assert_ge!(self.phys.next_chunk_offset, offset);
-                let offset_within_extent = self.phys.next_chunk_offset - offset;
-                // The last extent should go at least to the end of the chunks.
-                assert_le!(offset_within_extent, extent.size);
-                extent.range(offset_within_extent, extent.size - offset_within_extent)
-            })
+        self.phys.clear(&self.slab_allocator);
     }
 
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         assert!(self.pending_entries.is_empty());
-        self.phys.iter(self.block_access.clone())
+        self.phys
+            .iter(self.block_access.clone(), self.slab_allocator.access())
     }
 }
 impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
     pub async fn open(
         block_access: Arc<BlockAccess>,
+        slab_allocator: Arc<SlabAllocator>,
         phys: SummarizedBlockBasedLogPhys<T>,
     ) -> Self {
         // load in summary from disk
@@ -490,7 +461,7 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         // on the log statement below?
         let chunks = phys
             .chunk_summary
-            .iter(block_access.clone())
+            .iter(block_access.clone(), slab_allocator.access())
             .collect::<Vec<_>>()
             .await;
         info!(
@@ -502,6 +473,7 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
 
         Self {
             block_access,
+            slab_allocator,
             this: phys.this,
             chunk_summary: phys.chunk_summary,
             chunks,
@@ -533,11 +505,13 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
 
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
-        self.this.iter(self.block_access.clone())
+        self.this
+            .iter(self.block_access.clone(), self.slab_allocator.access())
     }
 
     pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        self.this.iter_chunks(self.block_access.clone())
+        self.this
+            .iter_chunks(self.block_access.clone(), self.slab_allocator.access())
     }
 
     /// Returns the exact location/size of this chunk (not the whole contiguous extent)
@@ -550,13 +524,11 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             self.chunks[chunk_id + 1].offset - chunk_summary.offset
         };
 
-        let (extent_offset, extent) = self
-            .this
-            .extents
-            .range((Unbounded, Included(chunk_summary.offset)))
-            .next_back()
-            .unwrap();
-        extent.range(chunk_summary.offset - *extent_offset, chunk_size)
+        let slab_size = self.slab_allocator.slab_size();
+        let extent = self
+            .slab_allocator
+            .slab_id_to_extent(self.this.slabs[usize::from64(chunk_summary.offset.0 / slab_size)]);
+        extent.range(chunk_summary.offset.0 % slab_size, chunk_size)
     }
 
     /// Returns (value, chunk_cache_hit), where the value is the value corresponding
@@ -696,21 +668,26 @@ pub struct SummarizedBlockBasedLogFlushDelta<T: BlockBasedLogEntry> {
 impl<T: BlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     pub async fn open(
         block_access: Arc<BlockAccess>,
-        extent_allocator: Arc<ExtentAllocator>,
+        slab_allocator: Arc<SlabAllocator>,
         phys: SummarizedBlockBasedLogPhys<T>,
     ) -> Self {
         Self {
             this: BlockBasedLog::open(
                 block_access.clone(),
-                extent_allocator.clone(),
+                slab_allocator.clone(),
                 phys.this.clone(),
             ),
             chunk_summary: BlockBasedLog::open(
                 block_access.clone(),
-                extent_allocator.clone(),
+                slab_allocator.clone(),
                 phys.chunk_summary.clone(),
             ),
-            readonly: ReadOnlySummarizedBlockBasedLog::open(block_access.clone(), phys).await,
+            readonly: ReadOnlySummarizedBlockBasedLog::open(
+                block_access.clone(),
+                slab_allocator,
+                phys,
+            )
+            .await,
         }
     }
 

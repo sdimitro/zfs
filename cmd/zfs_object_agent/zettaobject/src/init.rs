@@ -72,6 +72,7 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
 pub fn start(
     socket_dir: &str,
     cache_paths: Vec<&str>,
+    clear_incompatible_cache: bool,
     runtime: Runtime,
 ) -> Result<(), anyhow::Error> {
     register_siguser1_to_dump_tracing()?;
@@ -87,7 +88,7 @@ pub fn start(
         pool_destroy::init_pool_destroyer(socket_dir).await;
 
         let cache = match cache_paths.is_empty() {
-            false => Some(ZettaCache::open(cache_paths).await?),
+            false => Some(ZettaCache::open(cache_paths, clear_incompatible_cache).await?),
             true => None,
         };
 

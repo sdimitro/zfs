@@ -384,9 +384,10 @@ pub enum CacheStatCounter {
     Evictions,
     DemandBufferBytesAvailable,
     SpeculativeBufferBytesAvailable,
-    BlockAllocatorSize,
-    BlockAllocatorAvailable,
-    BlockAllocatorFreeSlabsSize,
+    SlabCapacity,
+    AvailableSpace,
+    AvailableBlocksSize,
+    AvailableSlabsSize,
 }
 
 impl Display for CacheStatCounter {
@@ -451,9 +452,10 @@ impl Sub<&Self> for &CacheStats {
                 CacheStatCounter::PendingChanges
                 | CacheStatCounter::DemandBufferBytesAvailable
                 | CacheStatCounter::SpeculativeBufferBytesAvailable
-                | CacheStatCounter::BlockAllocatorSize
-                | CacheStatCounter::BlockAllocatorFreeSlabsSize
-                | CacheStatCounter::BlockAllocatorAvailable => {
+                | CacheStatCounter::SlabCapacity
+                | CacheStatCounter::AvailableSpace
+                | CacheStatCounter::AvailableSlabsSize
+                | CacheStatCounter::AvailableBlocksSize => {
                     *diff_stat = self_stat.clone();
                 }
                 // Everything else should be subtracted

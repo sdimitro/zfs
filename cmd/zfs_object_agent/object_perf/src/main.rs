@@ -1,3 +1,7 @@
+// This file is not used in production.
+#![allow(clippy::print_stderr)]
+#![allow(clippy::print_stdout)]
+
 use std::time::Duration;
 
 use clap::Parser;

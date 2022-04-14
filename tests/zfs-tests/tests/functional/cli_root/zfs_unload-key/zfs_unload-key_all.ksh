@@ -54,9 +54,11 @@ log_must zfs create $TESTPOOL/$TESTFS1/child
 log_must zfs create -V 64M -o encryption=on -o keyformat=passphrase \
 	-o keylocation=file:///$TESTPOOL/pkey $TESTPOOL/zvol
 
-typeset DISK2="$(echo $DISKS | awk '{ print $2}')"
+typeset DISK2 _
+read -r _ DISK2 _ <<<"$DISKS"
 log_must create_pool -p $TESTPOOL1 -d "$DISK2" \
 	-e "-O encryption=on -O keyformat=passphrase -O keylocation=file:///$TESTPOOL/pkey"
+
 log_must zfs unmount $TESTPOOL/$TESTFS1
 log_must zfs unmount $TESTPOOL1
 

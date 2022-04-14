@@ -50,7 +50,7 @@ tunable! {
     static ref DISK_WRITE_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::mib(1);
     static ref DISK_WRITE_QUEUE_EMPTY_DELAY: Duration = Duration::from_millis(1);
     static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize = 16;
-    static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
+    pub static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -144,7 +144,7 @@ pub struct Disk {
     io_stats: &'static DiskIoStats,
     reader_tx: flume::Sender<ReadMessage>,
     writer_txs: Vec<mpsc::UnboundedSender<WriteMessage>>,
-    metadata_writer_tx: flume::Sender<WriteMessage>,
+    metadata_writer_txs: Vec<mpsc::UnboundedSender<WriteMessage>>,
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -185,7 +185,6 @@ struct ReadMessage {
 struct WriteMessage {
     offset: u64,
     bytes: AlignedBytes,
-    io_type: DiskIoType,
     tx: oneshot::Sender<()>,
 }
 
@@ -226,6 +225,7 @@ impl Disk {
             .to_owned();
 
         let (reader_tx, reader_rx) = flume::unbounded();
+
         let mut writer_txs = Vec::new();
         let mut writer_rxs = Vec::new();
         for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
@@ -233,7 +233,14 @@ impl Disk {
             writer_txs.push(tx);
             writer_rxs.push(rx);
         }
-        let (metadata_writer_tx, metadata_writer_rx) = flume::unbounded();
+
+        let mut metadata_writer_txs = Vec::new();
+        let mut metadata_writer_rxs = Vec::new();
+        for _ in 0..*DISK_METADATA_WRITE_MAX_QUEUE_DEPTH {
+            let (tx, rx) = mpsc::unbounded_channel();
+            metadata_writer_txs.push(tx);
+            metadata_writer_rxs.push(rx);
+        }
 
         let io_stats = &*Box::leak(Box::new(DiskIoStats::new(device)));
 
@@ -245,7 +252,7 @@ impl Disk {
             io_stats,
             reader_tx,
             writer_txs,
-            metadata_writer_tx,
+            metadata_writer_txs,
         };
 
         for _ in 0..*DISK_READ_MAX_QUEUE_DEPTH {
@@ -260,13 +267,22 @@ impl Disk {
         if !readonly {
             for rx in writer_rxs {
                 std::thread::spawn(move || {
-                    Self::aggregating_writer_thread(file, io_stats, sector_size, rx);
+                    Self::aggregating_writer_thread(
+                        file,
+                        &io_stats.stats[DiskIoType::WriteDataForInsert],
+                        sector_size,
+                        rx,
+                    );
                 });
             }
-            for _ in 0..*DISK_METADATA_WRITE_MAX_QUEUE_DEPTH {
-                let rx = metadata_writer_rx.clone();
+            for rx in metadata_writer_rxs {
                 std::thread::spawn(move || {
-                    Self::writer_thread(file, io_stats, sector_size, rx);
+                    Self::aggregating_writer_thread(
+                        file,
+                        &io_stats.stats[DiskIoType::MaintenanceWrite],
+                        sector_size,
+                        rx,
+                    );
                 });
             }
         }
@@ -324,7 +340,7 @@ impl Disk {
 
     fn aggregating_writer_thread(
         file: &'static File,
-        io_stats: &'static DiskIoStats,
+        stat_values: &'static IoStatValues,
         sector_size: usize,
         mut rx: mpsc::UnboundedReceiver<WriteMessage>,
     ) {
@@ -377,13 +393,21 @@ impl Disk {
                 };
                 assert_eq!(bytes.alignment() % sector_size, 0);
                 assert_eq!(bytes.as_ptr() as usize % sector_size, 0);
-                let op = OpInProgress::new(&io_stats.stats[message.io_type]);
+                let op = OpInProgress::new(stat_values);
                 nix::sys::uio::pwrite(
                     file.as_raw_fd(),
                     &bytes,
                     i64::try_from(message.offset).unwrap(),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "pwrite(fd={} off={} len={}) failed: {}",
+                        file.as_raw_fd(),
+                        message.offset,
+                        bytes.len(),
+                        e
+                    )
+                });
                 op.end(bytes.len() as u64);
                 message.tx.send(()).unwrap();
                 prev_offset = message.offset;
@@ -397,13 +421,21 @@ impl Disk {
                     aggregate.extend_from_slice(&message.bytes);
                     txs.push(message.tx);
                 }
-                let op = OpInProgress::new(&io_stats.stats[DiskIoType::WriteDataForInsert]);
+                let op = OpInProgress::new(stat_values);
                 nix::sys::uio::pwrite(
                     file.as_raw_fd(),
                     aggregate.as_slice(),
                     i64::try_from(offset).unwrap(),
                 )
-                .unwrap();
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "pwrite(fd={} off={} len={}) failed: {}",
+                        file.as_raw_fd(),
+                        offset,
+                        aggregate.len(),
+                        e
+                    )
+                });
                 op.end(len as u64);
                 for tx in txs {
                     tx.send(()).unwrap();
@@ -413,32 +445,10 @@ impl Disk {
 
             // Receive as many messages as we can without blocking
             while let Ok(message) = rx.try_recv() {
-                sorted.insert(message.offset, message);
+                let offset = message.offset;
+                let old = sorted.insert(offset, message);
+                assert!(old.is_none(), "duplicate offset {offset}");
             }
-        }
-    }
-
-    fn writer_thread(
-        file: &'static File,
-        io_stats: &'static DiskIoStats,
-        sector_size: usize,
-        rx: flume::Receiver<WriteMessage>,
-    ) {
-        while let Ok(message) = rx.recv() {
-            let offset = i64::try_from(message.offset).unwrap();
-            let mut bytes = message.bytes;
-            // Directio requires the pointer to be sector-aligned
-            if bytes.alignment() % sector_size != 0 {
-                bytes = AlignedBytes::copy_from_slice(&bytes, sector_size);
-            };
-            assert_eq!(bytes.alignment() % sector_size, 0);
-            assert_eq!(bytes.as_ptr() as usize % sector_size, 0);
-            let op = OpInProgress::new(&io_stats.stats[message.io_type]);
-            measure!()
-                .func(|| nix::sys::uio::pwrite(file.as_raw_fd(), &bytes, offset))
-                .unwrap();
-            op.end(bytes.len() as u64);
-            message.tx.send(()).unwrap();
         }
     }
 
@@ -447,34 +457,24 @@ impl Disk {
         self.verify_aligned(bytes.len());
 
         let (tx, rx) = oneshot::channel();
-        let message = WriteMessage {
-            offset,
-            bytes,
-            io_type,
-            tx,
-        };
+        let message = WriteMessage { offset, bytes, tx };
 
-        match io_type {
-            DiskIoType::WriteDataForInsert => {
-                // Dispatch this write to a writer thread, determined based on its offset.  The
-                // first DISK_WRITE_MAX_AGGREGATION_SIZE (default 1MB) of the disk goes to the
-                // first thread, the second chunk to the second thread, and so on, wrapping back
-                // around to the first thread.  Note that each block allocator slab (16MB) is
-                // mapped to multiple threads, so the work is distributed to multiple threads
-                // even when it's concentrated among a small number of slabs.
-                let writer = usize::from64(
-                    offset / DISK_WRITE_MAX_AGGREGATION_SIZE.as_u64()
-                        % self.writer_txs.len() as u64,
-                );
-                self.writer_txs[writer]
-                    .send(message)
-                    .unwrap_or_else(|e| panic!("writer_txs[{}].send: {}", writer, e));
-            }
-            DiskIoType::MaintenanceWrite => {
-                self.metadata_writer_tx.send_async(message).await.unwrap()
-            }
+        let txs = match io_type {
+            DiskIoType::WriteDataForInsert => &self.writer_txs,
+            DiskIoType::MaintenanceWrite => &self.metadata_writer_txs,
             _ => panic!("invalid {:?} for write", io_type),
-        }
+        };
+        // Dispatch this write to a writer thread, determined based on its offset.  The first
+        // DISK_WRITE_MAX_AGGREGATION_SIZE (default 1MB) of the disk goes to the first thread,
+        // the second chunk to the second thread, and so on, wrapping back around to the first
+        // thread.  Note that each block allocator slab (16MB) is mapped to multiple threads, so
+        // the work is distributed to multiple threads even when it's concentrated among a small
+        // number of slabs.
+        let writer =
+            usize::from64(offset / DISK_WRITE_MAX_AGGREGATION_SIZE.as_u64() % txs.len() as u64);
+        txs[writer]
+            .send(message)
+            .unwrap_or_else(|e| panic!("writer_txs[{}].send: {}", writer, e));
         measure!().fut(rx).await.unwrap();
     }
 

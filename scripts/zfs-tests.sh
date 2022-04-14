@@ -29,9 +29,9 @@
 BASE_DIR=$(dirname "$0")
 SCRIPT_COMMON=common.sh
 if [ -f "${BASE_DIR}/${SCRIPT_COMMON}" ]; then
-. "${BASE_DIR}/${SCRIPT_COMMON}"
+	. "${BASE_DIR}/${SCRIPT_COMMON}"
 else
-echo "Missing helper script ${SCRIPT_COMMON}" && exit 1
+	echo "Missing helper script ${SCRIPT_COMMON}" && exit 1
 fi
 
 PROG=zfs-tests.sh
@@ -53,7 +53,7 @@ TAGS=""
 ITERATIONS=1
 ZFS_DBGMSG="$STF_SUITE/callbacks/zfs_dbgmsg.ksh"
 ZFS_DMESG="$STF_SUITE/callbacks/zfs_dmesg.ksh"
-UNAME=$(uname -s)
+UNAME=$(uname)
 RERUN=""
 KMEMLEAK=""
 # Export zfs_object_agent variables to be used in tests
@@ -120,7 +120,7 @@ cleanup_linux_loopback() {
 	for TEST_LOOPBACK in ${LOOPBACKS}; do
 		LOOP_DEV="${TEST_LOOPBACK##*/}"
 		DM_DEV=$(sudo "${DMSETUP}" ls 2>/dev/null | \
-		    grep "${LOOP_DEV}" | cut -f1)
+		    awk -v l="${LOOP_DEV}" '$0 ~ l {print $1}')
 
 		if [ -n "$DM_DEV" ]; then
 			sudo "${DMSETUP}" remove "${DM_DEV}" ||
@@ -152,9 +152,8 @@ cleanup() {
 		fi
 	fi
 
-	for TEST_FILE in ${FILES}; do
-		rm -f "${TEST_FILE}" >/dev/null 2>&1
-	done
+	# shellcheck disable=SC2086
+	rm -f ${FILES} >/dev/null 2>&1
 
 
 	# Unset ZETTACACHE_DEVICES and invalidate zcache devices
@@ -281,28 +280,30 @@ trap cleanup EXIT
 # be dangerous and should only be used in a dedicated test environment.
 #
 cleanup_all() {
-	TEST_POOLS=$(sudo env ASAN_OPTIONS=detect_leaks=false "$ZPOOL" list -H -o name | grep testpool)
+	TEST_POOLS=$(ASAN_OPTIONS=detect_leaks=false "$ZPOOL" list -Ho name | grep testpool)
 	if [ "$UNAME" = "FreeBSD" ] ; then
 		TEST_LOOPBACKS=$(sudo "${LOSETUP}" -l)
 	else
-		TEST_LOOPBACKS=$(sudo "${LOSETUP}" -a|grep file-vdev|cut -f1 -d:)
+		TEST_LOOPBACKS=$("${LOSETUP}" -a | awk -F: '/file-vdev/ {print $1}')
 	fi
-	TEST_FILES=$(ls /var/tmp/file-vdev* 2>/dev/null)
+	TEST_FILES=$(ls "${FILEDIR}"/file-vdev* /var/tmp/file-vdev* 2>/dev/null)
 
 	msg
 	msg "--- Cleanup ---"
-	msg "Removing pool(s):     $(echo "${TEST_POOLS}" | tr '\n' ' ')"
+	# shellcheck disable=2116,2086
+	msg "Removing pool(s):     $(echo ${TEST_POOLS})"
 	for TEST_POOL in $TEST_POOLS; do
 		sudo env ASAN_OPTIONS=detect_leaks=false "$ZPOOL" destroy "${TEST_POOL}"
 	done
 
 	if [ "$UNAME" != "FreeBSD" ] ; then
-		msg "Removing dm(s):       $(sudo "${DMSETUP}" ls |
+		msg "Removing all dm(s):   $(sudo "${DMSETUP}" ls |
 		    grep loop | tr '\n' ' ')"
 		sudo "${DMSETUP}" remove_all
 	fi
 
-	msg "Removing loopback(s): $(echo "${TEST_LOOPBACKS}" | tr '\n' ' ')"
+	# shellcheck disable=2116,2086
+	msg "Removing loopback(s): $(echo ${TEST_LOOPBACKS})"
 	for TEST_LOOPBACK in $TEST_LOOPBACKS; do
 		if [ "$UNAME" = "FreeBSD" ] ; then
 			sudo "${LOSETUP}" -d -u "${TEST_LOOPBACK}"
@@ -311,10 +312,10 @@ cleanup_all() {
 		fi
 	done
 
-	msg "Removing files(s):    $(echo "${TEST_FILES}" | tr '\n' ' ')"
-	for TEST_FILE in $TEST_FILES; do
-		sudo rm -f "${TEST_FILE}"
-	done
+	# shellcheck disable=2116,2086
+	msg "Removing files(s):    $(echo ${TEST_FILES})"
+	# shellcheck disable=2086
+	sudo rm -f ${TEST_FILES}
 }
 
 #
@@ -328,19 +329,18 @@ cleanup_all() {
 #
 find_runfile() {
 	NAME=$1
-	RESULT=""
 
 	if [ -f "$RUNFILE_DIR/$NAME" ]; then
-		RESULT="$RUNFILE_DIR/$NAME"
+		echo "$RUNFILE_DIR/$NAME"
 	elif [ -f "$RUNFILE_DIR/$NAME.run" ]; then
-		RESULT="$RUNFILE_DIR/$NAME.run"
+		echo "$RUNFILE_DIR/$NAME.run"
 	elif [ -f "$NAME" ]; then
-		RESULT="$NAME"
+		echo "$NAME"
 	elif [ -f "$NAME.run" ]; then
-		RESULT="$NAME.run"
+		echo "$NAME.run"
+	else
+		return 1
 	fi
-
-	echo "$RESULT"
 }
 
 #
@@ -428,14 +428,11 @@ constrain_path() {
 	create_links "$SYSTEM_DIRS" "$SYSTEM_FILES"
 
 	# Exceptions
-	ln -fs "$STF_PATH/awk" "$STF_PATH/nawk"
 	if [ "$UNAME" = "Linux" ] ; then
 		ln -fs /sbin/fsck.ext4 "$STF_PATH/fsck"
 		ln -fs /sbin/mkfs.ext4 "$STF_PATH/newfs"
 		ln -fs "$STF_PATH/gzip" "$STF_PATH/compress"
 		ln -fs "$STF_PATH/gunzip" "$STF_PATH/uncompress"
-		ln -fs "$STF_PATH/exportfs" "$STF_PATH/share"
-		ln -fs "$STF_PATH/exportfs" "$STF_PATH/unshare"
 	elif [ "$UNAME" = "FreeBSD" ] ; then
 		ln -fs /usr/local/bin/ksh93 "$STF_PATH/ksh"
 	fi
@@ -466,7 +463,7 @@ OPTIONS:
 	-m          Enable kmemleak reporting (Linux only)
 	-n NFSFILE  Use the nfsfile to determine the NFS configuration
 	-I NUM      Number of iterations
-	-d DIR      Use DIR for files and loopback devices
+	-d DIR      Use world-writable DIR for files and loopback devices
 	-s SIZE     Use vdevs of SIZE (default: 4G)
 	-r RUNFILES Run tests in RUNFILES (default: ${DEFAULT_RUNFILES})
 	-t PATH     Run single test at PATH relative to test suite
@@ -474,7 +471,7 @@ OPTIONS:
 	-u USER     Run single test as USER (default: root)
 
 EXAMPLES:
-# Run the default (linux) suite of tests and output the configuration used.
+# Run the default ($(echo "${DEFAULT_RUNFILES}" | sed 's/\.run//')) suite of tests and output the configuration used.
 $0 -v
 
 # Run a smaller suite of tests designed to run more quickly.
@@ -484,7 +481,7 @@ $0 -r linux-fast
 $0 -t tests/functional/cli_root/zfs_bookmark/zfs_bookmark_cliargs.ksh
 
 # Cleanup a previous run of the test suite prior to testing, run the
-# default (linux) suite of tests and perform no cleanup on exit.
+# default ($(echo "${DEFAULT_RUNFILES}" | sed 's/\.run//')) suite of tests and perform no cleanup on exit.
 $0 -x
 
 EOF
@@ -775,11 +772,7 @@ if [ -n "$SINGLETEST" ]; then
 	fi
 	RUNFILE_DIR="/var/tmp"
 	RUNFILES="zfs-tests.$$.run"
-	SINGLEQUIET="False"
-
-	if [ -n "$QUIET" ]; then
-		SINGLEQUIET="True"
-	fi
+	[ -n "$QUIET" ] && SINGLEQUIET="True" || SINGLEQUIET="False"
 
 	cat >"${RUNFILE_DIR}/${RUNFILES}" << EOF
 [DEFAULT]
@@ -792,19 +785,14 @@ post_user = root
 post =
 outputdir = /var/tmp/test_results
 EOF
-	SINGLETESTDIR=$(dirname "$SINGLETEST")
-	SINGLETESTFILE=$(basename "$SINGLETEST")
-	SETUPSCRIPT=
-	CLEANUPSCRIPT=
+	SINGLETESTDIR="${SINGLETEST%/*}"
 
-	if [ -f "$STF_SUITE/$SINGLETESTDIR/setup.ksh" ]; then
-		SETUPSCRIPT="setup"
-	fi
+	SETUPDIR="$SINGLETESTDIR"
+	[ "${SETUPDIR#/}" = "$SETUPDIR" ] && SETUPDIR="$STF_SUITE/$SINGLETESTDIR"
+	[ -x "$SETUPDIR/setup.ksh"   ] && SETUPSCRIPT="setup"     || SETUPSCRIPT=
+	[ -x "$SETUPDIR/cleanup.ksh" ] && CLEANUPSCRIPT="cleanup" || CLEANUPSCRIPT=
 
-	if [ -f "$STF_SUITE/$SINGLETESTDIR/cleanup.ksh" ]; then
-		CLEANUPSCRIPT="cleanup"
-	fi
-
+	SINGLETESTFILE="${SINGLETEST##*/}"
 	cat >>"${RUNFILE_DIR}/${RUNFILES}" << EOF
 
 [$SINGLETESTDIR]
@@ -828,8 +816,8 @@ IFS=,
 for RUNFILE in $RUNFILES; do
 	if [ -n "$RUNFILE" ]; then
 		SAVED_RUNFILE="$RUNFILE"
-		RUNFILE=$(find_runfile "$RUNFILE")
-		[ -z "$RUNFILE" ] && fail "Cannot find runfile: $SAVED_RUNFILE"
+		RUNFILE=$(find_runfile "$RUNFILE") ||
+			fail "Cannot find runfile: $SAVED_RUNFILE"
 		R="$R,$RUNFILE"
 	fi
 
@@ -849,7 +837,7 @@ if [ "$(id -u)" = "0" ]; then
 	fail "This script must not be run as root."
 fi
 
-if [ "$(sudo whoami)" != "root" ]; then
+if [ "$(sudo id -un)" != "root" ]; then
 	fail "Passwordless sudo access required."
 fi
 
@@ -886,16 +874,14 @@ fi
 
 #
 # By default preserve any existing pools
-# NOTE: Since 'zpool list' outputs a newline-delimited list convert $KEEP from
-# space-delimited to newline-delimited.
 #
 if [ -z "${KEEP}" ]; then
-	KEEP="$(sudo env ASAN_OPTIONS=detect_leaks=false "$ZPOOL" list -H -o name)"
+	KEEP="$(ASAN_OPTIONS=detect_leaks=false "$ZPOOL" list -Ho name | tr -s '[:space:]' ' ')"
 	if [ -z "${KEEP}" ]; then
 		KEEP="rpool"
 	fi
 else
-	KEEP="$(echo "$KEEP" | tr '[:blank:]' '\n')"
+	KEEP="$(echo "$KEEP" | tr -s '[:space:]' ' ')"
 fi
 
 #
@@ -907,11 +893,7 @@ fi
 #
 # See libzfs/libzfs_config.c for more information.
 #
-if [ "$UNAME" = "FreeBSD" ] ; then
-	__ZFS_POOL_EXCLUDE="$(echo "$KEEP" | tr -s '\n' ' ')"
-else
-	__ZFS_POOL_EXCLUDE="$(echo "$KEEP" | sed ':a;N;s/\n/ /g;ba')"
-fi
+__ZFS_POOL_EXCLUDE="$KEEP"
 
 . "$STF_SUITE/include/default.cfg"
 
@@ -1027,8 +1009,7 @@ elif [ -z "${DISKS}" ]; then
 				DISKS="$DISKS $MDDEVICE"
 				LOOPBACKS="$LOOPBACKS $MDDEVICE"
 			else
-				TEST_LOOPBACK=$(sudo "${LOSETUP}" -f)
-				sudo "${LOSETUP}" "${TEST_LOOPBACK}" "${TEST_FILE}" ||
+				TEST_LOOPBACK=$(sudo "${LOSETUP}" --show -f "${TEST_FILE}") ||
 				    fail "Failed: ${TEST_FILE} -> ${TEST_LOOPBACK}"
 				BASELOOPBACK="${TEST_LOOPBACK##*/}"
 				DISKS="$DISKS $BASELOOPBACK"
@@ -1056,7 +1037,7 @@ fi
 #
 # Disable SELinux until the ZFS Test Suite has been updated accordingly.
 #
-if [ -x "$STF_PATH/setenforce" ]; then
+if command -v setenforce >/dev/null; then
 	sudo setenforce permissive >/dev/null 2>&1
 fi
 
@@ -1064,8 +1045,8 @@ fi
 # Enable internal ZFS debug log and clear it.
 #
 if [ -e /sys/module/zfs/parameters/zfs_dbgmsg_enable ]; then
-	sudo /bin/sh -c "echo 1 >/sys/module/zfs/parameters/zfs_dbgmsg_enable"
-	sudo /bin/sh -c "echo 0 >/proc/spl/kstat/zfs/dbgmsg"
+	sudo sh -c "echo 1 >/sys/module/zfs/parameters/zfs_dbgmsg_enable"
+	sudo sh -c "echo 0 >/proc/spl/kstat/zfs/dbgmsg"
 fi
 
 msg
@@ -1099,7 +1080,6 @@ export FILEDIR
 export KEEP
 export __ZFS_POOL_EXCLUDE
 export TESTFAIL_CALLBACKS
-export PATH=$STF_PATH
 
 mktemp_file() {
 	if [ "$UNAME" = "FreeBSD" ]; then
@@ -1123,7 +1103,8 @@ msg "${TEST_RUNNER}" \
     "-T \"${TAGS}\"" \
     "-i \"${STF_SUITE}\"" \
     "-I \"${ITERATIONS}\""
-{ ${TEST_RUNNER} \
+{ PATH=$STF_PATH \
+    ${TEST_RUNNER} \
     ${QUIET:+-q} \
     ${KMEMLEAK:+-m} \
     ${KMSG:+-K} \
@@ -1148,9 +1129,10 @@ if [ "$RESULT" -eq "2" ] && [ -n "$RERUN" ]; then
 	for test_name in $MAYBES; do
 		grep "$test_name " "$TEMP_RESULTS_FILE" >>"$TEST_LIST"
 	done
-	{ ${TEST_RUNNER} \
-            ${QUIET:+-q} \
-            ${KMEMLEAK:+-m} \
+	{ PATH=$STF_PATH \
+	    ${TEST_RUNNER} \
+	        ${QUIET:+-q} \
+	        ${KMEMLEAK:+-m} \
 	    -c "${RUNFILES}" \
 	    -T "${TAGS}" \
 	    -i "${STF_SUITE}" \
@@ -1173,7 +1155,7 @@ if [ -d "$RESULTS_DIR" ]; then
 	cat "$RESULTS_FILE" "$REPORT_FILE" >"$RESULTS_DIR/results"
 fi
 
-rm -f "$RESULTS_FILE" "$REPORT_FILE"
+rm -f "$RESULTS_FILE" "$REPORT_FILE" "$TEST_LIST" "$TEMP_RESULTS_FILE"
 
 if [ -n "$SINGLETEST" ]; then
 	rm -f "$RUNFILES" >/dev/null 2>&1

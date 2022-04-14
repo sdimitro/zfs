@@ -20,9 +20,10 @@ use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
 use crate::block_access::*;
 use crate::block_based_log::*;
-use crate::extent_allocator::ExtentAllocator;
-use crate::extent_allocator::ExtentAllocatorBuilder;
 use crate::pool_id::PoolId;
+use crate::slab_allocator::SlabAccess;
+use crate::slab_allocator::SlabAllocator;
+use crate::slab_allocator::SlabAllocatorBuilder;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[repr(packed)]
@@ -191,34 +192,40 @@ impl IndexRunPhys {
         }
     }
 
-    pub fn claim(&self, builder: &mut ExtentAllocatorBuilder) {
+    pub fn claim(&self, builder: &mut SlabAllocatorBuilder) {
         self.log.claim(builder);
     }
 
-    pub fn iter(&self, block_access: Arc<BlockAccess>) -> impl Stream<Item = IndexEntry> {
-        self.log.iter(block_access)
+    pub fn iter(
+        &self,
+        block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
+    ) -> impl Stream<Item = IndexEntry> {
+        self.log.iter(block_access, slab_access)
     }
 
     pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
     ) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
-        self.log.iter_chunks(block_access)
+        self.log.iter_chunks(block_access, slab_access)
     }
 
     pub fn iter_summary_chunks(
         &self,
         block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
     ) -> impl Stream<Item = BlockBasedLogChunk<BlockBasedLogChunkSummaryEntry<IndexEntry>>> {
-        self.log.iter_summary_chunks(block_access)
+        self.log.iter_summary_chunks(block_access, slab_access)
     }
 
     pub fn log_bytes(&self) -> u64 {
         self.log.bytes()
     }
 
-    pub fn log_capacity_bytes(&self) -> u64 {
-        self.log.capacity_bytes()
+    pub fn log_capacity_bytes(&self, slab_access: &SlabAccess) -> u64 {
+        self.log.capacity_bytes(slab_access)
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
@@ -229,12 +236,12 @@ impl IndexRunPhys {
         self.last_key
     }
 
-    pub async fn verify_histogram(&self, block_access: Arc<BlockAccess>) {
+    pub async fn verify_histogram(&self, block_access: Arc<BlockAccess>, slab_access: &SlabAccess) {
         let mut histogram = AtimeHistogramPhys::new(
             self.atime_histogram_phys.first_ghost(),
             self.atime_histogram_phys.first_live(),
         );
-        self.iter(block_access)
+        self.iter(block_access, slab_access)
             .for_each(|entry| {
                 histogram.insert(entry.value);
                 future::ready(())
@@ -258,14 +265,14 @@ pub struct IndexFlushDelta(SummarizedBlockBasedLogFlushDelta<IndexEntry>);
 impl IndexRun {
     pub async fn open(
         block_access: Arc<BlockAccess>,
-        extent_allocator: Arc<ExtentAllocator>,
+        slab_allocator: Arc<SlabAllocator>,
         phys: IndexRunPhys,
     ) -> Self {
         let index = Self {
             trim_key: phys.trim_key,
             last_key: phys.last_key,
             atime_histogram_phys: phys.atime_histogram_phys,
-            log: SummarizedBlockBasedLog::open(block_access, extent_allocator, phys.log).await,
+            log: SummarizedBlockBasedLog::open(block_access, slab_allocator, phys.log).await,
         };
         index
     }
@@ -393,11 +400,16 @@ pub struct ReadOnlyIndexRun {
 }
 
 impl ReadOnlyIndexRun {
-    pub async fn open(block_access: Arc<BlockAccess>, phys: IndexRunPhys) -> Self {
+    pub async fn open(
+        block_access: Arc<BlockAccess>,
+        slab_allocator: Arc<SlabAllocator>,
+        phys: IndexRunPhys,
+    ) -> Self {
         let index = Self {
             trim_key: phys.trim_key,
             last_key: phys.last_key,
-            log: ReadOnlySummarizedBlockBasedLog::open(block_access, phys.log).await,
+            log: ReadOnlySummarizedBlockBasedLog::open(block_access, slab_allocator, phys.log)
+                .await,
         };
         index
     }

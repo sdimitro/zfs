@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
 
-use bimap::BiBTreeMap;
 use util::nice_p2size;
 use util::writeln_stdout;
 use util::From64;
@@ -15,69 +14,30 @@ use super::Slab;
 use super::SlabBucketSize;
 use super::SlabEnum;
 use super::Slabs;
-use crate::base_types::*;
 use crate::block_access::BlockAccess;
 use crate::block_allocator::SlabId;
-use crate::extent_allocator::ExtentAllocator;
-use crate::space_map::SpaceMap;
+use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::DumpSlabsOptions;
 
 pub async fn zcachedb_dump_spacemaps(
     phys: BlockAllocatorPhys,
     block_access: Arc<BlockAccess>,
-    extent_allocator: Arc<ExtentAllocator>,
+    slab_builder: &SlabAllocatorBuilder,
 ) {
+    let import_cb = |entry| writeln_stdout!("{entry:?}");
+
     writeln_stdout!("DUMP SPACEMAP");
     writeln_stdout!("{:?}", phys.spacemap);
-    let spacemap = SpaceMap::open(
-        block_access.clone(),
-        extent_allocator.clone(),
-        phys.spacemap,
-    );
-    spacemap.load(|entry| writeln_stdout!("{:?}", entry)).await;
+    phys.spacemap
+        .load(block_access.clone(), slab_builder.access(), import_cb)
+        .await;
     writeln_stdout!();
 
     writeln_stdout!("DUMP SPACEMAP_NEXT");
     writeln_stdout!("{:?}", phys.spacemap_next);
-    let spacemap_next = SpaceMap::open(
-        block_access.clone(),
-        extent_allocator.clone(),
-        phys.spacemap_next,
-    );
-    spacemap_next
-        .load(|entry| writeln_stdout!("{:?}", entry))
+    phys.spacemap_next
+        .load(block_access.clone(), slab_builder.access(), import_cb)
         .await;
-}
-
-async fn zcachedb_load_slab_state(
-    block_access: Arc<BlockAccess>,
-    extent_allocator: Arc<ExtentAllocator>,
-    phys: BlockAllocatorPhys,
-) -> Slabs {
-    let spacemap = SpaceMap::open(
-        block_access.clone(),
-        extent_allocator.clone(),
-        phys.spacemap,
-    );
-    let spacemap_next = SpaceMap::open(
-        block_access.clone(),
-        extent_allocator.clone(),
-        phys.spacemap_next,
-    );
-    let slab_size = phys.slab_size;
-    let capacity: BiBTreeMap<SlabId, Extent> = {
-        let mut id = SlabId(0);
-        phys.capacity
-            .into_iter()
-            .map(|extent| {
-                let start = id;
-                id = id + extent.size / u64::from(slab_size);
-                (start, extent)
-            })
-            .collect()
-    };
-    let slabs = Slabs::open(&capacity, &spacemap, &spacemap_next, slab_size, &phys.slabs).await;
-    slabs
 }
 
 struct AllocationBucketStatistics {
@@ -245,7 +205,7 @@ impl SlabBucketsReport {
     }
 
     fn add_slab(&mut self, slab: &Slab) {
-        // Free and Evacuating slabs don't belong on a bucket, just log them for the total stats
+        // Evacuating slabs don't belong on a bucket, just log them for the total stats
         match slab.inner {
             SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => {
                 let bucket_info = self
@@ -258,7 +218,7 @@ impl SlabBucketsReport {
                 let nslabs = bucket_info.stats.nslabs;
                 self.reset_hist_scaling_factor(nslabs);
             }
-            SlabEnum::Free(_) | SlabEnum::Evacuating(_) => {}
+            SlabEnum::Evacuating(_) => {}
         }
         self.total.add_slab(slab);
     }
@@ -341,20 +301,26 @@ fn zcachedb_dump_slabs_print_legend() {
 
 pub async fn zcachedb_dump_slabs(
     block_access: Arc<BlockAccess>,
-    extent_allocator: Arc<ExtentAllocator>,
+    slab_builder: &mut SlabAllocatorBuilder,
     phys: BlockAllocatorPhys,
     opts: DumpSlabsOptions,
 ) {
-    let slab_size = u64::from(phys.slab_size);
+    let slab_size = slab_builder.slab_size();
     let buckets = phys.slab_buckets.buckets.clone();
     let mut cache_slabs = vec![];
     let mut slabs_per_device = HashMap::new();
     for disk in block_access.disks() {
         slabs_per_device.insert(disk, vec![]);
     }
-    let slabs = zcachedb_load_slab_state(block_access.clone(), extent_allocator, phys).await;
+    let slabs = Slabs::open(
+        block_access.clone(),
+        slab_builder,
+        &phys.spacemap,
+        &phys.spacemap_next,
+    )
+    .await;
 
-    for slab in slabs.0.iter() {
+    for slab in slabs.iter() {
         if opts.verbosity > 1 {
             slab.dump_info();
         }
@@ -395,7 +361,6 @@ fn zcachedb_dump_slabs_report(
         .map(|kbytes| (SlabBucketSize(kbytes * 1024u32), true))
         .collect();
     let mut extent_based_summary = SlabBucketsReport::new(&extent_summary_dist, slab_size);
-    let mut empty_total = AllocationBucketStatistics::new(slab_size);
     let mut evacuating_total = AllocationBucketStatistics::new(slab_size);
 
     for slab in slabs {
@@ -404,7 +369,6 @@ fn zcachedb_dump_slabs_report(
         match &slab.inner {
             SlabEnum::BitmapBased(_) => bitmap_based_summary.add_slab(slab),
             SlabEnum::ExtentBased(_) => extent_based_summary.add_slab(slab),
-            SlabEnum::Free(_) => empty_total.add_slab(slab),
             SlabEnum::Evacuating(_) => evacuating_total.add_slab(slab),
         }
     }
@@ -426,8 +390,6 @@ fn zcachedb_dump_slabs_report(
     extent_based_summary.dump_report(opts.verbosity);
     writeln_stdout!("------------------------------------------------------------");
     writeln_stdout!("    EXTENT: {}", extent_based_summary.total);
-    writeln_stdout!("------------------------------------------------------------");
-    writeln_stdout!("     EMPTY: {}", empty_total);
     writeln_stdout!("------------------------------------------------------------");
     writeln_stdout!("EVACUATING: {}", evacuating_total);
     writeln_stdout!("============================================================");

@@ -40,7 +40,8 @@
 # STRATEGY:
 #
 # 1. Using zpool get, retrieve all default values
-# 2. Get each property individually
+# 2. Verify that the header is printed
+# 3. Get each property individually
 #
 # Test for those properties are expected to check whether their
 # default values are sane, or whether they can be changed with zpool set.
@@ -56,12 +57,11 @@ fi
 typeset tmpfile=$(mktemp)
 
 log_must eval "zpool get all $TESTPOOL >$tmpfile"
-log_must grep -q "^NAME" $tmpfile
+log_must grep -q "^NAME " $tmpfile
 
 for prop in $(get_pool_props); do
 	log_must eval "zpool get "$prop" $TESTPOOL"
-	log_must grep -q "^NAME" $tmpfile
-	log_must grep -q "$prop" $tmpfile
+	log_must grep -q "$TESTPOOL *$prop" $tmpfile
 done
 
 log_pass "Zpool get all works as expected"

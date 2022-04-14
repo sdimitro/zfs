@@ -1,0 +1,11 @@
+# These lints can't be set at the crate level.  Rather than setting them
+# in every file, we set them as compiler options.
+#
+# See https://github.com/rust-lang/rust-clippy/issues/6610
+[target.'cfg(feature = "cargo-clippy")']
+rustflags = [
+    "-Dclippy::print_stdout",
+    "-Dclippy::print_stderr",
+    "-Dclippy::dbg_macro",
+]
+

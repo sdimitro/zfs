@@ -35,6 +35,7 @@ use crate::lazy_static_ptr;
 use crate::measure;
 use crate::tunable;
 use crate::with_alloctag_hf;
+use crate::writeln_stderr;
 use crate::TrackingAllocator;
 use crate::ALLOCATOR_PRINT_MIN_ALLOCS;
 use crate::ALLOCATOR_PRINT_MIN_BYTES;
@@ -355,7 +356,7 @@ pub fn register_siguser1_to_dump_tracing() -> Result<(), std::io::Error> {
                 _ => {
                     // This should never be executed as we are registered for
                     // SIGUSER1 only.
-                    eprintln!("Got an unexpected signal: {:?}", signum);
+                    writeln_stderr!("Got an unexpected signal: {:?}", signum);
                     emulate_default_handler(signum).unwrap();
                 }
             }

@@ -246,6 +246,7 @@ zfs_object_store_close(vdev_object_store_t *vos)
 {
 	ASSERT(MUTEX_HELD(&vos->vos_sock_lock));
 	rw_enter(&vos->vos_sock_rwlock, RW_WRITER);
+	vos->vos_sock_state = VOS_SOCK_CLOSED;
 	if (vos->vos_sock == INVALID_SOCKET) {
 		rw_exit(&vos->vos_sock_rwlock);
 		return;
@@ -258,7 +259,6 @@ zfs_object_store_close(vdev_object_store_t *vos)
 	ksock_close(vos->vos_sock);
 	vos->vos_sock = INVALID_SOCKET;
 	rw_exit(&vos->vos_sock_rwlock);
-	vos->vos_sock_state = VOS_SOCK_CLOSED;
 }
 
 static int
@@ -1831,7 +1831,8 @@ vdev_object_store_socket_open(vdev_t *vd)
 
 		int error = zfs_object_store_open(vos);
 		if (error != 0) {
-			return (error);
+			zfs_object_store_close(vos);
+			return (SET_ERROR(error));
 		}
 
 		if (vos->vos_sock == INVALID_SOCKET) {
@@ -1853,9 +1854,9 @@ vdev_object_store_socket_open(vdev_t *vd)
 	fnvlist_free(request);
 
 	if (rc != 0) {
-		zfs_dbgmsg("zfs_object_store_open failed to requet version: "
+		zfs_dbgmsg("zfs_object_store_open failed to request version: "
 		    "%d", rc);
-		ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
+		zfs_object_store_close(vos);
 		mutex_exit(&vos->vos_sock_lock);
 		return (SET_ERROR(EINTR));
 	}
@@ -1951,7 +1952,15 @@ vdev_agent_thread(void *arg)
 		ASSERT3P(vos->vos_sock, ==, INVALID_SOCKET);
 		VERIFY3U(vos->vos_sock_state, ==, VOS_SOCK_CLOSED);
 
-		vdev_object_store_socket_open(vd);
+		/*
+		 * Since we've successfully opened the socket before, we
+		 * ignore any open errors and keep retrying.
+		 */
+		while ((err = vdev_object_store_socket_open(vd)) != 0) {
+			zfs_dbgmsg("REOPENED(%px) sock failed " SOCK_FMT
+			    ", err %d", curthread, vos->vos_sock, err);
+			delay(hz);
+		}
 		zfs_dbgmsg("REOPENED(%px) sock " SOCK_FMT, curthread,
 		    vos->vos_sock);
 

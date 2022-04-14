@@ -55,6 +55,7 @@ pub use vec_ext::read_buf_exact_len;
 pub use vec_ext::tersevec;
 pub use vec_ext::AlignedBytes;
 pub use vec_ext::AlignedVec;
+pub use vec_ext::VecMap;
 pub use write_stdout::flush_stdout;
 pub use zcache_devices::DeviceEntry;
 pub use zcache_devices::DeviceList;

@@ -81,7 +81,7 @@ function test_vdev
 	VDEVS=$(get_pool_devices ${TESTPOOL} ${DEV_RDSKDIR})
 	log_note $VDEVS
 	set -A VDEV_ARRAY $VDEVS
-        for i in ${args[@]}; do
+	for i in ${args[@]}; do
 		log_must eval "zdb -l $i ${VDEV_ARRAY[0]} >/dev/null"
 	done
 }
@@ -89,7 +89,7 @@ function test_vdev
 function test_metaslab
 {
 	typeset -a args=("-A" "-L" "-P" "-Y")
-        for i in ${args[@]}; do
+	for i in ${args[@]}; do
 		log_must eval "zdb -m $i $TESTPOOL >/dev/null"
 	done
 }
