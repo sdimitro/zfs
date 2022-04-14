@@ -15,6 +15,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::anyhow;
+use anyhow::Error;
 use anyhow::Result;
 use bytes::Bytes;
 use futures::future;
@@ -180,7 +181,7 @@ where
                         tokio::spawn(async move {
                             if let Err(e) = server.start_connection(stream, connection_state).await
                             {
-                                error!("closing connection due to error: {:?}", e);
+                                info!("closing connection: {e:?}");
                             }
                         });
                     }
@@ -276,17 +277,16 @@ where
 
         let mut input = BufReader::with_capacity(1024 * 1024, input);
 
-        let (tx, rx) = mpsc::unbounded_channel();
-        tokio::spawn(async move { Responder::response_task(output, rx).await });
+        let (error_tx, mut error_rx) = mpsc::channel(1);
 
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(Responder::response_task(output, rx, error_tx.clone()));
         let responder = Responder::new(tx);
 
         let version =
             Self::negotiate_version(&self.version_list, responder.clone(), &mut input).await?;
         info!("Version selected for connection: {:?}", version);
         state.set_version(version);
-
-        let (error_tx, mut error_rx) = mpsc::channel(1);
 
         loop {
             if let Some(Some(e)) = error_rx.recv().now_or_never() {
@@ -403,7 +403,10 @@ impl Responder {
             .unwrap_or_else(|e| panic!("couldn't send: {}", e));
     }
 
-    async fn write_response<W: AsyncWriteExt + Unpin>(output: &mut W, message: ResponseMessage) {
+    async fn write_response<W: AsyncWriteExt + Unpin>(
+        output: &mut W,
+        message: ResponseMessage,
+    ) -> Result<()> {
         let struct_slice = &message.struct_array[..message.struct_len];
         let header = MessageHeader {
             message_type: message.message_type,
@@ -413,18 +416,43 @@ impl Responder {
 
         super_trace!("sending response {:?}", header);
 
-        header.write(output).await.unwrap();
+        header.write(output).await?;
         if !struct_slice.is_empty() {
-            output.write_all(struct_slice).await.unwrap();
+            output.write_all(struct_slice).await?;
         }
         if !message.payload.is_empty() {
-            output.write_all(&message.payload).await.unwrap();
+            output.write_all(&message.payload).await?;
         }
+        Ok(())
+    }
+
+    async fn response_task_impl<W: AsyncWriteExt + Unpin>(
+        output: &mut W,
+        rx: &mut mpsc::UnboundedReceiver<ResponseMessage>,
+    ) -> Result<()> {
+        while let Some(message) = measure!("Responder::response_task() recv")
+            .fut(rx.recv())
+            .await
+        {
+            let m = measure!("Responder::response_task() write_response");
+            m.fut(Self::write_response(output, message)).await?;
+
+            // drain the channel before flushing
+            while let Some(Some(message)) = rx.recv().now_or_never() {
+                m.fut(Self::write_response(output, message)).await?;
+            }
+
+            measure!("Responder::response_task() flush")
+                .fut(output.flush())
+                .await?;
+        }
+        Ok(())
     }
 
     fn response_task(
         output: OwnedWriteHalf,
         rx: mpsc::UnboundedReceiver<ResponseMessage>,
+        error_tx: mpsc::Sender<Error>,
     ) -> impl Future<Output = ()> {
         let output = BufWriter::with_capacity(1024 * 1024, output);
 
@@ -440,34 +468,20 @@ impl Responder {
         lazy_static_ptr! {
             static ref RESPOND_RECEIVERS:
                 DebugPointerSet<(
+                    BufWriter<OwnedWriteHalf>,
                     mpsc::UnboundedReceiver<ResponseMessage>,
-                    BufWriter<OwnedWriteHalf>
                 )> = Default::default();
         }
 
         // Save our rx and output in the global debug state, so that we can find them from the
         // debugger.
-        let mut state = RESPOND_RECEIVERS.insert((rx, output));
+        let mut state = RESPOND_RECEIVERS.insert((output, rx));
 
         async move {
             // destructure the tuple back into the rx/output
-            let (rx, output) = &mut *state;
-            while let Some(message) = measure!("Responder::response_task() recv")
-                .fut(rx.recv())
-                .await
-            {
-                let m = measure!("Responder::response_task() write_response");
-                m.fut(Self::write_response(output, message)).await;
-
-                // drain the channel before flushing
-                while let Some(Some(message)) = rx.recv().now_or_never() {
-                    m.fut(Self::write_response(output, message)).await;
-                }
-
-                measure!("Responder::response_task() flush")
-                    .fut(output.flush())
-                    .await
-                    .unwrap();
+            let (output, rx) = &mut *state;
+            if let Err(e) = Self::response_task_impl(output, rx).await {
+                error_tx.send(e).await.ok();
             }
         }
     }
