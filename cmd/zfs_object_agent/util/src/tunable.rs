@@ -289,12 +289,12 @@ impl Percent {
     }
 }
 
-pub fn read_config(file_name: &str) {
+pub fn read_config(file_name: &str) -> Result<()> {
     let mut config = CONFIG.write().unwrap();
     *config = Config::builder()
         .add_source(config::File::with_name(file_name))
-        .build()
-        .unwrap();
+        .build()?;
+    Ok(())
 }
 
 pub fn log_config() {
