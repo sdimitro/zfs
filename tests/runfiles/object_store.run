@@ -498,3 +498,9 @@ tags = ['functional', 'arc']
 [tests/functional/background_freeing]
 tests = ['default_free_space_reclaimation']
 tags = ['functional', 'background_freeing']
+
+[tests/functional/zoa]
+tests = ['dump_inmemory_zoa_tracing_sigusr1']
+pre =
+post =
+tags = ['functional', 'zoa']

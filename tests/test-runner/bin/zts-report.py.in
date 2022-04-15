@@ -397,6 +397,7 @@ else:
         'zcache_slog_sharing/cleanup': ['SKIP', block_devices_skip],
         'background_freeing/default_free_space_reclaimation':
             ['SKIP', block_devices_skip],
+        'zoa/dump_inmemory_zoa_tracing_sigusr1': ['SKIP', block_devices_skip]
     })
 
 #
