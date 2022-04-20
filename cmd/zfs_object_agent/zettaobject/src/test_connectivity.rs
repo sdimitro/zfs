@@ -6,9 +6,10 @@ use util::writeln_stderr;
 use util::writeln_stdout;
 
 use crate::access_stats::ObjectAccessOpType;
-use crate::object_access::s3::S3ObjectAccess;
 use crate::object_access::OAError;
 use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessCredentials;
+use crate::object_access::ObjectAccessProtocol;
 use crate::object_access::RequestError;
 
 #[derive(Debug, Deserialize)]
@@ -83,20 +84,23 @@ pub fn test_connectivity(
         .build()
         .unwrap()
         .block_on(async move {
-            let client = if aws_instance_profile {
-                S3ObjectAccess::get_client_with_instance_profile(&endpoint, &region)
+            let credentials = if aws_instance_profile {
+                ObjectAccessCredentials::ManagedCredentials
             } else {
-                // Both aws_access_key_id and aws_secret_access_key should also be specified.
-                S3ObjectAccess::get_client_with_creds(
-                    &endpoint,
-                    &region,
-                    aws_access_key_id.unwrap().as_str(),
-                    aws_secret_access_key.unwrap().as_str(),
-                )
+                ObjectAccessCredentials::Key {
+                    access_key_id: aws_access_key_id.unwrap(),
+                    secret_access_key: aws_secret_access_key.unwrap(),
+                }
             };
-            let object_access = ObjectAccess::from_s3(S3ObjectAccess::from_client(
-                client, &bucket, &endpoint, &region,
-            ));
+            let object_access = ObjectAccess::new(
+                ObjectAccessProtocol::S3 {
+                    endpoint: endpoint.to_string(),
+                    region: region.to_string(),
+                },
+                bucket.to_string(),
+                credentials,
+                false,
+            );
 
             std::process::exit(match do_test_connectivity(&object_access).await {
                 Err(err) => {

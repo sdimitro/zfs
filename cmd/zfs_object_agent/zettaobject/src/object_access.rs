@@ -33,7 +33,9 @@ use util::with_alloctag;
 
 use crate::access_stats::ObjectAccessOpType;
 use crate::access_stats::StatMapValue;
+use crate::object_access::blob::BlobBucketAccess;
 use crate::object_access::blob::BlobObjectAccess;
+use crate::object_access::s3::S3BucketAccess;
 use crate::object_access::s3::S3ObjectAccess;
 
 pub mod blob;
@@ -95,6 +97,25 @@ pub struct ObjectStat {
     pub last_modified: Option<DateTime<FixedOffset>>,
 }
 
+pub enum ObjectAccessProtocol {
+    S3 { endpoint: String, region: String },
+    Blob,
+}
+
+pub enum ObjectAccessCredentials {
+    /// Read credentials from a profile in an ini file
+    Profile { profile: Option<String> },
+    /// Credentials specified as parameters
+    Key {
+        access_key_id: String,
+        secret_access_key: String,
+    },
+    /// Managed credentials:
+    /// - AWS IAM roles passed using an instance profile
+    /// - managed identities for Azure
+    ManagedCredentials,
+}
+
 enum ObjectAccessEnum {
     S3(S3ObjectAccess),
     Azure(BlobObjectAccess),
@@ -107,48 +128,39 @@ pub struct ObjectAccess {
 }
 
 impl ObjectAccess {
+    pub fn new(
+        protocol: ObjectAccessProtocol,
+        bucket: String,
+        credentials: ObjectAccessCredentials,
+        readonly: bool,
+    ) -> Arc<Self> {
+        match protocol {
+            ObjectAccessProtocol::S3 { endpoint, region } => ObjectAccess::from_s3(
+                S3ObjectAccess::new(&endpoint, &region, &bucket, credentials),
+                readonly,
+            ),
+            ObjectAccessProtocol::Blob => {
+                ObjectAccess::from_azure(BlobObjectAccess::new(&bucket, credentials), readonly)
+            }
+        }
+    }
+
+    fn from_s3(oa: S3ObjectAccess, readonly: bool) -> Arc<Self> {
+        Arc::new(ObjectAccess {
+            inner: ObjectAccessEnum::S3(oa),
+            readonly,
+        })
+    }
+
+    fn from_azure(oa: BlobObjectAccess, readonly: bool) -> Arc<Self> {
+        Arc::new(ObjectAccess {
+            inner: ObjectAccessEnum::Azure(oa),
+            readonly,
+        })
+    }
+
     pub fn readonly(&self) -> bool {
         self.readonly
-    }
-
-    pub fn new_s3(
-        endpoint: &str,
-        region_str: &str,
-        bucket: &str,
-        credentials_profile: Option<String>,
-        readonly: bool,
-    ) -> Arc<Self> {
-        let oa = S3ObjectAccess::new(endpoint, region_str, bucket, credentials_profile);
-        Arc::new(ObjectAccess {
-            inner: ObjectAccessEnum::S3(oa),
-            readonly,
-        })
-    }
-
-    pub async fn new_azure(
-        bucket: &str,
-        credentials_profile: Option<String>,
-        readonly: bool,
-    ) -> Arc<Self> {
-        let oa = BlobObjectAccess::new(bucket, credentials_profile).await;
-        Arc::new(ObjectAccess {
-            inner: ObjectAccessEnum::Azure(oa),
-            readonly,
-        })
-    }
-
-    pub fn from_s3(oa: S3ObjectAccess) -> Arc<Self> {
-        Arc::new(ObjectAccess {
-            inner: ObjectAccessEnum::S3(oa),
-            readonly: false, // XXX
-        })
-    }
-
-    pub fn from_azure(oa: BlobObjectAccess) -> Arc<Self> {
-        Arc::new(ObjectAccess {
-            inner: ObjectAccessEnum::Azure(oa),
-            readonly: false, // XXX
-        })
     }
 
     pub fn bucket(&self) -> String {
@@ -321,6 +333,50 @@ impl ObjectAccess {
     pub fn collect_stats(&self) -> HashMap<String, StatMapValue> {
         self.as_trait().collect_stats()
     }
+}
+
+enum BucketAccessEnum {
+    S3(S3BucketAccess),
+    Azure(BlobBucketAccess),
+}
+
+pub struct BucketAccess {
+    inner: BucketAccessEnum,
+}
+
+impl BucketAccess {
+    pub fn new(protocol: ObjectAccessProtocol, credentials_profile: Option<String>) -> Arc<Self> {
+        match protocol {
+            ObjectAccessProtocol::S3 { endpoint, region } => {
+                let ba = S3BucketAccess::new(&endpoint, &region, credentials_profile);
+                Arc::new(BucketAccess {
+                    inner: BucketAccessEnum::S3(ba),
+                })
+            }
+            ObjectAccessProtocol::Blob => {
+                let ba = BlobBucketAccess::new(credentials_profile);
+                Arc::new(BucketAccess {
+                    inner: BucketAccessEnum::Azure(ba),
+                })
+            }
+        }
+    }
+
+    fn as_trait(&self) -> &dyn BucketAccessTrait {
+        match &self.inner {
+            BucketAccessEnum::S3(oa) => oa,
+            BucketAccessEnum::Azure(oa) => oa,
+        }
+    }
+
+    pub async fn list_buckets(&self) -> Vec<String> {
+        self.as_trait().list_buckets().await
+    }
+}
+
+#[async_trait]
+pub trait BucketAccessTrait: Send + Sync {
+    async fn list_buckets(&self) -> Vec<String>;
 }
 
 #[async_trait]

@@ -18,10 +18,13 @@ use azure_storage::clients::AsStorageClient;
 use azure_storage::clients::StorageAccountClient;
 use azure_storage::clients::StorageClient;
 use azure_storage_blobs::prelude::AsBlobClient;
+use azure_storage_blobs::prelude::AsBlobServiceClient;
 use azure_storage_blobs::prelude::AsContainerClient;
+use azure_storage_blobs::prelude::BlobServiceClient;
 use azure_storage_blobs::prelude::ContainerClient;
 use bytes::Bytes;
 use bytes::BytesMut;
+use chrono::DateTime;
 use enum_map::EnumMap;
 use futures::Stream;
 use futures::StreamExt;
@@ -34,6 +37,8 @@ use rusoto_core::ByteStream;
 use tokio::io::AsyncReadExt;
 
 use super::retry;
+use super::BucketAccessTrait;
+use super::ObjectAccessCredentials;
 use super::RequestError;
 use super::OBJECT_DELETION_BATCH_SIZE;
 use crate::access_stats::ObjectAccessOpType;
@@ -152,132 +157,87 @@ where
     }
 }
 
+pub struct BlobBucketAccess {
+    blob_service: Arc<BlobServiceClient>,
+}
+
+impl BlobBucketAccess {
+    pub fn new(credentials_profile: Option<String>) -> Self {
+        let storage_client = get_azure_storage_client(credentials_profile).unwrap();
+        let blob_service = storage_client.as_blob_service_client();
+        Self { blob_service }
+    }
+
+    fn convert_error<T>(e: Box<dyn Error + Send + Sync>) -> OAError<T>
+    where
+        T: MaybeFrom<HttpError> + Display,
+    {
+        let http_error: Box<HttpError> = e.downcast().unwrap();
+        OAError::from(*http_error)
+    }
+}
+
+#[async_trait]
+impl BucketAccessTrait for BlobBucketAccess {
+    async fn list_buckets(&self) -> Vec<String> {
+        let msg = "list_buckets";
+        let list_output = retry(msg, None, || async {
+            let result = self
+                .blob_service
+                .list_containers()
+                .execute()
+                .await
+                .map_err(|e| {
+                    debug!("{}: {}", msg, e);
+                    Self::convert_error::<ObjectStoreError>(e)
+                });
+
+            result
+        })
+        .await;
+
+        list_output
+            .unwrap()
+            .incomplete_vector
+            .iter()
+            .map(|c| c.name.clone())
+            .collect()
+    }
+}
+
 pub struct BlobObjectAccess {
     container_client: Arc<ContainerClient>,
-    bucket_str: String,
+    bucket: String,
     credentials_profile: Option<String>,
     access_stats: ObjectAccessStats,
     outstanding_ops: EnumMap<ObjectAccessOpType, OutstandingOps>,
 }
 
 impl BlobObjectAccess {
-    async fn get_azure_storage_client_from_env() -> Result<Arc<StorageClient>, Box<dyn Error>> {
-        let http_client = azure_core::new_http_client();
-        let storage_client = match env::var("AZURE_CONNECTION_STRING") {
-            Ok(connection_string) => StorageAccountClient::new_connection_string(
-                http_client.clone(),
-                &connection_string,
-            )?
-            .as_storage_client(),
-            Err(_) => {
-                let azure_account = env::var("AZURE_ACCOUNT")?;
-                let azure_key = env::var("AZURE_KEY")?;
+    pub fn new(bucket: &str, credentials: ObjectAccessCredentials) -> Self {
+        match credentials {
+            ObjectAccessCredentials::Profile { profile } => {
+                let storage_client = get_azure_storage_client(profile.clone()).unwrap();
+                let container_client = storage_client.as_container_client(bucket);
 
-                StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
-                    .as_storage_client()
-            }
-        };
-
-        Ok(storage_client)
-    }
-
-    async fn get_azure_storage_client_from_file(
-        config_file: &str,
-        credentials_profile: Option<String>,
-    ) -> Result<Arc<StorageClient>, Box<dyn Error>> {
-        #![allow(clippy::print_stderr)] // XXX remove before production
-
-        let http_client = azure_core::new_http_client();
-        match fs::metadata(config_file) {
-            Ok(file) => {
-                if !file.is_file() {
-                    return Err(
-                        format!("credentials file {} is not a regular file", config_file).into(),
-                    );
+                Self {
+                    container_client,
+                    access_stats: Default::default(),
+                    outstanding_ops: Default::default(),
+                    bucket: bucket.to_string(),
+                    credentials_profile: profile,
                 }
             }
-            Err(err) => {
-                return Err(format!("credentials file {} not found. {:?}", config_file, err).into())
-            }
-        }
-
-        let ini_file = ini::Ini::load_from_file(config_file)?;
-        let azure_account = ini_file.get_from(credentials_profile.clone(), "AZURE_ACCOUNT");
-        let azure_key = ini_file.get_from(credentials_profile.clone(), "AZURE_KEY");
-
-        if azure_account.is_none() {
-            eprintln!(
-                "AZURE_ACCOUNT not found in {:?} profile in config file {}",
-                credentials_profile, config_file
-            );
-            return Err(format!(
-                "AZURE_ACCOUNT not found in {:?} profile in config file {}",
-                credentials_profile, config_file
-            )
-            .into());
-        }
-        if azure_key.is_none() {
-            eprintln!(
-                "AZURE_KEY not found in {:?} profile in config file {}",
-                credentials_profile, config_file
-            );
-            return Err(format!(
-                "AZURE_KEY not found in {:?} profile in config file {}",
-                credentials_profile, config_file
-            )
-            .into());
-        }
-
-        Ok(StorageAccountClient::new_access_key(
-            http_client,
-            azure_account.unwrap(),
-            azure_key.unwrap(),
-        )
-        .as_storage_client())
-    }
-
-    // XXX Public because zoa_test uses it.
-    pub async fn get_azure_storage_client(
-        credentials_profile: Option<String>,
-    ) -> Result<Arc<StorageClient>, Box<dyn Error>> {
-        let credentials_file = match dirs_next::home_dir() {
-            Some(mut home_path) => {
-                home_path.push(".azure");
-                home_path.push("credentials");
-                home_path
-            }
-            None => {
-                panic!("Unable to determine home directory.");
-            }
-        };
-
-        match Self::get_azure_storage_client_from_env().await {
-            Ok(storage_client) => Ok(storage_client),
-            Err(_) => Ok(Self::get_azure_storage_client_from_file(
-                credentials_file.to_str().unwrap(),
-                credentials_profile,
-            )
-            .await?),
-        }
-    }
-
-    pub async fn new(bucket: &str, credentials_profile: Option<String>) -> Self {
-        let storage_account_client = Self::get_azure_storage_client(credentials_profile.clone())
-            .await
-            .unwrap();
-        let container_client = storage_account_client.as_container_client(bucket);
-
-        Self {
-            container_client,
-            access_stats: Default::default(),
-            outstanding_ops: Default::default(),
-            bucket_str: bucket.to_string(),
-            credentials_profile,
+            ObjectAccessCredentials::Key {
+                access_key_id: _,
+                secret_access_key: _,
+            } => todo!(),
+            ObjectAccessCredentials::ManagedCredentials => todo!(),
         }
     }
 
     pub fn bucket(&self) -> String {
-        self.bucket_str.clone()
+        self.bucket.clone()
     }
 
     pub fn credentials_profile(&self) -> Option<String> {
@@ -404,8 +364,23 @@ impl ObjectAccessTrait for BlobObjectAccess {
             .await;
     }
 
-    async fn stat_object(&self, _key: String) -> Option<ObjectStat> {
-        todo!()
+    async fn stat_object(&self, key: String) -> Option<ObjectStat> {
+        let msg = format!("head {}", key);
+        let blob_client = self.container_client.as_blob_client(key);
+        retry(&msg, None, || async {
+            match blob_client.get_properties().execute().await {
+                Err(e) => {
+                    debug!("{}: {}", &msg, e);
+                    Err(Self::convert_error::<ObjectStoreError>(e))
+                }
+                Ok(res) => Ok(res),
+            }
+        })
+        .await
+        .ok()
+        .map(|prop| ObjectStat {
+            last_modified: Some(DateTime::from(prop.blob.properties.last_modified)),
+        })
     }
 
     fn list(
@@ -436,7 +411,7 @@ impl ObjectAccessTrait for BlobObjectAccess {
                 match list_builder.execute().await
                 {
                     Err(e) => {
-                        debug!("{}: error while listing blogs: {}", &msg, e);
+                        debug!("{}: {}", &msg, e);
                         Err(Self::convert_error::<ObjectStoreError>(e))
                     }
                     Ok(res) => Ok(res),
@@ -458,5 +433,91 @@ impl ObjectAccessTrait for BlobObjectAccess {
         };
 
         Box::pin(stream_result)
+    }
+}
+
+fn get_azure_storage_client_from_env() -> Result<Arc<StorageClient>, Box<dyn Error>> {
+    let http_client = azure_core::new_http_client();
+    let storage_client = match env::var("AZURE_CONNECTION_STRING") {
+        Ok(connection_string) => {
+            StorageAccountClient::new_connection_string(http_client.clone(), &connection_string)?
+                .as_storage_client()
+        }
+        Err(_) => {
+            let azure_account = env::var("AZURE_ACCOUNT")?;
+            let azure_key = env::var("AZURE_KEY")?;
+
+            StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
+                .as_storage_client()
+        }
+    };
+
+    Ok(storage_client)
+}
+
+fn get_azure_storage_client_from_file(
+    credentials_profile: Option<String>,
+) -> Result<Arc<StorageClient>, Box<dyn Error>> {
+    let home_dir = dirs_next::home_dir();
+    if home_dir.is_none() {
+        return Err("Unable to determine home directory.".to_string().into());
+    }
+    let mut file_path = home_dir.unwrap();
+    file_path.push(".azure");
+    file_path.push("credentials");
+
+    let credentials_file = file_path.to_str().unwrap();
+
+    let http_client = azure_core::new_http_client();
+    match fs::metadata(credentials_file) {
+        Ok(file) => {
+            if !file.is_file() {
+                return Err(format!(
+                    "credentials file {} is not a regular file",
+                    credentials_file
+                )
+                .into());
+            }
+        }
+        Err(err) => {
+            return Err(
+                format!("credentials file {} not found. {:?}", credentials_file, err).into(),
+            )
+        }
+    }
+
+    let ini_file = ini::Ini::load_from_file(credentials_file)?;
+    let azure_account = ini_file.get_from(credentials_profile.clone(), "AZURE_ACCOUNT");
+    let azure_key = ini_file.get_from(credentials_profile.clone(), "AZURE_KEY");
+
+    if azure_account.is_none() {
+        return Err(format!(
+            "AZURE_ACCOUNT not found in {:?} profile in config file {}",
+            credentials_profile, credentials_file
+        )
+        .into());
+    }
+    if azure_key.is_none() {
+        return Err(format!(
+            "AZURE_KEY not found in {:?} profile in config file {}",
+            credentials_profile, credentials_file
+        )
+        .into());
+    }
+
+    Ok(StorageAccountClient::new_access_key(
+        http_client,
+        azure_account.unwrap(),
+        azure_key.unwrap(),
+    )
+    .as_storage_client())
+}
+
+fn get_azure_storage_client(
+    credentials_profile: Option<String>,
+) -> Result<Arc<StorageClient>, Box<dyn Error>> {
+    match get_azure_storage_client_from_env() {
+        Ok(storage_client) => Ok(storage_client),
+        Err(_) => Ok(get_azure_storage_client_from_file(credentials_profile)?),
     }
 }
