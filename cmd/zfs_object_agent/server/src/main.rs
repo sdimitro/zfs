@@ -134,7 +134,10 @@ fn main() {
     let cli = Cli::parse();
 
     if let Some(file_name) = cli.config_file {
-        util::tunable::read_config(&file_name);
+        if let Err(error) = util::tunable::read_config(&file_name) {
+            writeln_stderr!("error: reading config: {}", error);
+            std::process::exit(1);
+        }
     }
     if cli.command.is_none() || cli.logging.verbosity > 0 {
         setup_logging(cli.logging);

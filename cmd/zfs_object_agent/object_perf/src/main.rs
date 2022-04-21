@@ -9,6 +9,8 @@ use clap::Subcommand;
 use git_version::git_version;
 use uuid::Uuid;
 use zettaobject::object_access::ObjectAccess;
+use zettaobject::object_access::ObjectAccessCredentials;
+use zettaobject::object_access::ObjectAccessProtocol;
 mod s3perf;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
@@ -104,11 +106,15 @@ async fn main() {
         cli.endpoint, cli.region, cli.bucket, cli.profile
     );
 
-    let object_access = ObjectAccess::new_s3(
-        &cli.endpoint,
-        &cli.region,
-        &cli.bucket,
-        Some(cli.profile.to_owned()),
+    let object_access = ObjectAccess::new(
+        ObjectAccessProtocol::S3 {
+            endpoint: cli.endpoint,
+            region: cli.region,
+        },
+        cli.bucket,
+        ObjectAccessCredentials::Profile {
+            profile: Some(cli.profile.to_owned()),
+        },
         false,
     );
 

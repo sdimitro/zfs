@@ -19,6 +19,7 @@ use util::writeln_stdout;
 use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
 use crate::block_access::*;
+use crate::block_based_log::summarized::*;
 use crate::block_based_log::*;
 use crate::pool_id::PoolId;
 use crate::slab_allocator::SlabAccess;
