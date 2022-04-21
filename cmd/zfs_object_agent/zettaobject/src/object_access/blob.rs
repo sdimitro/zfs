@@ -420,15 +420,21 @@ impl ObjectAccessTrait for BlobObjectAccess {
             })
             .await.unwrap();
 
+            // XXX The performance of this is likely to be quite bad. We need a better solution. DOSE-1215
+            let initial = start_after.unwrap_or("".to_string());
             if list_prefixes {
                 if let Some(prefixes) = output.blobs.blob_prefix {
                     for blob_prefix in prefixes {
-                        yield blob_prefix.name;
+                        if initial < blob_prefix.name {
+                            yield blob_prefix.name;
+                        }
                     }
                 }
             } else {
                 for blob in output.blobs.blobs {
-                    yield blob.name;
+                    if initial < blob.name {
+                        yield blob.name;
+                    }
                 }
             }
         };
