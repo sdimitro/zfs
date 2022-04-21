@@ -318,7 +318,8 @@ impl ObjectAccessTrait for BlobObjectAccess {
 
             // XXX not streaming put yet; does put_page_blob fit the bill?
             let mut buf = BytesMut::with_capacity(len);
-            stream.into_async_read().read_buf(&mut buf).await.unwrap();
+            buf.resize(len, 0);
+            stream.into_async_read().read_exact(&mut buf).await.unwrap();
 
             match blob_client.put_block_blob(buf).execute().await {
                 Err(e) => {
