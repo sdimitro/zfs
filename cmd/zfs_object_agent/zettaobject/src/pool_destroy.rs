@@ -22,6 +22,8 @@ use util::tunable;
 use zettacache::base_types::*;
 
 use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessCredentials;
+use crate::object_access::ObjectAccessProtocol;
 use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
 use crate::pool::PoolPhys;
 
@@ -220,14 +222,17 @@ impl PoolDestroyer {
                         destroying_pool.cache_phys.state == PoolDestroyState::InProgress
                     })
                     .for_each(|(guid, destroying_pool)| {
-                        let object_access = ObjectAccess::new_s3(
-                            &destroying_pool.cache_phys.endpoint,
-                            &destroying_pool.cache_phys.region,
-                            &destroying_pool.cache_phys.bucket,
-                            destroying_pool.cache_phys.profile.clone(),
+                        let object_access = ObjectAccess::new(
+                            ObjectAccessProtocol::S3 {
+                                endpoint: destroying_pool.cache_phys.endpoint.clone(),
+                                region: destroying_pool.cache_phys.region.clone(),
+                            },
+                            destroying_pool.cache_phys.bucket.clone(),
+                            ObjectAccessCredentials::Profile {
+                                profile: destroying_pool.cache_phys.profile.clone(),
+                            },
                             false,
                         );
-
                         start_destroy_task(object_access, *guid);
                     });
 

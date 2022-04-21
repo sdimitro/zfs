@@ -26,6 +26,8 @@ use crate::access_stats::StatMapValue;
 use crate::base_types::*;
 use crate::features::FeatureError;
 use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessCredentials;
+use crate::object_access::ObjectAccessProtocol;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
@@ -95,11 +97,15 @@ struct ObjectAccessRequest {
 }
 impl ObjectAccessRequest {
     fn object_access(&self) -> Arc<ObjectAccess> {
-        ObjectAccess::new_s3(
-            &self.endpoint,
-            &self.region,
-            &self.bucket,
-            self.credentials_profile.clone(),
+        ObjectAccess::new(
+            ObjectAccessProtocol::S3 {
+                endpoint: self.endpoint.clone(),
+                region: self.region.clone(),
+            },
+            self.bucket.clone(),
+            ObjectAccessCredentials::Profile {
+                profile: self.credentials_profile.clone(),
+            },
             self.readonly,
         )
     }

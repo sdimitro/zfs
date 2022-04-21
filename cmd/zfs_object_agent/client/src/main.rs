@@ -14,11 +14,6 @@ use std::time::Instant;
 
 use ::util::writeln_stderr;
 use ::util::writeln_stdout;
-use azure_storage_blobs::blob::responses::GetBlobResponse;
-use azure_storage_blobs::container::PublicAccess;
-use azure_storage_blobs::prelude::AsBlobClient;
-use azure_storage_blobs::prelude::AsBlobServiceClient;
-use azure_storage_blobs::prelude::AsContainerClient;
 use chrono::prelude::*;
 use chrono::DateTime;
 use clap::Parser;
@@ -41,12 +36,13 @@ use zettacache::base_types::*;
 use zettaobject::access_stats::ObjectAccessOpType;
 use zettaobject::base_types::*;
 use zettaobject::data_object::DataObject;
-use zettaobject::object_access::blob::BlobObjectAccess;
-use zettaobject::object_access::s3::S3ObjectAccess;
+use zettaobject::object_access::BucketAccess;
+use zettaobject::object_access::ObjectAccessCredentials;
 use zettaobject::Pool;
 mod client;
 use itertools::Itertools;
 use zettaobject::object_access::ObjectAccess;
+use zettaobject::object_access::ObjectAccessProtocol;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
@@ -450,94 +446,65 @@ fn get_object_access(
     aws_access_key_id: Option<&str>,
     aws_secret_access_key: Option<&str>,
 ) -> Arc<ObjectAccess> {
-    match aws_access_key_id {
-        None => ObjectAccess::new_s3(endpoint, region, bucket, Some(profile.to_owned()), false),
-        Some(access_id) => {
-            // If access_id is specified, aws_secret_access_key should also be specified.
-            let secret_key = aws_secret_access_key.unwrap();
-
-            let client =
-                S3ObjectAccess::get_client_with_creds(endpoint, region, access_id, secret_key);
-
-            ObjectAccess::from_s3(S3ObjectAccess::from_client(
-                client, bucket, endpoint, region,
-            ))
+    let credentials = match aws_access_key_id {
+        None => ObjectAccessCredentials::Profile {
+            profile: Some(profile.to_string()),
+        },
+        Some(access_id) =>
+        // If access_id is specified, aws_secret_access_key should also be specified.
+        {
+            ObjectAccessCredentials::Key {
+                access_key_id: access_id.to_string(),
+                secret_access_key: aws_secret_access_key.unwrap().to_string(),
+            }
         }
-    }
+    };
+    ObjectAccess::new(
+        ObjectAccessProtocol::S3 {
+            endpoint: endpoint.to_string(),
+            region: region.to_string(),
+        },
+        bucket.to_string(),
+        credentials,
+        false,
+    )
 }
 
-async fn do_blob() -> Result<(), Box<dyn Error>> {
-    let container_name = "zoatest";
-    let credentials_profile = Some("default".to_string());
-    let mut container_exists = false;
-
-    let storage_client =
-        match BlobObjectAccess::get_azure_storage_client(credentials_profile.clone()).await {
-            Ok(storage_client) => storage_client,
-            Err(err) => {
-                eprintln!("Error: {:?}", err);
-                return Err(err);
-            }
-        };
-
-    let blob_service = storage_client.as_blob_service_client();
-
-    let containers = blob_service.list_containers().execute().await.unwrap();
-
-    // List containers
-    containers.incomplete_vector.iter().for_each(|item| {
-        println!("container: {:20} {}", item.name, item.last_modified);
-        if item.name == container_name {
-            container_exists = true;
-        }
-    });
-
-    let container_client = storage_client.as_container_client(container_name);
-
-    if !container_exists {
-        container_client
-            .create()
-            .public_access(PublicAccess::None)
-            .timeout(Duration::from_secs(100))
-            .execute()
-            .await
-            .unwrap();
-        println!("Container {} created", container_name);
+async fn do_blob(bucket: String, profile: String) -> Result<(), Box<dyn Error>> {
+    let credentials_profile = Some(profile);
+    let key = "blob2.txt".to_string();
+    let bucket_access = BucketAccess::new(ObjectAccessProtocol::Blob, credentials_profile.clone());
+    let buckets = bucket_access.list_buckets().await;
+    println!("List containers {:?}", buckets);
+    if !buckets.contains(&bucket) {
+        return Err(format!("Bucket {} not found.", bucket).into());
     }
 
-    container_client
-        .as_blob_client("blob.txt")
-        .put_block_blob("somedata")
-        .content_type("text/plain")
-        .execute()
-        .await
-        .unwrap();
+    let object_access = ObjectAccess::new(
+        ObjectAccessProtocol::Blob,
+        bucket,
+        ObjectAccessCredentials::Profile {
+            profile: credentials_profile.clone(),
+        },
+        false,
+    );
 
-    println!("\tPut blob: blob.txt");
-
-    let get_response: GetBlobResponse = container_client
-        .as_blob_client("blob.txt")
-        .get()
-        .execute()
-        .await
-        .unwrap();
-    println!("Get blob [blob.txt]: {:#?}", get_response);
-
-    let object_access = ObjectAccess::new_azure(container_name, credentials_profile, false).await;
     let content = "I want to go to azure".as_bytes().to_vec();
-
     object_access
         .put_object_stream(
-            "blob2.txt".to_string(),
+            key.clone(),
             || (ByteStream::from(content.clone()), content.len()),
             ObjectAccessOpType::MetadataPut,
         )
         .await;
 
     let bytes = object_access
-        .get_object("blob2.txt".to_string(), ObjectAccessOpType::ReadsGet)
+        .get_object(key.clone(), ObjectAccessOpType::ReadsGet)
         .await?;
-    println!("Get blob data [blob2.txt]: {:?}", bytes);
+    println!("Get blob data [{}]: {:?}", key, bytes);
+
+    let stat = object_access.stat_object(key.clone()).await;
+    println!("Last modified: [{}]: {:?}", key, stat);
 
     println!(
         "List blobs {:?}",
@@ -547,10 +514,7 @@ async fn do_blob() -> Result<(), Box<dyn Error>> {
             .await
     );
 
-    object_access.delete_object("blob2.txt".to_string()).await;
-
-    container_client.delete().execute().await.unwrap();
-    println!("Container {} deleted", container_name);
+    object_access.delete_object(key).await;
 
     Ok(())
 }
@@ -631,7 +595,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::S3Rusoto => do_s3_rusoto().await?,
-        Commands::Blob => do_blob().await?,
+        Commands::Blob => do_blob(cli.bucket, cli.profile).await?,
         Commands::Create => do_create().await?,
         Commands::Write => do_write().await?,
         Commands::Read => do_read().await?,

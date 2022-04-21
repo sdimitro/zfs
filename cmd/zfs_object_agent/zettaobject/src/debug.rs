@@ -12,6 +12,8 @@ use zettacache::base_types::PoolGuid;
 
 use crate::base_types::Txg;
 use crate::object_access::ObjectAccess;
+use crate::object_access::ObjectAccessCredentials;
+use crate::object_access::ObjectAccessProtocol;
 use crate::pool;
 use crate::pool::Pool;
 use crate::pool::PoolPhys;
@@ -31,11 +33,16 @@ fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
         .lookup_string("credentials_profile")
         .ok()
         .map(|s| s.to_string_lossy().to_string());
-    ObjectAccess::new_s3(
-        endpoint.to_str().unwrap(),
-        region_str.to_str().unwrap(),
-        bucket_name.to_str().unwrap(),
-        credentials_profile,
+
+    ObjectAccess::new(
+        ObjectAccessProtocol::S3 {
+            endpoint: endpoint.to_str().unwrap().to_string(),
+            region: region_str.to_str().unwrap().to_string(),
+        },
+        bucket_name.to_str().unwrap().to_string(),
+        ObjectAccessCredentials::Profile {
+            profile: credentials_profile,
+        },
         true,
     )
 }

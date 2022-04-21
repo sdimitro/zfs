@@ -376,6 +376,7 @@ AC_CONFIG_FILES([
 	tests/zfs-tests/tests/functional/write_dirs/Makefile
 	tests/zfs-tests/tests/functional/xattr/Makefile
 	tests/zfs-tests/tests/functional/zcache_slog_sharing/Makefile
+	tests/zfs-tests/tests/functional/zoa/Makefile
 	tests/zfs-tests/tests/functional/zpool_influxdb/Makefile
 	tests/zfs-tests/tests/functional/zvol/Makefile
 	tests/zfs-tests/tests/functional/zvol/zvol_ENOSPC/Makefile
