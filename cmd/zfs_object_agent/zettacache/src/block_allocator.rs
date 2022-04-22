@@ -1645,7 +1645,6 @@ impl BlockAllocator {
         self.condense();
         self.flush_dirty();
         let (spacemap, spacemap_next) = self.flush_impl().await;
-        self.slab_allocator.checkpoint_done();
         self.resort_buckets();
 
         self.available_space += self.freeing_space;
