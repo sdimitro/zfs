@@ -23,11 +23,14 @@ pub struct Feature {
 }
 
 lazy_static! {
-    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> =
-        [SLAB_INFO_SPACEMAP_ENTRIES.clone(), SLAB_ALLOCATOR.clone(),]
-            .map(|feature: Feature| (feature.name, feature.info))
-            .into_iter()
-            .collect();
+    pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = [
+        SLAB_INFO_SPACEMAP_ENTRIES.clone(),
+        SLAB_ALLOCATOR.clone(),
+        SLAB_SIZE_32MB.clone()
+    ]
+    .map(|feature: Feature| (feature.name, feature.info))
+    .into_iter()
+    .collect();
     pub static ref SLAB_INFO_SPACEMAP_ENTRIES: Feature = Feature {
         name: FeatureName("com.delphix:slab_info_spacemap_entries".to_string()),
         info: FeatureType::NonUpgradeable
@@ -35,6 +38,10 @@ lazy_static! {
     pub static ref SLAB_ALLOCATOR: Feature = Feature {
         name: FeatureName("com.delphix:slab_allocator".to_string()),
         info: FeatureType::NonUpgradeable
+    };
+    pub static ref SLAB_SIZE_32MB: Feature = Feature {
+        name: FeatureName("com.delphix:slab_size_32mb".to_string()),
+        info: FeatureType::Upgradeable
     };
 }
 

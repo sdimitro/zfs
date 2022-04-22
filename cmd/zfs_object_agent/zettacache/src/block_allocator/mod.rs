@@ -4,11 +4,13 @@ pub mod zcdb;
 use std::cmp::max;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
+use std::collections::HashSet;
 use std::mem;
 use std::ops::Bound::*;
 use std::sync::Arc;
 use std::time::Instant;
 
+use bytesize::ByteSize;
 use derivative::Derivative;
 use either::Either;
 use log::*;
@@ -135,7 +137,15 @@ impl BitmapSlab {
 
     fn new_slab(id: SlabId, extent: Extent, block_size: u32) -> Slab {
         let slab_size = u32::try_from(extent.size).unwrap();
-        let free_slots = u16::try_from(slab_size / block_size).unwrap();
+        let num_slots = slab_size / block_size;
+        let free_slots = if num_slots > u16::MAX.into() {
+            // Since the default slab_size is 32MB, num_slots can overflow a
+            // u16 for 512-byte slots.
+            assert_ge!(u64::from(slab_size), ByteSize::mib(32).as_u64());
+            u16::MAX
+        } else {
+            u16::try_from(num_slots).unwrap()
+        };
         let mut allocatable = BitRange::new();
 
         allocatable.insert_range(0..free_slots);
@@ -1763,13 +1773,26 @@ pub struct BlockAllocatorPhys {
 impl OnDisk for BlockAllocatorPhys {}
 
 impl BlockAllocatorPhys {
-    pub fn new() -> BlockAllocatorPhys {
+    pub fn new(block_access: &BlockAccess) -> BlockAllocatorPhys {
+        let mut bucket_sizes = HashSet::new();
+        let mut buckets = Vec::new();
+        for (default_bucket, is_extent_based) in &DEFAULT_SLAB_BUCKETS.buckets {
+            let aligned_bucket = SlabBucketSize(block_access.round_up_to_sector(default_bucket.0));
+            if !bucket_sizes.contains(&aligned_bucket) {
+                assert_le!(
+                    aligned_bucket.0,
+                    DEFAULT_SLAB_SIZE.as_u64().try_into().unwrap()
+                );
+                bucket_sizes.insert(aligned_bucket);
+                buckets.push((aligned_bucket, *is_extent_based));
+            }
+        }
         BlockAllocatorPhys {
             spacemap: SpaceMapPhys::new(),
             spacemap_next: SpaceMapPhys::new(),
             next_slab_to_condense: SlabId(0),
             segments_at_last_merge: 0,
-            slab_buckets: DEFAULT_SLAB_BUCKETS.clone(),
+            slab_buckets: SlabAllocationBucketsPhys { buckets },
         }
     }
 

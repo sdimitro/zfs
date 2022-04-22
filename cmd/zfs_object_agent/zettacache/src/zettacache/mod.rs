@@ -825,7 +825,7 @@ impl ZettaCache {
         let checkpoint = CheckpointPhys {
             id: CheckpointId(0),
             pool_guids: Default::default(),
-            block_allocator: BlockAllocatorPhys::new(),
+            block_allocator: BlockAllocatorPhys::new(block_access),
             slab_allocator: SlabAllocatorPhys::new(new_capacity),
             old_index: IndexRunPhys::new(Atime(0), Atime(0)),
             operation_log: Default::default(),

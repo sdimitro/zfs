@@ -29,7 +29,10 @@ use util::From64;
 use crate::base_types::Extent;
 
 tunable! {
-    pub static ref DEFAULT_SLAB_SIZE: ByteSize = ByteSize::mib(16);
+    // 32MBs is the biggest slab size that we can currently do without
+    // overflowing the u16 that holds the number of slots in a BitRange
+    // structure with the default config of a 512B bucket.
+    pub static ref DEFAULT_SLAB_SIZE: ByteSize = ByteSize::mib(32);
 
     // We need enough free slabs to write a new copy of the index.  Assuming a worst case of a 2K
     // average block size, the "live" index should stay within about 1% of the total cache size.
