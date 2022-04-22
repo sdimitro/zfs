@@ -68,9 +68,9 @@ enum Commands {
 
     /// dump slab info
     Slabs {
-        /// Sets the level of verbosity
-        #[clap(short = 'v', parse(from_occurrences))]
-        verbosity: u64,
+        /// Sets the level of detail
+        #[clap(short = 'd', parse(from_occurrences))]
+        detail: u64,
     },
 
     /// dump space usage statistics
@@ -130,9 +130,9 @@ async fn main() -> Result<(), anyhow::Error> {
         Commands::Superblocks => {
             ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, paths).await
         }
-        Commands::Slabs { verbosity } => {
+        Commands::Slabs { detail } => {
             ZettaCacheDBCommand::issue_command(
-                ZettaCacheDBCommand::DumpSlabs(DumpSlabsOptions { verbosity }),
+                ZettaCacheDBCommand::DumpSlabs(DumpSlabsOptions { verbosity: detail }),
                 paths,
             )
             .await
@@ -143,5 +143,17 @@ async fn main() -> Result<(), anyhow::Error> {
         Commands::Index => {
             ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, paths).await
         }
+    }
+}
+
+#[cfg(test)]
+mod test_clap {
+    use clap::IntoApp;
+
+    use super::*;
+
+    #[test]
+    fn test_debug_asserts() {
+        Cli::command().debug_assert();
     }
 }

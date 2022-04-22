@@ -79,3 +79,15 @@ async fn async_main() -> Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod test_clap {
+    use clap::IntoApp;
+
+    use super::*;
+
+    #[test]
+    fn test_debug_asserts() {
+        Cli::command().debug_assert();
+    }
+}

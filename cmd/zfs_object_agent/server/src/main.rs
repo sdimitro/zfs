@@ -293,3 +293,15 @@ mod test {
         neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd --aws_instance_profile");
     }
 }
+
+#[cfg(test)]
+mod test_clap {
+    use clap::IntoApp;
+
+    use super::*;
+
+    #[test]
+    fn test_debug_asserts() {
+        Cli::command().debug_assert();
+    }
+}
