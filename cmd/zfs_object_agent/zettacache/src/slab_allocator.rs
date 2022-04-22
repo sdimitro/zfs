@@ -290,6 +290,8 @@ impl SlabAllocator {
         target_free_slabs.saturating_sub(current_free_slabs)
     }
 
+    /// This should be called after the checkpoint has been persisted to disk, at which point
+    /// it's safe to re-allocate freed slabs.
     pub fn checkpoint_done(&self) {
         let mut inner = self.inner.lock().unwrap();
         let inner_ref = &mut *inner; // avoid 2 exclusive borrows from the MutexGuard
