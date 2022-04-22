@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use derivative::Derivative;
 use futures::future::join;
 use futures::StreamExt;
 use futures_core::Stream;
@@ -40,28 +41,27 @@ tunable! {
     static ref CHUNK_CACHE_ENTRIES: usize = 128;
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
+#[derive(Serialize, Deserialize, Derivative, Debug, Clone)]
+#[derivative(Default(bound = "T:"))]
+#[serde(bound = "T: DeserializeOwned")]
 pub struct SummarizedBlockBasedLogPhys<T: BlockBasedLogEntry> {
-    #[serde(bound(deserialize = "T: DeserializeOwned"))]
     this: BlockBasedLogPhys<T>,
-    #[serde(bound(deserialize = "T: DeserializeOwned"))]
     chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
+#[serde(bound = "T: DeserializeOwned")]
 pub struct BlockBasedLogChunkSummaryEntry<T: BlockBasedLogEntry> {
     offset: LogOffset,
-    #[serde(bound(deserialize = "T: DeserializeOwned"))]
     first_entry: T,
 }
 impl<T: BlockBasedLogEntry> OnDisk for BlockBasedLogChunkSummaryEntry<T> {}
 impl<T: BlockBasedLogEntry> BlockBasedLogEntry for BlockBasedLogChunkSummaryEntry<T> {}
 
 pub struct ReadOnlySummarizedBlockBasedLog<T: BlockBasedLogEntry> {
+    phys: SummarizedBlockBasedLogPhys<T>,
     block_access: Arc<BlockAccess>,
     slab_allocator: Arc<SlabAllocator>,
-    this: BlockBasedLogPhys<T>,
-    chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
     chunks: Vec<BlockBasedLogChunkSummaryEntry<T>>,
     chunk_cache: Mutex<LruCache<ChunkId, BlockBasedLogChunk<T>>>,
     chunk_reads: LockSet<ChunkId>,
@@ -71,15 +71,6 @@ pub struct SummarizedBlockBasedLog<T: BlockBasedLogEntry> {
     readonly: ReadOnlySummarizedBlockBasedLog<T>,
     this: BlockBasedLog<T>,
     chunk_summary: BlockBasedLog<BlockBasedLogChunkSummaryEntry<T>>,
-}
-
-impl<T: BlockBasedLogEntry> Default for SummarizedBlockBasedLogPhys<T> {
-    fn default() -> Self {
-        Self {
-            this: Default::default(),
-            chunk_summary: Default::default(),
-        }
-    }
 }
 
 pub struct BlockBasedLogValueGuard<'a, T: BlockBasedLogEntry> {
@@ -163,10 +154,9 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         );
 
         Self {
+            phys,
             block_access,
             slab_allocator,
-            this: phys.this,
-            chunk_summary: phys.chunk_summary,
             chunks,
             chunk_cache: Mutex::new(LruCache::new(*CHUNK_CACHE_ENTRIES)),
             chunk_reads: Default::default(),
@@ -174,14 +164,11 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
     }
 
     pub fn get_phys(&self) -> SummarizedBlockBasedLogPhys<T> {
-        SummarizedBlockBasedLogPhys {
-            this: self.this.clone(),
-            chunk_summary: self.chunk_summary.clone(),
-        }
+        self.phys.clone()
     }
 
     pub fn len(&self) -> u64 {
-        self.this.num_entries
+        self.phys.this.num_entries
     }
 
     #[allow(dead_code)]
@@ -191,17 +178,19 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
 
     /// Size of the on-disk representation
     pub fn num_bytes(&self) -> u64 {
-        self.this.bytes() + self.chunk_summary.bytes()
+        self.phys.this.bytes() + self.phys.chunk_summary.bytes()
     }
 
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
-        self.this
+        self.phys
+            .this
             .iter(self.block_access.clone(), self.slab_allocator.access())
     }
 
     pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        self.this
+        self.phys
+            .this
             .iter_chunks(self.block_access.clone(), self.slab_allocator.access())
     }
 
@@ -210,16 +199,38 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         let chunk_id = usize::from64(chunk_id.0);
         let chunk_summary = self.chunks[chunk_id];
         let chunk_size = if chunk_id == self.chunks.len() - 1 {
-            self.this.next_chunk_offset - chunk_summary.offset
+            self.phys.this.next_chunk_offset - chunk_summary.offset
         } else {
             self.chunks[chunk_id + 1].offset - chunk_summary.offset
         };
 
-        let slab_size = self.slab_allocator.slab_size();
-        let extent = self
-            .slab_allocator
-            .slab_id_to_extent(self.this.slabs[usize::from64(chunk_summary.offset.0 / slab_size)]);
-        extent.range(chunk_summary.offset.0 % slab_size, chunk_size)
+        Extent {
+            location: self
+                .phys
+                .this
+                .offset_to_location(self.slab_allocator.access(), chunk_summary.offset),
+            size: chunk_size,
+        }
+    }
+
+    /// Return the ChunkId where this key will be found, if present.
+    fn lookup_chunk_by_key<B, F>(&self, key: &B, f: &mut F) -> Option<ChunkId>
+    where
+        B: Ord + Debug,
+        F: FnMut(&T) -> B,
+    {
+        assert_eq!(ChunkId(self.chunks.len() as u64), self.phys.this.next_chunk);
+
+        // Find the chunk_id that this key belongs in.
+        match self
+            .chunks
+            .binary_search_by_key(key, |chunk_summary| f(&chunk_summary.first_entry))
+        {
+            Ok(index) => Some(ChunkId(index as u64)),
+            // key is before the first chunk, therefore not present
+            Err(index) if index == 0 => None,
+            Err(index) => Some(ChunkId(index as u64 - 1)),
+        }
     }
 
     /// Returns (value, chunk_cache_hit), where the value is the value corresponding
@@ -230,17 +241,9 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         B: Ord + Debug,
         F: FnMut(&T) -> B,
     {
-        assert_eq!(ChunkId(self.chunks.len() as u64), self.this.next_chunk);
-
-        // Find the chunk_id that this key belongs in.
-        let chunk_id = match self
-            .chunks
-            .binary_search_by_key(key, |chunk_summary| f(&chunk_summary.first_entry))
-        {
-            Ok(index) => ChunkId(index as u64),
-            // key is before the first chunk, therefore not present
-            Err(index) if index == 0 => return (None, false),
-            Err(index) => ChunkId(index as u64 - 1),
+        let chunk_id = match self.lookup_chunk_by_key(key, &mut f) {
+            Some(chunk_id) => chunk_id,
+            None => return (None, false),
         };
 
         if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
@@ -340,13 +343,12 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         phys: SummarizedBlockBasedLogPhys<T>,
         delta: &SummarizedBlockBasedLogFlushDelta<T>,
     ) {
-        assert_eq!(delta.first_new_chunk, self.this.next_chunk);
+        assert_eq!(delta.first_new_chunk, self.phys.this.next_chunk);
         with_alloctag("ReadOnlySummarizedBlockBasedLog.chunks", || {
             self.chunks.extend_from_slice(&delta.new_chunks)
         });
 
-        self.this = phys.this;
-        self.chunk_summary = phys.chunk_summary;
+        self.phys = phys;
     }
 }
 

@@ -1,4 +1,5 @@
 use std::borrow::Borrow;
+use std::cmp::min;
 use std::fmt::*;
 use std::num::NonZeroU64;
 use std::ops::Add;
@@ -149,6 +150,24 @@ impl Extent {
         Extent {
             location: self.location + relative_offset,
             size,
+        }
+    }
+
+    /// Trims the beginning off of this extent.
+    pub fn trim_start(&self, relative_offset: u64) -> Extent {
+        assert_le!(relative_offset, self.size);
+        Extent {
+            location: self.location + relative_offset,
+            size: self.size - relative_offset,
+        }
+    }
+
+    /// Reduce size to specified value.  If size is larger than the extent's size, this is a
+    /// no-op.
+    pub fn trim_end(&self, size: u64) -> Extent {
+        Extent {
+            location: self.location,
+            size: min(self.size, size),
         }
     }
 

@@ -39,7 +39,7 @@ impl IndexKey {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
 #[repr(packed)]
 pub struct IndexValue {
     location: Option<DiskLocation>,
@@ -338,7 +338,7 @@ impl IndexRun {
         self.log.clear();
     }
 
-    // Logically remove entries at and before `first`, which must be >= the current
+    // Logically remove entries at and before `trim_key`, which must be >= the current
     // `trim_key`.  The newly-obsoleted entries must have the provided
     // histogram.
     pub fn trim(&mut self, trim_key: IndexKey, obsoleted: &AtimeHistogramPhys) {

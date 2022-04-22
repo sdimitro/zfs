@@ -74,12 +74,12 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogPhys<T> {
 }
 
 #[derive(Serialize, Deserialize, Debug)]
+#[serde(bound = "T: DeserializeOwned")]
 struct ObjectBasedLogChunk<T: ObjectBasedLogEntry> {
     guid: PoolGuid,
     generation: u64,
     chunk: u64,
     txg: Txg,
-    #[serde(bound(deserialize = "Vec<T>: DeserializeOwned"))]
     entries: Vec<T>,
 }
 impl<T: ObjectBasedLogEntry> OnDisk for ObjectBasedLogChunk<T> {}
