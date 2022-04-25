@@ -35,6 +35,7 @@ use tokio::io::BufWriter;
 use tokio::net::unix::OwnedWriteHalf;
 use tokio::net::UnixListener;
 use tokio::net::UnixStream;
+use tokio::select;
 use tokio::sync::mpsc;
 use util::lazy_static_ptr;
 use util::lazy_static_ptr::DebugPointerSet;
@@ -289,12 +290,18 @@ where
         state.set_version(version);
 
         loop {
-            if let Some(Some(e)) = error_rx.recv().now_or_never() {
-                // an async (spawned) task produced an error
-                return Err(e);
-            }
-            let (request_type, struct_array, struct_len, payload_vec) =
-                Self::get_next_request(&mut input).await?;
+            let (request_type, struct_array, struct_len, payload_vec) = select! {
+                Some(e) = error_rx.recv() => {
+                    // an async (spawned) task produced an error
+                    return Err(e);
+                },
+                /*
+                 * While get_next_request isn't cancellation safe, this is OK because any time it is
+                 * cancelled we're going to terminate the connection, and won't resume the
+                 * get_next_request call.
+                 */
+                ret = Self::get_next_request(&mut input) => ret
+            }?;
             let struct_slice = &struct_array[..struct_len];
 
             if request_type == MessageType::NvList {
