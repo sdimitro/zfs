@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
 
+use anyhow::Context;
 use derivative::Derivative;
 use futures::future::join;
 use futures::StreamExt;
@@ -290,8 +291,12 @@ impl<T: BlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             .block_access
             .read_raw(chunk_extent, DiskIoType::ReadIndexForLookup)
             .await;
-        let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) =
-            self.block_access.chunk_from_raw(&chunk_bytes).unwrap();
+        let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) = self
+            .block_access
+            .chunk_from_raw(&chunk_bytes)
+            .with_context(|| format!("reading {chunk_id:?} at {chunk_extent:?} to lookup {key:?}"))
+            .unwrap();
+
         assert_eq!(chunk.id, chunk_id);
 
         // Search within this chunk.

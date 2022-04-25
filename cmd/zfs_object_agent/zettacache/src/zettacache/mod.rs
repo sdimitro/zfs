@@ -1509,15 +1509,15 @@ impl ZettaCache {
         Fut: Future<Output = R> + Send,
     {
         let key = locked_key.key();
-        // Hold the index lock over the whole operation
-        // so that the index can't change after we get the value from it.
-        // Lock ordering requires that we lock the index before locking the state.
+        // Hold the index lock over the whole operation so that the index can't change after we
+        // get the value from it.  Lock ordering requires that we lock the index before locking
+        // the state.
         let old_index_guard = self.old_index.read().await;
         let new_index_guard = self.new_index.read().await;
 
         let fut_or_f = {
-            // We don't want to hold the state lock while reading from disk so we
-            // use lock_non_send() to ensure that we can't hold it across .await.
+            // We don't want to hold the state lock while reading from disk so we use
+            // lock_non_send() to ensure that we can't hold it across .await.
             let mut state = measure!().fut(lock_non_send(&self.state)).await;
 
             let got_value = |state: &mut ZettaCacheState, f: F, counter, value| {
@@ -1565,9 +1565,8 @@ impl ZettaCache {
 
         let f = match fut_or_f {
             Either::Left(fut) => {
-                // Got the index entry from pending state or index cache and
-                // already called f().  Now that we've dropped the state lock,
-                // run the future that it returned.
+                // Got the index entry from pending state or index cache and already called f().
+                // Now that we've dropped the state lock, run the future that it returned.
                 return measure!().fut(fut).await;
             }
             Either::Right(f) => f,
@@ -1597,8 +1596,8 @@ impl ZettaCache {
         }
         let fut = match entry_opt {
             Some(entry) => {
-                // Again, we don't want to hold the state lock while reading from disk so
-                // we use lock_non_send() to ensure that we can't hold it across .await.
+                // Again, we don't want to hold the state lock while reading from disk so we use
+                // lock_non_send() to ensure that we can't hold it across .await.
                 let mut state = measure!().fut(lock_non_send(&self.state)).await;
 
                 // The LockedKey prevents an entry for this key from being inserted while we
@@ -1694,9 +1693,8 @@ impl ZettaCache {
         bytes_fn: F,
         source: InsertSource,
     ) {
-        // This permit will be dropped when the write to disk completes.  It
-        // serves to limit the number of insert()'s that we can buffer before
-        // dropping (ignoring) insertion requests.
+        // This permit will be dropped when the write to disk completes.  It serves to limit the
+        // number of insert()'s that we can buffer before dropping (ignoring) insertion requests.
         let insert_permit = match measure!()
             .fut(self.reserve_buffer_space(bytes_len, source))
             .await
@@ -1714,11 +1712,10 @@ impl ZettaCache {
         let cache = self.clone();
         measure!("ZettaCache::insert()").spawn(async move {
             cache.insert_impl(locked_key, bytes, source).await;
-            // We want to hold onto the insert_permit until the write completes
-            // because it represents the memory that's required to buffer this
-            // insertion, which isn't released until the io completes.
-            // Similarly, the write_permit (roughly) represents the disks'
-            // capacity to perform i/o.
+            // We want to hold onto the insert_permit until the write completes because it
+            // represents the memory that's required to buffer this insertion, which isn't
+            // released until the io completes.  Similarly, the write_permit (roughly) represents
+            // the disks' capacity to perform i/o.
             drop(insert_permit);
         });
     }
@@ -1782,9 +1779,9 @@ impl ZettaCache {
         }
         measure!("ZettaCache::insert_all()").spawn(async move {
             futures.count().await;
-            // We want to hold onto the insert_permit until the write completes
-            // because it represents the memory that's required to buffer this
-            // insertion, which isn't released until the io completes.
+            // We want to hold onto the insert_permit until the write completes because it
+            // represents the memory that's required to buffer this insertion, which isn't
+            // released until the io completes.
             drop(insert_permit);
         });
     }
@@ -1941,10 +1938,9 @@ impl ZettaCacheState {
             btree_map::Entry::Vacant(ve) => {
                 // Only in Index, not pending_changes.
                 if pending_len < self.pending_changes_cap {
-                    // Perserve the original atime (from the Index) in case we "replace" this block
-                    // and need to reset the histogram for the original block
-                    // (i.e. when we find the old block during the merge, we can
-                    // decrement the atime histogram)
+                    // Perserve the original atime (from the Index) in case we "replace" this
+                    // block and need to reset the histogram for the original block (i.e. when we
+                    // find the old block during the merge, we can decrement the atime histogram)
                     super_trace!(
                         "adding PendingChanges::UpdateAtime({:?}) for {:?}",
                         new_value,
@@ -1978,9 +1974,9 @@ impl ZettaCacheState {
         self.peek(locked_key, valid_value)
     }
 
-    /// Insert this block to the cache, if space and performance parameters
-    /// allow.  It may be a recent cache miss, or a recently-written block.
-    /// Returns a Future to be executed after the state lock has been dropped.
+    /// Insert this block to the cache, if space and performance parameters allow.  It may be a
+    /// recent cache miss, or a recently-written block.  Returns a Future to be executed after
+    /// the state lock has been dropped.
     fn insert(
         &mut self,
         locked_key: LockedKey,
@@ -2146,8 +2142,7 @@ impl ZettaCacheState {
         }
         self.primary.checkpoint_id = self.primary.checkpoint_id.next();
         self.primary.feature_flags = SUPPORTED_FEATURES.keys().cloned().collect();
-        // We need to write all the disks' superblocks in case new disks have
-        // been added.
+        // We need to write all the disks' superblocks in case new disks have been added.
         self.primary
             .write_all(self.primary_disk, self.guid, &self.block_access)
             .await;

@@ -674,21 +674,31 @@ impl BlockAccess {
 
     /// returns deserialized struct and amount of the buf that was consumed
     pub fn chunk_from_raw<T: DeserializeOwned>(&self, buf: &[u8]) -> Result<(T, usize)> {
-        // size includes the terminating NUL byte
-        let header_size = buf.iter().position(|&c| c == b'\0').unwrap() + 1;
-        let header: BlockHeader = serde_json::from_slice(&buf[..header_size - 1])?;
-
-        if header.payload_size > buf.len() - header_size {
-            return Err(anyhow!(
-                "invalid length {}: expected at most {} bytes",
-                header.payload_size,
-                buf.len() - header_size
-            ));
+        /// Like slice::splitn(), with n==2.  Returns None if the predicate never matches.
+        fn split2<T, F: FnMut(&T) -> bool>(slice: &[T], pred: F) -> Option<(&[T], &[T])> {
+            let mut split = slice.splitn(2, pred);
+            let slice1 = split.next()?;
+            let slice2 = split.next()?;
+            assert!(split.next().is_none());
+            Some((slice1, slice2))
         }
 
-        let data = &buf[header_size..header.payload_size + header_size];
-        assert_eq!(data.len(), header.payload_size);
-        let actual_checksum = seahash::hash(data);
+        // Note, the NUL byte is not included in either slice
+        let (header_slice, post_header_slice) = split2(buf, |&c| c == b'\0')
+            .ok_or_else(|| anyhow!("nul byte not found in {}-byte buf", buf.len()))?;
+        let header: BlockHeader = serde_json::from_slice(header_slice)
+            .with_context(|| format!("{}-byte BlockHeader", header_slice.len()))?;
+
+        if header.payload_size > post_header_slice.len() {
+            return Err(anyhow!(
+                "BlockHeader::payload_size = {} but buffer only has {} bytes remaining",
+                header.payload_size,
+                post_header_slice.len(),
+            ));
+        }
+        let (payload_slice, remainder_slice) = post_header_slice.split_at(header.payload_size);
+
+        let actual_checksum = seahash::hash(payload_slice);
         if header.checksum != actual_checksum {
             return Err(anyhow!(
                 "incorrect checksum of {} bytes: expected {:x}, got {:x}",
@@ -700,12 +710,12 @@ impl BlockAccess {
 
         let mut serde_vec = Vec::new();
         let serde_slice = match header.compression {
-            CompressType::None => data,
+            CompressType::None => payload_slice,
             CompressType::Lz4 => {
-                let mut decoder = lz4::Decoder::new(data).unwrap();
-                decoder.read_to_end(&mut serde_vec).unwrap();
+                let mut decoder = lz4::Decoder::new(payload_slice)?;
+                decoder.read_to_end(&mut serde_vec)?;
                 let (_, result) = decoder.finish();
-                result.unwrap();
+                result?;
                 &serde_vec
             }
         };
@@ -717,7 +727,7 @@ impl BlockAccess {
         };
         Ok((
             struct_obj,
-            self.round_up_to_sector(header_size + data.len()),
+            self.round_up_to_sector(buf.len() - remainder_slice.len()),
         ))
     }
 

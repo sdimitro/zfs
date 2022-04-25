@@ -195,15 +195,16 @@ impl DataObject {
 
     /// Returns (phys, offset_of_data)
     fn deserialize_header(bytes: &[u8]) -> Result<(DataObjectPhys<'_>, usize)> {
-        let header_len = usize::from64(u64::from_le_bytes(bytes[0..8].try_into().unwrap()));
-        if bytes.len() < 8 + header_len {
+        let (header_len_slice, remainder_slice) = bytes.split_at(8);
+        let header_len = usize::from64(u64::from_le_bytes(header_len_slice.try_into().unwrap()));
+        if remainder_slice.len() < header_len {
             return Err(anyhow!(
                 "header len {} greater than retrieved bytes {}",
                 8 + header_len,
                 bytes.len()
             ));
         }
-        let header_slice = &bytes[8..8 + header_len];
+        let (header_slice, _data_slice) = remainder_slice.split_at(header_len);
         Ok((bincode::deserialize(header_slice)?, 8 + header_len))
     }
 
@@ -253,7 +254,7 @@ impl DataObject {
         assert_lt!(block, phys.header.next_block);
         let index = arrays
             .binary_search(block)
-            .map_err(|_| anyhow!("expected {:?} not found in {:?}", block, phys.header.object))?;
+            .map_err(|_| anyhow!("expected {block:?} not found in {:?}", phys.header.object))?;
         let offset = arrays.offset(index);
         let next_offset = if index < arrays.len() - 1 {
             arrays.offset(index + 1)
@@ -280,7 +281,7 @@ impl DataObject {
                 .blocks
                 .get(&block)
                 .cloned()
-                .ok_or_else(|| anyhow!("expected {:?} not found in {:?}", block, object));
+                .ok_or_else(|| anyhow!("expected {block:?} not found in {object:?}"));
         }
         let header_bytes = object_access
             .get_object_range(
@@ -290,7 +291,7 @@ impl DataObject {
             )
             .await?;
         let (phys, data_offset) = Self::deserialize_header(&header_bytes)
-            .with_context(|| format!("{}: get {:?} for {:?}", key, object, block))?;
+            .with_context(|| format!("{key}: get {object:?} for {block:?}"))?;
         assert_eq!(phys.header.guid, guid);
         assert_eq!(phys.header.object, object);
         let (offset, next_offset) = Self::locate_block(phys, block)?;
