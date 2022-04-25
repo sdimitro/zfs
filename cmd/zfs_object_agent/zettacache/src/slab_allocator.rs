@@ -293,12 +293,15 @@ impl SlabAllocator {
         target_free_slabs.saturating_sub(current_free_slabs)
     }
 
-    /// This should be called after the checkpoint has been persisted to disk, at which point
-    /// it's safe to re-allocate freed slabs.
-    pub fn checkpoint_done(&self) {
-        let mut inner = self.inner.lock().unwrap();
-        let inner_ref = &mut *inner; // avoid 2 exclusive borrows from the MutexGuard
-        inner_ref.allocatable.append(&mut inner_ref.freeing);
+    /// Release the space held by freed slabs, allowing them to be re-allocated.  This is safe to
+    /// call after the checkpoint has been persisted to disk.
+    pub fn release_frees(&self) {
+        let mut guard = self.inner.lock().unwrap();
+        let inner = &mut *guard;
+        // By using the `&mut Inner` directly, the borrow checker can understand the
+        // `inner.allocatable` and `inner.freeing` below as "split borrows", allowing two
+        // exclusive references to different fields of the same struct.
+        inner.allocatable.append(&mut inner.freeing);
         inner.allocatable.shuffle(&mut thread_rng());
     }
 

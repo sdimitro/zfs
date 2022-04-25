@@ -20,6 +20,7 @@ pub mod message;
 mod mutex_ext;
 mod nicenum;
 mod range_tree;
+pub mod serde;
 pub mod tunable;
 pub mod unordered;
 mod vec_ext;

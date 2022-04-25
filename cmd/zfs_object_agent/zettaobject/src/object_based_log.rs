@@ -16,6 +16,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::task::JoinHandle;
 use util::measure;
+use util::serde::from_json_slice;
 use util::tunable;
 use zettacache::base_types::*;
 
@@ -102,7 +103,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
             )
             .await?;
         let begin = Instant::now();
-        let this: Self = serde_json::from_slice(&buf).with_context(|| {
+        let this: Self = from_json_slice(&buf).with_context(|| {
             format!(
                 "Failed to decode contents of {}",
                 Self::key(name, generation, chunk)

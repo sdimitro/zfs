@@ -18,6 +18,7 @@ use serde::Serialize;
 use tokio::sync::watch;
 use tokio::sync::watch::Receiver;
 use util::maybe_die_with;
+use util::serde::from_json_slice;
 use util::tunable;
 use uuid::Uuid;
 
@@ -53,7 +54,7 @@ impl HeartbeatPhys {
         let buf = object_access
             .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;
-        let this: Self = serde_json::from_slice(&buf)
+        let this: Self = from_json_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.id, id);

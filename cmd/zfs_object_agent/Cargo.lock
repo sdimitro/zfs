@@ -3023,6 +3023,7 @@ dependencies = [
  "rusoto_credential",
  "safer-ffi",
  "serde",
+ "serde_json",
  "serial_test",
  "signal-hook",
  "tokio",

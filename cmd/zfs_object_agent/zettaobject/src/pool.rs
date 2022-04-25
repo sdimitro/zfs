@@ -46,6 +46,7 @@ use tokio::time::sleep;
 use util::async_cache::GetMethod;
 use util::maybe_die_with;
 use util::measure;
+use util::serde::from_json_slice;
 use util::super_trace;
 use util::tunable;
 use util::tunable::Percent;
@@ -151,7 +152,7 @@ impl PoolOwnerPhys {
         let buf = object_access
             .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;
-        let this: Self = serde_json::from_slice(&buf)
+        let this: Self = from_json_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(id)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.id, id);
@@ -321,7 +322,7 @@ impl PoolPhys {
         let buf = object_access
             .get_object(Self::key(guid), ObjectAccessOpType::MetadataGet)
             .await?;
-        let this: Self = serde_json::from_slice(&buf)
+        let this: Self = from_json_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(guid)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.guid, guid);
@@ -382,7 +383,7 @@ impl UberblockPhys {
         let buf = object_access
             .get_object(Self::key(guid, txg), ObjectAccessOpType::MetadataGet)
             .await?;
-        let this: Self = serde_json::from_slice(&buf)
+        let this: Self = from_json_slice(&buf)
             .with_context(|| format!("Failed to decode contents of {}", Self::key(guid, txg)))?;
         debug!("got {:#?}", this);
         assert_eq!(this.guid, guid);

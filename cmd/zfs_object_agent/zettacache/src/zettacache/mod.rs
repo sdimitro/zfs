@@ -2152,7 +2152,7 @@ impl ZettaCacheState {
                 old_index_size + (self.pending_changes_cap * size_of::<IndexEntry>()) as u64,
             ),
         );
-        self.slab_allocator.checkpoint_done();
+        self.slab_allocator.release_frees();
 
         info!(
             "completed {:?} in {}ms; flushed {} operations ({}) to log",

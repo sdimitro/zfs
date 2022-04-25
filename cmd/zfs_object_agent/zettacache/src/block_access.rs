@@ -30,6 +30,7 @@ use tokio::sync::mpsc;
 use tokio::sync::oneshot;
 use util::iter_wrapping;
 use util::measure;
+use util::serde::from_json_slice;
 use util::tunable;
 use util::with_alloctag;
 use util::zettacache_stats::*;
@@ -686,7 +687,7 @@ impl BlockAccess {
         // Note, the NUL byte is not included in either slice
         let (header_slice, post_header_slice) = split2(buf, |&c| c == b'\0')
             .ok_or_else(|| anyhow!("nul byte not found in {}-byte buf", buf.len()))?;
-        let header: BlockHeader = serde_json::from_slice(header_slice)
+        let header: BlockHeader = from_json_slice(header_slice)
             .with_context(|| format!("{}-byte BlockHeader", header_slice.len()))?;
 
         if header.payload_size > post_header_slice.len() {
@@ -721,7 +722,7 @@ impl BlockAccess {
         };
 
         let struct_obj: T = match header.encoding {
-            EncodeType::Json => serde_json::from_slice(serde_slice)?,
+            EncodeType::Json => from_json_slice(serde_slice)?,
             EncodeType::Bincode => Self::bincode_options().deserialize(serde_slice)?,
             EncodeType::BincodeFixint => Self::bincode_fixint_options().deserialize(serde_slice)?,
         };
