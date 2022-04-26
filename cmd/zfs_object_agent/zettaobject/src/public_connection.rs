@@ -111,7 +111,7 @@ impl PublicConnectionState {
                 region: region.clone(),
             },
             credentials_profile.clone(),
-        );
+        )?;
 
         let mut buckets = vec![];
         let bucket_result = nvl.lookup_string("bucket");
@@ -134,7 +134,7 @@ impl PublicConnectionState {
                     profile: credentials_profile.clone(),
                 },
                 false,
-            );
+            )?;
             let guid_result = nvl.lookup_uint64("guid");
             if let Ok(guid) = guid_result {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {

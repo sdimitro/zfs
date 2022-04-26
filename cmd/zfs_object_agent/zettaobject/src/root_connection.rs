@@ -96,7 +96,7 @@ struct ObjectAccessRequest {
     credentials_profile: Option<String>,
 }
 impl ObjectAccessRequest {
-    fn object_access(&self) -> Arc<ObjectAccess> {
+    fn object_access(&self) -> Result<Arc<ObjectAccess>> {
         ObjectAccess::new(
             ObjectAccessProtocol::S3 {
                 endpoint: self.endpoint.clone(),
@@ -150,14 +150,8 @@ impl RootConnectionState {
 
             let request: CreatePoolRequest = nvpair::from_nvlist(&nvl)?;
             info!("got {:?}", request);
-
-            let result = match Pool::create(
-                &request.object_access.object_access(),
-                &request.name,
-                request.id.guid,
-            )
-            .await
-            {
+            let object_access = request.object_access.object_access()?;
+            let result = match Pool::create(&object_access, &request.name, request.id.guid).await {
                 Ok(_) => Ok(()),
                 Err(e) => Err(FailureMessage::new(e)),
             };
@@ -202,8 +196,9 @@ impl RootConnectionState {
                 Checkpoint,
             }
 
+            let object_access = request.object_access.object_access()?;
             let result = match Pool::open(
-                request.object_access.object_access(),
+                object_access,
                 request.id.guid,
                 request.txg,
                 self.cache.as_ref().cloned(),
@@ -580,11 +575,10 @@ impl RootConnectionState {
             }
             let request: ResumeDestroyPoolRequest = nvpair::from_nvlist(&nvl)?;
             debug!("got {:?}", request);
-
-            let result =
-                pool_destroy::resume_destroy(request.object_access.object_access(), request.guid)
-                    .await
-                    .map_err(FailureMessage::new);
+            let object_access = request.object_access.object_access()?;
+            let result = pool_destroy::resume_destroy(object_access, request.guid)
+                .await
+                .map_err(FailureMessage::new);
             return_result(TYPE_RESUME_DESTROY_POOL, (), result, true)
         }))
     }

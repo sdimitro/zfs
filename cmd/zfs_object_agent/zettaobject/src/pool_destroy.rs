@@ -222,7 +222,7 @@ impl PoolDestroyer {
                         destroying_pool.cache_phys.state == PoolDestroyState::InProgress
                     })
                     .for_each(|(guid, destroying_pool)| {
-                        let object_access = ObjectAccess::new(
+                        match ObjectAccess::new(
                             ObjectAccessProtocol::S3 {
                                 endpoint: destroying_pool.cache_phys.endpoint.clone(),
                                 region: destroying_pool.cache_phys.region.clone(),
@@ -232,8 +232,17 @@ impl PoolDestroyer {
                                 profile: destroying_pool.cache_phys.profile.clone(),
                             },
                             false,
-                        );
-                        start_destroy_task(object_access, *guid);
+                        ) {
+                            Ok(object_access) => {
+                                start_destroy_task(object_access, *guid);
+                            }
+                            Err(e) => {
+                                // Error likely caused by invalid credentials. Since
+                                // there may be other pools that can be accesssed,
+                                // log an error and keep going.
+                                error!("Failed to connect to pool: {} {}", &guid, e);
+                            }
+                        };
                     });
 
                 Ok(())

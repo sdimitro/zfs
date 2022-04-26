@@ -36,20 +36,26 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
         .await
     {
         Err(OAError::RequestError(RequestError::Unknown(response))) => {
-            match serde_xml_rs::from_str::<Error>(std::str::from_utf8(response.body()).unwrap()) {
-                Ok(error) => Err(format!(
-                    "Connectivity test failed: {}: {}",
-                    error.code, error.message
-                )),
-                Err(_) => {
-                    // If the error string can not be deserialized as xml, return the enterity of
-                    // the error back.
-                    Err(format!(
-                        "Connectivity test failed: {}",
-                        std::str::from_utf8(response.body()).unwrap()
-                    ))
+            /*
+             * The Byte-Order-Mark (or BOM), is a special marker added at the very beginning of
+             * an Unicode file encoded in UTF-8, UTF-16 or UTF-32. It is used to indicate whether
+             * the file uses the big-endian or little-endian byte order.
+             * Azure-Blob returns xml with a BOM prefix. Since serde_xml_rs does not deal with
+             * it, it needs to be trimmed first.
+             */
+            let body = std::str::from_utf8(response.body()).unwrap();
+            if let Some(index) = body.find("<?xml") {
+                if let Ok(error) = serde_xml_rs::from_str::<Error>(&body[index..]) {
+                    return Err(format!(
+                        "Connectivity test failed: {}: {}",
+                        error.code, error.message
+                    ));
                 }
             }
+
+            // If the error string can not be deserialized as xml, return the entirety of
+            // the error back.
+            Err(format!("Connectivity test failed: {}", body))
         }
         Err(OAError::TimeoutError(_)) => {
             Err("Connectivity test failed with a timeout.".to_string())
@@ -71,12 +77,13 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
 }
 
 pub fn test_connectivity(
-    endpoint: String,
-    region: String,
+    endpoint: Option<String>,
+    region: Option<String>,
     bucket: String,
-    aws_access_key_id: Option<String>,
-    aws_secret_access_key: Option<String>,
-    aws_instance_profile: bool,
+    protocol: String,
+    access_key_id: Option<String>,
+    secret_access_key: Option<String>,
+    instance_profile: bool,
 ) {
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -84,23 +91,32 @@ pub fn test_connectivity(
         .build()
         .unwrap()
         .block_on(async move {
-            let credentials = if aws_instance_profile {
+            let credentials = if instance_profile {
                 ObjectAccessCredentials::ManagedCredentials
             } else {
                 ObjectAccessCredentials::Key {
-                    access_key_id: aws_access_key_id.unwrap(),
-                    secret_access_key: aws_secret_access_key.unwrap(),
+                    access_key_id: access_key_id.unwrap(),
+                    secret_access_key: secret_access_key.unwrap(),
                 }
             };
-            let object_access = ObjectAccess::new(
+            let oa_protocol = if protocol.eq("s3") {
                 ObjectAccessProtocol::S3 {
-                    endpoint: endpoint.to_string(),
-                    region: region.to_string(),
-                },
-                bucket.to_string(),
-                credentials,
-                false,
-            );
+                    endpoint: endpoint.unwrap(),
+                    region: region.unwrap(),
+                }
+            } else if protocol.eq("blob") {
+                ObjectAccessProtocol::Blob {}
+            } else {
+                panic!("Invalid protocol {}", protocol);
+            };
+            let object_access =
+                match ObjectAccess::new(oa_protocol, bucket.to_string(), credentials, false) {
+                    Ok(oa) => oa,
+                    Err(err) => {
+                        writeln_stderr!("Connectivity test failed: {}", err);
+                        std::process::exit(1);
+                    }
+                };
 
             std::process::exit(match do_test_connectivity(&object_access).await {
                 Err(err) => {

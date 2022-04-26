@@ -9,6 +9,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
 use async_stream::stream;
@@ -109,24 +110,16 @@ where
 {
     fn from(e: azure_core::HttpError) -> Self {
         match e {
-            HttpError::StatusCode { status, body: _ } => {
+            HttpError::StatusCode { status, body } => {
                 if status == StatusCode::FORBIDDEN {
                     return Self::InvalidCredentials;
                 }
-                /*
-                 * XXX we need logic here to handle contentful errors that aren't
-                 * specific to E, like credential and validation issues.
-                 */
-                match E::maybe_from(e) {
-                    Ok(err) => Self::Service(err),
-                    Err(HttpError::StatusCode { status, body }) => Self::Unknown(
-                        Response::builder()
-                            .status(status)
-                            .body(Bytes::from(body))
-                            .unwrap(),
-                    ),
-                    Err(_) => panic!("Type changed during maybe_from"),
-                }
+                Self::Unknown(
+                    Response::builder()
+                        .status(status)
+                        .body(Bytes::from(body))
+                        .unwrap(),
+                )
             }
             HttpError::Utf8(err) => Self::InternalError(err.to_string()),
             /*
@@ -214,26 +207,41 @@ pub struct BlobObjectAccess {
 }
 
 impl BlobObjectAccess {
-    pub fn new(bucket: &str, credentials: ObjectAccessCredentials) -> Self {
-        match credentials {
+    pub fn new(bucket: &str, credentials: ObjectAccessCredentials) -> anyhow::Result<Self> {
+        let (storage_account_client, profile) = match credentials {
             ObjectAccessCredentials::Profile { profile } => {
-                let storage_client = get_azure_storage_client(profile.clone()).unwrap();
-                let container_client = storage_client.as_container_client(bucket);
-
-                Self {
-                    container_client,
-                    access_stats: Default::default(),
-                    outstanding_ops: Default::default(),
-                    bucket: bucket.to_string(),
-                    credentials_profile: profile,
-                }
+                let storage_client = match get_azure_storage_client(profile.clone()) {
+                    Ok(val) => val,
+                    Err(err) => {
+                        return Err(anyhow!(err.to_string()));
+                    }
+                };
+                (storage_client, profile)
             }
             ObjectAccessCredentials::Key {
-                access_key_id: _,
-                secret_access_key: _,
-            } => todo!(),
+                access_key_id,
+                secret_access_key,
+            } => {
+                let storage_client =
+                    match get_azure_storage_client_from_key(&access_key_id, &secret_access_key) {
+                        Ok(val) => val,
+                        Err(err) => {
+                            return Err(anyhow!(err));
+                        }
+                    };
+                (storage_client, None)
+            }
             ObjectAccessCredentials::ManagedCredentials => todo!(),
-        }
+        };
+        let container_client = storage_account_client.as_container_client(bucket);
+
+        Ok(Self {
+            container_client,
+            access_stats: Default::default(),
+            outstanding_ops: Default::default(),
+            bucket: bucket.to_string(),
+            credentials_profile: profile,
+        })
     }
 
     pub fn bucket(&self) -> String {
@@ -443,7 +451,30 @@ impl ObjectAccessTrait for BlobObjectAccess {
     }
 }
 
-fn get_azure_storage_client_from_env() -> Result<Arc<StorageClient>, Box<dyn Error>> {
+// Creation of a BlobObjectAccess object with invalid credentials can cause a crash as the azure sdk
+// calls unwrap() while decoding the credentials. To avoid this, we validate the credentials
+// before passing it to the azure sdk.
+fn validate_azure_key(azure_key: &str) -> anyhow::Result<()> {
+    match base64::decode(&azure_key) {
+        Ok(_) => Ok(()),
+        Err(err) => Err(anyhow!(format!("Invalid credentials: {:?}", err))),
+    }
+}
+
+fn get_azure_storage_client_from_key(
+    azure_account: &str,
+    azure_key: &str,
+) -> anyhow::Result<Arc<StorageClient>> {
+    let http_client = azure_core::new_http_client();
+    validate_azure_key(azure_key)?;
+
+    Ok(
+        StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
+            .as_storage_client(),
+    )
+}
+
+fn get_azure_storage_client_from_env() -> anyhow::Result<Arc<StorageClient>> {
     let http_client = azure_core::new_http_client();
     let storage_client = match env::var("AZURE_CONNECTION_STRING") {
         Ok(connection_string) => {
@@ -454,6 +485,7 @@ fn get_azure_storage_client_from_env() -> Result<Arc<StorageClient>, Box<dyn Err
             let azure_account = env::var("AZURE_ACCOUNT")?;
             let azure_key = env::var("AZURE_KEY")?;
 
+            validate_azure_key(&azure_key)?;
             StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
                 .as_storage_client()
         }
@@ -464,10 +496,10 @@ fn get_azure_storage_client_from_env() -> Result<Arc<StorageClient>, Box<dyn Err
 
 fn get_azure_storage_client_from_file(
     credentials_profile: Option<String>,
-) -> Result<Arc<StorageClient>, Box<dyn Error>> {
+) -> anyhow::Result<Arc<StorageClient>> {
     let home_dir = dirs_next::home_dir();
     if home_dir.is_none() {
-        return Err("Unable to determine home directory.".to_string().into());
+        return Err(anyhow!("Unable to determine home directory."));
     }
     let mut file_path = home_dir.unwrap();
     file_path.push(".azure");
@@ -479,45 +511,46 @@ fn get_azure_storage_client_from_file(
     match fs::metadata(credentials_file) {
         Ok(file) => {
             if !file.is_file() {
-                return Err(format!(
+                return Err(anyhow!(format!(
                     "credentials file {} is not a regular file",
                     credentials_file
-                )
-                .into());
+                )));
             }
         }
         Err(err) => {
-            return Err(
-                format!("credentials file {} not found. {:?}", credentials_file, err).into(),
-            )
+            return Err(anyhow!(format!(
+                "credentials file {} not found. {:?}",
+                credentials_file, err
+            )));
         }
     }
 
     let ini_file = ini::Ini::load_from_file(credentials_file)?;
-    let azure_account = ini_file.get_from(credentials_profile.clone(), "AZURE_ACCOUNT");
-    let azure_key = ini_file.get_from(credentials_profile.clone(), "AZURE_KEY");
+    let azure_account = match ini_file.get_from(credentials_profile.clone(), "AZURE_ACCOUNT") {
+        None => {
+            return Err(anyhow!(format!(
+                "AZURE_ACCOUNT not found in {:?} profile in config file {}",
+                credentials_profile, credentials_file
+            )));
+        }
+        Some(azure_account) => azure_account,
+    };
+    let azure_key = match ini_file.get_from(credentials_profile.clone(), "AZURE_KEY") {
+        None => {
+            return Err(anyhow!(format!(
+                "AZURE_KEY not found in {:?} profile in config file {}",
+                credentials_profile, credentials_file
+            )));
+        }
+        Some(azure_key) => azure_key,
+    };
 
-    if azure_account.is_none() {
-        return Err(format!(
-            "AZURE_ACCOUNT not found in {:?} profile in config file {}",
-            credentials_profile, credentials_file
-        )
-        .into());
-    }
-    if azure_key.is_none() {
-        return Err(format!(
-            "AZURE_KEY not found in {:?} profile in config file {}",
-            credentials_profile, credentials_file
-        )
-        .into());
-    }
+    validate_azure_key(azure_key)?;
 
-    Ok(StorageAccountClient::new_access_key(
-        http_client,
-        azure_account.unwrap(),
-        azure_key.unwrap(),
+    Ok(
+        StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
+            .as_storage_client(),
     )
-    .as_storage_client())
 }
 
 fn get_azure_storage_client(

@@ -468,12 +468,13 @@ fn get_object_access(
         credentials,
         false,
     )
+    .unwrap()
 }
 
 async fn do_blob(bucket: String, profile: String) -> Result<(), Box<dyn Error>> {
     let credentials_profile = Some(profile);
     let key = "blob2.txt".to_string();
-    let bucket_access = BucketAccess::new(ObjectAccessProtocol::Blob, credentials_profile.clone());
+    let bucket_access = BucketAccess::new(ObjectAccessProtocol::Blob, credentials_profile.clone())?;
     let buckets = bucket_access.list_buckets().await;
     println!("List containers {:?}", buckets);
     if !buckets.contains(&bucket) {
@@ -487,7 +488,7 @@ async fn do_blob(bucket: String, profile: String) -> Result<(), Box<dyn Error>> 
             profile: credentials_profile.clone(),
         },
         false,
-    );
+    )?;
 
     let content = "I want to go to azure".as_bytes().to_vec();
     object_access

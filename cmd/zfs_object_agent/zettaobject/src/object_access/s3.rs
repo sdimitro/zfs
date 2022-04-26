@@ -117,10 +117,14 @@ pub struct S3BucketAccess {
 }
 
 impl S3BucketAccess {
-    pub fn new(endpoint: &str, region: &str, credentials_profile: Option<String>) -> Self {
-        S3BucketAccess {
+    pub fn new(
+        endpoint: &str,
+        region: &str,
+        credentials_profile: Option<String>,
+    ) -> anyhow::Result<Self> {
+        Ok(S3BucketAccess {
             client: S3ObjectAccess::get_client(endpoint, region, credentials_profile),
-        }
+        })
     }
 }
 

@@ -133,14 +133,15 @@ impl ObjectAccess {
         bucket: String,
         credentials: ObjectAccessCredentials,
         readonly: bool,
-    ) -> Arc<Self> {
+    ) -> anyhow::Result<Arc<Self>> {
         match protocol {
-            ObjectAccessProtocol::S3 { endpoint, region } => ObjectAccess::from_s3(
+            ObjectAccessProtocol::S3 { endpoint, region } => Ok(ObjectAccess::from_s3(
                 S3ObjectAccess::new(&endpoint, &region, &bucket, credentials),
                 readonly,
-            ),
+            )),
             ObjectAccessProtocol::Blob => {
-                ObjectAccess::from_azure(BlobObjectAccess::new(&bucket, credentials), readonly)
+                let oa = BlobObjectAccess::new(&bucket, credentials)?;
+                Ok(ObjectAccess::from_azure(oa, readonly))
             }
         }
     }
@@ -345,19 +346,22 @@ pub struct BucketAccess {
 }
 
 impl BucketAccess {
-    pub fn new(protocol: ObjectAccessProtocol, credentials_profile: Option<String>) -> Arc<Self> {
+    pub fn new(
+        protocol: ObjectAccessProtocol,
+        credentials_profile: Option<String>,
+    ) -> anyhow::Result<Arc<Self>> {
         match protocol {
             ObjectAccessProtocol::S3 { endpoint, region } => {
-                let ba = S3BucketAccess::new(&endpoint, &region, credentials_profile);
-                Arc::new(BucketAccess {
+                let ba = S3BucketAccess::new(&endpoint, &region, credentials_profile)?;
+                Ok(Arc::new(BucketAccess {
                     inner: BucketAccessEnum::S3(ba),
-                })
+                }))
             }
             ObjectAccessProtocol::Blob => {
                 let ba = BlobBucketAccess::new(credentials_profile);
-                Arc::new(BucketAccess {
+                Ok(Arc::new(BucketAccess {
                     inner: BucketAccessEnum::Azure(ba),
-                })
+                }))
             }
         }
     }

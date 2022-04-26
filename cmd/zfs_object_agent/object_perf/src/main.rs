@@ -116,7 +116,8 @@ async fn main() {
             profile: Some(cli.profile.to_owned()),
         },
         false,
-    );
+    )
+    .unwrap();
 
     let key_prefix = format!("zfs_object_perf/{}/", Uuid::new_v4());
     println!("Using prefix: '{}'", key_prefix);

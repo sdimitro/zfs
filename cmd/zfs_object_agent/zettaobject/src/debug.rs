@@ -45,6 +45,7 @@ fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
         },
         true,
     )
+    .unwrap()
 }
 
 impl DebugHandle {
