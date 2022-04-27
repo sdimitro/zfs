@@ -83,6 +83,12 @@ pub struct IndexEntry {
     pub value: IndexValue,
 }
 impl BlockBasedLogEntry for IndexEntry {}
+impl SummarizedBlockBasedLogEntry for IndexEntry {
+    type Key = IndexKey;
+    fn key(&self) -> Self::Key {
+        self.key
+    }
+}
 impl From<&IndexEntryPhys> for IndexEntry {
     fn from(phys: &IndexEntryPhys) -> Self {
         IndexEntry {
@@ -390,7 +396,7 @@ impl IndexRun {
         if let Some(trim_key) = self.trim_key {
             assert_gt!(key, trim_key);
         }
-        self.log.lookup_by_key(&key, |entry| entry.key).await
+        self.log.lookup_by_key(&key).await
     }
 }
 
@@ -429,7 +435,7 @@ impl ReadOnlyIndexRun {
         if let Some(trim_key) = self.trim_key {
             assert_gt!(key, trim_key);
         }
-        self.log.lookup_by_key(&key, |entry| entry.key).await
+        self.log.lookup_by_key(&key).await
     }
 
     /// Update this readonly view to reflect newly-appended chunks.
