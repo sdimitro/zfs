@@ -1670,7 +1670,7 @@ impl BlockAllocator {
                 nice_p2size(
                     (self.slab_allocator.capacity()
                         - self.slab_allocator.free_slabs() * self.slab_allocator.slab_size())
-                        / self.segments_at_last_merge
+                        / (self.segments_at_last_merge + 1) // +1 to avoid divide-by-zero
                 ),
                 begin.elapsed().as_millis(),
             )
