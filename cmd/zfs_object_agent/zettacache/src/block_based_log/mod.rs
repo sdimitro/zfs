@@ -136,7 +136,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
     fn next_extent_to_write(&self, slab_access: &SlabAccess) -> Option<Extent> {
         self.allocated_extents(slab_access)
-            .last()
+            .next_back()
             .map(|(offset, extent)| extent.trim_start(self.next_chunk_offset - offset))
             .filter(|extent| extent.size > 0)
     }
