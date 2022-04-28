@@ -1,6 +1,5 @@
 use std::fmt::Debug;
 use std::marker::PhantomData;
-use std::mem::size_of;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Instant;
@@ -12,6 +11,7 @@ use futures::StreamExt;
 use futures_core::Stream;
 use log::*;
 use lru::LruCache;
+use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
@@ -36,15 +36,14 @@ use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
 
 tunable! {
-    // We primarily use the chunk cache to ensure that when looking up all the
-    // entries in an object, we need at most one read from the index.  So we
-    // only need as many chunks in the cache as the number of objects that we
-    // might be processing concurrently.
+    // We primarily use the chunk cache to ensure that when looking up all the entries in an
+    // object, we need at most one read from the index.  So we only need as many chunks in the
+    // cache as the number of objects that we might be processing concurrently.
     static ref CHUNK_CACHE_ENTRIES: usize = 128;
 }
 
 pub trait SummarizedBlockBasedLogEntry: BlockBasedLogEntry {
-    type Key: Debug + Copy + Clone + Ord;
+    type Key: Serialize + DeserializeOwned + Debug + Copy + Clone + Ord;
     fn key(&self) -> Self::Key;
 }
 
@@ -54,6 +53,8 @@ pub trait SummarizedBlockBasedLogEntry: BlockBasedLogEntry {
 pub struct SummarizedBlockBasedLogPhys<T: SummarizedBlockBasedLogEntry> {
     this: BlockBasedLogPhys<T>,
     chunk_summary: BlockBasedLogPhys<BlockBasedLogChunkSummaryEntry<T>>,
+    #[serde(default)]
+    trim_key: Option<T::Key>, // keys at and before this are logically removed
 }
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -87,6 +88,7 @@ pub struct SummarizedBlockBasedLog<T: SummarizedBlockBasedLogEntry> {
     readonly: ReadOnlySummarizedBlockBasedLog<T>,
     this: BlockBasedLog<T>,
     chunk_summary: BlockBasedLog<BlockBasedLogChunkSummaryEntry<T>>,
+    trim_key: Option<T::Key>,
 }
 
 pub struct BlockBasedLogValueGuard<'a, T: SummarizedBlockBasedLogEntry> {
@@ -106,6 +108,12 @@ impl<'a, T: SummarizedBlockBasedLogEntry> std::ops::Deref for BlockBasedLogValue
 pub struct SummarizedBlockBasedLogFlushDelta<T: SummarizedBlockBasedLogEntry> {
     first_new_chunk: ChunkId,
     new_chunks: Vec<SummaryEntry<T>>,
+}
+
+impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLogFlushDelta<T> {
+    pub fn is_empty(&self) -> bool {
+        self.new_chunks.is_empty()
+    }
 }
 
 impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLogPhys<T> {
@@ -167,10 +175,9 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             .collect::<Vec<_>>()
             .await;
         info!(
-            "loaded summary of {} chunks ({} on disk, {} in RAM) in {}ms",
+            "loaded summary of {} chunks ({}) in {}ms",
             chunks.len(),
             nice_p2size(phys.chunk_summary.bytes()),
-            nice_p2size((chunks.len() * size_of::<SummaryEntry<T>>()) as u64),
             begin.elapsed().as_millis()
         );
 
@@ -184,10 +191,8 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         }
     }
 
-    pub fn get_phys(&self) -> SummarizedBlockBasedLogPhys<T> {
-        self.phys.clone()
-    }
-
+    /// Returns the number of entries in the log, including those that have been logically
+    /// removed by trim().
     pub fn len(&self) -> u64 {
         self.phys.this.num_entries
     }
@@ -236,9 +241,13 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
 
     /// Return the ChunkId where this key will be found, if present.
     fn lookup_chunk_by_key(&self, key: &T::Key) -> Option<ChunkId> {
-        assert_eq!(ChunkId(self.chunks.len() as u64), self.phys.this.next_chunk);
+        if let Some(trim_key) = self.phys.trim_key.as_ref() {
+            if key <= trim_key {
+                return None;
+            }
+        }
 
-        // Find the chunk_id that this key belongs in.
+        assert_eq!(ChunkId(self.chunks.len() as u64), self.phys.this.next_chunk);
         match self.chunks.binary_search_by_key(key, |s| s.first_key) {
             Ok(index) => Some(ChunkId(index as u64)),
             // key is before the first chunk, therefore not present
@@ -247,9 +256,9 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         }
     }
 
-    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
-    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
-    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding to the key
+    /// argument if found, and chunk_cache_hit that tells us whether we found the value on the
+    /// chunk cache (true) or had to reach out to disk (false).
     async fn lookup_by_key_impl(&self, key: &T::Key) -> (Option<T>, bool) {
         let chunk_id = match self.lookup_chunk_by_key(key) {
             Some(chunk_id) => chunk_id,
@@ -322,16 +331,15 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         (result, false)
     }
 
-    /// Entries must have been added in sorted order, according to the provided
-    /// key-extraction function.  Similar to Vec::binary_search_by_key().  The
-    /// Guard returned helps the caller ensure that the Entry doesn't live
-    /// longer than the reference on the Log (however, since the Entry is Copy,
-    /// the caller still needs to be careful to not copy it, then drop the Log,
-    /// allowing the Log to be modified before using the copy of the Entry).
+    /// Entries must have been added in sorted order, according to the provided key-extraction
+    /// function.  Similar to Vec::binary_search_by_key().  The Guard returned helps the caller
+    /// ensure that the Entry doesn't live longer than the reference on the Log (however, since
+    /// the Entry is Copy, the caller still needs to be careful to not copy it, then drop the
+    /// Log, allowing the Log to be modified before using the copy of the Entry).
     ///
-    /// Returns (value, chunk_cache_hit), where the value is the value corresponding
-    /// to the key argument if found, and chunk_cache_hit that tells us whether we found
-    /// the value on the chunk cache (true) or had to reach out to disk (false).
+    /// Returns (value, chunk_cache_hit), where the value is the value corresponding to the key
+    /// argument if found, and chunk_cache_hit that tells us whether we found the value on the
+    /// chunk cache (true) or had to reach out to disk (false).
     pub async fn lookup_by_key(
         &self,
         key: &T::Key,
@@ -378,6 +386,7 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
                 slab_allocator.clone(),
                 phys.chunk_summary.clone(),
             ),
+            trim_key: phys.trim_key,
             readonly: ReadOnlySummarizedBlockBasedLog::open(
                 block_access.clone(),
                 slab_allocator,
@@ -413,6 +422,7 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
         let phys = SummarizedBlockBasedLogPhys {
             this,
             chunk_summary,
+            trim_key: self.trim_key,
         };
         let delta = SummarizedBlockBasedLogFlushDelta {
             new_chunks,
@@ -422,14 +432,6 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
         (phys, delta)
     }
 
-    /// Works only if there are no pending entries.
-    /// Use flush() to retrieve the phys when there are pending entries.
-    pub fn get_phys(&self) -> SummarizedBlockBasedLogPhys<T> {
-        assert!(self.this.pending_entries.is_empty());
-        assert!(self.chunk_summary.pending_entries.is_empty());
-        self.readonly.get_phys()
-    }
-
     pub fn append(&mut self, list: Vec<T>) {
         self.this.append(list);
     }
@@ -437,6 +439,24 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     pub fn clear(&mut self) {
         self.this.clear();
         self.chunk_summary.clear();
+    }
+
+    /// Free up space that is not needed for entries at and before `trim_key`.  We trim
+    /// entirely-trimmed chunks from the layer below, which will free entirely-trimmed slabs from
+    /// the SlabAllocator.
+    pub fn trim(&mut self, trim_key: T::Key) {
+        if let Some(old_trim_key) = self.trim_key {
+            assert_ge!(trim_key, old_trim_key);
+        }
+        debug!(
+            "advancing trim_key from {:?} to {trim_key:?}",
+            self.trim_key
+        );
+        self.trim_key = Some(trim_key);
+        if let Some(chunk_id) = self.readonly.lookup_chunk_by_key(&trim_key) {
+            let chunk_summary = self.readonly.chunks[usize::from64(chunk_id.0)];
+            self.this.trim(chunk_summary.offset);
+        }
     }
 
     // Below are helpers that just call through to the readonly struct

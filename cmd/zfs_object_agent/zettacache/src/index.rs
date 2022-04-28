@@ -269,6 +269,12 @@ pub struct IndexRun {
 #[derive(Debug)]
 pub struct IndexFlushDelta(SummarizedBlockBasedLogFlushDelta<IndexEntry>);
 
+impl IndexFlushDelta {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
 impl IndexRun {
     pub async fn open(
         block_access: Arc<BlockAccess>,
@@ -296,17 +302,6 @@ impl IndexRun {
             },
             IndexFlushDelta(new_chunks),
         )
-    }
-
-    /// Retrieve the index phys. This only works if there are no pending log entries.
-    /// Use flush() to retrieve the phys when there are pending entries.
-    pub fn get_phys(&self) -> IndexRunPhys {
-        IndexRunPhys {
-            trim_key: self.trim_key,
-            last_key: self.last_key,
-            atime_histogram_phys: self.atime_histogram_phys.clone(),
-            log: self.log.get_phys(),
-        }
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
@@ -359,6 +354,7 @@ impl IndexRun {
         );
         self.trim_key = Some(trim_key);
         self.atime_histogram_phys -= obsoleted;
+        self.log.trim(trim_key);
     }
 
     pub fn len(&self) -> u64 {

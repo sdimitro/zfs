@@ -29,17 +29,14 @@ use util::From64;
 use crate::base_types::Extent;
 
 tunable! {
-    // 32MBs is the biggest slab size that we can currently do without
-    // overflowing the u16 that holds the number of slots in a BitRange
-    // structure with the default config of a 512B bucket.
+    // 32MB is the biggest slab size that we can currently do without overflowing the u16 that
+    // holds the number of slots in a BitRange structure with the default config of a 512B
+    // bucket.
     pub static ref DEFAULT_SLAB_SIZE: ByteSize = ByteSize::mib(32);
 
-    // We need enough free slabs to write a new copy of the index.  Assuming a worst case of a 2K
-    // average block size, the "live" index should stay within about 1% of the total cache size.
-    // As long as the ghost entry "addition" is reasonable (say < 2x) then we should be able to
-    // stay within 3% space utilization for one index run.
-    // XXX we should free the old index as we merge, in which case this can be reduced a lot.
-    pub static ref RESERVED_SLABS_PCT: Percent = Percent::new(4.0);
+    // The old index is freed as we write the new index, so we only need enough free slabs to
+    // hold any increase in index size.
+    pub static ref RESERVED_SLABS_PCT: Percent = Percent::new(2.0);
 
     // We never allow these slabs to be allocated.  If we get down to this few free slabs, we'll
     // panic.  By doing this before we get to zero, we preserve the possibility of changing

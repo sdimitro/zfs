@@ -26,7 +26,8 @@ lazy_static! {
     pub static ref SUPPORTED_FEATURES: HashMap<FeatureName, FeatureType> = [
         SLAB_INFO_SPACEMAP_ENTRIES.clone(),
         SLAB_ALLOCATOR.clone(),
-        SLAB_SIZE_32MB.clone()
+        SLAB_SIZE_32MB.clone(),
+        TRIMMED_INDEX.clone(),
     ]
     .map(|feature: Feature| (feature.name, feature.info))
     .into_iter()
@@ -41,6 +42,10 @@ lazy_static! {
     };
     pub static ref SLAB_SIZE_32MB: Feature = Feature {
         name: FeatureName("com.delphix:slab_size_32mb".to_string()),
+        info: FeatureType::Upgradeable
+    };
+    pub static ref TRIMMED_INDEX: Feature = Feature {
+        name: FeatureName("com.delphix:trimmed_index".to_string()),
         info: FeatureType::Upgradeable
     };
 }
