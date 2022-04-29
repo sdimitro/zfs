@@ -256,6 +256,50 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         }
     }
 
+    /// returns f(chunk, cached)
+    async fn with_chunk<R, F: FnOnce(&BlockBasedLogChunk<T>, bool) -> R>(
+        &self,
+        chunk_id: ChunkId,
+        f: F,
+    ) -> R {
+        if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
+            super_trace!("found {chunk_id:?} in cache");
+            return f(chunk, true);
+        }
+
+        // Lock the chunk so that only one thread reads it
+        let _guard = self.chunk_reads.lock(chunk_id).await;
+
+        // Check again in case another thread already read it
+        if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
+            super_trace!("found {chunk_id:?} in cache after waiting for lock");
+            return f(chunk, true);
+        }
+
+        // Read chunk from disk
+        let chunk_extent = self.chunk_extent(chunk_id);
+        super_trace!("reading {chunk_id:?} at {chunk_extent:?}");
+        let chunk_bytes = self
+            .block_access
+            .read_raw(chunk_extent, DiskIoType::ReadIndexForLookup)
+            .await;
+        let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) = self
+            .block_access
+            .chunk_from_raw(&chunk_bytes)
+            .with_context(|| format!("reading {chunk_id:?} at {chunk_extent:?}"))
+            .unwrap();
+
+        assert_eq!(chunk.id, chunk_id);
+
+        let result = f(&chunk, false);
+
+        // Add to cache
+        super_trace!("inserting {:?} to cache", chunk_id);
+        self.chunk_cache.lock().unwrap().put(chunk_id, chunk);
+
+        result
+    }
+
     /// Returns (value, chunk_cache_hit), where the value is the value corresponding to the key
     /// argument if found, and chunk_cache_hit that tells us whether we found the value on the
     /// chunk cache (true) or had to reach out to disk (false).
@@ -265,70 +309,17 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
             None => return (None, false),
         };
 
-        if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
-            super_trace!("found {:?} in cache", chunk_id);
-            // found in cache
-            // Search within this chunk.
-            return (
+        self.with_chunk(chunk_id, |chunk, cached| {
+            (
                 chunk
                     .entries
                     .binary_search_by_key(key, |e| e.key())
                     .ok()
                     .map(|index| chunk.entries[index]),
-                true,
-            );
-        }
-
-        // Lock the chunk so that only one thread reads it
-        let _guard = self.chunk_reads.lock(chunk_id).await;
-
-        // Check again in case another thread already read it
-        if let Some(chunk) = self.chunk_cache.lock().unwrap().get(&chunk_id) {
-            super_trace!("found {:?} in cache after waiting for lock", chunk_id);
-            // found in cache
-            // Search within this chunk.
-            return (
-                chunk
-                    .entries
-                    .binary_search_by_key(key, |e| e.key())
-                    .ok()
-                    .map(|index| chunk.entries[index]),
-                true,
-            );
-        }
-
-        // Read the chunk from disk.
-        let chunk_extent = self.chunk_extent(chunk_id);
-        super_trace!(
-            "reading {:?} at {:?} to lookup {:?}",
-            chunk_id,
-            chunk_extent,
-            key
-        );
-        let chunk_bytes = self
-            .block_access
-            .read_raw(chunk_extent, DiskIoType::ReadIndexForLookup)
-            .await;
-        let (chunk, _consumed): (BlockBasedLogChunk<T>, usize) = self
-            .block_access
-            .chunk_from_raw(&chunk_bytes)
-            .with_context(|| format!("reading {chunk_id:?} at {chunk_extent:?} to lookup {key:?}"))
-            .unwrap();
-
-        assert_eq!(chunk.id, chunk_id);
-
-        // Search within this chunk.
-        let result = chunk
-            .entries
-            .binary_search_by_key(key, |e| e.key())
-            .ok()
-            .map(|index| chunk.entries[index]);
-
-        // add to cache
-        super_trace!("inserting {:?} to cache", chunk_id);
-        self.chunk_cache.lock().unwrap().put(chunk_id, chunk);
-
-        (result, false)
+                cached,
+            )
+        })
+        .await
     }
 
     /// Entries must have been added in sorted order, according to the provided key-extraction
