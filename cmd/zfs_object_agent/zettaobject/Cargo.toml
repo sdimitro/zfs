@@ -36,13 +36,13 @@ libc = "0.2"
 log = "0.4"
 log4rs = "1.0.0"
 more-asserts = "0.2.1"
-nix = "0.23.1"
+nix = "0.24.1"
 num-traits = "0.2.14"
 nvpair = { git = "https://github.com/delphix/rust-libzfs"}
 rand = "0.8.3"
-rusoto_core = "0.47.0"
-rusoto_credential = "0.47.0"
-rusoto_s3 = "0.47.0"
+rusoto_core = "0.48.0"
+rusoto_credential = "0.48.0"
+rusoto_s3 = "0.48.0"
 rust-ini = "0.18.0"
 safer-ffi = { version = "0.0.7", features = ["proc_macros"] }
 semver = "1.0.4"
@@ -54,5 +54,5 @@ stream-reduce = "0.1.0"
 tokio = { version = "1.4", features = ["full"] }
 tokio-stream = "0.1.5"
 util = { path = "../util" }
-uuid = {version = "0.8.2", features = ["v4", "serde"]}
+uuid = {version = "1.0.0", features = ["v4", "serde"]}
 zettacache = { path = "../zettacache" }

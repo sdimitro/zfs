@@ -1408,7 +1408,8 @@ impl ZettaCache {
             );
         }
 
-        let old_index_phys = self.old_index.write().await.get_phys();
+        let (old_index_phys, delta) = self.old_index.write().await.flush().await;
+        assert!(delta.is_empty());
         let mut state = self.state.lock().await;
 
         // Now that we have the state lock, we need to wait for outstanding i/os again, because

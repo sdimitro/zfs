@@ -1,6 +1,7 @@
 pub mod summarized;
 
 use std::cmp::max;
+use std::collections::VecDeque;
 use std::fmt::Debug;
 use std::iter;
 use std::marker::PhantomData;
@@ -14,6 +15,7 @@ use futures::stream;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures_core::Stream;
+use log::*;
 use more_asserts::*;
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
@@ -66,7 +68,13 @@ pub trait BlockBasedLogEntry:
 #[derivative(Default(bound = "T:"))]
 #[serde(bound = "T: DeserializeOwned")]
 pub struct BlockBasedLogPhys<T: BlockBasedLogEntry> {
-    slabs: Vec<SlabId>,
+    slabs: VecDeque<SlabId>,
+
+    // Everything before this is logically not part of the log.  Slabs entirely before this have
+    // been freed and removed from `slabs`.
+    #[serde(default)]
+    trimmed: LogOffset,
+
     next_chunk: ChunkId,
     next_chunk_offset: LogOffset, // logical byte offset of next chunk to write
     num_entries: u64,
@@ -119,8 +127,14 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         &'a self,
         slab_access: &'a SlabAccess,
     ) -> impl DoubleEndedIterator<Item = (LogOffset, Extent)> + 'a {
-        self.allocated_extents(slab_access)
-            .map(|(offset, extent)| (offset, extent.trim_end(self.next_chunk_offset - offset)))
+        self.allocated_extents(slab_access).map(|(offset, extent)| {
+            (
+                max(offset, self.trimmed),
+                extent
+                    .trim_start(self.trimmed.0.saturating_sub(offset.0))
+                    .trim_end(self.next_chunk_offset - offset),
+            )
+        })
     }
 
     fn allocated_extents<'a>(
@@ -128,7 +142,9 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         slab_access: &'a SlabAccess,
     ) -> impl DoubleEndedIterator<Item = (LogOffset, Extent)> + 'a {
         self.slabs.iter().enumerate().map(|(slab_index, &slab_id)| {
-            let offset = LogOffset((slab_index as u64) * slab_access.slab_size());
+            let slab_size = slab_access.slab_size();
+            let trimmed_slabs = self.trimmed.0 / slab_size;
+            let offset = LogOffset((slab_index as u64 + trimmed_slabs) * slab_size);
             let extent = slab_access.slab_id_to_extent(slab_id);
             (offset, extent)
         })
@@ -143,10 +159,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
     fn offset_to_location(&self, slab_access: &SlabAccess, offset: LogOffset) -> DiskLocation {
         let slab_size = slab_access.slab_size();
-        let slab_index = usize::from64(offset.0 / slab_size);
+        let slab_index = (offset.0 / slab_size)
+            .checked_sub(self.trimmed.0 / slab_size)
+            .unwrap();
         let relative_offset = offset.0 % slab_size;
         slab_access
-            .slab_id_to_extent(self.slabs[slab_index])
+            .slab_id_to_extent(self.slabs[usize::from64(slab_index)])
             .location
             + relative_offset
     }
@@ -219,8 +237,9 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
             .flat_map(|chunk| stream::iter(chunk.entries.into_iter()))
     }
 
+    /// The number of bytes in use, i.e. those that will be read by .iter()
     pub fn bytes(&self) -> u64 {
-        self.next_chunk_offset.0
+        self.next_chunk_offset - self.trimmed
     }
 
     pub fn len(&self) -> u64 {
@@ -284,6 +303,24 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         }
     }
 
+    /// Indicate that log offsets before `offset` are no longer needed.  Any entirely-unneeded
+    /// slabs will be freed.
+    pub fn trim(&mut self, offset: LogOffset) {
+        assert_ge!(offset, self.phys.trimmed);
+        let slab_size = self.slab_allocator.slab_size();
+        let slabs_trimmed = (offset.0 / slab_size)
+            .checked_sub(self.phys.trimmed.0 / slab_size)
+            .unwrap();
+        debug!(
+            "advancing trimmed from {:?} to {offset:?}, freeing {slabs_trimmed} slabs",
+            self.phys.trimmed
+        );
+        for slab in self.phys.slabs.drain(..usize::from64(slabs_trimmed)) {
+            self.slab_allocator.free(slab);
+        }
+        self.phys.trimmed = offset;
+    }
+
     async fn flush_impl<F>(&mut self, mut new_chunk_fn: F)
     where
         F: FnMut(ChunkId, LogOffset, T),
@@ -325,7 +362,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 None => {
                     // Last slab has been fully written, allocate a new one
                     let slab = self.slab_allocator.allocate_reserved();
-                    self.phys.slabs.push(slab);
+                    self.phys.slabs.push_back(slab);
                     self.slab_allocator.slab_id_to_extent(slab)
                 }
             };

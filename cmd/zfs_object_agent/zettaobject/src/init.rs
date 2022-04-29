@@ -62,10 +62,7 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
     let mut f = File::open(id_path)?;
 
     let mut bytes = Vec::new();
-    assert_eq!(
-        f.read_to_end(&mut bytes)?,
-        uuid::adapter::Hyphenated::LENGTH,
-    );
+    assert_eq!(f.read_to_end(&mut bytes)?, uuid::fmt::Hyphenated::LENGTH);
     Ok(Uuid::parse_str(std::str::from_utf8(&bytes)?)?)
 }
 
@@ -100,8 +97,8 @@ pub fn start(
             trace!("Opening agent id failed: {:?}", err);
             let mut file = File::create(id_path).unwrap();
             let uuid = Uuid::new_v4();
-            let mut buf = [0; uuid::adapter::Hyphenated::LENGTH];
-            uuid.to_hyphenated().encode_lower(&mut buf);
+            let mut buf = [0; uuid::fmt::Hyphenated::LENGTH];
+            uuid.hyphenated().encode_lower(&mut buf);
             file.write_all(&buf).unwrap();
             uuid
         });

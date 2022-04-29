@@ -7,7 +7,7 @@ build = "src/build.rs"
 publish = false
 
 [build-dependencies]
-cbindgen = "0.20"
+cbindgen = "0.23.0"
 
 [lib]
 crate-type = ["cdylib"]      # Creates dynamic lib
@@ -21,11 +21,11 @@ futures = "0.3.13"
 libc = "0.2"
 log = "0.4"
 log4rs = "1.0.0"
-nix = "0.23.1"
+nix = "0.24.1"
 nvpair = { git = "https://github.com/delphix/rust-libzfs"}
 nvpair-sys = { git = "https://github.com/delphix/rust-libzfs"}
 tokio = { version = "1.4", features = ["full"] }
 util = { path =  "../util" }
-uuid = {version = "0.8.2", features = ["v4"]}
+uuid = {version = "1.0.0", features = ["v4"]}
 zettacache = { path =  "../zettacache" }
 zettaobject = { path =  "../zettaobject" }

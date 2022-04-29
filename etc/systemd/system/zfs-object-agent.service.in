@@ -3,6 +3,8 @@ Description=ZFS object agent
 DefaultDependencies=no
 After=local-fs.target
 Before=zfs-import-cache.service
+Requires=zfs-mount.service
+Before=zfs-mount.service
 ConditionVirtualization=!container
 
 [Service]

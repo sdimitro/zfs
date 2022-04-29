@@ -16,7 +16,7 @@ backtrace = "0.3"
 bytes = "1.0"
 bytesize = "1.1.0"
 chrono = "0.4.19"
-config = "0.12"
+config = "0.13.1"
 dashmap = "5.1.0"
 derivative = "2.2.0"
 enum-map = { version = "2.0.3", features = ["serde"] }
@@ -31,11 +31,11 @@ more-asserts = "0.2.1"
 num-traits = "0.2.14"
 paste = "1.0.6"
 rand = "0.8.3"
-rusoto_credential = "0.47.0"
+rusoto_credential = "0.48.0"
 safer-ffi = { version = "0.0.7", features = ["proc_macros"] }
 serde = { version = "1.0.125", features = ["derive"] }
 serde_json = "1.0.64"
 serial_test = "0.6.0"
 signal-hook = "0.3.13"
 tokio = { version = "1.4", features = ["full"] }
-uuid = {version = "0.8.2", features = ["v4", "serde"]}
+uuid = {version = "1.0.0", features = ["v4", "serde"]}

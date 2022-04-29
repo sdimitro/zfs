@@ -26,7 +26,7 @@ log = "0.4"
 lru = "0.7.0"
 lz4 = "1.23.2"
 more-asserts = "0.2.1"
-nix = "0.23.0"
+nix = "0.24.1"
 num-traits = "0.2.14"
 rand = "0.8.3"
 safer-ffi = { version = "0.0.7", features = ["proc_macros"] }
@@ -37,4 +37,4 @@ sysinfo = "0.23.5"
 tokio = { version = "1.4", features = ["full"] }
 tokio-stream = "0.1.8"
 util = { path = "../util" }
-uuid = {version = "0.8.2", features = ["v4", "serde"]}
+uuid = {version = "1.0.0", features = ["v4", "serde"]}
