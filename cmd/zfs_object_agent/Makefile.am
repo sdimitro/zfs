@@ -1,16 +1,18 @@
 sbin_PROGRAMS = $(RUSTDIR)/zcache $(RUSTDIR)/zcachedb $(RUSTDIR)/zfs_object_agent $(RUSTDIR)/zfs_object_perf $(RUSTDIR)/zoa_test
 
-__RUSTDIR__zcache_SOURCES = $(shell sed 's/.*: //' $(RUSTDIR)/zcache.d || find . -name "*.rs" -o -name "*.toml" -o -name "*.lock")
+common_sources = $(wildcard util/src/*.rs util/Cargo.toml zettacache/src/*.rs zettacache/src/*/*.rs zettacache/Cargo.toml zettaobject/src/*/*.rs zettaobject/src/*.rs zettaobject/Cargo.toml Cargo.lock Cargo.toml)
 
-__RUSTDIR__zcachedb_SOURCES = $(shell sed 's/.*: //' $(RUSTDIR)/zcachedb.d || find . -name "*.rs" -o -name "*.toml" -o -name "*.lock")
+__RUSTDIR__zcache_SOURCES = $(wildcard zcache/src/*.rs zcache/Cargo.toml) $(common_sources)
 
-__RUSTDIR__zfs_object_agent_SOURCES = $(shell sed 's/.*: //' $(RUSTDIR)/zfs_object_agent.d || find . -name "*.rs" -o -name "*.toml" -o -name "*.lock")
+__RUSTDIR__zcachedb_SOURCES = $(wildcard zcdb/src/*.rs zcdb/Cargo.toml) $(common_sources)
 
-__RUSTDIR__zfs_object_perf_SOURCES = $(shell sed 's/.*: //' $(RUSTDIR)/zfs_object_perf.d || find . -name "*.rs" -o -name "*.toml" -o -name "*.lock")
+__RUSTDIR__zfs_object_agent_SOURCES = $(wildcard server/src/*.rs server/Cargo.toml) $(common_sources)
 
-__RUSTDIR__zoa_test_SOURCES = $(shell sed 's/.*: //' $(RUSTDIR)/zoa_test.d || find . -name "*.rs" -o -name "*.toml" -o -name "*.lock")
+__RUSTDIR__zfs_object_perf_SOURCES = $(wildcard object_perf/src/*.rs object_perf/Cargo.toml) $(common_sources)
 
-__RUSTDIR__libzoa_so_SOURCES = $(shell sed 's/.*: //' $(RUSTDIR)/libzoa.d || find . -name "*.rs" -o -name "*.toml" -o -name "*.lock")
+__RUSTDIR__zoa_test_SOURCES = $(wildcard client/src/*.rs client/Cargo.toml) $(common_sources)
+
+__RUSTDIR__libzoa_so_SOURCES = $(wildcard zoa/src/*.rs zoa/Cargo.toml) $(common_sources)
 
 EXTRA_DIST = $(__RUSTDIR__libzoa_so_SOURCES)
 
