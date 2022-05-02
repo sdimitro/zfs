@@ -1747,7 +1747,7 @@ impl Pool {
                     .fut(cache.lookup(self.state.shared_state.guid, block))
                     .await
                 {
-                    LookupResponse::Present((cached_bytes, _key)) => cached_bytes.into(),
+                    LookupResponse::Present(cached_bytes, _key) => cached_bytes.into(),
                     LookupResponse::Absent(key) => {
                         if *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
                             let (data_object, method) = self.read_object_for_block(block).await;

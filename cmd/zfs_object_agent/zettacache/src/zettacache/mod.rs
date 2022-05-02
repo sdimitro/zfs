@@ -792,7 +792,7 @@ impl LockedKey {
 }
 
 pub enum LookupResponse {
-    Present((AlignedBytes, LockedKey)),
+    Present(AlignedBytes, LockedKey),
     Absent(LockedKey),
 }
 
@@ -1461,7 +1461,7 @@ impl ZettaCache {
             Some(bytes) => {
                 self.stats.track_bytes(CacheHitBytes, bytes.len() as u64);
                 self.stats.track_count(CacheHit);
-                LookupResponse::Present((bytes, locked_key))
+                LookupResponse::Present(bytes, locked_key)
             }
             None => LookupResponse::Absent(locked_key),
         }
@@ -1492,7 +1492,7 @@ impl ZettaCache {
                 super_trace!("cache hit for {:?}", key);
                 self.stats.track_bytes(CacheHitBytes, bytes.len() as u64);
                 self.stats.track_count(CacheHit);
-                LookupResponse::Present((bytes, locked_key))
+                LookupResponse::Present(bytes, locked_key)
             }
             None => LookupResponse::Absent(locked_key),
         }
@@ -1788,7 +1788,7 @@ impl ZettaCache {
     }
 
     pub async fn heal(&self, guid: PoolGuid, block: BlockId, object_bytes: AlignedBytes) {
-        if let LookupResponse::Present((cache_bytes, locked_key)) = self.peek(guid, block).await {
+        if let LookupResponse::Present(cache_bytes, locked_key) = self.peek(guid, block).await {
             // We only need to do the heal when the bytes contained in the cache differ from the
             // bytes contained in the object store. The bytes contained in the object store are
             // always preferred over the bytes contained in the cache; we assume the bytes passed
