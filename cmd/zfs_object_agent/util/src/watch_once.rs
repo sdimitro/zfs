@@ -35,4 +35,8 @@ impl<T: Clone> Receiver<T> {
             Err(e) => Err(e),
         }
     }
+
+    pub fn same_channel(&self, other: &Receiver<T>) -> bool {
+        self.0.same_channel(&other.0)
+    }
 }
