@@ -356,10 +356,11 @@ fn zcachedb_dump_slabs_report(
         .map(|kbytes| (SlabBucketSize(kbytes * 1024u32), false))
         .collect();
     let mut bitmap_based_summary = SlabBucketsReport::new(&bitmap_summary_dist, slab_size);
-    let extent_summary_dist: Vec<(SlabBucketSize, bool)> = [64, 256, 1024, 16384]
+    let mut extent_summary_dist: Vec<(SlabBucketSize, bool)> = [64, 256, 1024]
         .iter()
         .map(|kbytes| (SlabBucketSize(kbytes * 1024u32), true))
         .collect();
+    extent_summary_dist.push((SlabBucketSize(u32::try_from(slab_size).unwrap()), true));
     let mut extent_based_summary = SlabBucketsReport::new(&extent_summary_dist, slab_size);
     let mut evacuating_total = AllocationBucketStatistics::new(slab_size);
 
