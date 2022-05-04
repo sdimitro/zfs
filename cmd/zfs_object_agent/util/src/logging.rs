@@ -12,6 +12,9 @@ use std::thread;
 use atomic_counter::AtomicCounter;
 use atomic_counter::RelaxedCounter;
 use backtrace::Backtrace;
+use chrono::DateTime;
+use chrono::Local;
+use chrono::Utc;
 use lazy_static::lazy_static;
 pub use log::log;
 use log::*;
@@ -43,7 +46,7 @@ use crate::ALLOCATOR_PRINT_MIN_BYTES;
 type PanicHook = Box<dyn Fn(&panic::PanicInfo) + Sync + Send>;
 
 lazy_static_ptr! {
-    static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<String>> = Default::default();
+    static ref LOG_MESSAGES: std::sync::Mutex<VecDeque<LogMessage>> = Default::default();
 }
 
 tunable! {
@@ -56,6 +59,12 @@ lazy_static! {
     static ref LOG_PATTERN: String = "[{d(%Y-%m-%d %H:%M:%S%.3f)}][{t}][{l}] {m}{n}".to_string();
     static ref DEFAULT_HOOK: std::sync::Mutex<Option<PanicHook>> = Default::default();
     static ref PANIC_COUNTER: RelaxedCounter = RelaxedCounter::new(0);
+}
+
+struct LogMessage {
+    date: DateTime<Utc>,
+    level: Level,
+    message: String,
 }
 
 #[macro_export]
@@ -82,12 +91,10 @@ pub struct BufferAppender {}
 
 impl Append for BufferAppender {
     fn append(&self, record: &Record) -> anyhow::Result<()> {
-        let str = with_alloctag_hf("logging BufferAppender", || {
+        let message = with_alloctag_hf("logging BufferAppender", || {
             format!(
-                "[{}][{}][{}] {}",
-                chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f"),
+                "[{}] {}",
                 record.target(),
-                record.level(),
                 record.args()
             )
         });
@@ -96,7 +103,11 @@ impl Append for BufferAppender {
             while messages.len() >= *MAX_LOG_MESSAGES {
                 messages.pop_front();
             }
-            messages.push_back(str);
+            messages.push_back(LogMessage {
+                date: chrono::Utc::now(),
+                level: record.level(),
+                message,
+            });
         }
 
         Ok(())
@@ -127,7 +138,17 @@ impl BufferAppender {
     {
         if let Ok(messages) = LOG_MESSAGES.lock() {
             for message in messages.iter() {
-                writeln!(writer, "{}", message).unwrap();
+                writeln!(
+                    writer,
+                    "[{}][{}]{}",
+                    message
+                        .date
+                        .with_timezone(&Local)
+                        .format("%Y-%m-%d %H:%M:%S%.3f"),
+                    message.level,
+                    message.message,
+                )
+                .unwrap();
             }
         }
     }
