@@ -22,8 +22,8 @@ use util::tunable;
 use zettacache::base_types::*;
 
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessCredentials;
 use crate::object_access::ObjectAccessProtocol;
+use crate::object_access::S3Credentials;
 use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
 use crate::pool::PoolPhys;
 
@@ -215,35 +215,40 @@ impl PoolDestroyer {
                 }
 
                 // Fire off destroy tasks
-                self.destroying_pools_map
-                    .pools
-                    .iter()
-                    .filter(|(_, destroying_pool)| {
-                        destroying_pool.cache_phys.state == PoolDestroyState::InProgress
-                    })
-                    .for_each(|(guid, destroying_pool)| {
-                        match ObjectAccess::new(
-                            ObjectAccessProtocol::S3 {
-                                endpoint: destroying_pool.cache_phys.endpoint.clone(),
-                                region: destroying_pool.cache_phys.region.clone(),
+                let destroying_pool_list =
+                    self.destroying_pools_map
+                        .pools
+                        .iter()
+                        .filter(|(_, destroying_pool)| {
+                            destroying_pool.cache_phys.state == PoolDestroyState::InProgress
+                        });
+
+                for (guid, destroying_pool) in destroying_pool_list {
+                    match ObjectAccess::new(
+                        ObjectAccessProtocol::S3 {
+                            endpoint: destroying_pool.cache_phys.endpoint.clone(),
+                            region: destroying_pool.cache_phys.region.clone(),
+                            credentials: match destroying_pool.cache_phys.profile.clone() {
+                                Some(profile) => S3Credentials::Profile(profile),
+                                None => S3Credentials::Automatic,
                             },
-                            destroying_pool.cache_phys.bucket.clone(),
-                            ObjectAccessCredentials::Profile {
-                                profile: destroying_pool.cache_phys.profile.clone(),
-                            },
-                            false,
-                        ) {
-                            Ok(object_access) => {
-                                start_destroy_task(object_access, *guid);
-                            }
-                            Err(e) => {
-                                // Error likely caused by invalid credentials. Since
-                                // there may be other pools that can be accesssed,
-                                // log an error and keep going.
-                                error!("Failed to connect to pool: {} {}", &guid, e);
-                            }
-                        };
-                    });
+                        },
+                        destroying_pool.cache_phys.bucket.clone(),
+                        false,
+                    )
+                    .await
+                    {
+                        Ok(object_access) => {
+                            start_destroy_task(object_access, *guid);
+                        }
+                        Err(e) => {
+                            // Error likely caused by invalid credentials. Since
+                            // there may be other pools that can be accesssed,
+                            // log an error and keep going.
+                            error!("Failed to connect to pool: {} {}", &guid, e);
+                        }
+                    };
+                }
 
                 Ok(())
             }

@@ -97,23 +97,51 @@ pub struct ObjectStat {
     pub last_modified: Option<DateTime<FixedOffset>>,
 }
 
-pub enum ObjectAccessProtocol {
-    S3 { endpoint: String, region: String },
-    Blob,
-}
-
-pub enum ObjectAccessCredentials {
+#[derive(Clone)]
+pub enum S3Credentials {
+    /// Get credentials from the following sources in order:
+    /// 1. Environment variables
+    /// 2. AWS credentials file
+    /// 3. IAM instance profile.
+    Automatic,
     /// Read credentials from a profile in an ini file
-    Profile { profile: Option<String> },
+    Profile(String),
     /// Credentials specified as parameters
     Key {
-        access_key_id: String,
-        secret_access_key: String,
+        aws_access_key_id: String,
+        aws_secret_access_key: String,
     },
-    /// Managed credentials:
-    /// - AWS IAM roles passed using an instance profile
-    /// - managed identities for Azure
-    ManagedCredentials,
+    /// AWS IAM roles passed using an instance profile
+    InstanceProfile,
+}
+
+#[derive(Clone)]
+pub enum BlobCredentials {
+    /// Get credentials the following sources in order:
+    /// 1. Environment variables
+    /// 2. ~/.azure/credentials file
+    /// 3. managed identities.
+    Automatic,
+    /// Read credentials from a profile in an ini file
+    Profile(String),
+    /// Credentials specified as parameters
+    Key {
+        azure_account: String,
+        azure_key: String,
+    },
+    /// Managed identities
+    ManagedCredentials { azure_account: String },
+}
+
+pub enum ObjectAccessProtocol {
+    S3 {
+        endpoint: String,
+        region: String,
+        credentials: S3Credentials,
+    },
+    Blob {
+        credentials: BlobCredentials,
+    },
 }
 
 enum ObjectAccessEnum {
@@ -128,19 +156,22 @@ pub struct ObjectAccess {
 }
 
 impl ObjectAccess {
-    pub fn new(
+    pub async fn new(
         protocol: ObjectAccessProtocol,
         bucket: String,
-        credentials: ObjectAccessCredentials,
         readonly: bool,
-    ) -> anyhow::Result<Arc<Self>> {
+    ) -> Result<Arc<Self>> {
         match protocol {
-            ObjectAccessProtocol::S3 { endpoint, region } => Ok(ObjectAccess::from_s3(
+            ObjectAccessProtocol::S3 {
+                endpoint,
+                region,
+                credentials,
+            } => Ok(ObjectAccess::from_s3(
                 S3ObjectAccess::new(&endpoint, &region, &bucket, credentials),
                 readonly,
             )),
-            ObjectAccessProtocol::Blob => {
-                let oa = BlobObjectAccess::new(&bucket, credentials)?;
+            ObjectAccessProtocol::Blob { credentials } => {
+                let oa = BlobObjectAccess::new(&bucket, credentials).await?;
                 Ok(ObjectAccess::from_azure(oa, readonly))
             }
         }
@@ -346,19 +377,20 @@ pub struct BucketAccess {
 }
 
 impl BucketAccess {
-    pub fn new(
-        protocol: ObjectAccessProtocol,
-        credentials_profile: Option<String>,
-    ) -> anyhow::Result<Arc<Self>> {
+    pub async fn new(protocol: ObjectAccessProtocol) -> Result<Arc<Self>> {
         match protocol {
-            ObjectAccessProtocol::S3 { endpoint, region } => {
-                let ba = S3BucketAccess::new(&endpoint, &region, credentials_profile)?;
+            ObjectAccessProtocol::S3 {
+                endpoint,
+                region,
+                credentials,
+            } => {
+                let ba = S3BucketAccess::new(&endpoint, &region, credentials)?;
                 Ok(Arc::new(BucketAccess {
                     inner: BucketAccessEnum::S3(ba),
                 }))
             }
-            ObjectAccessProtocol::Blob => {
-                let ba = BlobBucketAccess::new(credentials_profile);
+            ObjectAccessProtocol::Blob { credentials } => {
+                let ba = BlobBucketAccess::new(credentials).await?;
                 Ok(Arc::new(BucketAccess {
                     inner: BucketAccessEnum::Azure(ba),
                 }))

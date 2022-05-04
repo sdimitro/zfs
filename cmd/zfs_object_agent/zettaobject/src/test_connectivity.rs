@@ -8,7 +8,6 @@ use util::writeln_stdout;
 use crate::access_stats::ObjectAccessOpType;
 use crate::object_access::OAError;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessCredentials;
 use crate::object_access::ObjectAccessProtocol;
 use crate::object_access::RequestError;
 
@@ -76,57 +75,23 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
     }
 }
 
-pub fn test_connectivity(
-    endpoint: Option<String>,
-    region: Option<String>,
-    bucket: String,
-    protocol: String,
-    access_key_id: Option<String>,
-    secret_access_key: Option<String>,
-    instance_profile: bool,
-) {
-    tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .thread_name("zoa_test_connectivity")
-        .build()
-        .unwrap()
-        .block_on(async move {
-            let credentials = if instance_profile {
-                ObjectAccessCredentials::ManagedCredentials
-            } else {
-                ObjectAccessCredentials::Key {
-                    access_key_id: access_key_id.unwrap(),
-                    secret_access_key: secret_access_key.unwrap(),
-                }
-            };
-            let oa_protocol = if protocol.eq("s3") {
-                ObjectAccessProtocol::S3 {
-                    endpoint: endpoint.unwrap(),
-                    region: region.unwrap(),
-                }
-            } else if protocol.eq("blob") {
-                ObjectAccessProtocol::Blob {}
-            } else {
-                panic!("Invalid protocol {}", protocol);
-            };
-            let object_access =
-                match ObjectAccess::new(oa_protocol, bucket.to_string(), credentials, false) {
-                    Ok(oa) => oa,
-                    Err(err) => {
-                        writeln_stderr!("Connectivity test failed: {}", err);
-                        std::process::exit(1);
-                    }
-                };
+pub async fn test_connectivity(protocol: ObjectAccessProtocol, bucket: String) {
+    let object_access = match ObjectAccess::new(protocol, bucket, false).await {
+        Ok(oa) => oa,
+        Err(err) => {
+            writeln_stderr!("Connectivity test failed: {}", err);
+            std::process::exit(1);
+        }
+    };
 
-            std::process::exit(match do_test_connectivity(&object_access).await {
-                Err(err) => {
-                    writeln_stderr!("{}", err);
-                    1
-                }
-                Ok(_) => {
-                    writeln_stdout!("Connectivity test succeeded.");
-                    0
-                }
-            });
-        });
+    std::process::exit(match do_test_connectivity(&object_access).await {
+        Err(err) => {
+            writeln_stderr!("{}", err);
+            1
+        }
+        Ok(_) => {
+            writeln_stdout!("Connectivity test succeeded.");
+            0
+        }
+    });
 }

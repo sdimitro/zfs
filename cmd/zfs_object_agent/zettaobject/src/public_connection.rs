@@ -16,8 +16,8 @@ use zettacache::ZettaCache;
 
 use crate::object_access::BucketAccess;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessCredentials;
 use crate::object_access::ObjectAccessProtocol;
+use crate::object_access::S3Credentials;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::return_result;
@@ -105,13 +105,17 @@ impl PublicConnectionState {
             .ok()
             .map(|s| s.to_string_lossy().to_string());
 
-        let bucket_access = BucketAccess::new(
-            ObjectAccessProtocol::S3 {
-                endpoint: endpoint.clone(),
-                region: region.clone(),
-            },
-            credentials_profile.clone(),
-        )?;
+        let credentials = match credentials_profile {
+            Some(profile) => S3Credentials::Profile(profile),
+            None => S3Credentials::Automatic,
+        };
+
+        let bucket_access = BucketAccess::new(ObjectAccessProtocol::S3 {
+            endpoint: endpoint.clone(),
+            region: region.clone(),
+            credentials: credentials.clone(),
+        })
+        .await?;
 
         let mut buckets = vec![];
         let bucket_result = nvl.lookup_string("bucket");
@@ -128,13 +132,12 @@ impl PublicConnectionState {
                 ObjectAccessProtocol::S3 {
                     endpoint: endpoint.clone(),
                     region: region.clone(),
+                    credentials: credentials.clone(),
                 },
                 buck,
-                ObjectAccessCredentials::Profile {
-                    profile: credentials_profile.clone(),
-                },
                 false,
-            )?;
+            )
+            .await?;
             let guid_result = nvl.lookup_uint64("guid");
             if let Ok(guid) = guid_result {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {

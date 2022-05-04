@@ -12,8 +12,8 @@ use zettacache::base_types::PoolGuid;
 
 use crate::base_types::Txg;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessCredentials;
 use crate::object_access::ObjectAccessProtocol;
+use crate::object_access::S3Credentials;
 use crate::pool;
 use crate::pool::Pool;
 use crate::pool::PoolPhys;
@@ -25,7 +25,7 @@ pub struct DebugHandle {
     object_access: Option<Arc<ObjectAccess>>,
 }
 
-fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
+async fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
     let bucket_name = nvl.lookup_string("bucket").unwrap();
     let region_str = nvl.lookup_string("region").unwrap();
     let endpoint = nvl.lookup_string("endpoint").unwrap();
@@ -34,17 +34,21 @@ fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
         .ok()
         .map(|s| s.to_string_lossy().to_string());
 
+    let credentials = match credentials_profile {
+        Some(profile) => S3Credentials::Profile(profile),
+        None => S3Credentials::Automatic,
+    };
+
     ObjectAccess::new(
         ObjectAccessProtocol::S3 {
             endpoint: endpoint.to_str().unwrap().to_string(),
             region: region_str.to_str().unwrap().to_string(),
+            credentials,
         },
         bucket_name.to_str().unwrap().to_string(),
-        ObjectAccessCredentials::Profile {
-            profile: credentials_profile,
-        },
         true,
     )
+    .await
     .unwrap()
 }
 
@@ -57,13 +61,23 @@ impl DebugHandle {
         }
     }
     pub fn open_pool(&mut self, guid: PoolGuid, nvl: &NvListRef) -> Result<(), Errno> {
-        let object_access = get_object_access(nvl);
-        let oac = object_access.clone();
-        let future =
-            async move { Pool::open(oac, guid, None, None, Uuid::new_v4(), None, false).await };
+        let future = async move {
+            let object_access = get_object_access(nvl).await;
+            let (pool, _, _) = Pool::open(
+                object_access.clone(),
+                guid,
+                None,
+                None,
+                Uuid::new_v4(),
+                None,
+                false,
+            )
+            .await?;
+            Ok((pool, object_access))
+        };
 
         match self.runtime.block_on(future) {
-            Ok((pool, _, _)) => {
+            Ok((pool, object_access)) => {
                 self.object_access = Some(object_access);
                 self.pool = Some(Arc::new(pool));
                 Ok(())

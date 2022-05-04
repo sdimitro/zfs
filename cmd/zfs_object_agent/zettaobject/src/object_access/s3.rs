@@ -42,8 +42,8 @@ use util::with_alloctag;
 
 use super::BucketAccessTrait;
 use super::GetError;
-use super::ObjectAccessCredentials;
 use super::RequestError;
+use super::S3Credentials;
 use super::OBJECT_DELETION_BATCH_SIZE;
 use crate::access_stats::ObjectAccessOpType;
 use crate::access_stats::ObjectAccessStats;
@@ -117,13 +117,9 @@ pub struct S3BucketAccess {
 }
 
 impl S3BucketAccess {
-    pub fn new(
-        endpoint: &str,
-        region: &str,
-        credentials_profile: Option<String>,
-    ) -> anyhow::Result<Self> {
-        Ok(S3BucketAccess {
-            client: S3ObjectAccess::get_client(endpoint, region, credentials_profile),
+    pub fn new(endpoint: &str, region: &str, credentials: S3Credentials) -> Result<Self> {
+        Ok(Self {
+            client: S3ObjectAccess::get_client(endpoint, region, credentials),
         })
     }
 }
@@ -179,21 +175,33 @@ impl S3ObjectAccess {
         }
     }
 
+    fn get_client(endpoint: &str, region: &str, credentials: S3Credentials) -> S3Client {
+        match credentials {
+            S3Credentials::Profile(profile) => {
+                S3ObjectAccess::new_with_profile(endpoint, region, &profile)
+            }
+            S3Credentials::Key {
+                aws_access_key_id,
+                aws_secret_access_key,
+            } => Self::new_with_key(endpoint, region, &aws_access_key_id, &aws_secret_access_key),
+
+            S3Credentials::InstanceProfile => Self::new_with_instance_profile(endpoint, region),
+            S3Credentials::Automatic => S3ObjectAccess::get_client_automatic(endpoint, region),
+        }
+    }
+
     /// Get client by checking in order, the following sources for credentials.
     /// 1. Environment variables
-    /// 2. AWS credentials file
+    /// 2. default profile in AWS credentials file
     /// 3. IAM instance profile.
-    fn get_client(endpoint: &str, region: &str, credentials_profile: Option<String>) -> S3Client {
+    fn get_client_automatic(endpoint: &str, region: &str) -> S3Client {
         info!("region: {}", region);
         info!("Endpoint: {}", endpoint);
-        info!("Profile: {:?}", credentials_profile);
+        info!("Profile: {:?}", "default");
 
         let provider =
             util::ResilientCredentialsProvider::new(ChainProvider::with_profile_provider(
-                ProfileProvider::with_default_credentials(
-                    credentials_profile.unwrap_or_else(|| "default".to_owned()),
-                )
-                .unwrap(),
+                ProfileProvider::with_default_credentials("default".to_string()).unwrap(),
             ))
             .unwrap();
 
@@ -207,76 +215,64 @@ impl S3ObjectAccess {
         bucket: &str,
         endpoint: &str,
         region: &str,
+        credentials_profile: Option<String>,
     ) -> Self {
         S3ObjectAccess {
             client,
             bucket: bucket.to_string(),
             region: region.to_string(),
             endpoint: endpoint.to_string(),
-            credentials_profile: None,
+            credentials_profile,
             access_stats: Default::default(),
             outstanding_ops: Default::default(),
         }
     }
 
+    /// Create S3Client with AWS credential keys
     fn new_with_key(
         endpoint: &str,
         region: &str,
-        bucket: &str,
-        access_key_id: &str,
-        secret_access_key: &str,
-    ) -> Self {
+        aws_access_key_id: &str,
+        aws_secret_access_key: &str,
+    ) -> S3Client {
         info!("region: {:?}", region);
         info!("Endpoint: {}", endpoint);
 
         let http_client = rusoto_core::HttpClient::new().unwrap();
         let creds = rusoto_core::credential::StaticProvider::new(
-            access_key_id.to_string(),
-            secret_access_key.to_string(),
+            aws_access_key_id.to_string(),
+            aws_secret_access_key.to_string(),
             None,
             None,
         );
         let s3_region = S3ObjectAccess::get_custom_region(endpoint, region);
-        let client = rusoto_s3::S3Client::new_with(http_client, creds, s3_region);
-
-        Self::from_client(client, bucket, endpoint, region)
+        rusoto_s3::S3Client::new_with(http_client, creds, s3_region)
     }
 
-    /// Create S3 object access with instance metadata provider and ignoring all other sources of
+    /// Create S3Client with instance metadata provider and ignoring all other sources of
     /// credentials.
-    fn new_with_instance_profile(endpoint: &str, region: &str, bucket: &str) -> Self {
+    fn new_with_instance_profile(endpoint: &str, region: &str) -> S3Client {
         let http_client = rusoto_core::HttpClient::new().unwrap();
         let creds = InstanceMetadataProvider::new();
         let s3_region = S3ObjectAccess::get_custom_region(endpoint, region);
-        let client = rusoto_s3::S3Client::new_with(http_client, creds, s3_region);
-
-        Self::from_client(client, bucket, endpoint, region)
+        rusoto_s3::S3Client::new_with(http_client, creds, s3_region)
     }
 
-    pub fn new(
-        endpoint: &str,
-        region: &str,
-        bucket: &str,
-        credentials: ObjectAccessCredentials,
-    ) -> Self {
-        match credentials {
-            ObjectAccessCredentials::Profile { profile } => Self {
-                client: S3ObjectAccess::get_client(endpoint, region, profile.clone()),
-                bucket: bucket.to_string(),
-                region: region.to_string(),
-                endpoint: endpoint.to_string(),
-                credentials_profile: profile,
-                access_stats: Default::default(),
-                outstanding_ops: Default::default(),
-            },
-            ObjectAccessCredentials::Key {
-                access_key_id,
-                secret_access_key,
-            } => Self::new_with_key(endpoint, region, bucket, &access_key_id, &secret_access_key),
-            ObjectAccessCredentials::ManagedCredentials => {
-                Self::new_with_instance_profile(endpoint, region, bucket)
-            }
-        }
+    fn new_with_profile(endpoint: &str, region: &str, profile: &str) -> S3Client {
+        let http_client = rusoto_core::HttpClient::new().unwrap();
+        let creds = ProfileProvider::with_default_credentials(profile).unwrap();
+        let s3_region = S3ObjectAccess::get_custom_region(endpoint, region);
+        rusoto_s3::S3Client::new_with(http_client, creds, s3_region)
+    }
+
+    pub fn new(endpoint: &str, region: &str, bucket: &str, credentials: S3Credentials) -> Self {
+        let client = S3ObjectAccess::get_client(endpoint, region, credentials.clone());
+        let profile = if let S3Credentials::Profile(profile) = credentials {
+            Some(profile)
+        } else {
+            None
+        };
+        Self::from_client(client, bucket, endpoint, region, profile)
     }
 
     pub fn bucket(&self) -> String {

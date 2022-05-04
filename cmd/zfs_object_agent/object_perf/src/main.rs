@@ -9,8 +9,8 @@ use clap::Subcommand;
 use git_version::git_version;
 use uuid::Uuid;
 use zettaobject::object_access::ObjectAccess;
-use zettaobject::object_access::ObjectAccessCredentials;
 use zettaobject::object_access::ObjectAccessProtocol;
+use zettaobject::object_access::S3Credentials;
 mod s3perf;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
@@ -110,13 +110,12 @@ async fn main() {
         ObjectAccessProtocol::S3 {
             endpoint: cli.endpoint,
             region: cli.region,
+            credentials: S3Credentials::Profile(cli.profile.to_owned()),
         },
         cli.bucket,
-        ObjectAccessCredentials::Profile {
-            profile: Some(cli.profile.to_owned()),
-        },
         false,
     )
+    .await
     .unwrap();
 
     let key_prefix = format!("zfs_object_perf/{}/", Uuid::new_v4());

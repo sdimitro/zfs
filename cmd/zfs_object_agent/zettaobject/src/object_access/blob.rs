@@ -15,6 +15,8 @@ use anyhow::Result;
 use async_stream::stream;
 use async_trait::async_trait;
 use azure_core::HttpError;
+use azure_identity::token_credentials::ImdsManagedIdentityCredential;
+use azure_identity::token_credentials::TokenCredential;
 use azure_storage::clients::AsStorageClient;
 use azure_storage::clients::StorageAccountClient;
 use azure_storage::clients::StorageClient;
@@ -31,6 +33,7 @@ use futures::Stream;
 use futures::StreamExt;
 use http::Response;
 use http::StatusCode;
+use ini::Ini;
 use log::debug;
 use log::trace;
 use more_asserts::assert_le;
@@ -38,8 +41,8 @@ use rusoto_core::ByteStream;
 use tokio::io::AsyncReadExt;
 
 use super::retry;
+use super::BlobCredentials;
 use super::BucketAccessTrait;
-use super::ObjectAccessCredentials;
 use super::RequestError;
 use super::OBJECT_DELETION_BATCH_SIZE;
 use crate::access_stats::ObjectAccessOpType;
@@ -155,10 +158,10 @@ pub struct BlobBucketAccess {
 }
 
 impl BlobBucketAccess {
-    pub fn new(credentials_profile: Option<String>) -> Self {
-        let storage_client = get_azure_storage_client(credentials_profile).unwrap();
+    pub async fn new(credentials: BlobCredentials) -> Result<Self> {
+        let storage_client = get_azure_storage_client(credentials).await?;
         let blob_service = storage_client.as_blob_service_client();
-        Self { blob_service }
+        Ok(Self { blob_service })
     }
 
     fn convert_error<T>(e: Box<dyn Error + Send + Sync>) -> OAError<T>
@@ -207,31 +210,12 @@ pub struct BlobObjectAccess {
 }
 
 impl BlobObjectAccess {
-    pub fn new(bucket: &str, credentials: ObjectAccessCredentials) -> anyhow::Result<Self> {
-        let (storage_account_client, profile) = match credentials {
-            ObjectAccessCredentials::Profile { profile } => {
-                let storage_client = match get_azure_storage_client(profile.clone()) {
-                    Ok(val) => val,
-                    Err(err) => {
-                        return Err(anyhow!(err.to_string()));
-                    }
-                };
-                (storage_client, profile)
-            }
-            ObjectAccessCredentials::Key {
-                access_key_id,
-                secret_access_key,
-            } => {
-                let storage_client =
-                    match get_azure_storage_client_from_key(&access_key_id, &secret_access_key) {
-                        Ok(val) => val,
-                        Err(err) => {
-                            return Err(anyhow!(err));
-                        }
-                    };
-                (storage_client, None)
-            }
-            ObjectAccessCredentials::ManagedCredentials => todo!(),
+    pub async fn new(bucket: &str, credentials: BlobCredentials) -> Result<Self> {
+        let storage_account_client = get_azure_storage_client(credentials.clone()).await?;
+        let credentials_profile = if let BlobCredentials::Profile(profile) = credentials {
+            Some(profile)
+        } else {
+            None
         };
         let container_client = storage_account_client.as_container_client(bucket);
 
@@ -240,7 +224,7 @@ impl BlobObjectAccess {
             access_stats: Default::default(),
             outstanding_ops: Default::default(),
             bucket: bucket.to_string(),
-            credentials_profile: profile,
+            credentials_profile,
         })
     }
 
@@ -454,17 +438,59 @@ impl ObjectAccessTrait for BlobObjectAccess {
 // Creation of a BlobObjectAccess object with invalid credentials can cause a crash as the azure sdk
 // calls unwrap() while decoding the credentials. To avoid this, we validate the credentials
 // before passing it to the azure sdk.
-fn validate_azure_key(azure_key: &str) -> anyhow::Result<()> {
+fn validate_azure_key(azure_key: &str) -> Result<()> {
     match base64::decode(&azure_key) {
         Ok(_) => Ok(()),
-        Err(err) => Err(anyhow!(format!("Invalid credentials: {:?}", err))),
+        Err(err) => Err(anyhow!("Invalid credentials: {:?}", err)),
     }
+}
+
+async fn get_azure_storage_client_with_managed_key_profile(
+    profile: String,
+) -> Result<Arc<StorageClient>> {
+    let ini_file = get_credentials_file()?;
+
+    let azure_account = match ini_file.get_from(Some(&profile), "AZURE_ACCOUNT") {
+        None => {
+            return Err(anyhow!(
+                "AZURE_ACCOUNT not found in {:?} profile in ~/.azure/credentials file.",
+                profile
+            ));
+        }
+        Some(azure_account) => azure_account,
+    };
+
+    get_azure_storage_client_with_managed_key(azure_account).await
+}
+
+async fn get_azure_storage_client_with_managed_key(
+    azure_account: &str,
+) -> Result<Arc<StorageClient>> {
+    // azure-sdk-for-net checks for an optional env variable "IDENTITY_HEADER" and calls unwrap on
+    // it. Until this bug is fixed, we have to workaround it by setting this variable.
+    // See: https://github.com/Azure/azure-sdk-for-rust/issues/420
+    env::set_var("IDENTITY_HEADER", "");
+
+    let http_client = azure_core::new_http_client();
+
+    // There is a new AutoRefreshingTokenCredential wrapper in the repo that has not been released
+    // yet. Once it is released, we should consider using it.
+    // See: https://github.com/Azure/azure-sdk-for-rust/pull/673
+    let creds = ImdsManagedIdentityCredential {};
+
+    let bearer_token = creds.get_token("https://storage.azure.com/").await?;
+    Ok(StorageAccountClient::new_bearer_token(
+        http_client.clone(),
+        azure_account,
+        bearer_token.token.secret(),
+    )
+    .as_storage_client())
 }
 
 fn get_azure_storage_client_from_key(
     azure_account: &str,
     azure_key: &str,
-) -> anyhow::Result<Arc<StorageClient>> {
+) -> Result<Arc<StorageClient>> {
     let http_client = azure_core::new_http_client();
     validate_azure_key(azure_key)?;
 
@@ -474,7 +500,7 @@ fn get_azure_storage_client_from_key(
     )
 }
 
-fn get_azure_storage_client_from_env() -> anyhow::Result<Arc<StorageClient>> {
+fn get_azure_storage_client_from_env() -> Result<Arc<StorageClient>> {
     let http_client = azure_core::new_http_client();
     let storage_client = match env::var("AZURE_CONNECTION_STRING") {
         Ok(connection_string) => {
@@ -493,10 +519,7 @@ fn get_azure_storage_client_from_env() -> anyhow::Result<Arc<StorageClient>> {
 
     Ok(storage_client)
 }
-
-fn get_azure_storage_client_from_file(
-    credentials_profile: Option<String>,
-) -> anyhow::Result<Arc<StorageClient>> {
+fn get_credentials_file() -> Result<Ini> {
     let home_dir = dirs_next::home_dir();
     if home_dir.is_none() {
         return Err(anyhow!("Unable to determine home directory."));
@@ -507,57 +530,85 @@ fn get_azure_storage_client_from_file(
 
     let credentials_file = file_path.to_str().unwrap();
 
-    let http_client = azure_core::new_http_client();
+    trace!("Reading credentials from {}", credentials_file);
     match fs::metadata(credentials_file) {
         Ok(file) => {
             if !file.is_file() {
-                return Err(anyhow!(format!(
+                return Err(anyhow!(
                     "credentials file {} is not a regular file",
                     credentials_file
-                )));
+                ));
             }
         }
         Err(err) => {
-            return Err(anyhow!(format!(
+            return Err(anyhow!(
                 "credentials file {} not found. {:?}",
-                credentials_file, err
-            )));
+                credentials_file,
+                err
+            ));
         }
     }
 
-    let ini_file = ini::Ini::load_from_file(credentials_file)?;
-    let azure_account = match ini_file.get_from(credentials_profile.clone(), "AZURE_ACCOUNT") {
+    Ok(ini::Ini::load_from_file(credentials_file)?)
+}
+
+fn get_azure_storage_client_from_file(credentials_profile: String) -> Result<Arc<StorageClient>> {
+    let ini_file = get_credentials_file()?;
+
+    let azure_account = match ini_file.get_from(Some(credentials_profile.clone()), "AZURE_ACCOUNT")
+    {
         None => {
-            return Err(anyhow!(format!(
-                "AZURE_ACCOUNT not found in {:?} profile in config file {}",
-                credentials_profile, credentials_file
-            )));
+            return Err(anyhow!(
+                "AZURE_ACCOUNT not found in {:?} profile in ~/.azure/credentials file.",
+                credentials_profile
+            ));
         }
         Some(azure_account) => azure_account,
     };
-    let azure_key = match ini_file.get_from(credentials_profile.clone(), "AZURE_KEY") {
+    let azure_key = match ini_file.get_from(Some(credentials_profile.clone()), "AZURE_KEY") {
         None => {
-            return Err(anyhow!(format!(
-                "AZURE_KEY not found in {:?} profile in config file {}",
-                credentials_profile, credentials_file
-            )));
+            return Err(anyhow!(
+                "AZURE_KEY not found in {:?} profile in ~/.azure/credentials file",
+                credentials_profile
+            ));
         }
         Some(azure_key) => azure_key,
     };
 
     validate_azure_key(azure_key)?;
 
+    let http_client = azure_core::new_http_client();
     Ok(
         StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
             .as_storage_client(),
     )
 }
 
-fn get_azure_storage_client(
-    credentials_profile: Option<String>,
-) -> Result<Arc<StorageClient>, Box<dyn Error>> {
-    match get_azure_storage_client_from_env() {
-        Ok(storage_client) => Ok(storage_client),
-        Err(_) => Ok(get_azure_storage_client_from_file(credentials_profile)?),
+/// Create a StorageClient after getting credentials the following sources in order:
+/// 1. Environment variables
+/// 2. ~/.azure/credentials file
+/// 3. managed identities.
+/// Once credentials have been successfully obtained from a source, we do not try the rest of the
+/// sources even if the credentials are invalid.
+async fn get_azure_storage_client_automatic() -> Result<Arc<StorageClient>> {
+    get_azure_storage_client_from_env()
+        .or_else(|_| get_azure_storage_client_from_file("default".to_string()))
+        .or(get_azure_storage_client_with_managed_key_profile("default".to_string()).await)
+}
+
+async fn get_azure_storage_client(credentials: BlobCredentials) -> Result<Arc<StorageClient>> {
+    match credentials {
+        BlobCredentials::Profile(profile) => Ok(get_azure_storage_client_from_file(profile)?),
+        BlobCredentials::Key {
+            azure_account,
+            azure_key,
+        } => Ok(get_azure_storage_client_from_key(
+            &azure_account,
+            &azure_key,
+        )?),
+        BlobCredentials::ManagedCredentials { azure_account } => {
+            Ok(get_azure_storage_client_with_managed_key(&azure_account).await?)
+        }
+        BlobCredentials::Automatic => Ok(get_azure_storage_client_automatic().await?),
     }
 }

@@ -148,7 +148,7 @@ impl PoolOwnerPhys {
         format!("zfs/{}/owner", id)
     }
 
-    async fn get(object_access: &ObjectAccess, id: PoolGuid) -> anyhow::Result<Self> {
+    async fn get(object_access: &ObjectAccess, id: PoolGuid) -> Result<Self> {
         let buf = object_access
             .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;

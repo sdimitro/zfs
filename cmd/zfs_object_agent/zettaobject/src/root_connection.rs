@@ -26,8 +26,8 @@ use crate::access_stats::StatMapValue;
 use crate::base_types::*;
 use crate::features::FeatureError;
 use crate::object_access::ObjectAccess;
-use crate::object_access::ObjectAccessCredentials;
 use crate::object_access::ObjectAccessProtocol;
+use crate::object_access::S3Credentials;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
@@ -96,18 +96,20 @@ struct ObjectAccessRequest {
     credentials_profile: Option<String>,
 }
 impl ObjectAccessRequest {
-    fn object_access(&self) -> Result<Arc<ObjectAccess>> {
+    async fn object_access(self) -> Result<Arc<ObjectAccess>> {
         ObjectAccess::new(
             ObjectAccessProtocol::S3 {
-                endpoint: self.endpoint.clone(),
-                region: self.region.clone(),
+                endpoint: self.endpoint,
+                region: self.region,
+                credentials: match self.credentials_profile {
+                    Some(profile) => S3Credentials::Profile(profile),
+                    None => S3Credentials::Automatic,
+                },
             },
-            self.bucket.clone(),
-            ObjectAccessCredentials::Profile {
-                profile: self.credentials_profile.clone(),
-            },
+            self.bucket,
             self.readonly,
         )
+        .await
     }
 }
 
@@ -150,7 +152,7 @@ impl RootConnectionState {
 
             let request: CreatePoolRequest = nvpair::from_nvlist(&nvl)?;
             info!("got {:?}", request);
-            let object_access = request.object_access.object_access()?;
+            let object_access = request.object_access.object_access().await?;
             let result = match Pool::create(&object_access, &request.name, request.id.guid).await {
                 Ok(_) => Ok(()),
                 Err(e) => Err(FailureMessage::new(e)),
@@ -196,7 +198,7 @@ impl RootConnectionState {
                 Checkpoint,
             }
 
-            let object_access = request.object_access.object_access()?;
+            let object_access = request.object_access.object_access().await?;
             let result = match Pool::open(
                 object_access,
                 request.id.guid,
@@ -575,7 +577,7 @@ impl RootConnectionState {
             }
             let request: ResumeDestroyPoolRequest = nvpair::from_nvlist(&nvl)?;
             debug!("got {:?}", request);
-            let object_access = request.object_access.object_access()?;
+            let object_access = request.object_access.object_access().await?;
             let result = pool_destroy::resume_destroy(object_access, request.guid)
                 .await
                 .map_err(FailureMessage::new);

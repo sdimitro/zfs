@@ -7,6 +7,7 @@ use std::time::Instant;
 use std::time::SystemTime;
 
 use anyhow::Context;
+use anyhow::Result;
 use lazy_static::lazy_static;
 use log::debug;
 use log::error;
@@ -50,7 +51,7 @@ impl HeartbeatPhys {
         format!("zfs/agents/{}", id)
     }
 
-    pub async fn get(object_access: &ObjectAccess, id: Uuid) -> anyhow::Result<Self> {
+    pub async fn get(object_access: &ObjectAccess, id: Uuid) -> Result<Self> {
         let buf = object_access
             .get_object(Self::key(id), ObjectAccessOpType::MetadataGet)
             .await?;

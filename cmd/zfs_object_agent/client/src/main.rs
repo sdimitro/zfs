@@ -36,13 +36,14 @@ use zettacache::base_types::*;
 use zettaobject::access_stats::ObjectAccessOpType;
 use zettaobject::base_types::*;
 use zettaobject::data_object::DataObject;
+use zettaobject::object_access::BlobCredentials;
 use zettaobject::object_access::BucketAccess;
-use zettaobject::object_access::ObjectAccessCredentials;
 use zettaobject::Pool;
 mod client;
 use itertools::Itertools;
 use zettaobject::object_access::ObjectAccess;
 use zettaobject::object_access::ObjectAccessProtocol;
+use zettaobject::object_access::S3Credentials;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
@@ -438,7 +439,7 @@ async fn do_dump_object(
     };
 }
 
-fn get_object_access(
+async fn get_object_access(
     endpoint: &str,
     region: &str,
     bucket: &str,
@@ -447,15 +448,13 @@ fn get_object_access(
     aws_secret_access_key: Option<&str>,
 ) -> Arc<ObjectAccess> {
     let credentials = match aws_access_key_id {
-        None => ObjectAccessCredentials::Profile {
-            profile: Some(profile.to_string()),
-        },
-        Some(access_id) =>
+        None => S3Credentials::Profile(profile.to_string()),
+        Some(aws_access_key_id) =>
         // If access_id is specified, aws_secret_access_key should also be specified.
         {
-            ObjectAccessCredentials::Key {
-                access_key_id: access_id.to_string(),
-                secret_access_key: aws_secret_access_key.unwrap().to_string(),
+            S3Credentials::Key {
+                aws_access_key_id: aws_access_key_id.to_string(),
+                aws_secret_access_key: aws_secret_access_key.unwrap().to_string(),
             }
         }
     };
@@ -463,18 +462,21 @@ fn get_object_access(
         ObjectAccessProtocol::S3 {
             endpoint: endpoint.to_string(),
             region: region.to_string(),
+            credentials,
         },
         bucket.to_string(),
-        credentials,
         false,
     )
+    .await
     .unwrap()
 }
 
 async fn do_blob(bucket: String, profile: String) -> Result<(), Box<dyn Error>> {
-    let credentials_profile = Some(profile);
     let key = "blob2.txt".to_string();
-    let bucket_access = BucketAccess::new(ObjectAccessProtocol::Blob, credentials_profile.clone())?;
+    let bucket_access = BucketAccess::new(ObjectAccessProtocol::Blob {
+        credentials: BlobCredentials::Profile(profile.clone()),
+    })
+    .await?;
     let buckets = bucket_access.list_buckets().await;
     println!("List containers {:?}", buckets);
     if !buckets.contains(&bucket) {
@@ -482,13 +484,13 @@ async fn do_blob(bucket: String, profile: String) -> Result<(), Box<dyn Error>> 
     }
 
     let object_access = ObjectAccess::new(
-        ObjectAccessProtocol::Blob,
-        bucket,
-        ObjectAccessCredentials::Profile {
-            profile: credentials_profile.clone(),
+        ObjectAccessProtocol::Blob {
+            credentials: BlobCredentials::Profile(profile.clone()),
         },
+        bucket,
         false,
-    )?;
+    )
+    .await?;
 
     let content = "I want to go to azure".as_bytes().to_vec();
     object_access
@@ -592,7 +594,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &cli.profile,
         cli.aws_access_key_id.as_deref(),
         cli.aws_secret_access_key.as_deref(),
-    );
+    )
+    .await;
 
     match cli.command {
         Commands::S3Rusoto => do_s3_rusoto().await?,

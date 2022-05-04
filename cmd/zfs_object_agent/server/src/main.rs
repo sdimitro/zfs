@@ -10,6 +10,9 @@ use util::writeln_stderr;
 use util::TrackingAllocator;
 use util::ALLOCATOR_PRINT_MIN_ALLOCS;
 use util::ALLOCATOR_PRINT_MIN_BYTES;
+use zettaobject::object_access::BlobCredentials;
+use zettaobject::object_access::ObjectAccessProtocol;
+use zettaobject::object_access::S3Credentials;
 use zettaobject::test_connectivity;
 
 #[global_allocator]
@@ -78,55 +81,78 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// test connectivity
-    #[clap(alias = "test_connectivity")]
-    TestConnectivity {
+    /// test connectivity s3
+    #[clap(aliases = &["test_connectivity", "test-connectivity"])]
+    TestConnectivityS3 {
         /// S3 endpoint
-        #[clap(short = 'e', long, required_if_eq("protocol", "s3"))]
-        endpoint: Option<String>,
+        #[clap(short = 'e', long)]
+        endpoint: String,
 
         /// S3 region
-        #[clap(short = 'r', long, required_if_eq("protocol", "s3"))]
-        region: Option<String>,
+        #[clap(short = 'r', long)]
+        region: String,
 
         /// S3 bucket
         #[clap(short = 'b', long)]
         bucket: String,
 
-        /// Object Storage protocol <s3|blob>
-        #[clap(
-            short = 'p',
-            long,
-            default_value = "s3",
-            possible_values = ["s3", "blob"],
-        )]
-        protocol: String,
-
         /// AWS access key id
         #[clap(
             short = 'i',
             long,
-            aliases = &["aws_access_key_id", "aws-access-key-id"],
-            requires = "secret-access-key",
-            required_unless_present = "instance-profile",
-            conflicts_with = "instance-profile"
+            alias = "aws_access_key_id",
+            requires = "aws-secret-access-key",
+            required_unless_present = "aws-instance-profile",
+            conflicts_with = "aws-instance-profile"
         )]
-        access_key_id: Option<String>,
+        aws_access_key_id: Option<String>,
 
         /// AWS secret access key
         #[clap(
             short = 's',
             long,
-            aliases = &["aws_secret_access_key", "aws-secret-access-key"],
-            requires = "access-key-id",
-            required_unless_present = "instance-profile",
-            conflicts_with = "instance-profile"
+            alias = "aws_secret_access_key",
+            requires = "aws-access-key-id",
+            required_unless_present = "aws-instance-profile",
+            conflicts_with = "aws-instance-profile"
         )]
-        secret_access_key: Option<String>,
+        aws_secret_access_key: Option<String>,
 
-        /// Use AWS instance profile
-        #[clap(long, aliases = &["aws_instance_profile", "aws-instance-profile"])]
-        instance_profile: bool,
+        /// Use IAM instance profile
+        #[clap(short = 'm', long, alias = "aws_instance_profile")]
+        aws_instance_profile: bool,
+    },
+    /// test connectivity blob
+    TestConnectivityBlob {
+        /// Azure-Blob endpoint
+        #[clap(short = 'e', long)]
+        endpoint: Option<String>,
+
+        /// Azure-Blob bucket (a.k.a container)
+        #[clap(short = 'b', long)]
+        bucket: String,
+
+        /// Azure-Blob account name
+        #[clap(short = 'a', long)]
+        azure_account: String,
+
+        /// Azure-Blob secret key
+        #[clap(
+            short = 's',
+            long,
+            required_unless_present = "managed-identity",
+            conflicts_with = "managed-identity"
+        )]
+        azure_key: Option<String>,
+
+        /// Use managed identity for Azure-Blob
+        #[clap(
+            short = 'm',
+            long,
+            required_unless_present = "azure-key",
+            conflicts_with = "azure-key"
+        )]
+        managed_identity: bool,
     },
 }
 
@@ -152,25 +178,58 @@ fn main() {
         setup_logging(cli.logging);
     }
 
-    match cli.command {
-        Some(Commands::TestConnectivity {
-            endpoint,
-            region,
-            bucket,
-            protocol,
-            access_key_id,
-            secret_access_key,
-            instance_profile,
-        }) => test_connectivity::test_connectivity(
-            endpoint,
-            region,
-            bucket,
-            protocol,
-            access_key_id,
-            secret_access_key,
-            instance_profile,
-        ),
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .thread_name("zoa")
+        .build()
+        .unwrap();
 
+    match cli.command {
+        Some(Commands::TestConnectivityS3 {
+            endpoint,
+            region,
+            bucket,
+            aws_access_key_id,
+            aws_secret_access_key,
+            aws_instance_profile,
+        }) => {
+            let protocol = ObjectAccessProtocol::S3 {
+                endpoint,
+                region,
+                credentials: if aws_instance_profile {
+                    S3Credentials::InstanceProfile
+                } else {
+                    S3Credentials::Key {
+                        aws_access_key_id: aws_access_key_id.unwrap(),
+                        aws_secret_access_key: aws_secret_access_key.unwrap(),
+                    }
+                },
+            };
+            runtime.block_on(async move {
+                test_connectivity::test_connectivity(protocol, bucket).await
+            });
+        }
+        Some(Commands::TestConnectivityBlob {
+            endpoint: _, // XXX DLPX-80615
+            bucket,
+            azure_account,
+            azure_key,
+            managed_identity,
+        }) => {
+            let protocol = ObjectAccessProtocol::Blob {
+                credentials: if managed_identity {
+                    BlobCredentials::ManagedCredentials { azure_account }
+                } else {
+                    BlobCredentials::Key {
+                        azure_account,
+                        azure_key: azure_key.unwrap(),
+                    }
+                },
+            };
+            runtime.block_on(async move {
+                test_connectivity::test_connectivity(protocol, bucket).await
+            });
+        }
         None => {
             // This has to be called after setting up tunables.  Allocations
             // that happen before this call will use the defaults hard-coded in
@@ -182,12 +241,6 @@ fn main() {
                 GIT_VERSION,
                 chrono::Local::now().format("%Z (%:z)")
             );
-
-            let runtime = tokio::runtime::Builder::new_multi_thread()
-                .enable_all()
-                .thread_name("zoa")
-                .build()
-                .unwrap();
 
             runtime.spawn(async {
                 let mut interval = tokio::time::interval(*ALLOCATOR_PRINT_DURATION);
@@ -238,40 +291,46 @@ mod test {
     }
 
     #[test]
-    fn log_conflict() {
-        neg("zfs_object_agent -l -v");
-        neg("zfs_object_agent -l --output-file foo");
-    }
-
-    #[test]
-    fn test_connectivity_missing() {
-        neg("zfs_object_agent test_connectivity");
-        neg("zfs_object_agent test-connectivity");
-        neg("zfs_object_agent test-connectivity -e foo -r bar -b baz");
-    }
-
-    #[test]
-    fn test_connectivity_blob() {
+    fn test_connectivity_blob_key() {
         let cli = pos(
-            "zfs_object_agent test_connectivity -e foo -r bar -b baz -p blob --instance-profile",
+            "zfs_object_agent test-connectivity-blob -e foo -b bar -a azure-account -s super-secret-key",
         );
         match cli.command {
-            Some(Commands::TestConnectivity {
+            Some(Commands::TestConnectivityBlob {
                 endpoint,
-                region,
                 bucket,
-                protocol,
-                access_key_id,
-                secret_access_key,
-                instance_profile,
+                azure_account,
+                azure_key,
+                managed_identity,
             }) => {
                 assert_eq!(endpoint.unwrap(), "foo");
-                assert_eq!(region.unwrap(), "bar");
-                assert_eq!(&bucket, "baz");
-                assert_eq!(&protocol, "blob");
-                assert!(access_key_id.is_none());
-                assert!(secret_access_key.is_none());
-                assert!(instance_profile);
+                assert_eq!(&bucket, "bar");
+                assert_eq!(azure_account, "azure-account");
+                assert_eq!(azure_key.unwrap(), "super-secret-key");
+                assert!(!managed_identity);
+            }
+            _ => panic!("wrong subcommand"),
+        }
+    }
+
+    #[test]
+    fn test_connectivity_blob_managed() {
+        let cli = pos(
+            "zfs_object_agent test-connectivity-blob -e foo -b bar -a azure-account --managed-identity",
+        );
+        match cli.command {
+            Some(Commands::TestConnectivityBlob {
+                endpoint,
+                bucket,
+                azure_account,
+                azure_key,
+                managed_identity,
+            }) => {
+                assert_eq!(endpoint.unwrap(), "foo");
+                assert_eq!(&bucket, "bar");
+                assert_eq!(azure_account, "azure-account");
+                assert!(azure_key.is_none());
+                assert!(managed_identity);
             }
             _ => panic!("wrong subcommand"),
         }
@@ -279,24 +338,23 @@ mod test {
 
     #[test]
     fn test_connectivity_default_protocol() {
-        let cli = pos("zfs_object_agent test_connectivity -e foo -r bar -b baz --instance-profile");
+        let cli =
+            pos("zfs_object_agent test-connectivity -e foo -r bar -b baz --aws-instance-profile");
         match cli.command {
-            Some(Commands::TestConnectivity {
+            Some(Commands::TestConnectivityS3 {
                 endpoint,
                 region,
                 bucket,
-                protocol,
-                access_key_id,
-                secret_access_key,
-                instance_profile,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_instance_profile,
             }) => {
-                assert_eq!(endpoint.unwrap(), "foo");
-                assert_eq!(region.unwrap(), "bar");
+                assert_eq!(endpoint, "foo");
+                assert_eq!(region, "bar");
                 assert_eq!(&bucket, "baz");
-                assert_eq!(&protocol, "s3");
-                assert!(access_key_id.is_none());
-                assert!(secret_access_key.is_none());
-                assert!(instance_profile);
+                assert!(aws_access_key_id.is_none());
+                assert!(aws_secret_access_key.is_none());
+                assert!(aws_instance_profile);
             }
             _ => panic!("wrong subcommand"),
         }
@@ -304,25 +362,24 @@ mod test {
 
     #[test]
     fn test_connectivity_profile() {
-        let cli =
-            pos("zfs_object_agent test_connectivity -e foo -r bar -b baz -p s3 --instance-profile");
+        let cli = pos(
+            "zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz --aws-instance-profile",
+        );
         match cli.command {
-            Some(Commands::TestConnectivity {
+            Some(Commands::TestConnectivityS3 {
                 endpoint,
                 region,
                 bucket,
-                protocol,
-                access_key_id,
-                secret_access_key,
-                instance_profile,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_instance_profile,
             }) => {
-                assert_eq!(endpoint.unwrap(), "foo");
-                assert_eq!(region.unwrap(), "bar");
+                assert_eq!(endpoint, "foo");
+                assert_eq!(region, "bar");
                 assert_eq!(&bucket, "baz");
-                assert_eq!(&protocol, "s3");
-                assert!(access_key_id.is_none());
-                assert!(secret_access_key.is_none());
-                assert!(instance_profile);
+                assert!(aws_access_key_id.is_none());
+                assert!(aws_secret_access_key.is_none());
+                assert!(aws_instance_profile);
             }
             _ => panic!("wrong subcommand"),
         }
@@ -330,35 +387,59 @@ mod test {
 
     #[test]
     fn test_connectivity_creds() {
-        let cli =
-            pos("zfs_object_agent test_connectivity -p s3 -e foo -r bar -b baz -i abcd -s 1234");
+        let cli = pos("zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz -i abcd -s 1234");
         match cli.command {
-            Some(Commands::TestConnectivity {
+            Some(Commands::TestConnectivityS3 {
                 endpoint,
                 region,
                 bucket,
-                protocol,
-                access_key_id,
-                secret_access_key,
-                instance_profile,
+                aws_access_key_id,
+                aws_secret_access_key,
+                aws_instance_profile,
             }) => {
-                assert_eq!(endpoint.unwrap(), "foo");
-                assert_eq!(region.unwrap(), "bar");
+                assert_eq!(endpoint, "foo");
+                assert_eq!(region, "bar");
                 assert_eq!(&bucket, "baz");
-                assert_eq!(&protocol, "s3");
-                assert_eq!(access_key_id.unwrap(), "abcd");
-                assert_eq!(secret_access_key.unwrap(), "1234");
-                assert!(!instance_profile);
+                assert_eq!(aws_access_key_id.unwrap(), "abcd");
+                assert_eq!(aws_secret_access_key.unwrap(), "1234");
+                assert!(!aws_instance_profile);
             }
             _ => panic!("wrong subcommand"),
         }
     }
 
     #[test]
-    fn test_connectivity_neg() {
-        neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd");
-        neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd -s 1234 --instance_profile");
-        neg("zfs_object_agent test_connectivity -e foo -r bar -b baz -i abcd --instance_profile");
+    fn test_connectivity_s3_missing_params() {
+        neg("zfs_object_agent test-connectivity-s3");
+        neg("zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz");
+        neg("zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz -i abcd");
+        neg("zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz -s 1234");
+    }
+
+    #[test]
+    fn test_connectivity_s3_param_conflicts() {
+        neg("zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz -i abcd -s 1234 --aws-instance-profile");
+        neg("zfs_object_agent test-connectivity-s3 -e foo -r bar -b baz -i abcd --aws-instance-profile");
+    }
+
+    #[test]
+    fn test_connectivity_blob_missing_params() {
+        neg("zfs_object_agent test-connectivity-blob");
+        neg("zfs_object_agent test-connectivity-blob -b baz");
+        neg("zfs_object_agent test-connectivity-blob -e foo -b baz -a abcd");
+        neg("zfs_object_agent test-connectivity-blob -e foo -b baz -s abcd");
+        neg("zfs_object_agent test-connectivity-blob -e foo -b baz --managed_identity");
+    }
+
+    #[test]
+    fn test_connectivity_blob_param_conflicts() {
+        neg("zfs_object_agent test-connectivity-blob -e foo -b baz -a abcd -s 1234 --managed_identity");
+    }
+
+    #[test]
+    fn log_conflict() {
+        neg("zfs_object_agent -l -v");
+        neg("zfs_object_agent -l --output-file foo");
     }
 }
 
