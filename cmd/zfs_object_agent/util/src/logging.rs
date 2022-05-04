@@ -221,8 +221,9 @@ fn setup_console_logging(verbosity: u64) {
                     ),
                 ),
         )
-        // rusoto_core::request is very chatty when set to debug. So, set it to info.
+        // These are too chatty by default, so increase their minimum log level.
         .logger(Logger::builder().build("rusoto_core::request", LevelFilter::Info))
+        .logger(Logger::builder().build("want", LevelFilter::Debug))
         .build(
             Root::builder()
                 .appender("memory")
@@ -254,8 +255,9 @@ fn setup_logfile(verbosity: u64, logfile: &str) {
                     ),
                 ),
         )
-        // rusoto_core::request is very chatty when set to debug. So, set it to info.
+        // These are too chatty by default, so increase their minimum log level.
         .logger(Logger::builder().build("rusoto_core::request", LevelFilter::Info))
+        .logger(Logger::builder().build("want", LevelFilter::Debug))
         .build(
             Root::builder()
                 .appender("memory")

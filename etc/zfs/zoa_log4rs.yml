@@ -108,6 +108,8 @@ root:
     - memory
 
 loggers:
-  # "rusoto_core::request" is very chatty when set to debug.
+  # These are too chatty; increase their log level
   rusoto_core::request:
     level: info
+  want:
+    level: debug
