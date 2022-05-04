@@ -74,7 +74,7 @@ impl StatCount {
         let nice_value = if value == 0.0 || (scale.is_none() && value < 999.0) {
             self.0.load(Relaxed).to_string()
         } else {
-            nice_number_count(value)
+            nice_number_count(value).to_string()
         };
 
         // right aligned for a width of 6, padded with 2 spaces
@@ -117,14 +117,13 @@ impl StatBytes {
         if let Some(s) = scale {
             value *= s;
         }
-        let nice_value = if value < 1.0 {
+        if value < 1.0 {
             // Intentionally avoid displaying "0B" when 0
-            String::from("0")
+            write_stdout!("{:>6}  ", "0");
         } else {
-            nice_p2size(value.round().to_u64().unwrap())
-        };
-        // right aligned for a width of 6, padded with 2 spaces
-        write_stdout!("{:>6}  ", nice_value);
+            // right aligned for a width of 6, padded with 2 spaces
+            write_stdout!("{:>6}  ", nice_p2size(value.round().to_u64().unwrap()));
+        }
     }
 }
 
