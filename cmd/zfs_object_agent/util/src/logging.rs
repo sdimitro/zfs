@@ -1,4 +1,5 @@
 use std::collections::VecDeque;
+use std::fmt::Write as FmtWrite;
 use std::fs::OpenOptions;
 use std::io::BufWriter;
 use std::io::Write;
@@ -53,6 +54,8 @@ tunable! {
     static ref MAX_LOG_MESSAGES: usize = 100_000;
     static ref PANIC_LOG_FOLDER: String = "/var/log/zoa".to_string();
     pub static ref SUPER_EXPENSIVE_TRACE: AtomicBool = AtomicBool::new(false);
+    static ref MIN_MESSAGE_CAPACITY: usize = 64;
+    static ref MAX_REUSEABLE_MESSAGE_CAPACITY: usize = 256;
 }
 
 lazy_static! {
@@ -91,18 +94,21 @@ pub struct BufferAppender {}
 
 impl Append for BufferAppender {
     fn append(&self, record: &Record) -> anyhow::Result<()> {
-        let message = with_alloctag_hf("logging BufferAppender", || {
-            format!(
-                "[{}] {}",
-                record.target(),
-                record.args()
-            )
-        });
-
+        const TAG: &str = "logging BufferAppender";
         if let Ok(mut messages) = LOG_MESSAGES.lock() {
+            let mut reuse = None;
             while messages.len() >= *MAX_LOG_MESSAGES {
-                messages.pop_front();
+                reuse = Some(messages.pop_front().unwrap().message);
             }
+            let mut message = match reuse {
+                Some(reuse) if reuse.capacity() <= *MAX_REUSEABLE_MESSAGE_CAPACITY => reuse,
+                _ => with_alloctag_hf(TAG, || String::with_capacity(*MIN_MESSAGE_CAPACITY)),
+            };
+            message.truncate(0);
+            with_alloctag_hf(TAG, || {
+                write!(message, "[{}] {}", record.target(), record.args())
+            })?;
+
             messages.push_back(LogMessage {
                 date: chrono::Utc::now(),
                 level: record.level(),
