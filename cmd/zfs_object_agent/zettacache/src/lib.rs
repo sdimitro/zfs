@@ -13,6 +13,7 @@ mod block_based_log;
 mod checkpoint;
 mod features;
 mod index;
+mod open;
 mod pool_id;
 mod size_histogram;
 mod slab_allocator;
@@ -25,6 +26,7 @@ pub use zcachedb::DumpSlabsOptions;
 pub use zcachedb::DumpStructuresOptions;
 pub use zcachedb::ZettaCacheDBCommand;
 
+pub use crate::open::CacheOpenMode;
 pub use crate::zettacache::InsertSource;
 pub use crate::zettacache::LookupResponse;
 pub use crate::zettacache::ZettaCache;

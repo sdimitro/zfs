@@ -24,9 +24,9 @@ pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
 /// State stored at the beginning of every disk
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct SuperblockPhys {
-    primary: Option<PrimaryPhys>,
-    disk: DiskId,
-    guid: u64,
+    pub primary: Option<PrimaryPhys>,
+    pub disk: DiskId,
+    pub guid: u64,
 }
 
 /// Subset of SuperblockPhys that's needed to get the feature flags.

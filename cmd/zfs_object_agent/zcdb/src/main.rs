@@ -1,6 +1,7 @@
 use clap::Parser;
 use clap::Subcommand;
 use git_version::git_version;
+use zettacache::CacheOpenMode;
 use zettacache::DumpSlabsOptions;
 use zettacache::DumpStructuresOptions;
 use zettacache::ZettaCacheDBCommand;
@@ -19,8 +20,19 @@ static GIT_VERSION: &str = git_version!(
 #[clap(propagate_version = true)]
 struct Cli {
     /// File/device to use for ZettaCache
-    #[clap(short = 'c', long, value_name = "PATH", required = true)]
-    cache_device: Vec<String>,
+    #[clap(short = 'c', long, value_name = "PATH")]
+    cache_device: Option<Vec<String>>,
+
+    /// Directory path to use for importing devices that are part of the
+    /// ZettaCache
+    #[clap(
+        short = 'd',
+        long,
+        value_name = "DIR",
+        conflicts_with = "cache-device",
+        default_value = "/dev/disk/by-id/"
+    )]
+    cache_device_dir: String,
 
     /// Sets the verbosity level for logging and debugging
     #[clap(short = 'v', long, parse(from_occurrences), global = true)]
@@ -68,8 +80,8 @@ enum Commands {
 
     /// dump slab info
     Slabs {
-        /// Sets the level of detail
-        #[clap(short = 'd', parse(from_occurrences))]
+        /// Sets the level of information
+        #[clap(short = 'i', parse(from_occurrences))]
         detail: u64,
     },
 
@@ -98,11 +110,10 @@ async fn main() -> Result<(), anyhow::Error> {
     util::setup_logging(cli.verbose, cli.log_file.as_deref(), None, true);
 
     // Set up cache paths
-    let paths = cli
-        .cache_device
-        .iter()
-        .map(AsRef::as_ref)
-        .collect::<Vec<_>>();
+    let cache_mode = match cli.cache_device {
+        Some(paths) => CacheOpenMode::new_device_list(paths),
+        None => CacheOpenMode::new_device_dir(cli.cache_device_dir),
+    };
 
     match cli.command {
         Commands::Logs {
@@ -123,25 +134,27 @@ async fn main() -> Result<(), anyhow::Error> {
                         .rebalance_log_raw(rebalance_log_raw)
                         .atime_histogram(atime_histogram),
                 ),
-                paths,
+                cache_mode,
             )
             .await
         }
         Commands::Superblocks => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, paths).await
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, cache_mode)
+                .await
         }
         Commands::Slabs { detail } => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpSlabs(DumpSlabsOptions { verbosity: detail }),
-                paths,
+                cache_mode,
             )
             .await
         }
         Commands::Space => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, paths).await
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, cache_mode)
+                .await
         }
         Commands::Index => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, paths).await
+            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, cache_mode).await
         }
     }
 }

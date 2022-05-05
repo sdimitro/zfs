@@ -10,6 +10,7 @@ use util::writeln_stderr;
 use util::TrackingAllocator;
 use util::ALLOCATOR_PRINT_MIN_ALLOCS;
 use util::ALLOCATOR_PRINT_MIN_BYTES;
+use zettacache::CacheOpenMode;
 use zettaobject::object_access::BlobCredentials;
 use zettaobject::object_access::ObjectAccessProtocol;
 use zettaobject::object_access::S3Credentials;
@@ -64,12 +65,22 @@ struct Cli {
     config_file: Option<String>,
 
     /// Directory for unix-domain sockets
-    #[clap(short = 'd', long, value_name = "DIR", default_value = "/etc/zfs")]
+    #[clap(short = 'k', long, value_name = "DIR", default_value = "/etc/zfs")]
     socket_dir: String,
 
     /// File/device to use for ZettaCache
-    #[clap(short = 'c', long, value_name = "PATH")]
-    cache_device: Vec<String>,
+    #[clap(
+        short = 'c',
+        long,
+        value_name = "PATH",
+        conflicts_with = "cache-device-dir"
+    )]
+    cache_device: Option<Vec<String>>,
+
+    /// Directory path to use for importing devices that are part of the
+    /// ZettaCache
+    #[clap(short = 'd', long, value_name = "DIR")]
+    cache_device_dir: Option<String>,
 
     /// Clear the cache when it has incompatible features
     #[clap(long)]
@@ -257,9 +268,14 @@ fn main() {
                 }
             });
 
+            let cache_mode = match cli.cache_device {
+                Some(paths) => Some(CacheOpenMode::new_device_list(paths)),
+                None => cli.cache_device_dir.map(CacheOpenMode::new_device_dir),
+            };
+
             match zettaobject::init::start(
                 &cli.socket_dir,
-                cli.cache_device.iter().map(AsRef::as_ref).collect(),
+                cache_mode,
                 cli.clear_incompatible_cache,
                 runtime,
             ) {
@@ -440,6 +456,11 @@ mod test {
     fn log_conflict() {
         neg("zfs_object_agent -l -v");
         neg("zfs_object_agent -l --output-file foo");
+    }
+
+    #[test]
+    fn test_args_neg() {
+        neg("zfs_object_agent -c disk1 -d /dev/");
     }
 }
 

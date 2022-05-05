@@ -29,10 +29,10 @@ pub struct ZCacheDBHandle {
 }
 
 impl ZCacheDBHandle {
-    pub async fn dump_superblocks(paths: Vec<&str>) -> Result<()> {
+    pub async fn dump_superblocks(paths: Vec<String>) -> Result<()> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
-            match Disk::new(path, true) {
+            match Disk::new(&path, true) {
                 Ok(disk) => disks.push(disk),
                 Err(err) => writeln_stderr!("error: {}", err),
             }
@@ -45,10 +45,10 @@ impl ZCacheDBHandle {
         Ok(())
     }
 
-    pub async fn open(paths: Vec<&str>) -> Result<ZCacheDBHandle> {
+    pub async fn open(paths: Vec<String>) -> Result<ZCacheDBHandle> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
-            disks.push(Disk::new(path, true)?);
+            disks.push(Disk::new(&path, true)?);
         }
         let block_access = Arc::new(BlockAccess::new(disks, true));
 

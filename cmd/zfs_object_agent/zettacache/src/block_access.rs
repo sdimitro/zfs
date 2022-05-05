@@ -673,8 +673,7 @@ impl BlockAccess {
         bincode::DefaultOptions::new().with_fixint_encoding()
     }
 
-    /// returns deserialized struct and amount of the buf that was consumed
-    pub fn chunk_from_raw<T: DeserializeOwned>(&self, buf: &[u8]) -> Result<(T, usize)> {
+    pub fn chunk_from_raw_impl<T: DeserializeOwned>(buf: &[u8]) -> Result<(T, usize)> {
         /// Like slice::splitn(), with n==2.  Returns None if the predicate never matches.
         fn split2<T, F: FnMut(&T) -> bool>(slice: &[T], pred: F) -> Option<(&[T], &[T])> {
             let mut split = slice.splitn(2, pred);
@@ -726,10 +725,13 @@ impl BlockAccess {
             EncodeType::Bincode => Self::bincode_options().deserialize(serde_slice)?,
             EncodeType::BincodeFixint => Self::bincode_fixint_options().deserialize(serde_slice)?,
         };
-        Ok((
-            struct_obj,
-            self.round_up_to_sector(buf.len() - remainder_slice.len()),
-        ))
+        Ok((struct_obj, buf.len() - remainder_slice.len()))
+    }
+
+    /// returns deserialized struct and amount of the buf that was consumed
+    pub fn chunk_from_raw<T: DeserializeOwned>(&self, buf: &[u8]) -> Result<(T, usize)> {
+        let (struct_obj, consumed) = BlockAccess::chunk_from_raw_impl(buf)?;
+        Ok((struct_obj, self.round_up_to_sector(consumed)))
     }
 
     /// Return the I/O stats collected as a serialized json string.

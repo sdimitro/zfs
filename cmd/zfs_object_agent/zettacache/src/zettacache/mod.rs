@@ -79,6 +79,7 @@ use crate::slab_allocator::RESERVED_SLABS_PCT;
 use crate::superblock::DiskPhys;
 use crate::superblock::PrimaryPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
+use crate::CacheOpenMode;
 
 #[derive(Debug)]
 struct GhostCacheSizePct(Percent);
@@ -894,10 +895,11 @@ impl ZettaCache {
         index_cache_cap
     }
 
-    pub async fn open(paths: Vec<&str>, clear_incompatible_cache: bool) -> Result<Self> {
+    pub async fn open(mode: CacheOpenMode, clear_incompatible_cache: bool) -> Result<Self> {
+        let paths = mode.device_paths().await?;
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
-            disks.push(Disk::new(path, false)?);
+            disks.push(Disk::new(&path, false)?);
         }
         let block_access = Arc::new(BlockAccess::new(disks, false));
 

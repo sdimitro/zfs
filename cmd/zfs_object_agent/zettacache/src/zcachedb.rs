@@ -1,4 +1,5 @@
 use crate::zettacache::zcdb::ZCacheDBHandle;
+use crate::CacheOpenMode;
 
 // This file and its data structures exists solely to interact with the zcachedb
 // binary generated from the zcdb crate/directory. This way we don't have to
@@ -124,8 +125,9 @@ impl DumpSlabsOptions {
 impl ZettaCacheDBCommand {
     pub async fn issue_command(
         command: ZettaCacheDBCommand,
-        paths: Vec<&str>,
+        mode: CacheOpenMode,
     ) -> Result<(), anyhow::Error> {
+        let paths = mode.device_paths().await?;
         match command {
             ZettaCacheDBCommand::DumpSuperblocks => ZCacheDBHandle::dump_superblocks(paths).await,
             _ => ZettaCacheDBCommand::issue_pool_state_command(command, paths).await,
@@ -134,7 +136,7 @@ impl ZettaCacheDBCommand {
 
     async fn issue_pool_state_command(
         command: ZettaCacheDBCommand,
-        paths: Vec<&str>,
+        paths: Vec<String>,
     ) -> Result<(), anyhow::Error> {
         let mut handle = ZCacheDBHandle::open(paths).await?;
         match command {
