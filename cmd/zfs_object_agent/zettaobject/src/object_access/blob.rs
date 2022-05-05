@@ -99,8 +99,8 @@ impl MaybeFrom<HttpError> for ObjectStoreError {
             HttpError::StatusCode {
                 status: StatusCode::NOT_FOUND,
                 body: _,
-            } => Ok(ObjectStoreError("No such key".to_string())),
-            HttpError::StatusCode { status: _, body } => Ok(ObjectStoreError(body)),
+            } => Ok(ObjectStoreError::NoSuchKey),
+            HttpError::StatusCode { status: _, body } => Ok(ObjectStoreError::Other(body)),
             HttpError::ExecuteRequest(_) => todo!(),
             _ => Err(value),
         }
@@ -341,11 +341,19 @@ impl ObjectAccessTrait for BlobObjectAccess {
                         match blob_client.delete().execute().await {
                             Err(e) => {
                                 debug!("error while deleting: {}", e);
-                                Err(Self::convert_error::<ObjectStoreError>(e))
+                                let err = Self::convert_error::<ObjectStoreError>(e);
+                                if let OAError::RequestError(RequestError::Service(
+                                    ObjectStoreError::NoSuchKey,
+                                )) = err
+                                {
+                                    Ok(None)
+                                } else {
+                                    Err(err)
+                                }
                             }
                             Ok(res) => {
                                 trace!("deleted {} in {}ms", key, begin.elapsed().as_millis());
-                                Ok(res)
+                                Ok(Some(res))
                             }
                         }
                     })

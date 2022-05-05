@@ -112,6 +112,7 @@ typedef struct object_store_free_block {
 
 typedef struct vdev_object_store {
 	vdev_t *vos_vdev;
+	char *vos_protocol;
 	char *vos_endpoint;
 	char *vos_region;
 	char *vos_cred_profile;
@@ -802,8 +803,11 @@ agent_create_pool(vdev_t *vd, vdev_object_store_t *vos)
 		fnvlist_add_string(nv, AGENT_CRED_PROFILE,
 		    vos->vos_cred_profile);
 	}
-	fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
-	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
+	fnvlist_add_string(nv, AGENT_PROTOCOL, vos->vos_protocol);
+	if (vos->vos_endpoint != NULL)
+		fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
+	if (vos->vos_region != NULL)
+		fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
 	zfs_dbgmsg("agent_create_pool(guid=%llu name=%s bucket=%s)",
 	    (u_longlong_t)spa_guid(vd->vdev_spa),
@@ -833,8 +837,11 @@ agent_open_pool(vdev_t *vd, vdev_object_store_t *vos, mode_t mode,
 		fnvlist_add_string(nv, AGENT_CRED_PROFILE,
 		    vos->vos_cred_profile);
 	}
-	fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
-	fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
+	fnvlist_add_string(nv, AGENT_PROTOCOL, vos->vos_protocol);
+	if (vos->vos_endpoint != NULL)
+		fnvlist_add_string(nv, AGENT_ENDPOINT, vos->vos_endpoint);
+	if (vos->vos_region != NULL)
+		fnvlist_add_string(nv, AGENT_REGION, vos->vos_region);
 	fnvlist_add_string(nv, AGENT_BUCKET, vd->vdev_path);
 	fnvlist_add_boolean_value(nv, AGENT_ROLLBACK,
 	    !!(vd->vdev_spa->spa_import_flags & ZFS_IMPORT_CHECKPOINT));
@@ -1899,6 +1906,14 @@ vdev_object_store_socket_open(vdev_t *vd)
 	    (u_longlong_t)vos->vos_version_minor,
 	    (u_longlong_t)vos->vos_version_patch);
 	fnvlist_free(response);
+	if (vos->vos_version_major == 1 && vos->vos_version_minor == 0 &&
+	    strcmp(vos->vos_protocol, "s3") != 0) {
+		zfs_dbgmsg("zfs_object_store_open received version too low for "
+		    "non-s3 protocols");
+		zfs_object_store_close(vos);
+		mutex_exit(&vos->vos_sock_lock);
+		return (ENOTSUP);
+	}
 	if (zfs_flags & ZFS_DEBUG_OBJECT_STORE_SOCKET) {
 		zfs_dbgmsg("SOCKET OPEN(%px): " SOCK_FMT, curthread,
 		    vos->vos_sock);
@@ -2053,23 +2068,30 @@ vdev_object_store_init(spa_t *spa, nvlist_t *nv, void **tsd)
 	    offsetof(object_store_free_block_t, osfb_list_node));
 
 	if (!nvlist_lookup_string(nv,
+	    zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL), &val)) {
+		vos->vos_protocol = kmem_strdup(val);
+	} else {
+		vos->vos_protocol = kmem_strdup("s3");
+	}
+	if (!nvlist_lookup_string(nv,
 	    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), &val)) {
 		vos->vos_endpoint = kmem_strdup(val);
-	} else {
+	} else if (strcmp(vos->vos_protocol, "s3") == 0) {
 		return (SET_ERROR(EINVAL));
 	}
 	if (!nvlist_lookup_string(nv,
 	    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), &val)) {
 		vos->vos_region = kmem_strdup(val);
-	} else {
+	} else if (strcmp(vos->vos_protocol, "s3") == 0) {
 		return (SET_ERROR(EINVAL));
 	}
 	if (!nvlist_lookup_string(nv, ZPOOL_CONFIG_CRED_PROFILE, &val)) {
 		vos->vos_cred_profile = kmem_strdup(val);
 	}
 
-	zfs_dbgmsg("vdev_object_store_init, endpoint=%s region=%s profile=%s",
-	    vos->vos_endpoint, vos->vos_region, vos->vos_cred_profile);
+	zfs_dbgmsg("vdev_object_store_init, protocol=%s endpoint=%s region=%s "
+	    "profile=%s", vos->vos_protocol, vos->vos_endpoint, vos->vos_region,
+	    vos->vos_cred_profile);
 
 	return (0);
 }
@@ -2092,6 +2114,9 @@ vdev_object_store_fini(vdev_t *vd)
 	cv_destroy(&vos->vos_resume_cv);
 	cv_destroy(&vos->vos_outstanding_cv);
 	avl_destroy(&vos->vos_pending_stats_tree);
+	if (vos->vos_protocol != NULL) {
+		kmem_strfree(vos->vos_protocol);
+	}
 	if (vos->vos_endpoint != NULL) {
 		kmem_strfree(vos->vos_endpoint);
 	}
@@ -2312,9 +2337,16 @@ vdev_object_store_config_generate(vdev_t *vd, nvlist_t *nv, boolean_t getstats)
 	vdev_object_store_t *vos = vd->vdev_tsd;
 
 	fnvlist_add_string(nv,
-	    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), vos->vos_endpoint);
-	fnvlist_add_string(nv,
-	    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), vos->vos_region);
+	    zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL), vos->vos_protocol);
+	if (vos->vos_endpoint != NULL) {
+		fnvlist_add_string(nv,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
+		    vos->vos_endpoint);
+	}
+	if (vos->vos_region != NULL) {
+		fnvlist_add_string(nv,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), vos->vos_region);
+	}
 	if (vos->vos_cred_profile != NULL) {
 		fnvlist_add_string(nv, ZPOOL_CONFIG_CRED_PROFILE,
 		    vos->vos_cred_profile);

@@ -1906,7 +1906,7 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 		fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
 
 	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET);
+	    ZFS_PUBLIC_SOCKET, NULL);
 
 	nvpair_t *elem = NULL;
 	while ((elem = nvlist_next_nvpair(resp, elem)) != NULL) {
@@ -2206,7 +2206,7 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 	}
 
 	nvlist_t *resp = zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_ROOT_SOCKET);
+	    ZFS_ROOT_SOCKET, NULL);
 	if (resp == NULL)
 		return (-1);
 

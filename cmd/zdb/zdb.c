@@ -172,6 +172,7 @@ char *endpoint;
 char *region;
 char *bucket;
 char *creds_profile = "default";
+char *protocol;
 zoa_handle_t *zoa_handle;
 
 static void snprintf_blkptr_compact(char *, size_t, const blkptr_t *,
@@ -798,7 +799,8 @@ usage(void)
 	    "\t%1$s [-AdiPv] [-e [-V] [-p <path> ...]] [-U <cache>]\n"
 	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]\n"
 #ifdef HAVE_LIBZOA
-	    "\t%1$s [-AdiPv] [-e [-V] -a <endpoint> -g <region> -B <bucket>\n"
+	    "\t%1$s [-AdiPv] [-e [-V] [-T <protocol>] -a <endpoint> "
+	    "-g <region> -B <bucket>\n"
 	    "\t\t[-f <creds profile>] [-z <zoa logfile>]]\n"
 #endif
 	    "\t\t[<poolname>[/<dataset | objset id>] [<object | range> ...]\n"
@@ -897,6 +899,7 @@ usage(void)
 	(void) fprintf(stderr, "        -p --path==PATH              "
 	    "use one or more with -e to specify path to vdev dir\n");
 #ifdef HAVE_LIBZOA
+	(void) fprintf(stderr, "        -T <protocol> object-store protocol\n");
 	(void) fprintf(stderr, "        -a <endpoint> -- use with "
 	    "-e to specify object-store endpoint\n");
 	(void) fprintf(stderr, "        -g <region> object-store region\n");
@@ -8539,6 +8542,10 @@ make_objectstore_prop(void)
 		usage();
 	}
 
+	// We default to s3 for compatibility's sake
+	if (protocol == NULL)
+		protocol = "s3";
+
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, ZPOOL_CONFIG_PATH, bucket);
 	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
@@ -8547,6 +8554,8 @@ make_objectstore_prop(void)
 	    region);
 	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE),
 	    creds_profile);
+	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL),
+	    protocol);
 
 	return (nv);
 }
@@ -8656,7 +8665,7 @@ main(int argc, char **argv)
 	};
 
 	while ((c = getopt_long(argc, argv,
-	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMNo:Op:PqrRsSt:uU:vVx:XYyZz:",
+	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMNo:Op:pPqrRsSt:TuU:vVx:XYyZz:",
 	    long_options, NULL)) != -1) {
 		switch (c) {
 		case 'b':
@@ -8763,6 +8772,10 @@ main(int argc, char **argv)
 			break;
 		case 'z':
 			zoa_log_file = optarg;
+			objstore = 1;
+			break;
+		case 'T':
+			protocol = optarg;
 			objstore = 1;
 			break;
 #endif
@@ -9114,8 +9127,8 @@ retry_lookup:
 		fatal("can't open '%s': %s", target, strerror(error));
 
 	if (spa != NULL && spa_is_object_based(spa)) {
-		nvlist_t *nvl = zoa_create_connection_nvl(endpoint, region,
-		    bucket, creds_profile);
+		nvlist_t *nvl = zoa_create_connection_nvl(protocol, endpoint,
+		    region, bucket, creds_profile);
 		/*
 		 * We open the pool again here for the debugging
 		 * connection. Rust can't easily expose the same internal

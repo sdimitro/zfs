@@ -259,32 +259,50 @@ is_spare(nvlist_t *config, const char *path)
 }
 
 static nvlist_t *
-make_objstore_vdev(nvlist_t *props, const char *arg)
+make_objstore_vdev(nvlist_t *props, const char *protocol, const char *arg)
 {
 	nvlist_t *vdev = fnvlist_alloc();
 	char *endpoint, *region, *profile;
+	boolean_t s3 = (strcmp(protocol, "s3") == 0);
+	VERIFY(s3 || strcmp(protocol, "blob") == 0);
 	fnvlist_add_string(vdev, ZPOOL_CONFIG_PATH, arg);
 	fnvlist_add_string(vdev, ZPOOL_CONFIG_TYPE, VDEV_TYPE_OBJSTORE);
+	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL),
+	    protocol);
 
-	if ((nvlist_lookup_string(props,
-	    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), &endpoint)) != 0) {
+	int err = nvlist_lookup_string(props,
+	    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), &endpoint);
+	if (err != 0 && s3) {
 		fprintf(stderr, gettext("No endpoint provided for objstore "
 		    "vdev %s\n"), arg);
 		fnvlist_free(vdev);
 		return (NULL);
+	} else if (err == 0 && !s3) {
+		fprintf(stderr, gettext("Endpoint provided for objstore "
+		    "vdev that doesn't support endpoints %s\n"), arg);
+		fnvlist_free(vdev);
+		return (NULL);
+	} else if (err == 0) {
+		fnvlist_add_string(vdev,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), endpoint);
 	}
-	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
-	    endpoint);
 
-	if ((nvlist_lookup_string(props,
-	    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), &region)) != 0) {
+	err = nvlist_lookup_string(props,
+	    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), &region);
+	if (err != 0 && s3) {
 		fprintf(stderr, gettext("No region provided for objstore "
 		    "vdev %s\n"), arg);
 		fnvlist_free(vdev);
 		return (NULL);
+	} else if (err == 0 && !s3) {
+		fprintf(stderr, gettext("Region provided for objstore "
+		    "vdev that doesn't support region %s\n"), arg);
+		fnvlist_free(vdev);
+		return (NULL);
+	} else if (err == 0) {
+		fnvlist_add_string(vdev,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), region);
 	}
-	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION),
-	    region);
 
 	if ((nvlist_lookup_string(props,
 	    zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE), &profile)) == 0) {
@@ -1694,15 +1712,18 @@ construct_spec(nvlist_t *props, int argc, char **argv)
 					nvlist_free(child[c]);
 				free(child);
 			}
-		} else if (strcmp(fulltype, "s3") == 0) {
+		} else if (strcmp(fulltype, "s3") == 0 ||
+		    strcmp(fulltype, "blob") == 0) {
 			if (argc == 1) {
 				(void) fprintf(stderr,
-				    gettext("invalid vdev specification: 's3' "
-				    "requires a parameter\n"));
+				    gettext("invalid vdev specification: "
+				    "object store protocol requires a parameter"
+				    "\n"));
 				goto spec_out;
 			}
 			seen_obj = B_TRUE;
-			if ((nv = make_objstore_vdev(props, argv[1])) == NULL) {
+			if ((nv = make_objstore_vdev(props, fulltype,
+			    argv[1])) == NULL) {
 				goto spec_out;
 			}
 			argc -= 2;

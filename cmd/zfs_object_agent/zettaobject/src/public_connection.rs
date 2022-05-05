@@ -62,7 +62,7 @@ impl PublicServerState {
             0o666, // world writable
             PublicServerState { cache },
             Box::new(Self::connection_handler),
-            vec![Version::new(1, 0, 0)],
+            vec![Version::new(2, 0, 0)],
         );
 
         PublicConnectionState::register(&mut server);
@@ -99,7 +99,7 @@ impl PublicConnectionState {
         let endpoint_cstr = nvl.lookup_string("endpoint")?;
         let region = region_cstr.to_str()?.to_string();
         let endpoint = endpoint_cstr.to_str()?.to_string();
-        let _readonly = nvl.exists("readonly");
+        let readonly = nvl.exists("readonly");
         let credentials_profile: Option<String> = nvl
             .lookup_string("credentials_profile")
             .ok()
@@ -135,7 +135,7 @@ impl PublicConnectionState {
                     credentials: credentials.clone(),
                 },
                 buck,
-                false,
+                readonly,
             )
             .await?;
             let guid_result = nvl.lookup_uint64("guid");

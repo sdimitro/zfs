@@ -23,7 +23,6 @@ use zettacache::base_types::*;
 
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
-use crate::object_access::S3Credentials;
 use crate::object_access::OBJECT_DELETION_BATCH_SIZE;
 use crate::pool::PoolPhys;
 
@@ -53,8 +52,8 @@ enum PoolDestroyState {
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct DestroyingCacheItemPhys {
     name: String,
-    endpoint: String,
-    region: String,
+    #[serde(flatten)]
+    protocol: ObjectAccessProtocol,
     bucket: String,
     profile: Option<String>,
     state: PoolDestroyState,
@@ -65,9 +64,11 @@ struct DestroyingCachePhys {
     pools: HashMap<PoolGuid, DestroyingCacheItemPhys>,
 }
 
-#[derive(Debug)]
+#[derive(Serialize, Debug)]
 struct DestroyingPool {
+    #[serde(flatten)]
     cache_phys: DestroyingCacheItemPhys,
+    #[serde(flatten)]
     destroying_phys: Option<PoolDestroyingPhys>,
 }
 
@@ -141,49 +142,7 @@ impl DestroyingPoolsMap {
         let mut nvl = NvList::new_unique_names();
 
         for (guid, destroying_pool) in self.pools.iter() {
-            let mut nvl_item = NvList::new_unique_names();
-            nvl_item.insert("guid", &guid.0).unwrap();
-            nvl_item
-                .insert("name", destroying_pool.cache_phys.name.as_str())
-                .unwrap();
-            nvl_item
-                .insert("endpoint", destroying_pool.cache_phys.endpoint.as_str())
-                .unwrap();
-            nvl_item
-                .insert("region", destroying_pool.cache_phys.region.as_str())
-                .unwrap();
-            nvl_item
-                .insert("bucket", destroying_pool.cache_phys.bucket.as_str())
-                .unwrap();
-            nvl_item
-                .insert(
-                    "destroy_completed",
-                    &(destroying_pool.cache_phys.state == PoolDestroyState::Complete),
-                )
-                .unwrap();
-
-            // When the destroy task is initializing, there could be a short period when
-            // destroying_phys has not been initialized. Skip the destroying_phys
-            // if it is None.
-            if let Some(destroying_phys) = destroying_pool.destroying_phys {
-                nvl_item
-                    .insert(
-                        "start_time",
-                        &destroying_phys
-                            .start_time
-                            .duration_since(std::time::UNIX_EPOCH)
-                            .unwrap()
-                            .as_secs(),
-                    )
-                    .unwrap();
-                nvl_item
-                    .insert("total_data_objects", &destroying_phys.total_data_objects)
-                    .unwrap();
-                nvl_item
-                    .insert("destroyed_objects", &destroying_phys.destroyed_objects)
-                    .unwrap();
-            }
-
+            let nvl_item = nvpair::to_nvlist(destroying_pool).unwrap();
             nvl.insert(format!("{}", guid), nvl_item.as_ref()).unwrap();
         }
 
@@ -225,14 +184,7 @@ impl PoolDestroyer {
 
                 for (guid, destroying_pool) in destroying_pool_list {
                     match ObjectAccess::new(
-                        ObjectAccessProtocol::S3 {
-                            endpoint: destroying_pool.cache_phys.endpoint.clone(),
-                            region: destroying_pool.cache_phys.region.clone(),
-                            credentials: match destroying_pool.cache_phys.profile.clone() {
-                                Some(profile) => S3Credentials::Profile(profile),
-                                None => S3Credentials::Automatic,
-                            },
-                        },
+                        destroying_pool.cache_phys.protocol.clone(),
                         destroying_pool.cache_phys.bucket.clone(),
                         false,
                     )
@@ -319,8 +271,7 @@ impl PoolDestroyer {
         let destroying_pool = DestroyingPool {
             cache_phys: DestroyingCacheItemPhys {
                 name: pool_phys.name,
-                endpoint: object_access.endpoint(),
-                region: object_access.region(),
+                protocol: object_access.protocol(),
                 profile: object_access.credentials_profile(),
                 bucket: object_access.bucket(),
                 state: PoolDestroyState::InProgress,

@@ -169,6 +169,7 @@ typedef struct ztest_shared_opts {
 	char zo_pool[ZFS_MAX_DATASET_NAME_LEN];
 	char zo_dir[ZFS_MAX_DATASET_NAME_LEN];
 	int zo_obj_store;
+	char zo_obj_store_protocol[MAXPATHLEN];
 	char zo_obj_store_endpoint[MAXPATHLEN];
 	char zo_obj_store_region[MAXNAMELEN];
 	char zo_obj_store_bucket[MAXNAMELEN];
@@ -206,6 +207,7 @@ typedef struct ztest_shared_opts {
 /* Default values for command line options. */
 #define	DEFAULT_POOL "ztest"
 #define	DEFAULT_VDEV_DIR "/tmp"
+#define	DEFAULT_PROTOCOL "s3"
 #define	DEFAULT_ENDPOINT "https://s3-us-west-2.amazonaws.com"
 #define	DEFAULT_REGION "us-west-2"
 #define	DEFAULT_CREDS_PROFILE "default"
@@ -239,6 +241,7 @@ static const ztest_shared_opts_t ztest_opts_defaults = {
 	.zo_pool = DEFAULT_POOL,
 	.zo_dir = DEFAULT_VDEV_DIR,
 	.zo_obj_store = 0,
+	.zo_obj_store_protocol = DEFAULT_PROTOCOL,
 	.zo_obj_store_endpoint = DEFAULT_ENDPOINT,
 	.zo_obj_store_region = DEFAULT_REGION,
 	.zo_obj_store_bucket = { '\0' },
@@ -784,6 +787,8 @@ static ztest_option_t option_table[] = {
 	{ 'f',	"vdev-file-directory", "PATH", "File directory for vdev files",
 	    NO_DEFAULT, DEFAULT_VDEV_DIR},
 #ifdef HAVE_LIBZOA
+	{ 'L',	"object-protocol", "STRING", "Object-store protocol",
+	    NO_DEFAULT, DEFAULT_PROTOCOL},
 	{ 'O',	"object-endpoint", "URI", "Object-store endpoint",
 	    NO_DEFAULT, DEFAULT_ENDPOINT},
 	{ 'A',	"object-region", "STRING", "Object-store region",
@@ -1055,6 +1060,11 @@ process_options(int argc, char **argv)
 			}
 			break;
 #ifdef HAVE_LIBZOA
+		case 'L':
+			(void) strlcpy(zo->zo_obj_store_protocol, optarg,
+			    sizeof (zo->zo_obj_store_protocol));
+			zo->zo_obj_store = 1;
+			break;
 		case 'O':
 			(void) strlcpy(zo->zo_obj_store_endpoint, optarg,
 			    sizeof (zo->zo_obj_store_endpoint));
@@ -1298,6 +1308,8 @@ make_vdev_obj_store(void)
 	fnvlist_add_string(vdev, ZPOOL_CONFIG_TYPE, VDEV_TYPE_OBJSTORE);
 	fnvlist_add_string(vdev, ZPOOL_CONFIG_PATH,
 	    ztest_opts.zo_obj_store_bucket);
+	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL),
+	    ztest_opts.zo_obj_store_protocol);
 	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
 	    ztest_opts.zo_obj_store_endpoint);
 	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION),
@@ -6998,7 +7010,8 @@ ztest_run_zdb(char *pool, uint64_t guid)
 
 	if (ztest_opts.zo_obj_store) {
 		ASSERT3P(guid, !=, 0);
-		snprintf(loc, len, "-a %s -g %s -B %s -f %s %llu",
+		snprintf(loc, len, "-p %s -a %s -g %s -B %s -f %s %llu",
+		    ztest_opts.zo_obj_store_protocol,
 		    ztest_opts.zo_obj_store_endpoint,
 		    ztest_opts.zo_obj_store_region,
 		    ztest_opts.zo_obj_store_bucket,

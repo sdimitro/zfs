@@ -44,7 +44,7 @@
  * communication protocol. This should be updated as new capabilities are
  * added and supported or required.
  */
-#define	AGENT_PROTOCOL_VERSION "^1"
+#define	AGENT_PROTOCOL_VERSION ">=1.0.0, <3.0.0"
 
 struct sockaddr_un zfs_public_socket = {
 	AF_UNIX, "/etc/zfs/zfs_public_socket"
@@ -229,13 +229,13 @@ zoa_connect_agent(libpc_handle_t *hdl, zoa_socket_t zoa_sock,
 
 nvlist_t *
 zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
-    const char *version_req_str, zoa_socket_t zoa_sock)
+    const char *version_req_str, zoa_socket_t zoa_sock, nvlist_t **version)
 {
 	nvlist_t *resp = NULL;
 	int retries = 0;
 	for (; retries < ZOA_MAX_RETRIES; retries++) {
 		int sock = zoa_connect_agent(hdl, zoa_sock, version_req_str,
-		    NULL);
+		    version);
 		if (sock == -1) {
 			break;
 		}
@@ -268,6 +268,7 @@ zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
 struct destroying_pool {
 	char *name;
 	uint64_t guid;
+	char *protocol;
 	char *endpoint;
 	char *bucket;
 	uint64_t start_time;
@@ -315,7 +316,9 @@ print_destroying_item(struct destroying_pool item)
 	printf("config:\n\n");
 	printf("        NAME                 STATE\n");
 	printf("        %-20s %s\n", item.name,  state);
-	printf("          %s:%s %s\n", item.endpoint, item.bucket, state);
+	printf("          %s %s:%s %s\n", item.protocol,
+	    (item.endpoint == NULL ? "<default endpoint>" : item.endpoint),
+	    item.bucket, state);
 
 	return (B_TRUE);
 }
@@ -323,14 +326,20 @@ print_destroying_item(struct destroying_pool item)
 static void
 zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 {
-	nvlist_t *msg = fnvlist_alloc();
+	nvlist_t *msg = fnvlist_alloc(), *version = NULL;
 	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
 	    AGENT_TYPE_GET_DESTROYING_POOLS);
 
 	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET);
-	if (resp == NULL)
+	    ZFS_PUBLIC_SOCKET, &version);
+	if (resp == NULL) {
+		if (version != NULL)
+			fnvlist_free(version);
 		return;
+	}
+	boolean_t protocol_v2 = fnvlist_lookup_uint64(version,
+	    AGENT_VERSION_MAJOR) >= 2;
+	fnvlist_free(version);
 
 	const char *type = fnvlist_lookup_string(resp, AGENT_RESPONSE_TYPE);
 	VERIFY0(strcmp(type, AGENT_TYPE_GET_DESTROYING_POOLS));
@@ -338,24 +347,34 @@ zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 	nvlist_t *nvpools = NULL;
 	(void) nvlist_lookup_nvlist(resp, AGENT_POOLS, &nvpools);
 
-
 	nvpair_t *elem = NULL;
 	struct destroying_pool item = { 0 };
 	while ((elem = nvlist_next_nvpair(nvpools, elem)) != NULL) {
 		nvlist_t *config;
 		VERIFY0(nvpair_value_nvlist(elem, &config));
 
-		item.destroyed = fnvlist_lookup_boolean_value(config,
-		    AGENT_DESTROY_DOMPLETED);
+		if (nvlist_lookup_boolean_value(config,
+		    AGENT_DESTROY_COMPLETED, &item.destroyed) != 0) {
+			char *state = fnvlist_lookup_string(config,
+			    AGENT_DESTROY_STATE);
+			item.destroyed =
+			    strcmp(state, AGENT_DESTROY_STATE_COMPLETE) == 0;
+		}
 		if (item.destroyed != destroy_complete) {
 			continue;
 		}
 
 		item.name = fnvlist_lookup_string(config, AGENT_NAME);
-		item.guid =
-		    fnvlist_lookup_uint64(config, AGENT_GUID);
+		item.guid = strtoull(nvpair_name(elem), NULL, 10);
 		item.bucket = fnvlist_lookup_string(config, AGENT_BUCKET);
-		item.endpoint = fnvlist_lookup_string(config, AGENT_ENDPOINT);
+		if (protocol_v2) {
+			item.protocol = fnvlist_lookup_string(config,
+			    AGENT_PROTOCOL);
+		} else {
+			item.protocol = "s3";
+		}
+		(void) nvlist_lookup_string(config, AGENT_ENDPOINT,
+		    &item.endpoint);
 		// Optional componenents
 		(void) nvlist_lookup_uint64(config, AGENT_START_TIME,
 		    &item.start_time);
@@ -416,14 +435,15 @@ zoa_clear_destroyed_pools(void *hdl)
 	    AGENT_TYPE_CLEAR_DESTROYED_POOLS);
 
 	zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET);
+	    ZFS_PUBLIC_SOCKET, NULL);
 }
 
 nvlist_t *
-zoa_create_connection_nvl(const char *endpoint, const char *region,
-    const char *bucket, const char *creds_profile)
+zoa_create_connection_nvl(const char *protocol, const char *endpoint,
+    const char *region, const char *bucket, const char *creds_profile)
 {
 	nvlist_t *nvl = fnvlist_alloc();
+	fnvlist_add_string(nvl, AGENT_PROTOCOL, protocol);
 	fnvlist_add_string(nvl, AGENT_ENDPOINT, endpoint);
 	fnvlist_add_string(nvl, AGENT_REGION, region);
 	fnvlist_add_string(nvl, AGENT_BUCKET, bucket);

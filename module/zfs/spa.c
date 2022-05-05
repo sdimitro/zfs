@@ -5961,7 +5961,8 @@ spa_create(const char *pool, nvlist_t *nvroot, nvlist_t *props,
 	spa_config_enter(spa, SCL_ALL, FTAG, RW_WRITER);
 
 	error = spa_config_parse(spa, &rvd, nvroot, NULL, 0, VDEV_ALLOC_ADD);
-	spa_set_pool_type(spa);
+	if (error == 0)
+		spa_set_pool_type(spa);
 
 	ASSERT(error != 0 || rvd != NULL);
 	ASSERT(error != 0 || spa->spa_root_vdev == rvd);

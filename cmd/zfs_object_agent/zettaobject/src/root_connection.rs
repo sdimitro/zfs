@@ -27,7 +27,6 @@ use crate::base_types::*;
 use crate::features::FeatureError;
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
-use crate::object_access::S3Credentials;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
@@ -79,7 +78,7 @@ impl RootServerState {
             0o600,
             RootServerState { cache, id },
             Box::new(Self::connection_handler),
-            vec![Version::new(1, 0, 0)],
+            vec![Version::new(1, 0, 0), Version::new(1, 1, 0)],
         );
 
         RootConnectionState::register(&mut server);
@@ -89,27 +88,15 @@ impl RootServerState {
 #[derive(Deserialize, Debug)]
 struct ObjectAccessRequest {
     bucket: String,
-    region: String,
-    endpoint: String,
     #[serde(default)]
     readonly: bool,
-    credentials_profile: Option<String>,
+    #[serde(flatten)]
+    protocol: ObjectAccessProtocol,
 }
+
 impl ObjectAccessRequest {
     async fn object_access(self) -> Result<Arc<ObjectAccess>> {
-        ObjectAccess::new(
-            ObjectAccessProtocol::S3 {
-                endpoint: self.endpoint,
-                region: self.region,
-                credentials: match self.credentials_profile {
-                    Some(profile) => S3Credentials::Profile(profile),
-                    None => S3Credentials::Automatic,
-                },
-            },
-            self.bucket,
-            self.readonly,
-        )
-        .await
+        ObjectAccess::new(self.protocol, self.bucket, self.readonly).await
     }
 }
 
@@ -179,6 +166,7 @@ impl RootConnectionState {
                 txg: Option<Txg>,
                 syncing_txg: Option<Txg>,
             }
+
             let request: OpenPoolRequest = nvpair::from_nvlist(&nvl)?;
             info!("got {:?}", request);
 
@@ -575,6 +563,7 @@ impl RootConnectionState {
                 object_access: ObjectAccessRequest,
                 guid: PoolGuid,
             }
+
             let request: ResumeDestroyPoolRequest = nvpair::from_nvlist(&nvl)?;
             debug!("got {:?}", request);
             let object_access = request.object_access.object_access().await?;

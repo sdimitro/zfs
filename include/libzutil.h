@@ -78,7 +78,7 @@ _LIBZUTIL_H void zoa_list_destroying_pools(void *);
 _LIBZUTIL_H void zoa_list_destroyed_pools(void *);
 _LIBZUTIL_H void zoa_clear_destroyed_pools(void *);
 _LIBZUTIL_H nvlist_t *zoa_create_connection_nvl(const char *, const char *,
-    const char *, const char *);
+    const char *, const char *, const char *);
 
 _LIBZUTIL_H int zoa_resume_destroy(void *, importargs_t *import);
 

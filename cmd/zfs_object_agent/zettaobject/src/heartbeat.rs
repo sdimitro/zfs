@@ -89,8 +89,8 @@ impl HeartbeatPhys {
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 struct HeartbeatImpl {
-    endpoint: String,
-    region: String,
+    endpoint: Option<String>,
+    region: Option<String>,
     bucket: String,
 }
 pub struct HeartbeatGuard {

@@ -49,6 +49,7 @@
 #define	AGENT_GUID			"guid"
 #define	AGENT_BUCKET			"bucket"
 #define	AGENT_CRED_PROFILE		"credentials_profile"
+#define	AGENT_PROTOCOL			"protocol"
 #define	AGENT_ENDPOINT			"endpoint"
 #define	AGENT_REGION			"region"
 #define	AGENT_BLOCK			"block"
@@ -63,7 +64,9 @@
 #define	AGENT_FEATURE			"feature"
 #define	AGENT_FEATURES			"features"
 #define	AGENT_DESTROY			"destroy"
-#define	AGENT_DESTROY_DOMPLETED		"destroy_completed"
+#define	AGENT_DESTROY_COMPLETED		"destroy_completed"
+#define	AGENT_DESTROY_STATE		"state"
+#define	AGENT_DESTROY_STATE_COMPLETE	"Complete"
 #define	AGENT_START_TIME		"start_time"
 #define	AGENT_TOTAL_DATA_OBJECTS	"total_data_objects"
 #define	AGENT_DESTROYED_OBJECTS		"destroyed_objects"
@@ -72,6 +75,9 @@
 #define	AGENT_ROLLBACK			"rollback"
 #define	AGENT_REISSUE			"reissue"
 #define	AGENT_VERSION			"version"
+#define	AGENT_VERSION_MAJOR		"major"
+#define	AGENT_VERSION_MINOR		"minor"
+#define	AGENT_VERSION_PATCH		"patch"
 
 typedef struct vdev_object_store_stats {
 	uint64_t voss_blocks_count;
