@@ -144,6 +144,13 @@ impl AlignedVec {
         assert_eq!(self.as_ptr().align_offset(self.alignment), 0);
     }
 
+    pub fn extend_from_value(&mut self, len: usize, value: u8) {
+        // Can't allow vec capacity to change, as that could violate the alignment constraint.
+        assert_le!(len, self.vec.capacity() - self.vec.len());
+        self.vec.resize(self.vec.len() + len, value);
+        self.verify();
+    }
+
     pub fn extend_from_slice(&mut self, slice: &[u8]) {
         // We can't allow the vec to be resized, as that could violate the alignment constraint.
         assert_le!(slice.len(), self.vec.capacity() - self.vec.len());

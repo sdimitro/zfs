@@ -144,6 +144,11 @@ tunable! {
     // Don't start a merge due to evicting (removing LRU blocks from cache) unless we intend to
     // free up at least this much space.
     static ref EVICTION_MIN_BATCH_PCT: Percent = Percent::new(0.5);
+
+    // Percent of time to corrupt data on inserts and lookups
+    static ref CORRUPT_INSERT_PCT: Percent = Percent::new(0.0);
+    static ref CORRUPT_LOOKUP_PCT: Percent = Percent::new(0.0);
+    static ref CORRUPTION_FILL: u8 = 0x31; // fill blocks with '1'
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -1656,10 +1661,28 @@ impl ZettaCache {
         }
     }
 
+    /// Return a block with a specific pattern of "corruption"
+    pub fn corruption(len: usize, alignment: usize) -> AlignedBytes {
+        let mut vec = with_alloctag("corruption()", || {
+            util::AlignedVec::with_capacity(len, alignment)
+        });
+        vec.extend_from_value(len, *CORRUPTION_FILL);
+        vec.into()
+    }
+
+    /// Insert into the cache in the current checkpoint (allocate a block, add to
+    /// pending_changes and outstanding_writes).
     async fn insert_impl(&self, locked_key: LockedKey, bytes: AlignedBytes, source: InsertSource) {
+        let bytes = if CORRUPT_INSERT_PCT.as_fraction() != 0.0
+            && rand::thread_rng().gen_bool(CORRUPT_INSERT_PCT.as_fraction())
+        {
+            // For debug, replace the input data with a known corruption pattern
+            debug!("Injecting corrupt data for {:?}", locked_key.key());
+            Self::corruption(bytes.len(), bytes.alignment())
+        } else {
+            bytes
+        };
         let len = bytes.len() as u64;
-        // Insert to the cache in the current checkpoint (allocate a block, add to
-        // pending_changes and outstanding_writes).
         let fut = measure!()
             .fut(lock_non_send(&self.state))
             .await
@@ -1899,6 +1922,7 @@ impl ZettaCacheState {
 
         let read_permit = self.outstanding_reads.acquire();
         let block_access = self.block_access.clone();
+        let key = locked_key.key();
         async move {
             let bytes = block_access
                 .read_raw(valid_value.extent(), DiskIoType::ReadDataForLookup)
@@ -1906,7 +1930,15 @@ impl ZettaCacheState {
 
             // It's now OK for a checkpoint to complete, potentially freeing this block.
             drop(read_permit);
-            Some(bytes)
+
+            if CORRUPT_LOOKUP_PCT.as_fraction() != 0.0
+                && rand::thread_rng().gen_bool(CORRUPT_LOOKUP_PCT.as_fraction())
+            {
+                debug!("Returning corrupt data for {key:?}");
+                Some(ZettaCache::corruption(bytes.len(), bytes.alignment()))
+            } else {
+                Some(bytes)
+            }
         }
     }
 
