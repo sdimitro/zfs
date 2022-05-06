@@ -58,7 +58,7 @@ fi
 function cleanup
 {
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
-	invalidate_zettacache_devices $AVAILABLE_DEVICES
+	invalidate_zcache
 }
 
 log_assert "Verify that the shared device(s) are partitioned into two parts." \

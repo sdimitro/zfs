@@ -71,15 +71,3 @@ function verify_zcache_devices_were_added
     done
     return $?
 }
-
-#
-# Helper to invalidate all provided
-# zettacache devices
-#
-function invalidate_zettacache_devices
-{
-    typeset devices=$@
-    for cache_dev in $devices; do
-        invalidate_zcache_dev $cache_dev
-    done
-}

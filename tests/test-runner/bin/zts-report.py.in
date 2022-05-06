@@ -205,7 +205,8 @@ elif sys.platform.startswith('linux'):
         'cli_root/zfs_unshare/zfs_unshare_002_pos': ['SKIP', na_reason],
     })
 
-if os.environ.get('ZTS_OBJECT_STORE') == 'true':
+if 'ZTS_OBJECT_STORE' in os.environ and \
+        re.search("^true$|^s3$|^blob$", os.getenv('ZTS_OBJECT_STORE')):
     known.update({
         'cli_root/zfs_copies/zfs_copies_002_pos': ['SKIP', object_store_skip],
         'cli_root/zfs_copies/zfs_copies_003_pos': ['SKIP', object_store_skip],
@@ -500,7 +501,8 @@ elif sys.platform.startswith('linux'):
         'arc/dbufstats_001_pos': ['FAIL', 'QA-33190'],
     })
 
-if os.environ.get('ZTS_OBJECT_STORE') == 'true':
+if 'ZTS_OBJECT_STORE' in os.environ and \
+        re.search("^true$|^s3$|^blob$", os.getenv('ZTS_OBJECT_STORE')):
     maybe.update({
         'cli_root/zpool_create/zpool_create_003_pos': ['FAIL', 'DOSE-545'],
         'cli_root/zdb/zdb_checksum': ['FAIL', 'DOSE-737'],

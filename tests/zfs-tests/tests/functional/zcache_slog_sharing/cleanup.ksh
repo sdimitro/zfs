@@ -39,7 +39,7 @@ function destroy_all_partitions
     done
 }
 
-reset_zcache_configuration
+invalidate_zcache
 destroy_all_partitions
 
 log_pass

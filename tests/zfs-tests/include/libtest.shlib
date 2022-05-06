@@ -1653,10 +1653,12 @@ function get_slog_part
 	[[ -z "$devname" ]] && fail "Missing argument"
 
 	#
-	# Devices are specified by /dev/ or /dev/disk/by-id/ names. The
-	# partition suffix varies with names.
+	# Devices are specified by /dev, /dev/disk/by-id or /dev/disk/azure
+	# names. The partition suffix varies with names.
 	#
 	if [[ "$devname" =~ "^/dev/disk/by-id/" ]]; then
+		slog_part="${devname}-part1"
+	elif [[ "$devname" =~ "^/dev/disk/azure" ]]; then
 		slog_part="${devname}-part1"
 	elif [[ "$devname" =~ "nvme" ]]; then
 		devname="$(basename "$devname")"
@@ -1680,10 +1682,12 @@ function get_cache_part
 	[ -z "$devname" ] && fail "Missing argument"
 
 	#
-	# Devices are specified by /dev/ or /dev/disk/by-id/ names. The
-	# partition suffix varies with names.
+	# Devices are specified by /dev, /dev/disk/by-id or /dev/disk/azure
+	# names. The partition suffix varies with names.
 	#
 	if [[ "$devname" =~ "^/dev/disk/by-id/" ]]; then
+		cache_part="${devname}-part2"
+	elif [[ "$devname" =~ "^/dev/disk/azure" ]]; then
 		cache_part="${devname}-part2"
 	elif [[ "$devname" =~ "nvme" ]]; then
 		devname="$(basename "$devname")"
@@ -1701,7 +1705,7 @@ function invalidate_zcache_dev
 {
 	typeset cache_dev="$1"
 	cache_part="$(get_cache_part "$cache_dev")"
-	sudo dd if=/dev/zero of=${cache_part} bs=1M count=1 >/dev/null 2>&1
+	sudo zcache labelclear -f "$cache_part"
 }
 
 function invalidate_zcache
@@ -1823,7 +1827,7 @@ function create_pool
 	fi
 
 	if [[ -z $devices_list ]] && ! use_object_store; then
-		log_note "ZTS_OBJECT_STORE and devices list are empty."
+		log_note "ZTS_OBJECT_STORE set and devices list is empty."
 		return 1
 	fi
 
@@ -1838,16 +1842,30 @@ function create_pool
 
 	typeset zpool_create_cmd=""
 	if use_object_store; then
-		zpool_create_cmd="zpool create \
-			-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-			-o object-region=$ZTS_REGION \
-			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-			$extra_options \
-			$pool s3 $ZTS_BUCKET_NAME $log_options"
+		typeset object_store_args=""
+		case $ZTS_OBJECT_STORE in
+		blob)
+			# Blob storage requires no special arguments.
+			;;
+		s3)
+			object_store_args="
+			    -o object-endpoint=$ZTS_OBJECT_ENDPOINT
+			    -o object-region=$ZTS_REGION
+			    -o object-credentials-profile=$ZTS_CREDS_PROFILE"
+			;;
+		*)
+			log_note "Unknown object store $ZTS_OBJECT_STORE"
+			return 1
+			;;
+		esac
+		zpool_create_cmd="zpool create
+		    $object_store_args
+		    $extra_options
+		    $pool $ZTS_OBJECT_STORE $ZTS_BUCKET_NAME $log_options"
 	else
-		zpool_create_cmd="zpool create \
-			$extra_options \
-			$pool $devices_list $log_options"
+		zpool_create_cmd="zpool create
+		    $extra_options
+		    $pool $devices_list $log_options"
 	fi
 
 	log_note $zpool_create_cmd
@@ -1860,14 +1878,12 @@ function create_pool
 		return 0
 	fi
 
-	# If Zettacache devices was specified, they have been partitioned to
-	# also contain a partition for a slog. Add the log devices  here.
-	if [[ -n $ZETTACACHE_DEVICES ]]; then
-		for cache_dev in ${ZETTACACHE_DEVICES}; do
-			typeset log_dev=$(get_slog_part $cache_dev)
-			log_must zpool add $pool log $log_dev
-		done
-	fi
+	# If Zettacache devices were specified, they have been partitioned to
+	# also contain a partition for a slog. Add the log devices here.
+	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		typeset log_dev=$(get_slog_part $cache_dev)
+		log_must zpool add $pool log $log_dev
+	done
 
 	return 0
 }
@@ -1919,13 +1935,27 @@ function import_pool
 
 	typeset zpool_import_cmd=""
 	if use_object_store; then
-		zpool_import_cmd="zpool import \
-			-d $ZTS_BUCKET_NAME
-			-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-			-o object-region=$ZTS_REGION \
-			-o object-credentials-profile=$ZTS_CREDS_PROFILE \
-			$extra_options \
-			$pool"
+		typeset object_store_args=""
+		case $ZTS_OBJECT_STORE in
+		blob)
+			object_store_args="-o object-protocol=blob"
+			;;
+		s3)
+			object_store_args="
+			    -o object-endpoint=$ZTS_OBJECT_ENDPOINT
+			    -o object-region=$ZTS_REGION
+			    -o object-credentials-profile=$ZTS_CREDS_PROFILE"
+			;;
+		*)
+			log_note "Unknown object store $ZTS_OBJECT_STORE"
+			return 1
+		esac
+
+		zpool_import_cmd="zpool import
+		    -d $ZTS_BUCKET_NAME
+		    $object_store_args
+		    $extra_options
+		    $pool"
 	else
 		zpool_import_cmd="zpool import $search_path $extra_options $pool"
 	fi
@@ -1964,13 +1994,27 @@ function run_zdb
 
 	typeset zdb_cmd=""
 	if use_object_store; then
-		zdb_cmd="zdb \
-			-B $ZTS_BUCKET_NAME
-			-a $ZTS_OBJECT_ENDPOINT \
-			-g $ZTS_REGION \
-			-f $ZTS_CREDS_PROFILE \
-			$extra_options \
-			$pool"
+		typeset object_store_args=""
+		case $ZTS_OBJECT_STORE in
+		blob)
+			# Blob storage requires no special arguments.
+			;;
+		s3)
+			object_store_args="
+			    -a $ZTS_OBJECT_ENDPOINT
+			    -g $ZTS_REGION"
+			;;
+		*)
+			log_note "Unknown object store $ZTS_OBJECT_STORE"
+			return 1
+		esac
+		zdb_cmd="zdb
+		    -f $ZTS_CREDS_PROFILE
+		    -B $ZTS_BUCKET_NAME
+		    -T $ZTS_OBJECT_STORE
+		    $object_store_args
+		    $extra_options
+		    $pool"
 	else
 		zdb_cmd="zdb $extra_options $pool"
 	fi

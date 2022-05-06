@@ -65,7 +65,7 @@ jobs:
         /usr/share/zfs/zfs-tests.sh -v -s 3G -r object_store
       env:
         LD_LIBRARY_PATH: /lib/x86_64-linux-gnu
-        ZTS_OBJECT_STORE: true
+        ZTS_OBJECT_STORE: s3
         ZTS_BUCKET_NAME: testbucket
         ZTS_OBJECT_ENDPOINT: http://127.0.0.1:9000
         ZTS_REGION: us-west-2
@@ -73,14 +73,14 @@ jobs:
         AWS_SECRET_ACCESS_KEY: minioadmin
         AWS_EC2_METADATA_DISABLED: true
     - name: Prepare artifacts
-      if: failure()
+      if: failure() || cancelled()
       run: |
         RESULTS_PATH=$(readlink -f /var/tmp/test_results/current)
         sudo dmesg > $RESULTS_PATH/dmesg
         sudo cp /var/log/syslog $RESULTS_PATH/
         # Stop the zfs-object-agent to prevent it from writing
         # into the /var/log/zoa
-        sudo systemctl stop zfs-object-agent.service
+        sudo systemctl stop zfs-object-agent.service || true
         # The create archive command may exit with status 1 if the
         # files are being updated while the tar command is running
         # Thus we do a clean exit in such case for the next
@@ -90,7 +90,7 @@ jobs:
         # Replace ':' in dir names, actions/upload-artifact doesn't support it
         for f in $(find $RESULTS_PATH -name '*:*'); do mv "$f" "${f//:/__}"; done
     - uses: actions/upload-artifact@v2
-      if: failure()
+      if: failure() || cancelled()
       with:
         name: Test logs
         path: /var/tmp/test_results/20*/

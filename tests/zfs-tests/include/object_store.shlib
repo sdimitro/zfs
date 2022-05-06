@@ -194,9 +194,9 @@ function configure_zettacache
 	stop_zfs_object_agent
 	# Truncate the zoa log to verify cache information
 	sudo truncate -s 0 $(get_zoa_debug_log)
-	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
-	sudo sh -c "echo ZETTACACHE_DEVICES=$zcache_devices >>$ZOA_CONF"
-
+	for cache_dev in ${ZETTACACHE_DEVICES}; do
+		invalidate_zcache_dev $cache_dev
+	done
 	start_zfs_object_agent
 }
 
@@ -220,14 +220,4 @@ function verify_zcache_added_from_logfile
 		retry_count=$((retry_count+1))
 	done
 	return 1
-}
-
-#
-# Reset the zettcache configuration and reload the
-# zfs object agent
-#
-function reset_zcache_configuration
-{
-    sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
-    restart_zfs_object_agent
 }

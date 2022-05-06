@@ -54,7 +54,7 @@ fi
 function cleanup
 {
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
-	invalidate_zettacache_devices $AVAILABLE_DEVICES
+	invalidate_zcache
 }
 
 log_onexit cleanup
@@ -69,8 +69,7 @@ for device in $AVAILABLE_DEVICES; do
 done
 
 log_note "Configuring zfs-object-agent with invalid devices [$invalid_devices]"
-#
-reset_zcache_configuration && configure_zettacache $invalid_devices
+invalidate_zcache && configure_zettacache $invalid_devices
 
 log_must eval "sudo systemctl status zfs-object-agent | grep -q 'Waiting for'"
 

@@ -55,7 +55,6 @@ KMEMLEAK=""
 #
 export ZOA_LOG="/var/tmp/zoa.log"
 export ZOA_OUTPUT="/var/tmp/zoa.stdout"
-export ZOA_CONF="/etc/zfs/zoa.conf"
 export ZOA_CONFIG="/etc/zfs/zoa_config.toml"
 export HAS_ZOA_SERVICE="$(systemctl list-unit-files 2>/dev/null | \
     awk '/^zfs-object-agent/ {found=1}
@@ -150,18 +149,8 @@ cleanup() {
 	# shellcheck disable=SC2086
 	rm -f ${FILES} >/dev/null 2>&1
 
-
-	# Unset ZETTACACHE_DEVICES and invalidate zcache devices
-	if [ -n "$ZTS_OBJECT_STORE" ]; then
-		sudo systemctl stop zfs-object-agent
-		for cache_dev in ${ZETTACACHE_DEVICES}; do
-			invalidate_zcache_dev "$cache_dev"
-		done
-
-		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
-		    "$ZOA_CONF"
-		sudo systemctl start zfs-object-agent
-	fi
+	# Invalidate all the zcache devices
+	[ -n "$ZTS_OBJECT_STORE" ] && invalidate_zcache
 
 	# Find all the crash files that were created after the start
 	# of the test
@@ -478,6 +467,40 @@ $0 -x
 EOF
 }
 
+start_zfs_object_agent() {
+	if $HAS_ZOA_SERVICE; then
+		sudo systemctl start zfs-object-agent
+	else
+		sudo -E /sbin/zfs_object_agent -vv -t "$ZOA_CONFIG" \
+		    --output-file="$ZOA_LOG" 2>&1 | \
+		    sudo tee "$ZOA_OUTPUT" > /dev/null &
+	fi
+}
+
+stop_zfs_object_agent() {
+	if $HAS_ZOA_SERVICE; then
+		sudo systemctl stop zfs-object-agent
+	else
+		sudo pkill -9 -f zfs_object_agent
+	fi
+}
+
+invalidate_zcache_dev() {
+	cache_dev="$1"
+	cache_part="$(get_cache_part "$cache_dev")"
+	sudo zcache labelclear -f "$cache_part" >/dev/null 2>&1
+}
+
+invalidate_zcache() {
+	[ -z "$ZETTACACHE_DEVICES" ] && return
+
+	stop_zfs_object_agent
+	for cache_dev in $ZETTACACHE_DEVICES; do
+		invalidate_zcache_dev "$cache_dev"
+	done
+	start_zfs_object_agent
+}
+
 # Take a Zettacache device as either an absolute or relative path and
 # return the /dev/disk/by-id name for the cache partition.
 get_cache_part() {
@@ -485,35 +508,32 @@ get_cache_part() {
 	cache_part=""
 
 	[ -z "$devname" ] && fail "Missing argument"
-
-	if echo "$devname" | grep -q "^/dev/disk/by-id/"; then
+	#
+	# Devices are specified by /dev, /dev/disk/by-id or /dev/disk/azure
+	# names. The partition suffix varies with names.
+	#
+	if expr "$devname" : '/dev/disk/azure/' >/dev/null ||
+	    expr "$devname" : '/dev/disk/by-id/' >/dev/null; then
 		cache_part="${devname}-part2"
-	elif echo "$devname" | grep -q "nvme"; then
-		devname="$(basename "$devname")"
-		cache_part="/dev/${devname}p2"
+	elif expr "$devname" : '.*nvme' >/dev/null; then
+		cache_part="/dev/${devname##*/}p2"
 	else
-		devname="$(basename "$devname")"
-		cache_part="/dev/${devname}2"
+		cache_part="/dev/${devname##*/}2"
 	fi
 
 	udevadm settle -E "$cache_part"
 	echo "$cache_part"
 }
 
-invalidate_zcache_dev() {
-	cache_dev="$1"
-	cache_part="$(get_cache_part "$cache_dev")"
-	sudo dd if=/dev/zero of="${cache_part}" bs=1M count=1 >/dev/null 2>&1
-}
-
 configure_zettacache() {
-	cache_parts=""
 	for cache_dev in ${ZETTACACHE_DEVICES}; do
 		#
 		# Dedicate 8G at the start of the zettacache disk for a slog.
-		# Devices are specified by /dev/ or /dev/disk/by-id/ names.
+		# Devices are specified by /dev, /dev/disk/azure or
+		# /dev/disk/by-id names.
 		#
-		if echo "$cache_dev" | grep -q "^/dev/disk/by-id/"; then
+		if echo "$cache_dev" | \
+		    grep -E -q "^/dev/disk/(azure|by-id)/"; then
 			printf "size=16777216, bootable\n," | \
 			    sudo sfdisk -q -X gpt --wipe always "$cache_dev"
 		else
@@ -523,14 +543,9 @@ configure_zettacache() {
 		fi
 
 		invalidate_zcache_dev "$cache_dev"
-		if [ -z "$cache_parts" ]; then
-			cache_parts="$(get_cache_part "$cache_dev")"
-		else
-			cache_parts="${cache_parts},$(get_cache_part "$cache_dev")"
-		fi
+		cache_part="$(get_cache_part "$cache_dev")"
+		sudo zcache add "$cache_part"
 	done
-	sudo -E sed -i '/ZETTACACHE_DEVICES=.*/d' "$ZOA_CONF"
-	sudo sh -c "echo ZETTACACHE_DEVICES=$cache_parts >>$ZOA_CONF"
 }
 
 # Add a tunable with name and value in the
@@ -623,54 +638,97 @@ check_and_set_zoa_tunables() {
     fi
 }
 
-
-# Checks if the S3 credentials are available
-# for the connectivity test
-are_s3_credentials_available() {
-	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
-		return 0 || return 1
+# Checks if backend credentials are available for the connectivity test
+credentials_in_env() {
+	case $ZTS_OBJECT_STORE in
+	blob)
+		if [ -n "$AZURE_ACCOUNT" ] && \
+		    [ -n "$AZURE_KEY" ]; then
+			return 0
+		fi
+		;;
+	s3)
+		if [ -n "$AWS_ACCESS_KEY_ID" ] && \
+		    [ -n "$AWS_SECRET_ACCESS_KEY" ]; then \
+			return 0
+		fi
+		;;
+	*)
+		return 1
+		;;
+	esac
 }
 
-
-# Tests the S3 connectivity using the s3 credentials
-# or the instance profile.
-# To test using instance profile pass "true"
-# as the first positional argument
-test_s3_connectivity() {
-	# Flag to check if connectivity should be
-	# tested using the instance profile
-	# Defaults to false
-	use_instance_profile="${1:-false}"
+# Test connectivity to the object storage back end. Uses the
+# environment or managed profile, based on the first argument.
+test_object_store_connectivity() {
+	use_managed_profile="${1:-false}"
 
 	# Build the common part
-	zoa_cmd="/sbin/zfs_object_agent test_connectivity"
-	zoa_cmd="$zoa_cmd --region $ZTS_REGION"
-	zoa_cmd="$zoa_cmd --endpoint $ZTS_OBJECT_ENDPOINT"
+	zoa_cmd="/sbin/zfs_object_agent test-connectivity-$ZTS_OBJECT_STORE"
 	zoa_cmd="$zoa_cmd --bucket $ZTS_BUCKET_NAME"
 
-	if [ "$use_instance_profile" = "true" ]; then
-		zoa_cmd="$zoa_cmd --aws_instance_profile"
-	elif [ "$use_instance_profile" = "false" ]; then
-		zoa_cmd="$zoa_cmd --aws_access_key_id $AWS_ACCESS_KEY_ID"
-		zoa_cmd="$zoa_cmd --aws_secret_access_key $AWS_SECRET_ACCESS_KEY"
-	fi
-	$zoa_cmd >/dev/null 2>&1 || fail "Unable to connect to S3"
+	case $ZTS_OBJECT_STORE in
+	blob)
+		if $use_managed_profile; then
+			zoa_cmd="$zoa_cmd --managed-identity"
+		else
+			zoa_cmd="$zoa_cmd --azure-key $AZURE_KEY"
+		fi
+		zoa_cmd="$zoa_cmd --azure-account $AZURE_ACCOUNT"
+		;;
+	s3)
+		if $use_managed_profile; then
+			zoa_cmd="$zoa_cmd --aws_instance_profile"
+		else
+			zoa_cmd="$zoa_cmd --region $ZTS_REGION"
+			zoa_cmd="$zoa_cmd --endpoint $ZTS_OBJECT_ENDPOINT"
+			zoa_cmd="$zoa_cmd --aws-access-key-id
+			    $AWS_ACCESS_KEY_ID"
+			zoa_cmd="$zoa_cmd --aws-secret-access-key
+			    $AWS_SECRET_ACCESS_KEY"
+		fi
+		;;
+	*)
+		fail "Uknown object store: $ZTS_OBJECT_STORE"
+		;;
+	esac
+
+	$zoa_cmd >/dev/null 2>&1 || \
+	    fail "Unable to connect to $ZTS_OBJECT_STORE storage"
 }
 
-# Configures and sets the S3 credentials to the disk
-configure_and_set_s3_credentials() {
-	# Check and comment out the AWS_ environment variables
-	# from the /etc/environment file
-	if grep -q "^AWS" /etc/environment 2>/dev/null; then
-		sudo sed -i "s/^AWS/# AWS/g" /etc/environment
-	fi
-	# If aws cli is installed and is in path
-	if command -v aws >/dev/null 2>&1; then
-		aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
-		aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
-		sudo mkdir -p /root/.aws && \
-			sudo cp ~/.aws/credentials /root/.aws/credentials
-	fi
+# Configures and sets the object storage credentials to the disk
+configure_object_store_credentials() {
+	case $ZTS_OBJECT_STORE in
+	blob)
+		mkdir -p ~/.azure
+		echo "[default]" > ~/.azure/credentials
+		echo "AZURE_ACCOUNT = $AZURE_ACCOUNT" >> ~/.azure/credentials
+		echo "AZURE_KEY = $AZURE_KEY" >> ~/.azure/credentials
+		sudo mkdir -p /root/.azure && \
+		    sudo cp ~/.azure/credentials /root/.azure/credentials
+		;;
+	s3)
+		# Check and comment out the AWS_ environment variables
+		# from the /etc/environment file
+		if grep -q "^AWS" /etc/environment 2>/dev/null; then
+			sudo sed -i "s/^AWS/# AWS/g" /etc/environment
+		fi
+		# If aws cli is installed and is in path
+		if command -v aws >/dev/null 2>&1; then
+			aws configure set aws_access_key_id \
+			    "$AWS_ACCESS_KEY_ID"
+			aws configure set aws_secret_access_key \
+			    "$AWS_SECRET_ACCESS_KEY"
+			sudo mkdir -p /root/.aws && \
+			    sudo cp ~/.aws/credentials /root/.aws/credentials
+		fi
+		;;
+	*)
+		fail "Uknown object store: $ZTS_OBJECT_STORE"
+		;;
+	esac
 }
 
 while getopts 'hvqxkKfScRmn:d:s:r:?t:T:u:I:' OPTION; do
@@ -896,16 +954,31 @@ __ZFS_POOL_EXCLUDE="$KEEP"
 #
 
 if [ -n "$ZTS_OBJECT_STORE" ]; then
-	# No need to specify disks if we're using object storage
-
 	#
-	# Ensure that all the required environment variables for object
-	# storage are set. If any of them is unset, exit the script.
+	# Determine which backing store is in use. Ensure that all the relevant
+	# environment variables for object storage are set. If any of them are
+	# unset, exit the script.
 	#
-	[ -n "$ZTS_OBJECT_ENDPOINT" ] || fail "ZTS_OBJECT_ENDPOINT is unset."
-	[ -n "$ZTS_BUCKET_NAME" ] || fail "ZTS_BUCKET_NAME is unset."
-	[ -n "$ZTS_REGION" ] || fail "ZTS_REGION is unset."
+	case $ZTS_OBJECT_STORE in
+	blob)
+		[ -n "$AZURE_ACCOUNT" ] || \
+		    fail "AZURE_ACCOUNT is unset."
+		[ -n "$AZURE_KEY" ] || \
+		    fail "AZURE_KEY is unset."
+		;;
+	s3|true)
+		# Convert legacy value of 'true' to an s3 default
+		ZTS_OBJECT_STORE="s3"
+		[ -n "$ZTS_OBJECT_ENDPOINT" ] || \
+		    fail "ZTS_OBJECT_ENDPOINT is unset."
+		[ -n "$ZTS_REGION" ] || fail "ZTS_REGION is unset."
+		;;
+	*)
+		fail "ZTS_OBJECT_STORE set to unknown value: ZTS_OBJECT_STORE"
+		;;
+	esac
 	[ -n "$ZTS_CREDS_PROFILE" ] || export ZTS_CREDS_PROFILE=default
+	[ -n "$ZTS_BUCKET_NAME" ] || fail "ZTS_BUCKET_NAME is unset."
 
 	#
 	# Set RUST_BACKTRACE environment variable to generate proper stack
@@ -913,57 +986,35 @@ if [ -n "$ZTS_OBJECT_STORE" ]; then
 	#
 	export RUST_BACKTRACE=1
 
-	# Use ZETTACACHE_DEVICE to be backward compatible
-	ZETTACACHE_DEVICE=${ZETTACACHE_DEVICE:-""}
-	if [ -n "$ZETTACACHE_DEVICE" ]; then
-		export ZETTACACHE_DEVICES=$ZETTACACHE_DEVICE
-		unset ZETTACACHE_DEVICE
-	fi
-
-	if [ -n "$ZETTACACHE_DEVICES" ]; then
-		configure_zettacache
-	else
-		sudo -E sed -i 's/ZETTACACHE_DEVICES=.*/ZETTACACHE_DEVICES=/g' \
-		    "$ZOA_CONF"
-	fi
-
 	# Enable zfs-object-agent to automatically
 	# kill itself with the tunables set
-	if [ -n "$ZTS_KILL_ZOA" ]; then
-		check_and_set_zoa_tunables
-	fi
+	[ -n "$ZTS_KILL_ZOA" ] && check_and_set_zoa_tunables
+
+	# Launch the ZFS object agent.
+	start_zfs_object_agent
+
+	# Add any specified devices
+	configure_zettacache
 
 	#
-	# Start zfs_object_agent using the service if available, otherwise
-	# start it manually.
+	# Check connectivity to the object store and configure the
+	# system to correctly run test either by using the creds
+	# or the managed profile role.
 	#
-	if $HAS_ZOA_SERVICE; then
-		sudo systemctl restart zfs-object-agent
-	else
-		sudo -E /sbin/zfs_object_agent -vv -t "$ZOA_CONFIG" \
-		    --output-file="$ZOA_LOG" 2>&1 | \
-		    sudo tee "$ZOA_OUTPUT" > /dev/null &
-	fi
-
-	#
-	# Check connectivity to s3 and configure the system
-	# to correctly run test either by using the S3 creds
-	# or the instance profile role.
-	#
-	if are_s3_credentials_available; then
-		test_s3_connectivity
-		configure_and_set_s3_credentials
+	if credentials_in_env; then
+		test_object_store_connectivity
+		configure_object_store_credentials
 		msg "zfs-test for object storage configured" \
-			"to run via S3 credentials"
+			"to run with credentials from environment"
 	else
 		# Test using instance profile
-		test_s3_connectivity "true"
+		test_object_store_connectivity "true"
 		# For running test using instance profile
 		# we need to remove the underlying credentials
 		# stored in the disk
-		rm -f ~/.aws/credentials
+		rm -f ~/.aws/credentials ~/.azure/credentials
 
-		sudo rm -f /root/.aws/credentials
+		sudo rm -f /root/.aws/credentials /root/.azure/credentials
 		msg "zfs-test for object storage configured" \
 			"to run via the instance profile role"
 	fi

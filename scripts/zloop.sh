@@ -35,6 +35,8 @@ GDB=${GDB:-gdb}
 
 AWS_ACCESS_KEY_ID=${AWS_ACCESS_KEY_ID:-}
 AWS_SECRET_ACCESS_KEY=${AWS_SECRET_ACCESS_KEY:-}
+AZURE_ACCOUNT=${AZURE_ACCOUNT:-}
+AZURE_KEY=${AZURE_KEY:-}
 ZTS_OBJECT_STORE=${ZTS_OBJECT_STORE:-}
 ZTS_OBJECT_ENDPOINT=${ZTS_OBJECT_ENDPOINT:-}
 ZTS_REGION=${ZTS_REGION:-}
@@ -188,44 +190,59 @@ function store_core
 	fi
 }
 
-#
-# Returns if S3 credentials are available for
-# configuring the zloop test
-#
-function are_s3_credentials_available
-{
-	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
-		return 0 || return 1
+# Checks if backend credentials are available for the connectivity test
+credentials_in_env() {
+	case $ZTS_OBJECT_STORE in
+	blob)
+		if [ -n "$AZURE_ACCOUNT" ] && \
+		    [ -n "$AZURE_KEY" ]; then
+			return 0
+		fi
+		;;
+	s3)
+		if [ -n "$AWS_ACCESS_KEY_ID" ] && \
+		    [ -n "$AWS_SECRET_ACCESS_KEY" ]; then \
+			return 0
+		fi
+		;;
+	*)
+		return 1
+		;;
+	esac
 }
 
-#
-# Configures and sets the S3 credentials using the aws cli tool
-#
-function configure_and_set_s3_credentials() {
-	# Check and comment out the AWS_ environment variables
-	# from the /etc/environment file
-	if grep -q "^AWS" /etc/environment 2>/dev/null; then
-		sudo sed -i "s/^AWS/# AWS/g" /etc/environment
-	fi
-	# If aws cli is installed and is in path
-	if command -v aws >/dev/null 2>&1; then
-		aws configure set aws_access_key_id "$AWS_ACCESS_KEY_ID"
-		aws configure set aws_secret_access_key "$AWS_SECRET_ACCESS_KEY"
-		sudo mkdir -p /root/.aws && \
-			sudo cp ~/.aws/credentials /root/.aws/credentials
-	else
-		echo "The aws cli tool is missing or not available in the" \
-			" path. Aborting zloop test with object store."
+# Configures and sets the object storage credentials to the disk
+configure_object_store_credentials() {
+	case $ZTS_OBJECT_STORE in
+	blob)
+		mkdir -p ~/.azure
+		echo "[default]" > ~/.azure/credentials
+		echo "AZURE_ACCOUNT = $AZURE_ACCOUNT" >> ~/.azure/credentials
+		echo "AZURE_KEY = $AZURE_KEY" >> ~/.azure/credentials
+		sudo mkdir -p /root/.azure && \
+		    sudo cp ~/.azure/credentials /root/.azure/credentials
+		;;
+	s3)
+		# Check and comment out the AWS_ environment variables
+		# from the /etc/environment file
+		if grep -q "^AWS" /etc/environment 2>/dev/null; then
+			sudo sed -i "s/^AWS/# AWS/g" /etc/environment
+		fi
+		# If aws cli is installed and is in path
+		if command -v aws >/dev/null 2>&1; then
+			aws configure set aws_access_key_id \
+			    "$AWS_ACCESS_KEY_ID"
+			aws configure set aws_secret_access_key \
+			    "$AWS_SECRET_ACCESS_KEY"
+			sudo mkdir -p /root/.aws && \
+			    sudo cp ~/.aws/credentials /root/.aws/credentials
+		fi
+		;;
+	*)
+		echo "Uknown object store: $ZTS_OBJECT_STORE"
 		exit 1
-	fi
-}
-
-#
-# Returns if object store is being used
-#
-function use_object_store
-{
-	[ -n "$ZTS_OBJECT_STORE" ] && return 0 || return 1
+		;;
+	esac
 }
 
 # parse arguments
@@ -303,11 +320,11 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 	# Set common working directory
 	zopt="$zopt -f $workdir"
 
-	if use_object_store; then
-		# If S3 credentials are provided configure and
-		# save it.
-		if are_s3_credentials_available; then
-			configure_and_set_s3_credentials
+	if [ -n "$ZTS_OBJECT_STORE" ]; then
+		# If Object Store credentials are provided configure and
+		# save them.
+		if credentials_in_env; then
+			configure_object_store_credentials
 		else
 			# For running test using instance profile
 			# we need to remove the underlying credentials
@@ -315,11 +332,23 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 			rm -f ~/.aws/credentials
 			sudo rm -f /root/.aws/credentials
 		fi
-		zopt="$zopt -O $ZTS_OBJECT_ENDPOINT"
-		zopt="$zopt -A $ZTS_REGION"
+		case $ZTS_OBJECT_STORE in
+		blob)
+			# Blob storage requires no special arguments.
+			;;
+		s3)
+			zopt="$zopt -O $ZTS_OBJECT_ENDPOINT"
+			zopt="$zopt -A $ZTS_REGION"
+			[ -z "$ZTS_CREDS_PROFILE" ] && \
+			    ZTS_CREDS_PROFILE="default"
+			zopt="$zopt -z $ZTS_CREDS_PROFILE"
+			;;
+		*)
+			echo "Unknown object store $ZTS_OBJECT_STORE"
+			exit 1
+		esac
 		zopt="$zopt -b $ZTS_BUCKET_NAME"
-		[ -z "$ZTS_CREDS_PROFILE" ] && ZTS_CREDS_PROFILE="default"
-		zopt="$zopt -z $ZTS_CREDS_PROFILE"
+		zopt="$zopt -L $ZTS_OBJECT_STORE"
 	else
 
 		# switch between three types of configs

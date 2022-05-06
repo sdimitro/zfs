@@ -60,7 +60,7 @@ fi
 function cleanup
 {
 	poolexists $TESTPOOL && destroy_pool $TESTPOOL
-	invalidate_zettacache_devices $AVAILABLE_DEVICES
+	invalidate_zcache
 }
 
 log_assert "Verify that the shared device(s) are partitioned into two parts." \
@@ -84,7 +84,7 @@ verify_slog_devices_are_online $TESTPOOL $SLOG_DEVICES
 
 log_must zpool export $TESTPOOL
 
-reset_zcache_configuration
+invalidate_zcache
 
 for dev in ${AVAILABLE_DEVICES}; do
 	# Partition 1 is the slog part

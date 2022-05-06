@@ -61,18 +61,18 @@ jobs:
         sudo -E /usr/share/zfs/zloop.sh -t 1200 -l -m1 -- -T 120 -P 60
       env:
         LD_LIBRARY_PATH: /lib/x86_64-linux-gnu
-        ZTS_OBJECT_STORE: true
+        ZTS_OBJECT_STORE: s3
         ZTS_BUCKET_NAME: testbucket
         ZTS_OBJECT_ENDPOINT: http://127.0.0.1:9000
         ZTS_REGION: us-west-2
         AWS_ACCESS_KEY_ID: minioadmin
         AWS_SECRET_ACCESS_KEY: minioadmin
     - name: Prepare artifacts
-      if: failure()
+      if: failure() || cancelled()
       run: |
         sudo chmod +r -R $TEST_DIR/
     - uses: actions/upload-artifact@v2
-      if: failure()
+      if: failure() || cancelled()
       with:
         name: Logs
         path: |
@@ -80,7 +80,7 @@ jobs:
           !/var/tmp/zloop/*/vdev/
         if-no-files-found: ignore
     - uses: actions/upload-artifact@v2
-      if: failure()
+      if: failure() || cancelled()
       with:
         name: Pool files
         path: |

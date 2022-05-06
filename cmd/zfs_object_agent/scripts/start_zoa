@@ -6,31 +6,8 @@
 # to determine which command line parameters to pass to the ZFS Object Agent process.
 #  - ZOA_CONFIG: Configuration file to set tunables (toml/json/yaml)
 #  - ZOA_LOG_CONFIG : log4rs configuration
-#  - ZETTACACHE_DEVICES: File[s]/device[s] to use for ZettaCache
 #  - ZETTACACHE_DIRECTORY: Directory to use for ZettaCache device discovery.
 #
-
-DEV_WAIT=300
-
-function error() {
-	echo "$@" 1>&2
-	exit 1
-}
-
-function wait_for_device() {
-	local DEVICE=$1
-
-	# Wait for udev to settle and for the device to show up.
-	udevadm settle
-	for i in $(seq 1 $DEV_WAIT); do
-		[[ -b "$DEVICE" ]] && return
-
-		echo "Waiting for $DEVICE to show up..."
-		sleep 1
-	done
-
-	error "$DEVICE does not exists."
-}
 
 ZOA_LOG_CONFIG="${ZOA_LOG_CONFIG:-/etc/zfs/zoa_log4rs.yml}"
 PARAMS="-l ${ZOA_LOG_CONFIG} --clear-incompatible-cache"
@@ -40,34 +17,6 @@ if [[ ! -z $ZOA_CONFIG ]]; then
 	echo "Config file: ${ZOA_CONFIG}"
 	PARAMS="${PARAMS} -t ${ZOA_CONFIG}"
 fi
-
-#
-# The "-c" and "-d" options are mutually exclusive. Thus, if both
-# ZETTACACHE_DEVICES and ZETTACACHE_DIRECTORY are provided, we could
-# wind up in a situation where starting the agent fails (e.g. if we
-# naively used both "-c" and "-d" simultaneously).
-#
-# Rather than failing, if ZETTACACHE_DEVICES is supplied, we prioritize
-# that over ZETTACACHE_DIRECTORY. This way, we prefer to not fail, and
-# prefer the more user supplied configuraiton that specifies exactly
-# which devices to use.
-#
-# Additionally, if neither ZETTACACHE_DEVICES nor ZETTACACHE_DIRECTORY
-# is supplied, we use "-d" but with a default value. This way, if the
-# agent/service is being used, and disks were dynamically added (e.g.
-# via "zcache add"), those devices should be automatically discovered
-# after an agent/service restart, rather than restarting without any
-# cache (which would effectively undo any prior "zcache add").
-#
-if [[ -z $ZETTACACHE_DEVICES ]]; then
-	PARAMS="$PARAMS -d ${ZETTACACHE_DIRECTORY:-/dev}"
-else
-	echo "ZettaCache: ${ZETTACACHE_DEVICES}"
-	ZETTACACHE_DEVICES=(${ZETTACACHE_DEVICES//,/\ })
-	for dev in "${ZETTACACHE_DEVICES[@]}"; do
-		wait_for_device "${dev}"
-		PARAMS="$PARAMS -c ${dev}"
-	done
-fi
+PARAMS="$PARAMS -d ${ZETTACACHE_DIRECTORY:-/dev}"
 
 exec /sbin/zfs_object_agent ${PARAMS}
