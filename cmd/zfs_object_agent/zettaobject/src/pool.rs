@@ -9,7 +9,6 @@ use std::collections::HashSet;
 use std::fmt;
 use std::fmt::Display;
 use std::mem;
-use std::ops::Bound::*;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,7 +22,6 @@ use bytes::Bytes;
 use bytesize::ByteSize;
 use derivative::Derivative;
 use futures::future;
-use futures::future::join;
 use futures::future::join3;
 use futures::future::join5;
 use futures::future::Either;
@@ -681,7 +679,7 @@ impl PoolSyncingState {
         let max = ObjectId::new(BlockId(min.as_min_block().0 + BLOCKIDS_PER_LOG_GROUP));
 
         assert_le!(min, object);
-        assert_ge!(max, object);
+        assert_gt!(max, object);
         /*
         let log = self.get_log_id(object);
         assert_ne!(self.get_log_id(ObjectId(min.0 - 1)), log);
@@ -1696,7 +1694,7 @@ impl Pool {
             )
             .await
             {
-                Ok(object) => return object,
+                Ok(bytes) => return bytes,
                 Err(e) => {
                     // We may have failed due to the object not existing, due to the
                     // object/block map changing out from under us, and then the object being
@@ -1727,7 +1725,9 @@ impl Pool {
             }
         }
 
+        let guid = self.state.shared_state.guid;
         match &self.state.zettacache {
+            None => measure!().fut(self.read_block_impl(block)).await,
             Some(cache) => match heal {
                 true => {
                     // Using boxed() on this infrequently-called path reduces the size of the
@@ -1735,69 +1735,73 @@ impl Pool {
                     measure!()
                         .fut(async move {
                             let bytes = self.read_block_impl(block).await;
-                            cache
-                                .heal(self.state.shared_state.guid, block, bytes.clone().into())
-                                .await;
+                            cache.heal(guid, block, bytes.clone()).await;
                             bytes
                         })
                         .boxed()
                         .await
                 }
-                false => match measure!()
-                    .fut(cache.lookup(self.state.shared_state.guid, block))
-                    .await
-                {
-                    LookupResponse::Present(cached_bytes, _key) => cached_bytes.into(),
-                    LookupResponse::Absent(key) => {
-                        if *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
-                            let (data_object, method) = self.read_object_for_block(block).await;
-                            let bytes = data_object.blocks.get(&block).unwrap().clone();
-
-                            // Note: bytes.clone().into() will result in a memcpy in
-                            // BlockAccess::write_raw_permit(), if we end up actually writing it
-                            // to disk.
-                            let demand_insert = cache.insert(
-                                key,
-                                bytes.len(),
-                                || bytes.clone().into(),
-                                InsertSource::Read,
-                            );
-
-                            if matches!(method, GetMethod::Loaded) {
-                                let speculative_inserts = cache.insert_all(
-                                    self.state.shared_state.guid,
-                                    &data_object.blocks,
-                                    InsertSource::SpeculativeRead,
-                                );
-                                join(demand_insert, speculative_inserts).await;
-                            } else {
-                                demand_insert.await;
+                false => {
+                    let object = self.state.object_block_map.block_to_object(block);
+                    // Look for this block in the object cache (memory).
+                    if let Some(bytes) = measure!("Pool::read_block() peak_block()")
+                        .fut(DataObject::peek_block(guid, object, block))
+                        .await
+                    {
+                        // If we are doing sibling block ingestion, then all of the object's
+                        // blocks (including this one) were recently added to the zettacache.  If
+                        // not, we need to add this block now.
+                        if !*SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
+                            match measure!().fut(cache.lookup(guid, block)).await {
+                                LookupResponse::Present(..) => {
+                                    trace!("found {block:?} in object cache and zettacache")
+                                }
+                                LookupResponse::Absent(key) => {
+                                    cache.insert(key, bytes.clone(), InsertSource::Read).await;
+                                }
                             }
-                            bytes
-                        } else {
-                            let bytes = self.read_block_impl(block).await;
-
-                            // We explicitly copy to a new buffer so that the object buffer,
-                            // which is much larger than this one block, can be freed before the
-                            // insert write completes.  By aligning the buffer here, we avoid a
-                            // copy to align it in BlockAccess::write_raw(), so there's no
-                            // "additional" copy.  However, we don't want to copy it if we aren't
-                            // going to insert (due to the insertion buffer being full), so we do
-                            // the copy from the closure.
-                            cache
-                                .insert(
-                                    key,
-                                    bytes.len(),
-                                    || AlignedBytes::copy_from_slice(&bytes, cache.sector_size()),
-                                    InsertSource::Read,
-                                )
-                                .await;
-                            bytes
+                        }
+                        return bytes;
+                    }
+                    // This block was not in the object cache.  Check the zettacache (disk).
+                    match measure!().fut(cache.lookup(guid, block)).await {
+                        LookupResponse::Present(cached_bytes, _key) => cached_bytes.into(),
+                        LookupResponse::Absent(key) => {
+                            if *SIBLING_BLOCKS_INGEST_TO_ZETTACACHE {
+                                // This block was not in the zettacache.  Read the entire object
+                                // from the object store (network), and add all its blocks to the
+                                // zettacache.
+                                drop(key); // must not be held across insert_all()
+                                let (data_object, method) = self.read_object_for_block(block).await;
+                                if matches!(method, GetMethod::Loaded) {
+                                    cache
+                                        .insert_all(
+                                            guid,
+                                            &data_object.blocks,
+                                            InsertSource::SpeculativeRead,
+                                        )
+                                        .await;
+                                }
+                                data_object
+                                    .blocks
+                                    .get(&block)
+                                    .with_context(|| format!("{block:?} not in {object:?}"))
+                                    .unwrap()
+                                    .clone()
+                            } else {
+                                // This block was not in the zettacache.  Read it[*] from the
+                                // object store (network), and add just this block to the
+                                // zettacache.
+                                // [*] (the DataObject layer may read the entire object or do a
+                                // ranged read to get just this block out of the object)
+                                let bytes = self.read_block_impl(block).await;
+                                cache.insert(key, bytes.clone(), InsertSource::Read).await;
+                                bytes
+                            }
                         }
                     }
-                },
+                }
             },
-            None => measure!().fut(self.read_block_impl(block)).await,
         }
     }
 
@@ -2564,7 +2568,7 @@ fn try_reclaim_frees(state: Arc<PoolState>, syncing_state: &mut PoolSyncingState
             assert!(object_sizes.contains(&object));
             let mut first = true;
             let (_min_object, max_object) = PoolSyncingState::get_log_range(object);
-            for later_object_size in object_sizes.range((Included(object), Excluded(max_object))) {
+            for later_object_size in object_sizes.range(object..max_object) {
                 let later_object = later_object_size.object;
                 let empty_vec = Vec::new();
                 let later_object_frees = frees_per_object.get(&later_object).unwrap_or(&empty_vec);

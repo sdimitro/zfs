@@ -37,7 +37,7 @@ pub const NUM_DATA_PREFIXES: u64 = 64;
 
 tunable! {
     static ref DATA_OBJ_RANGED_GET: bool = false;
-    static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(32);
+    static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(16);
     static ref OBJECT_CACHE_SIZE: usize = 100;
 }
 
@@ -379,6 +379,16 @@ impl DataObject {
             .get(&block)
             .cloned()
             .ok_or_else(|| anyhow!("expected {:?} not found in {:?}", block, object))
+    }
+
+    /// If this object is already in the cache, or a GetObject is in progress for it, and the
+    /// block is present in the object, then return it.  Otherwise, return None rather than
+    /// initiating a GetObject for it.
+    pub async fn peek_block(guid: PoolGuid, object: ObjectId, block: BlockId) -> Option<Bytes> {
+        CACHE
+            .get_without_loading(Key::new(guid, object))
+            .await
+            .and_then(|data| data.blocks.get(&block).cloned())
     }
 
     fn invalidate_cache(guid: PoolGuid, object: ObjectId) {

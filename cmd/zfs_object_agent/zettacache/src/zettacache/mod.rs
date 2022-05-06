@@ -1712,17 +1712,11 @@ impl ZettaCache {
     /// closure returns the AlignedBytes to insert.  This is useful if it's expensive to compute
     /// (e.g. we need to memcpy() it), as we won't invoke it if the block is not actually
     /// inserted due to the insertion buffer being full.
-    pub async fn insert<F: FnOnce() -> AlignedBytes>(
-        &self,
-        locked_key: LockedKey,
-        bytes_len: usize,
-        bytes_fn: F,
-        source: InsertSource,
-    ) {
+    pub async fn insert(&self, locked_key: LockedKey, bytes: Bytes, source: InsertSource) {
         // This permit will be dropped when the write to disk completes.  It serves to limit the
         // number of insert()'s that we can buffer before dropping (ignoring) insertion requests.
         let insert_permit = match measure!()
-            .fut(self.reserve_buffer_space(bytes_len, source))
+            .fut(self.reserve_buffer_space(bytes.len(), source))
             .await
         {
             Some(permit) => permit,
@@ -1732,12 +1726,9 @@ impl ZettaCache {
             }
         };
 
-        let bytes = bytes_fn();
-        assert_eq!(bytes.len(), bytes_len);
-
         let cache = self.clone();
         measure!("ZettaCache::insert()").spawn(async move {
-            cache.insert_impl(locked_key, bytes, source).await;
+            cache.insert_impl(locked_key, bytes.into(), source).await;
             // We want to hold onto the insert_permit until the write completes because it
             // represents the memory that's required to buffer this insertion, which isn't
             // released until the io completes.  Similarly, the write_permit (roughly) represents
@@ -1746,6 +1737,8 @@ impl ZettaCache {
         });
     }
 
+    /// Insert all the blocks to the zettacache (if they are not already present).  Note that the
+    /// caller must not hold any LockedKey's, otherwise this could deadlock.
     pub async fn insert_all(
         &self,
         guid: PoolGuid,
@@ -1812,7 +1805,7 @@ impl ZettaCache {
         });
     }
 
-    pub async fn heal(&self, guid: PoolGuid, block: BlockId, object_bytes: AlignedBytes) {
+    pub async fn heal(&self, guid: PoolGuid, block: BlockId, object_bytes: Bytes) {
         if let LookupResponse::Present(cache_bytes, locked_key) = self.peek(guid, block).await {
             // We only need to do the heal when the bytes contained in the cache differ from the
             // bytes contained in the object store. The bytes contained in the object store are
@@ -1824,13 +1817,8 @@ impl ZettaCache {
                 // Note: this will result in a second insert for the same key in the index. This
                 // will be resolved either in the insert code (if the first insert is in
                 // pending_changes) or later during the next merge.
-                self.insert(
-                    locked_key,
-                    object_bytes.len(),
-                    || object_bytes,
-                    InsertSource::Heal,
-                )
-                .await;
+                self.insert(locked_key, object_bytes, InsertSource::Heal)
+                    .await;
             }
         }
     }
