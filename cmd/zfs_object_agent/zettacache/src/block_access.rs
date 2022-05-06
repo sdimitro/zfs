@@ -8,6 +8,7 @@ use std::os::unix::prelude::AsRawFd;
 use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
 use std::sync::atomic::Ordering;
+use std::sync::RwLock;
 use std::thread::sleep;
 use std::time::Duration;
 use std::time::Instant;
@@ -17,6 +18,8 @@ use anyhow::Context;
 use anyhow::Result;
 use bincode::Options;
 use bytesize::ByteSize;
+use derivative::Derivative;
+use futures::Future;
 use libc::c_void;
 use log::*;
 use nix::errno::Errno;
@@ -123,18 +126,18 @@ impl<'a> Drop for OpInProgress<'a> {
 #[derive(Debug)]
 pub struct BlockAccess {
     sector_size: usize,
-    disks: Vec<Disk>,
+    disks: RwLock<Vec<Disk>>,
     readonly: bool,
     timebase: Instant,
 }
 
-#[derive(Debug)]
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct Disk {
-    // We want all the reader/writer_threads to share the same file descriptor,
-    // but we don't have a mechanism to ensure that they stop using the fd when
-    // the DiskStruct is dropped and the fd is closed.  To solve this we simply
-    // never close the fd.  The fd is owned by the File, and we leave a
-    // reference to it here to indicate that it's related to this Disk, even
+    // We want all the reader/writer_threads to share the same file descriptor, but we don't have
+    // a mechanism to ensure that they stop using the fd when the DiskStruct is dropped and the
+    // fd is closed.  To solve this we simply never close the fd.  The fd is owned by the File,
+    // and we leave a reference to it here to indicate that it's related to this Disk, even
     // though it's only used via the reader/writer_threads.
     #[allow(dead_code)]
     file: &'static File,
@@ -142,9 +145,13 @@ pub struct Disk {
     device_path: String,
     size: u64,
     sector_size: usize,
+    #[derivative(Debug = "ignore")]
     io_stats: &'static DiskIoStats,
+    #[derivative(Debug = "ignore")]
     reader_tx: flume::Sender<ReadMessage>,
+    #[derivative(Debug = "ignore")]
     writer_txs: Vec<mpsc::UnboundedSender<WriteMessage>>,
+    #[derivative(Debug = "ignore")]
     metadata_writer_txs: Vec<mpsc::UnboundedSender<WriteMessage>>,
 }
 
@@ -322,7 +329,15 @@ impl Disk {
         }
     }
 
-    async fn read(&self, offset: u64, size: usize, io_type: DiskIoType) -> AlignedBytes {
+    // This is a desugared `async fn` so that it can return a Future that does not capture
+    // `&self` (as indicated by the absence of `+ '_`).  That way, the caller can drop the
+    // associated RwLock before `await`ing.
+    fn read(
+        &self,
+        offset: u64,
+        size: usize,
+        io_type: DiskIoType,
+    ) -> impl Future<Output = AlignedBytes> {
         self.verify_aligned(offset);
         self.verify_aligned(size);
 
@@ -334,9 +349,9 @@ impl Disk {
             tx,
         };
 
-        self.reader_tx.send_async(message).await.unwrap();
-        let bytes = measure!().fut(rx).await.unwrap();
-        bytes
+        // note: reader_tx is unbounded, so .send() will not block
+        self.reader_tx.send(message).unwrap();
+        async move { measure!().fut(rx).await.unwrap() }
     }
 
     fn aggregating_writer_thread(
@@ -453,7 +468,15 @@ impl Disk {
         }
     }
 
-    async fn write(&self, offset: u64, bytes: AlignedBytes, io_type: DiskIoType) {
+    // This is a desugared `async fn` so that it can return a Future that does not capture
+    // `&self` (as indicated by the absence of `+ '_`).  That way, the caller can drop the
+    // associated RwLock before `await`ing.
+    fn write(
+        &self,
+        offset: u64,
+        bytes: AlignedBytes,
+        io_type: DiskIoType,
+    ) -> impl Future<Output = ()> {
         self.verify_aligned(offset);
         self.verify_aligned(bytes.len());
 
@@ -476,7 +499,7 @@ impl Disk {
         txs[writer]
             .send(message)
             .unwrap_or_else(|e| panic!("writer_txs[{}].send: {}", writer, e));
-        measure!().fut(rx).await.unwrap();
+        async move { measure!().fut(rx).await.unwrap() }
     }
 
     fn verify_aligned<N: Num + NumCast + Copy + Debug + Display>(&self, n: N) {
@@ -507,23 +530,32 @@ impl BlockAccess {
 
         BlockAccess {
             sector_size,
-            disks,
+            disks: RwLock::new(disks),
             readonly,
             timebase: Instant::now(),
         }
+    }
+
+    pub fn add_disk(&self, disk: Disk) -> DiskId {
+        let mut disks = self.disks.write().unwrap();
+        let id = DiskId::new(disks.len());
+        disks.push(disk);
+        id
     }
 
     /// Note: In the future we'll support device removal in which case the
     /// DiskId's will probably not be sequential.  By using this accessor we
     /// need not assume anything about the values inside the DiskId's.
     pub fn disks(&self) -> impl Iterator<Item = DiskId> {
-        (0..self.disks.len()).map(DiskId::new)
+        (0..self.disks.read().unwrap().len()).map(DiskId::new)
     }
 
     // Gather a list of devices for zcache list_devices command.
     pub fn list_devices(&self) -> DeviceList {
         let devices = self
             .disks
+            .read()
+            .unwrap()
             .iter()
             .map(|d| DeviceEntry {
                 name: d.device_path.to_string(),
@@ -533,16 +565,21 @@ impl BlockAccess {
         DeviceList { devices }
     }
 
-    fn disk(&self, disk: DiskId) -> &Disk {
-        &self.disks[disk.get()]
+    pub fn disk_size(&self, disk: DiskId) -> u64 {
+        self.disks.read().unwrap()[disk.index()].size
     }
 
-    pub fn disk_size(&self, disk: DiskId) -> u64 {
-        self.disk(disk).size
+    pub fn disk_extent(&self, disk: DiskId) -> Extent {
+        Extent {
+            location: DiskLocation::new(disk, 0),
+            size: self.disk_size(disk),
+        }
     }
 
     pub fn disk_path(&self, disk: DiskId) -> String {
-        self.disk(disk).device_path.to_string()
+        self.disks.read().unwrap()[disk.index()]
+            .device_path
+            .to_string()
     }
 
     pub fn total_capacity(&self) -> u64 {
@@ -555,13 +592,13 @@ impl BlockAccess {
         self.verify_aligned(extent.location.offset());
         self.verify_aligned(extent.size);
 
-        self.disk(extent.location.disk())
-            .read(
-                extent.location.offset(),
-                usize::from64(extent.size),
-                io_type,
-            )
-            .await
+        let disk = extent.location.disk();
+        let fut = self.disks.read().unwrap()[disk.index()].read(
+            extent.location.offset(),
+            usize::from64(extent.size),
+            io_type,
+        ); // drop disks RwLock before waiting for io
+        fut.await
     }
 
     // The location.offset() and bytes.len() must be sector-aligned.  However,
@@ -578,9 +615,10 @@ impl BlockAccess {
         );
         self.verify_aligned(location.offset());
         self.verify_aligned(bytes.len());
-        self.disk(location.disk())
-            .write(location.offset(), bytes, io_type)
-            .await
+        let disk = location.disk();
+        let fut = self.disks.read().unwrap()[disk.index()].write(location.offset(), bytes, io_type);
+        // drop disks RwLock before waiting for io
+        fut.await;
     }
 
     pub fn round_up_to_sector<N: Num + NumCast + Copy>(&self, n: N) -> N {
@@ -739,7 +777,13 @@ impl BlockAccess {
         serde_json::to_string(&IoStatsRef {
             cache_runtime_id: agent_id, // used to detect agent restarts across stat snapshots
             timestamp: self.timebase.elapsed(),
-            disk_stats: self.disks.iter().map(|disk| disk.io_stats).collect(),
+            disk_stats: self
+                .disks
+                .read()
+                .unwrap()
+                .iter()
+                .map(|disk| disk.io_stats)
+                .collect(),
         })
         .unwrap()
     }

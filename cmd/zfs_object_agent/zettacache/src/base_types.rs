@@ -62,7 +62,7 @@ impl DiskId {
         assert_le!(value, Self::MAX_VALUE);
         DiskId(u16::try_from(value).unwrap())
     }
-    pub fn get(self) -> usize {
+    pub fn index(self) -> usize {
         self.0 as usize
     }
 }

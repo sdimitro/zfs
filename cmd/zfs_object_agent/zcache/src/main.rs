@@ -4,22 +4,21 @@
 #![warn(clippy::cast_sign_loss)]
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
+
+mod add;
 mod hits;
 mod iostat;
 mod list;
 mod remote_channel;
 mod stats;
 mod subcommand;
+mod sync;
 
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
 use hits::ClearHitData;
-use hits::Hits;
-use iostat::Iostat;
-use list::List;
 use log::*;
-use stats::Stats;
 use subcommand::ZcacheSubCommand;
 
 fn main() -> Result<()> {
@@ -52,10 +51,12 @@ struct Cli {
 /// 2. Add an entry to the enum here where it will be parsed and instantiated automatically.
 /// 3. Add a match entry to the match block in `async_main()`.
 enum Commands {
-    Hits(Hits),
-    Iostat(Iostat),
-    List(List),
-    Stats(Stats),
+    Hits(hits::Hits),
+    Iostat(iostat::Iostat),
+    List(list::List),
+    Stats(stats::Stats),
+    Add(add::Add),
+    Sync(sync::Sync),
 
     // clear_hit_data is deprecated/hidden
     #[clap(rename_all = "snake_case")]
@@ -75,6 +76,8 @@ async fn async_main() -> Result<()> {
         Commands::Iostat(subcommand) => subcommand.invoke().await?,
         Commands::List(subcommand) => subcommand.invoke().await?,
         Commands::Stats(subcommand) => subcommand.invoke().await?,
+        Commands::Add(subcommand) => subcommand.invoke().await?,
+        Commands::Sync(subcommand) => subcommand.invoke().await?,
     }
 
     Ok(())

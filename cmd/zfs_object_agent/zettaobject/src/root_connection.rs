@@ -118,6 +118,9 @@ impl RootConnectionState {
             Box::new(Self::resume_destroy_pool),
         );
         server.register_handler(TYPE_CLEAR_HIT_DATA, Box::new(Self::clear_hit_data));
+        server.register_handler(TYPE_ADD_DISK, Box::new(Self::add_disk));
+        server.register_handler(TYPE_SYNC_CHECKPOINT, Box::new(Self::sync_checkpoint));
+        server.register_handler(TYPE_INITIATE_MERGE, Box::new(Self::initiate_merge));
         server.register_struct_handler(MessageType::ReadBlock, Box::new(Self::read_block));
         server.register_struct_handler(MessageType::WriteBlock, Box::new(Self::write_block));
     }
@@ -596,6 +599,52 @@ impl RootConnectionState {
             };
             // XXX standardize on if response has the same type as request, or with "done" appended
             return_result(TYPE_CLEAR_HIT_DATA, (), result, true)
+        }))
+    }
+
+    fn add_disk(&mut self, nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            let request: AddDiskRequest = nvpair::from_nvlist(&nvl)?;
+            debug!("got {:?}", request);
+
+            let result = match cache {
+                Some(cache) => Ok(cache.add_disk(&request.path).await?),
+                None => Err(FailureMessage::new("zettacache not present")),
+            };
+            return_result(TYPE_ADD_DISK, (), result, true)
+        }))
+    }
+
+    fn sync_checkpoint(&mut self, nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            debug!("got {:?}", nvl);
+
+            let result = match cache {
+                Some(cache) => {
+                    cache.sync_checkpoint().await;
+                    Ok(())
+                }
+                None => Err(FailureMessage::new("zettacache not present")),
+            };
+            return_result(TYPE_SYNC_CHECKPOINT, (), result, true)
+        }))
+    }
+
+    fn initiate_merge(&mut self, nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            debug!("got {:?}", nvl);
+
+            let result = match cache {
+                Some(cache) => {
+                    cache.initiate_merge().await;
+                    Ok(())
+                }
+                None => Err(FailureMessage::new("zettacache not present")),
+            };
+            return_result(TYPE_INITIATE_MERGE, (), result, true)
         }))
     }
 }

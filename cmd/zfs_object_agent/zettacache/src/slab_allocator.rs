@@ -14,6 +14,7 @@ use std::ops::Add;
 use std::ops::Bound::*;
 use std::ops::Sub;
 use std::sync::Mutex;
+use std::sync::RwLock;
 
 use bimap::BiBTreeMap;
 use bytesize::ByteSize;
@@ -56,8 +57,13 @@ pub struct SlabAllocatorPhys {
 
 #[derive(Debug)]
 pub struct SlabAccess {
-    capacity: BiBTreeMap<SlabId, Extent>,
+    inner: RwLock<SlabAccessInner>,
     slab_size: u64,
+}
+
+#[derive(Debug)]
+struct SlabAccessInner {
+    capacity: BiBTreeMap<SlabId, Extent>,
     num_slabs: u64,
 }
 
@@ -114,7 +120,8 @@ impl SlabAllocatorPhys {
 
 impl SlabAccess {
     pub fn slab_id_to_extent(&self, slab_id: SlabId) -> Extent {
-        let (&extent_slab, containing_extent) = self
+        let inner = self.inner.read().unwrap();
+        let (&extent_slab, containing_extent) = inner
             .capacity
             .left_range((Unbounded, Included(slab_id)))
             .next_back()
@@ -125,7 +132,8 @@ impl SlabAccess {
     pub fn extent_to_slab_id(&self, extent: Extent) -> SlabId {
         assert_le!(extent.size, self.slab_size);
 
-        let (&capacity_slab, capacity_extent) = self
+        let inner = self.inner.read().unwrap();
+        let (&capacity_slab, capacity_extent) = inner
             .capacity
             .right_range((Unbounded, Included(extent.location)))
             .next_back()
@@ -135,7 +143,7 @@ impl SlabAccess {
         let slab_id =
             capacity_slab + ((extent.location - capacity_extent.location) / self.slab_size);
 
-        assert_lt!(slab_id.0, self.num_slabs);
+        assert_lt!(slab_id.0, inner.num_slabs);
         debug_assert!(self.slab_id_to_extent(slab_id).contains(&extent));
         slab_id
     }
@@ -145,11 +153,13 @@ impl SlabAccess {
     }
 
     pub fn num_slabs(&self) -> u64 {
-        self.num_slabs
+        let inner = self.inner.read().unwrap();
+        inner.num_slabs
     }
 
     pub fn capacity(&self) -> u64 {
-        self.num_slabs * self.slab_size
+        let inner = self.inner.read().unwrap();
+        inner.num_slabs * self.slab_size
     }
 }
 
@@ -168,9 +178,11 @@ impl SlabAllocatorBuilder {
         Self {
             allocatable: (0..num_slabs).map(SlabId).collect(),
             access: SlabAccess {
-                capacity,
+                inner: RwLock::new(SlabAccessInner {
+                    capacity,
+                    num_slabs,
+                }),
                 slab_size: phys.slab_size,
-                num_slabs,
             },
         }
     }
@@ -185,7 +197,7 @@ impl SlabAllocatorBuilder {
             inner: Mutex::new(Inner {
                 allocatable: self.allocatable.into_iter().collect(),
                 freeing: Vec::new(),
-                reserved_slabs: RESERVED_SLABS_PCT.apply(self.access.num_slabs),
+                reserved_slabs: RESERVED_SLABS_PCT.apply(self.access.num_slabs()),
             }),
             access: self.access,
         }
@@ -220,11 +232,35 @@ impl SlabAllocatorBuilder {
 }
 
 impl SlabAllocator {
+    pub fn extend(&self, capacity: Extent) {
+        // lock order: SlabAllocator.inner before SlabAccess.inner
+        let mut inner = self.inner.lock().unwrap();
+
+        let mut access_inner = self.access.inner.write().unwrap();
+        let first_new_slab = SlabId(access_inner.num_slabs);
+        // capacity is aligned to be a multiple of slabsize
+        let capacity = capacity.trim_end(capacity.size - capacity.size % self.access.slab_size);
+        access_inner.capacity.insert(first_new_slab, capacity);
+        let new_slabs = capacity.size / self.access.slab_size;
+
+        // We don't want to allocate and write to the new capacity until the next checkpoint
+        // (when the SuperBlockPhys's have been updated to reflect the new capacity).  Therefore
+        // we add the new slabs to `freeing`.
+        inner
+            .freeing
+            .extend((0..new_slabs).map(|n| SlabId(access_inner.num_slabs + n)));
+
+        access_inner.num_slabs += new_slabs;
+    }
+
     pub fn get_phys(&self) -> SlabAllocatorPhys {
         SlabAllocatorPhys {
             slab_size: self.access.slab_size,
             capacity: self
                 .access
+                .inner
+                .read()
+                .unwrap()
                 .capacity
                 .iter()
                 .map(|(_, &extent)| extent)
@@ -250,13 +286,14 @@ impl SlabAllocator {
         let mut inner = self.inner.lock().unwrap();
         inner.reserved_slabs = max(
             reserved_space / self.access.slab_size,
-            RESERVED_SLABS_PCT.apply(self.access.num_slabs),
+            RESERVED_SLABS_PCT.apply(self.access.num_slabs()),
         );
     }
 
     pub fn allocate_reserved(&self) -> SlabId {
         let mut inner = self.inner.lock().unwrap();
-        if inner.allocatable.len() as u64 <= SUPER_RESERVED_SLABS_PCT.apply(self.access.num_slabs) {
+        if inner.allocatable.len() as u64 <= SUPER_RESERVED_SLABS_PCT.apply(self.access.num_slabs())
+        {
             panic!("Free slabs exhausted.");
         }
         inner.allocatable.pop().unwrap()
@@ -285,7 +322,7 @@ impl SlabAllocator {
     pub fn num_slabs_to_evacuate(&self) -> u64 {
         let inner = self.inner.lock().unwrap();
         let target_free_slabs =
-            inner.reserved_slabs + TARGET_AVAILABLE_SLABS_PCT.apply(self.access.num_slabs);
+            inner.reserved_slabs + TARGET_AVAILABLE_SLABS_PCT.apply(self.access.num_slabs());
         let current_free_slabs = inner.allocatable.len() as u64;
         target_free_slabs.saturating_sub(current_free_slabs)
     }

@@ -1,8 +1,11 @@
+use std::fmt::Debug;
 use std::mem::size_of;
 use std::ptr;
 use std::slice;
 
 use safer_ffi::prelude::*;
+use serde::Deserialize;
+use serde::Serialize;
 use tokio::io;
 use tokio::io::AsyncReadExt;
 use tokio::io::AsyncWriteExt;
@@ -132,3 +135,11 @@ pub const TYPE_REPORT_HITS: &str = "report hits";
 pub const TYPE_LIST_DEVICES: &str = "list devices";
 pub const TYPE_ZCACHE_IOSTAT: &str = "zcache iostat";
 pub const TYPE_ZCACHE_STATS: &str = "zcache stats";
+pub const TYPE_ADD_DISK: &str = "add disk";
+pub const TYPE_SYNC_CHECKPOINT: &str = "sync checkpoint";
+pub const TYPE_INITIATE_MERGE: &str = "initiate merge";
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct AddDiskRequest {
+    pub path: String,
+}

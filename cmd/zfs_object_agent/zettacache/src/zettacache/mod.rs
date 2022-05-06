@@ -32,11 +32,12 @@ use serde::Deserialize;
 use serde::Serialize;
 use sysinfo::System;
 use sysinfo::SystemExt;
+use tokio::select;
 use tokio::sync::mpsc;
+use tokio::sync::watch;
 use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::time::sleep_until;
-use tokio::time::timeout_at;
 use util::concurrent_batch::ConcurrentBatch;
 use util::lock_non_send;
 use util::measure;
@@ -195,6 +196,9 @@ impl Deref for ZettaCache {
 pub struct Inner {
     block_access: Arc<BlockAccess>,
     slab_allocator: Arc<SlabAllocator>,
+
+    checkpoint_synced: watch::Receiver<CheckpointId>,
+    checkpoint_wanted: std::sync::Mutex<watch::Sender<CheckpointId>>,
 
     // lock ordering: index first then state
     old_index: Arc<tokio::sync::RwLock<IndexRun>>,
@@ -787,6 +791,8 @@ struct ZettaCacheState {
 
     atime: Atime,
     stats: Arc<CacheStats>,
+    checkpoint_synced: watch::Sender<CheckpointId>,
+    merge_requested: bool,
 }
 
 pub struct LockedKey(LockedItem<IndexKey>);
@@ -819,13 +825,7 @@ impl ZettaCache {
 
         let new_capacity = block_access
             .disks()
-            .map(|disk| {
-                Extent::new(
-                    disk,
-                    SUPERBLOCK_SIZE,
-                    block_access.disk_size(disk) - SUPERBLOCK_SIZE,
-                )
-            })
+            .map(|disk| block_access.disk_extent(disk).trim_start(SUPERBLOCK_SIZE))
             .collect::<Vec<_>>();
 
         let checkpoint = CheckpointPhys {
@@ -941,13 +941,7 @@ impl ZettaCache {
 
             let new_capacity = extra_disks
                 .iter()
-                .map(|&disk| {
-                    Extent::new(
-                        disk,
-                        SUPERBLOCK_SIZE,
-                        block_access.disk_size(disk) - SUPERBLOCK_SIZE,
-                    )
-                })
+                .map(|&disk| block_access.disk_extent(disk).trim_start(SUPERBLOCK_SIZE))
                 .collect::<Vec<_>>();
             primary.disks.extend(
                 extra_disks
@@ -1089,6 +1083,9 @@ impl ZettaCache {
 
         let stats = Arc::new(CacheStats::default());
 
+        let (checkpoint_synced_tx, checkpoint_synced_rx) = watch::channel(primary.checkpoint_id);
+        let (checkpoint_wanted_tx, checkpoint_wanted_rx) = watch::channel(primary.checkpoint_id);
+
         let mut state = ZettaCacheState {
             block_access: block_access.clone(),
             pending_changes,
@@ -1110,6 +1107,8 @@ impl ZettaCache {
             block_allocator,
             slab_allocator,
             stats: stats.clone(),
+            checkpoint_synced: checkpoint_synced_tx,
+            merge_requested: false,
         };
 
         // Now that BlockAllocator is open grab its size stats (these will be updated periodically)
@@ -1139,6 +1138,8 @@ impl ZettaCache {
             timebase: Instant::now(),
             cache_runtime_id: Uuid::new_v4(),
             pool_guids: PoolGuidMapping::open(checkpoint.pool_guids),
+            checkpoint_synced: checkpoint_synced_rx,
+            checkpoint_wanted: std::sync::Mutex::new(checkpoint_wanted_tx),
         }));
 
         let merging = match checkpoint.merge_progress {
@@ -1158,7 +1159,9 @@ impl ZettaCache {
 
         let my_cache = this.clone();
         measure!("checkpoint_task").spawn(async move {
-            my_cache.checkpoint_task(merging).await;
+            my_cache
+                .checkpoint_task(checkpoint_wanted_rx, merging)
+                .await;
         });
 
         let state = this.state.clone();
@@ -1246,6 +1249,7 @@ impl ZettaCache {
     /// for the current progress are passed in.
     async fn checkpoint_task(
         &self,
+        mut checkpoint_wanted: watch::Receiver<CheckpointId>,
         mut merging: Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)>,
     ) {
         let mut next_tick = tokio::time::Instant::now();
@@ -1267,10 +1271,25 @@ impl ZettaCache {
                 let mut state_lock_held = Duration::ZERO;
                 // we have a channel to an active merge task, check it for messages
                 loop {
-                    let result = timeout_at(next_tick, rx.recv()).await;
+                    let result = select! {
+                        result = rx.recv() => result,
+                        _ = sleep_until(next_tick) => break,
+                        _ = checkpoint_wanted.changed() => {
+                            let wanted = *checkpoint_wanted.borrow_and_update();
+                            let synced = *self.checkpoint_synced.borrow();
+                            debug!(
+                                "checkpoint_wanted changed, wanted={wanted:?} synced={synced:?}",
+                            );
+                            if wanted > synced {
+                                break;
+                            } else {
+                                continue;
+                            }
+                        }
+                    };
                     match result {
                         // capture merge progress: the current next index phys and eviction requests
-                        Ok(Some(MergeMessage::Progress(progress))) => {
+                        Some(MergeMessage::Progress(progress)) => {
                             msg_count += 1;
                             free_count += progress.frees.len();
                             cache_updates_count += progress.cache_updates.len();
@@ -1311,7 +1330,11 @@ impl ZettaCache {
                                     match entry.value.location() {
                                         // It's possible the key wasn't already in the cache, so
                                         // this may add or update the key.
-                                        Some(_) => state.index_cache.put(entry.key, entry.value),
+                                        Some(_) => {
+                                            with_alloctag("ZettaCacheState::index_cache", || {
+                                                state.index_cache.put(entry.key, entry.value)
+                                            })
+                                        }
                                         // It's possible the key isn't in the cache; .pop() doesn't
                                         // fail in that case.
                                         None => state.index_cache.pop(&entry.key),
@@ -1344,7 +1367,7 @@ impl ZettaCache {
                             }
                         }
                         // merge task complete, replace the current index with the new index
-                        Ok(Some(MergeMessage::Complete(new_index))) => {
+                        Some(MergeMessage::Complete(new_index)) => {
                             let mut old_index = self.old_index.write().await;
                             let mut new_index_opt = self.new_index.write().await;
 
@@ -1354,24 +1377,37 @@ impl ZettaCache {
                             *new_index_opt = None;
                             merging = None;
                             completed_merge = true;
+                            // When a merge completes, we immediately flush a checkpoint, so that
+                            // we can then check if another merge is needed without delay.
                             break;
                         }
-                        Ok(None) => panic!("channel closed before Complete message received"),
-                        Err(_) => break, // timed out
+                        None => panic!("channel closed before Complete message received"),
                     }
                 }
                 debug!(
-                    "processed {} merge messages with {} frees and {} cache updates in {}ms (state lock held for {}ms)",
-                    msg_count,
-                    free_count,
-                    cache_updates_count,
+                    "processed {msg_count} merge messages with {free_count} frees and \
+                    {cache_updates_count} cache updates in {}ms (state lock held for {}ms)",
                     begin.elapsed().as_millis(),
                     state_lock_held.as_millis(),
                 );
+            } else {
+                loop {
+                    select! {
+                        _ = sleep_until(next_tick) => break,
+                        _ = checkpoint_wanted.changed() => {
+                            let wanted = *checkpoint_wanted.borrow_and_update();
+                            let synced = *self.checkpoint_synced.borrow();
+                            debug!(
+                                "checkpoint_wanted changed, wanted={wanted:?} synced={synced:?}",
+                            );
+                            if wanted > synced {
+                                break;
+                            }
+                        }
+                    }
+                }
             }
 
-            // flush out a new checkpoint every CHECKPOINT_INTERVAL to capture the current state
-            sleep_until(next_tick).await;
             self.flush_checkpoint(
                 merging.as_mut().map(|(_, phys)| (phys.clone())),
                 completed_merge,
@@ -1731,8 +1767,7 @@ impl ZettaCache {
             cache.insert_impl(locked_key, bytes.into(), source).await;
             // We want to hold onto the insert_permit until the write completes because it
             // represents the memory that's required to buffer this insertion, which isn't
-            // released until the io completes.  Similarly, the write_permit (roughly) represents
-            // the disks' capacity to perform i/o.
+            // released until the io completes.
             drop(insert_permit);
         });
     }
@@ -1821,6 +1856,35 @@ impl ZettaCache {
                     .await;
             }
         }
+    }
+
+    pub async fn add_disk(&self, path: &str) -> Result<()> {
+        self.state.lock().await.add_disk(path)?;
+        self.sync_checkpoint().await;
+        Ok(())
+    }
+
+    pub async fn initiate_merge(&self) {
+        self.state.lock().await.request_merge();
+        self.sync_checkpoint().await;
+    }
+
+    /// Wait for the next checkpoint to be written to disk.  Note that a checkpoint may already
+    /// be in progress, and its completion will count as the "next" checkpoint.  If that is not
+    /// desired, the caller would need to coordinate with the in-progress checkpoint, e.g. by
+    /// acquiring the ZettaCacheState lock, which is held while writing out a checkpoint.
+    pub async fn sync_checkpoint(&self) {
+        let mut watch = self.checkpoint_synced.clone();
+        let next = watch.borrow_and_update().next();
+        debug!("waiting for {next:?}");
+        {
+            let wanted = self.checkpoint_wanted.lock().unwrap();
+            if next > *wanted.borrow() {
+                debug!("sending checkpoint_wanted {next:?}");
+                wanted.send(next).unwrap();
+            }
+        } // drop wanted lock
+        watch.changed().await.ok();
     }
 
     pub fn sector_size(&self) -> usize {
@@ -2163,7 +2227,7 @@ impl ZettaCacheState {
             self.slab_allocator
                 .free(self.slab_allocator.extent_to_slab_id(extent));
         }
-        self.primary.checkpoint_id = self.primary.checkpoint_id.next();
+        self.primary.checkpoint_id = checkpoint.id;
         self.primary.feature_flags = SUPPORTED_FEATURES.keys().cloned().collect();
         // We need to write all the disks' superblocks in case new disks have been added.
         self.primary
@@ -2176,6 +2240,7 @@ impl ZettaCacheState {
             ),
         );
         self.slab_allocator.release_frees();
+        self.checkpoint_synced.send(checkpoint.id).ok();
 
         info!(
             "completed {:?} in {}ms; flushed {} operations ({}) to log",
@@ -2329,6 +2394,11 @@ impl ZettaCacheState {
             }
         }
 
+        if self.merge_requested {
+            debug!("starting merge due to user request");
+            need_merge = true;
+        }
+
         need_merge
     }
 
@@ -2340,6 +2410,8 @@ impl ZettaCacheState {
         if !self.need_merge() {
             return None;
         }
+
+        self.merge_requested = false;
 
         let reduction = self.space_to_evict();
         let eviction_atime = self.atime_histogram.atime_for_eviction_target(reduction);
@@ -2529,5 +2601,35 @@ impl ZettaCacheState {
             PendingChanges,
             old_pending + self.pending_changes.len() as u64,
         );
+    }
+
+    fn add_disk(&mut self, path: &str) -> Result<()> {
+        // We hold the state lock across all these operations to ensure that we're always
+        // adding the last DiskId to the SlabAllocator and Primary, in the case of concurrent
+        // calls to add_disk().
+
+        let disk_id = self.block_access.add_disk(Disk::new(path, false)?);
+
+        self.slab_allocator.extend(
+            self.block_access
+                .disk_extent(disk_id)
+                .trim_start(SUPERBLOCK_SIZE),
+        );
+
+        self.primary
+            .disks
+            .insert(disk_id, DiskPhys::new(self.block_access.disk_size(disk_id)));
+
+        // The hit data isn't accurate across cache size changes, so clear
+        // it, which also updates the histogram parameters to reflect the
+        // new cache size.
+        self.clear_hit_data();
+
+        info!("added {path} as {disk_id:?}");
+        Ok(())
+    }
+
+    fn request_merge(&mut self) {
+        self.merge_requested = true;
     }
 }

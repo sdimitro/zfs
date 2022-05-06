@@ -4,6 +4,7 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
+use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -184,7 +185,9 @@ impl ZcacheSubCommand for Hits {
                     writeln_stdout!("Hits-by-size data cleared");
                 }
                 Err(RemoteError::ResultError(_)) => {
-                    writeln_stdout!("No cache found, so no hits-by-size data present");
+                    return Err(anyhow!(
+                        "No cache found, so no hits-by-size data is available"
+                    ))
                 }
                 Err(RemoteError::Other(e)) => return Err(e),
             }
@@ -207,7 +210,9 @@ impl ZcacheSubCommand for Hits {
                 hits_by_size.print(quantiles, cumulative, ghost);
             }
             Err(RemoteError::ResultError(_)) => {
-                writeln_stdout!("No cache found, so no hits-by-size data is available");
+                return Err(anyhow!(
+                    "No cache found, so no hits-by-size data is available"
+                ));
             }
             Err(RemoteError::Other(e)) => return Err(e),
         }
