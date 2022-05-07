@@ -1,39 +1,66 @@
 //! `zcache hits` subcommand
 
-use std::time::Duration;
-use std::time::SystemTime;
-use std::time::UNIX_EPOCH;
+use std::cmp::max;
+use std::cmp::Ordering;
 
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
-use chrono::Local;
+use chrono::Utc;
 use clap::Parser;
 use num_traits::cast::ToPrimitive;
+use serde::Serialize;
 use util::message::TYPE_CLEAR_HIT_DATA;
 use util::message::TYPE_REPORT_HITS;
 use util::nice_p2size;
 use util::write_stdout;
 use util::writeln_stdout;
 use util::From64;
+use util::ReportHitsResponse;
 
 use crate::remote_channel::RemoteChannel;
 use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
 
-struct SizeHistogram {
-    start: SystemTime,
-    lookups: u64,
+#[derive(Serialize)]
+struct HitsBySize {
+    start_time: DateTime<Utc>,
+    end_time: DateTime<Utc>,
     cache_capacity: u64,
+    cache_lookups: u64,
+    cache_hits: u64,
     bucket_size: u64,
-    live_histogram: Vec<u64>,
-    ghost_histogram: Vec<u64>,
+    hits_report: Vec<u64>,
 }
 
-impl SizeHistogram {
-    fn sum_live_hits(&self) -> u64 {
-        self.live_histogram.iter().sum()
+impl HitsBySize {
+    fn new(report_hits: ReportHitsResponse, quantiles: usize) -> HitsBySize {
+        let mut hits_by_size = HitsBySize {
+            start_time: report_hits.started.into(),
+            end_time: Utc::now(),
+            cache_lookups: report_hits.cache_lookups,
+            cache_hits: report_hits.combined_histogram.iter().sum(),
+            cache_capacity: report_hits.cache_capacity,
+            bucket_size: report_hits.bucket_size,
+            hits_report: Vec::new(),
+        };
+        if quantiles == 0 {
+            return hits_by_size;
+        }
+
+        let raw_length = report_hits.combined_histogram.len() as u64;
+        let resampled_report = hits_by_size.resample(quantiles, &report_hits.combined_histogram);
+        hits_by_size.bucket_size =
+            report_hits.bucket_size * raw_length / resampled_report.len() as u64;
+
+        let mut cumulative_hits = 0;
+        for hits in resampled_report.iter() {
+            cumulative_hits += hits;
+            hits_by_size.hits_report.push(cumulative_hits);
+        }
+
+        hits_by_size
     }
 
     /// Resample a histogram to produce a new histogram with the requested
@@ -70,103 +97,121 @@ impl SizeHistogram {
         resample
     }
 
-    /// print out a histogram of hits-by-cache-size
-    fn print(&self, quantiles: usize, cumulative: bool, ghost: bool) {
-        let start_as_utc: DateTime<Local> = self.start.into();
-        writeln_stdout!("Data collection started: {}", start_as_utc.to_rfc2822());
-        writeln_stdout!("Data collection ended: {}", Local::now().to_rfc2822());
-        let total = self.sum_live_hits();
+    fn print(&self) {
+        writeln_stdout!("Data collection started: {}", self.start_time.to_rfc2822());
+        writeln_stdout!("Data collection ended: {}", self.end_time.to_rfc2822());
         write_stdout!(
             "Cache Hits by Size ({} lookups with {} hits ",
-            self.lookups,
-            total
+            self.cache_lookups,
+            self.cache_hits
         );
-        let hit_percent = if self.lookups == 0 {
+        let hit_percent = if self.cache_lookups == 0 {
             100.0
         } else {
-            total as f64 * 100.0 / self.lookups as f64
+            self.cache_hits as f64 * 100.0 / self.cache_lookups as f64
         };
         writeln_stdout!(
             "({:.1}%) in {} cache)",
             hit_percent,
             nice_p2size(self.cache_capacity)
         );
-        if quantiles == 0 {
+
+        if self.hits_report.is_empty() {
             return;
         }
-        const HISTOGRAM_WIDTH: usize = 50;
-        let histogram_length = self.live_histogram.len() as u64;
-        let histogram_capacity = histogram_length * self.bucket_size;
-        let mut bucket_total = 0;
-        let mut cache_size = 0;
-        let live_histogram = self.resample(quantiles, &self.live_histogram);
-        let ghost_histogram = self.resample(quantiles, &self.ghost_histogram);
-        let bucket_size = self.bucket_size * histogram_length / live_histogram.len() as u64;
-        let mut beyond_live = false;
 
-        for (index, (live_hits, ghost_hits)) in
-            live_histogram.into_iter().zip(ghost_histogram).enumerate()
-        {
-            if !beyond_live && (ghost_hits > live_hits || index == quantiles) {
-                if !ghost {
-                    return;
-                }
-                writeln_stdout!("-------------------ghost hits---------------------");
-                beyond_live = true;
-            }
-            cache_size += bucket_size;
+        const HISTOGRAM_WIDTH: usize = 50;
+        const PREFIX_WIDTH: usize = 16;
+        writeln_stdout!(
+            "\n{:>15}{:>2}{:>10}{:>10}{:>10}{:>10}{:>9}",
+            "size : %hit",
+            0,
+            20,
+            40,
+            60,
+            80,
+            100
+        );
+        writeln_stdout!("{0:-<1$}", "-", HISTOGRAM_WIDTH + PREFIX_WIDTH);
+
+        let histogram_length = self.hits_report.len() as u64;
+        let histogram_capacity = histogram_length * self.bucket_size;
+        let mut cache_size = 0;
+
+        for (index, &cumulative_hits) in self.hits_report.iter().enumerate() {
+            cache_size += self.bucket_size;
             // The last bucket may not be the "full" bucket size
             if cache_size > histogram_capacity {
-                assert!(
-                    index == self.live_histogram.len() - 1,
+                assert_eq!(
+                    index,
+                    self.hits_report.len() - 1,
                     "Capacity overflow at histogram index {}",
                     index
                 );
                 cache_size = histogram_capacity;
             }
-
+            if hit_percent > 99.9 && cache_size > self.cache_capacity {
+                break;
+            }
             write_stdout!("{: >8} : ", nice_p2size(cache_size));
-            if total == 0 {
+            if self.cache_hits == 0 {
                 writeln_stdout!();
                 continue;
             }
-            if cumulative {
-                bucket_total += live_hits + ghost_hits;
-            } else {
-                bucket_total = live_hits + ghost_hits;
-            };
-            if bucket_total == 0 {
-                // this bucket is empty (if we are accumulating, no hits have been seen yet)
-                writeln_stdout!("  0%");
-                continue;
-            }
-            let percent = (bucket_total as f64 * hit_percent) / total as f64;
-            if percent < 1.0 {
+
+            let percent = (cumulative_hits * 100) as f64 / self.cache_lookups as f64;
+            let mut stars = if cumulative_hits == 0 {
+                // no hits have been seen yet
+                write_stdout!("  0% ");
+                0
+            } else if percent < 1.0 {
                 // there are a small number of hits
-                writeln_stdout!(" <1% *");
+                write_stdout!(" <1% ");
+                1
             } else {
-                let stars = std::cmp::max(percent.to_usize().unwrap() * HISTOGRAM_WIDTH / 100, 1);
-                writeln_stdout!("{: >3.0}% {:*<2$}", percent, "", stars);
-            }
+                write_stdout!("{: >3.0}% ", percent);
+                max(percent.to_usize().unwrap() * HISTOGRAM_WIDTH / 100, 1)
+            };
+
+            let real_stars = hit_percent.to_usize().unwrap() * HISTOGRAM_WIDTH / 100;
+            let (spaces, trailing) = match stars.cmp(&real_stars) {
+                Ordering::Greater => {
+                    let trailing = stars - real_stars - 1;
+                    stars = real_stars;
+                    (0, trailing)
+                }
+                Ordering::Less => (real_stars - stars, 0),
+                Ordering::Equal => (0, 0),
+            };
+            writeln_stdout!(
+                "{:*<3$}{: <4$}|{:*<5$}",
+                "",
+                "",
+                "",
+                stars,
+                spaces,
+                trailing
+            );
         }
     }
 }
 
 #[derive(Parser)]
-#[clap(about = "Print out the current hit-by-size histogram.")]
+#[clap(about = "Print out the current hits-by-size histogram.")]
 #[clap(alias = "report_hits")]
 pub struct Hits {
-    /// Divide hit data into this many buckets
+    /// Divide hit data into this many buckets.
     #[clap(short = 'q', long, default_value = "20", conflicts_with = "clear")]
     quantiles: usize,
 
-    /// Don't accumulate hits from previous quantiles
-    #[clap(short = 'n', long, conflicts_with = "clear")]
-    non_cumulative: bool,
-
-    /// Don't show ghost hit data
-    #[clap(short = 'o', long, conflicts_with = "clear")]
-    only_live_hits: bool,
+    /// Use JSON output format.
+    #[clap(
+        short = 'j',
+        long,
+        conflicts_with = "clear",
+        conflicts_with = "quantiles"
+    )]
+    json: bool,
 
     /// Clear the current hit-by-size histogram
     #[clap(short = 'c', long)]
@@ -194,20 +239,25 @@ impl ZcacheSubCommand for Hits {
             return Ok(());
         }
 
-        let quantiles = self.quantiles;
-        let cumulative = !self.non_cumulative;
-        let ghost = !self.only_live_hits;
         match remote.call(TYPE_REPORT_HITS, None).await {
             Ok(response) => {
-                let hits_by_size = SizeHistogram {
-                    start: UNIX_EPOCH + Duration::new(response.lookup_uint64("started")?, 0),
-                    lookups: response.lookup_uint64("lookups")?,
-                    cache_capacity: response.lookup_uint64("cache_capacity")?,
-                    bucket_size: response.lookup_uint64("bucket_size")?,
-                    live_histogram: response.lookup_uint64_array("live_histogram")?,
-                    ghost_histogram: response.lookup_uint64_array("ghost_histogram")?,
-                };
-                hits_by_size.print(quantiles, cumulative, ghost);
+                let response: ReportHitsResponse = nvpair::from_nvlist(&response)?;
+                let json_quantiles = response.cache_capacity / response.bucket_size;
+                let hits_by_size = HitsBySize::new(
+                    response,
+                    if self.json {
+                        // For JSON keep all the data points (don't down sample)
+                        usize::from64(json_quantiles)
+                    } else {
+                        self.quantiles
+                    },
+                );
+
+                if self.json {
+                    writeln_stdout!("{}", serde_json::to_string_pretty(&hits_by_size).unwrap());
+                } else {
+                    hits_by_size.print();
+                }
             }
             Err(RemoteError::ResultError(_)) => {
                 return Err(anyhow!(
@@ -232,8 +282,7 @@ impl ZcacheSubCommand for ClearHitData {
     async fn invoke(&self) -> Result<()> {
         let hits = Hits {
             quantiles: 0,
-            non_cumulative: false,
-            only_live_hits: false,
+            json: false,
             clear: true,
         };
         hits.invoke().await

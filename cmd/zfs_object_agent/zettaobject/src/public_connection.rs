@@ -1,6 +1,5 @@
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::time::UNIX_EPOCH;
 
 use anyhow::Result;
 use futures::stream::StreamExt;
@@ -11,6 +10,7 @@ use serde::Serialize;
 use util::maybe_die_with;
 use util::message::*;
 use util::tunable;
+use util::ReportHitsResponse;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
 
@@ -229,28 +229,22 @@ impl PublicConnectionState {
         let cache = self.cache.clone();
         debug!("got ReportHitsRequest");
         Ok(Box::pin(async move {
-            #[derive(Debug, Serialize)]
-            struct ReportHitsResponse {
-                started: u64,
-                lookups: u64,
-                cache_capacity: u64,
-                meta_overhead: u64,
-                bucket_size: u64,
-                live_histogram: Vec<u64>,
-                ghost_histogram: Vec<u64>,
-            }
-
             let response = match cache {
                 Some(cache) => {
                     let phys = cache.hits_by_size_data().await;
+                    let mut hits_report = Vec::new();
+                    for (live_hits, ghost_hits) in
+                        phys.live_histogram.iter().zip(&phys.ghost_histogram)
+                    {
+                        hits_report.push(live_hits + ghost_hits);
+                    }
+
                     Ok(ReportHitsResponse {
-                        started: phys.started().duration_since(UNIX_EPOCH).unwrap().as_secs(),
-                        lookups: phys.lookups,
+                        started: phys.started(),
+                        cache_lookups: phys.lookups,
                         cache_capacity: phys.cache_capacity,
-                        meta_overhead: phys.meta_overhead,
                         bucket_size: phys.bucket_size,
-                        live_histogram: phys.live_histogram,
-                        ghost_histogram: phys.ghost_histogram,
+                        combined_histogram: hits_report,
                     })
                 }
                 None => Err(FailureMessage::new("no zettacache present")),

@@ -27,6 +27,7 @@ mod vec_ext;
 pub mod watch_once;
 pub mod write_stdout;
 mod zcache_devices;
+mod zcache_hits;
 pub mod zettacache_stats;
 
 pub use alloc::with_alloctag;
@@ -60,3 +61,4 @@ pub use vec_ext::VecMap;
 pub use write_stdout::flush_stdout;
 pub use zcache_devices::DeviceEntry;
 pub use zcache_devices::DeviceList;
+pub use zcache_hits::ReportHitsResponse;
