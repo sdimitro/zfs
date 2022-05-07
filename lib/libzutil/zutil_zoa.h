@@ -24,6 +24,13 @@
 #ifndef _LIBZUTIL_ZUTIL_ZOA_H_
 #define	_LIBZUTIL_ZUTIL_ZOA_H_
 
+/*
+ * This specifies that this code supports all 1.X.Y and 2.X.Y versions of the
+ * agent communication protocol. This should be updated as new capabilities
+ * are added and supported or required.
+ */
+#define	AGENT_PUBLIC_PROTOCOL_VERSION ">=1.0.0, <3.0.0"
+
 typedef enum zoa_socket {
 	ZFS_PUBLIC_SOCKET,
 	ZFS_ROOT_SOCKET,

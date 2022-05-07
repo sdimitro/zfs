@@ -77,13 +77,6 @@
 #include "zutil_import.h"
 #include "zutil_zoa.h"
 
-/*
- * This specifies that this code supports all 1.X.Y versions of the agent
- * communication protocol. This should be updated as new capabilities are
- * added and supported or required.
- */
-#define	AGENT_PROTOCOL_VERSION "^1"
-
 __attribute__((format(printf, 2, 3))) void
 zutil_error_aux(libpc_handle_t *hdl, const char *fmt, ...)
 {
@@ -1843,7 +1836,7 @@ zpool_find_import_cached(libpc_handle_t *hdl, importargs_t *iarg)
 			 * to prevent the import from hanging.
 			 */
 			int sock = zoa_connect_agent(hdl, ZFS_ROOT_SOCKET,
-			    AGENT_PROTOCOL_VERSION, NULL);
+			    AGENT_PUBLIC_PROTOCOL_VERSION, NULL);
 			if (sock == -1) {
 				continue;
 			}
@@ -1905,8 +1898,8 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 	if (iarg->guid != 0)
 		fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
 
-	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET, NULL);
+	nvlist_t *resp = zoa_send_recv_msg(hdl, msg,
+	    AGENT_PUBLIC_PROTOCOL_VERSION, ZFS_PUBLIC_SOCKET, NULL);
 
 	nvpair_t *elem = NULL;
 	while ((elem = nvlist_next_nvpair(resp, elem)) != NULL) {
@@ -2205,8 +2198,8 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 		fnvlist_add_string(msg, AGENT_NAME, iarg->poolname);
 	}
 
-	nvlist_t *resp = zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_ROOT_SOCKET, NULL);
+	nvlist_t *resp = zoa_send_recv_msg(&handle, msg,
+	    AGENT_PUBLIC_PROTOCOL_VERSION, ZFS_ROOT_SOCKET, NULL);
 	if (resp == NULL)
 		return (-1);
 

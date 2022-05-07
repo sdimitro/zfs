@@ -39,13 +39,6 @@
  */
 #define	ZOA_MAX_RETRIES	15
 
-/*
- * This specifies that this code supports all 1.X.Y versions of the agent
- * communication protocol. This should be updated as new capabilities are
- * added and supported or required.
- */
-#define	AGENT_PROTOCOL_VERSION ">=1.0.0, <3.0.0"
-
 struct sockaddr_un zfs_public_socket = {
 	AF_UNIX, "/etc/zfs/zfs_public_socket"
 };
@@ -330,8 +323,8 @@ zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
 	    AGENT_TYPE_GET_DESTROYING_POOLS);
 
-	nvlist_t *resp = zoa_send_recv_msg(hdl, msg, AGENT_PROTOCOL_VERSION,
-	    ZFS_PUBLIC_SOCKET, &version);
+	nvlist_t *resp = zoa_send_recv_msg(hdl, msg,
+	    AGENT_PUBLIC_PROTOCOL_VERSION, ZFS_PUBLIC_SOCKET, &version);
 	if (resp == NULL) {
 		if (version != NULL)
 			fnvlist_free(version);
@@ -434,7 +427,7 @@ zoa_clear_destroyed_pools(void *hdl)
 	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
 	    AGENT_TYPE_CLEAR_DESTROYED_POOLS);
 
-	zoa_send_recv_msg(&handle, msg, AGENT_PROTOCOL_VERSION,
+	zoa_send_recv_msg(&handle, msg, AGENT_PUBLIC_PROTOCOL_VERSION,
 	    ZFS_PUBLIC_SOCKET, NULL);
 }
 

@@ -101,7 +101,7 @@ impl RemoteChannel {
     async fn agent_version(stream: &mut UnixStream) -> Result<Version> {
         let mut vers_req_nvlist = NvList::new_unique_names();
         vers_req_nvlist.insert(AGENT_REQUEST_TYPE, TYPE_VERSION)?;
-        vers_req_nvlist.insert("version", "^1")?;
+        vers_req_nvlist.insert("version", ">=1.0.0, < 3.0.0")?;
         Self::send(stream, vers_req_nvlist).await?;
         let response = Self::receive(stream).await?;
         assert!(response.lookup_string(AGENT_RESPONSE_TYPE)?.to_str() == Ok(TYPE_VERSION));
