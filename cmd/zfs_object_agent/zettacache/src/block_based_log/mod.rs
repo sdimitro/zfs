@@ -131,8 +131,8 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
             (
                 max(offset, self.trimmed),
                 extent
-                    .trim_start(self.trimmed.0.saturating_sub(offset.0))
-                    .trim_end(self.next_chunk_offset - offset),
+                    .trim_end(self.next_chunk_offset - offset)
+                    .trim_start(self.trimmed.0.saturating_sub(offset.0)),
             )
         })
     }
@@ -213,14 +213,11 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                     let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
                         .chunk_from_raw(&extent_bytes[total_consumed..])
                         .unwrap();
-                    let chunk_id = chunk.id;
+                    assert_lt!(chunk.id, next_chunk);
                     if chunk_tx.send(chunk).await.is_err() {
                         break;
                     }
                     total_consumed += consumed;
-                    if chunk_id == next_chunk {
-                        break;
-                    }
                 }
             }
         });
