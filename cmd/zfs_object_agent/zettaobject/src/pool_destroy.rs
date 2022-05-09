@@ -55,7 +55,6 @@ struct DestroyingCacheItemPhys {
     #[serde(flatten)]
     protocol: ObjectAccessProtocol,
     bucket: String,
-    profile: Option<String>,
     state: PoolDestroyState,
 }
 
@@ -272,7 +271,6 @@ impl PoolDestroyer {
             cache_phys: DestroyingCacheItemPhys {
                 name: pool_phys.name,
                 protocol: object_access.protocol(),
-                profile: object_access.credentials_profile(),
                 bucket: object_access.bucket(),
                 state: PoolDestroyState::InProgress,
             },

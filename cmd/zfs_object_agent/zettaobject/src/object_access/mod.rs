@@ -188,6 +188,7 @@ impl<'de> Deserialize<'de> for ObjectAccessProtocol {
             S3Legacy {
                 endpoint: String,
                 region: String,
+                #[serde(alias = "profile")]
                 credentials_profile: Option<String>,
             },
         }
