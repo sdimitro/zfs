@@ -29,9 +29,8 @@ impl<T: Clone> Receiver<T> {
     /// calling .send().
     pub async fn recv(mut self) -> Result<T, watch::error::RecvError> {
         match self.0.changed().await {
-            // Unwrap is safe because it's only changed to Some.
+            // Unwrap is safe because it's only changed to Some
             Ok(()) => Ok(self.0.borrow().as_ref().unwrap().clone()),
-            // Sender doesn't have a value for us.  Retry.
             Err(e) => Err(e),
         }
     }

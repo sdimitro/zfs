@@ -38,7 +38,6 @@ use serde::Deserialize;
 use serde::Serialize;
 use stream_reduce::Reduce;
 use tokio::sync::oneshot;
-use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tokio::time::sleep;
 use util::async_cache::GetMethod;
@@ -49,6 +48,7 @@ use util::super_trace;
 use util::tunable;
 use util::tunable::Percent;
 use util::unordered::Unordered;
+use util::watch_once;
 use util::with_alloctag;
 use util::AlignedBytes;
 use uuid::Uuid;
@@ -446,7 +446,7 @@ pub struct PoolState {
     object_block_map: ObjectBlockMap,
     zettacache: Option<ZettaCache>,
     pub shared_state: Arc<PoolSharedState>,
-    resuming: watch::Receiver<bool>,
+    resuming: watch_once::Receiver<()>,
     heartbeat_guard: Option<HeartbeatGuard>,
 }
 
@@ -574,7 +574,7 @@ struct PoolSyncingState {
     pending_flushes: BTreeSet<BlockId>,
     cleanup_handle: Option<JoinHandle<()>>,
     features: HashMap<FeatureFlag, u64>,
-    resuming: watch::Sender<bool>,
+    resuming: Option<watch_once::Sender<()>>,
     checkpoint_txg: Option<Txg>,
 }
 
@@ -929,7 +929,9 @@ impl Pool {
             });
         }
 
-        let (tx, rx) = watch::channel(syncing_txg.is_some());
+        let (tx, rx) = watch_once::channel();
+        // If not syncing, drop Sender so that Receivers will return immediately
+        let tx = syncing_txg.map(|_| tx);
         /*
          * If we are rolling backwards to a checkpoint and the checkpoint txg is equal
          * to the current txg, then delete the checkpoint and continue onwards. In all
@@ -1035,8 +1037,6 @@ impl Pool {
                 ),
             });
 
-            let (tx, rx) = watch::channel(false);
-
             let mut pool = Pool {
                 state: Arc::new(PoolState {
                     shared_state: shared_state.clone(),
@@ -1059,12 +1059,12 @@ impl Pool {
                         pending_flushes: Default::default(),
                         cleanup_handle: None,
                         features: Default::default(),
-                        resuming: tx,
+                        resuming: None,
                         checkpoint_txg: None,
                     })),
                     zettacache,
                     object_block_map,
-                    resuming: rx,
+                    resuming: watch_once::channel().1,
                     heartbeat_guard: if !shared_state.object_access.readonly() {
                         Some(
                             heartbeat::start_heartbeat(shared_state.object_access.clone(), id)
@@ -1286,9 +1286,9 @@ impl Pool {
             );
             Self::initiate_flush_object_impl(state, syncing_state);
 
-            assert!(*syncing_state.resuming.borrow());
-            // This unwrap is safe because there's a receiver: state.resuming
-            syncing_state.resuming.send(false).unwrap();
+            // drop the Sender, causing waiting Receivers to wake up
+            assert!(syncing_state.resuming.is_some());
+            syncing_state.resuming = None;
 
             info!("resume: completed");
         })
@@ -1718,12 +1718,7 @@ impl Pool {
         // If we are in the middle of resuming, wait for that to complete before
         // processing this read.  This is needed because we may be reading from
         // a block that hasn't yet been added to the ObjectBlockMap.
-        if *self.state.resuming.borrow() {
-            let mut resuming = self.state.resuming.clone();
-            while *resuming.borrow_and_update() {
-                resuming.changed().await.unwrap();
-            }
-        }
+        self.state.resuming.clone().recv().await.ok();
 
         let guid = self.state.shared_state.guid;
         match &self.state.zettacache {
