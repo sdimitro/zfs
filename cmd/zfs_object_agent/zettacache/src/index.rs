@@ -89,19 +89,24 @@ impl SummarizedBlockBasedLogEntry for IndexEntry {
         self.key
     }
 }
+impl IndexEntry {
+    pub fn new(key: IndexKey, value: IndexValue) -> Self {
+        Self { key, value }
+    }
+}
 impl From<&IndexEntryPhys> for IndexEntry {
     fn from(phys: &IndexEntryPhys) -> Self {
-        IndexEntry {
-            key: IndexKey {
+        IndexEntry::new(
+            IndexKey {
                 id: PoolId(phys.pool_id),
                 block: BlockId(phys.block),
             },
-            value: IndexValue {
+            IndexValue {
                 location: NonZeroU64::new(phys.location).map(DiskLocation::from_raw),
                 sectors: phys.sectors,
                 atime: Atime(phys.atime),
             },
-        }
+        )
     }
 }
 impl Serialize for IndexEntry {

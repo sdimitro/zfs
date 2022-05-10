@@ -400,6 +400,7 @@ impl MergeState {
         /// to wait for merge completion. Buffers for accumulated work are pre-allocated
         /// to avoid the cost of growing those buffers during the merge.
         struct Progress {
+            chunk_len: usize,
             tx: mpsc::Sender<IndexMessage>,
             last_key: Option<IndexKey>,
             entries: Vec<IndexEntry>,
@@ -419,12 +420,14 @@ impl MergeState {
 
         impl Progress {
             fn new(tx: mpsc::Sender<IndexMessage>, first_ghost: Atime, first_live: Atime) -> Self {
+                let chunk_len = *MERGE_PROGRESS_CHUNK;
                 Self {
+                    chunk_len,
                     tx,
                     last_key: None,
-                    entries: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
-                    frees: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
-                    cache_updates: Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                    entries: Vec::with_capacity(chunk_len),
+                    frees: Vec::with_capacity(chunk_len),
+                    cache_updates: Vec::with_capacity(chunk_len),
                     obsoleted: AtimeHistogramPhys::new(first_ghost, first_live),
                     timer: Instant::now(),
                 }
@@ -456,25 +459,38 @@ impl MergeState {
                         None => self.frees.push(extent),
                     }
 
-                    if self.entries.len() >= *MERGE_PROGRESS_CHUNK
-                        || self.frees.len() >= *MERGE_PROGRESS_CHUNK
-                        || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
+                    if self.entries.len() >= self.chunk_len
+                        || self.frees.len() >= self.chunk_len
+                        || self.cache_updates.len() >= self.chunk_len
                     {
                         self.report().await;
                     }
                 }
             }
 
+            /// Like `ingest()`.  Returns true if `report().await` is needed.
+            fn ingest_pc(&mut self, state: &MergeState, key: IndexKey, value: IndexValue) -> bool {
+                self.ingest(
+                    state,
+                    IndexEntry::new(key, value),
+                    IngestSource::PendingChange,
+                )
+            }
+
             /// The provided index entry is either:
             /// 1. Added to the list of entries to be part of the new index, or
             /// 2. Added to the list of entries to be evicted from the cache, or
             /// 3. Dropped because it is an already evicted entry that is no longer being tracked.
-            async fn ingest(
+            /// Returns true if report() is needed.  Note that we don't want to do the
+            /// `report.await()` here because that would require instantiating a Future in the
+            /// common case where we don't need to report(), which impacts performance because
+            /// this is called very frequently.
+            fn ingest(
                 &mut self,
                 state: &MergeState,
                 mut entry: IndexEntry,
                 source: IngestSource,
-            ) {
+            ) -> bool {
                 if let Some(extent) = entry.value.extent() {
                     if let Some(rebalance) = &state.rebalance {
                         let remapped_location = rebalance.remap(extent);
@@ -511,12 +527,9 @@ impl MergeState {
                 }
                 self.last_key = Some(entry.key);
 
-                if self.entries.len() >= *MERGE_PROGRESS_CHUNK
-                    || self.frees.len() >= *MERGE_PROGRESS_CHUNK
-                    || self.cache_updates.len() >= *MERGE_PROGRESS_CHUNK
-                {
-                    self.report().await;
-                }
+                self.entries.len() >= self.chunk_len
+                    || self.frees.len() >= self.chunk_len
+                    || self.cache_updates.len() >= self.chunk_len
             }
 
             /// Send a message to the next_index_task, with the current set of index entries to
@@ -529,15 +542,15 @@ impl MergeState {
                             last_key,
                             entries: mem::replace(
                                 &mut self.entries,
-                                Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                                Vec::with_capacity(self.chunk_len),
                             ),
                             frees: mem::replace(
                                 &mut self.frees,
-                                Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                                Vec::with_capacity(self.chunk_len),
                             ),
                             cache_updates: mem::replace(
                                 &mut self.cache_updates,
-                                Vec::with_capacity(*MERGE_PROGRESS_CHUNK),
+                                Vec::with_capacity(self.chunk_len),
                             ),
                             obsoleted: self.obsoleted.take(),
                         })
@@ -614,16 +627,9 @@ impl MergeState {
                         break;
                     }
                     // Add this new entry to the index
-                    progress
-                        .ingest(
-                            self,
-                            IndexEntry {
-                                key: pc_key,
-                                value: pc_value,
-                            },
-                            IngestSource::PendingChange,
-                        )
-                        .await;
+                    if progress.ingest_pc(self, pc_key, pc_value) {
+                        progress.report().await
+                    }
                     pending_changes_iter.next();
                 }
 
@@ -641,37 +647,25 @@ impl MergeState {
                                 debug!("Insert of {:?} replaces {:?}", pc_value, entry);
                             }
                             progress.evict(self, entry).await;
-                            progress
-                                .ingest(
-                                    self,
-                                    IndexEntry {
-                                        key: pc_key,
-                                        value: pc_value,
-                                    },
-                                    IngestSource::PendingChange,
-                                )
-                                .await;
+                            if progress.ingest_pc(self, pc_key, pc_value) {
+                                progress.report().await;
+                            }
                             // this pending change is consumed
                             pending_changes_iter.next();
                         } else {
                             assert_gt!(pc_key, entry.key);
-                            progress.ingest(self, entry, IngestSource::Index).await;
+                            if progress.ingest(self, entry, IngestSource::Index) {
+                                progress.report().await;
+                            }
                         }
                     }
                     Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
                         if pc_key == entry.key {
                             // Update this entry with the new atime from the pending change
                             assert_eq!(pc_value.extent(), entry.value.extent());
-                            progress
-                                .ingest(
-                                    self,
-                                    IndexEntry {
-                                        key: pc_key,
-                                        value: pc_value,
-                                    },
-                                    IngestSource::PendingChange,
-                                )
-                                .await;
+                            if progress.ingest_pc(self, pc_key, pc_value) {
+                                progress.report().await;
+                            }
 
                             // this pending change is consumed
                             pending_changes_iter.next();
@@ -679,28 +673,25 @@ impl MergeState {
                             // We shouldn't have skipped any, because there has to be a
                             // corresponding Index entry
                             assert_gt!(pc_key, entry.key);
-                            progress.ingest(self, entry, IngestSource::Index).await;
+                            if progress.ingest(self, entry, IngestSource::Index) {
+                                progress.report().await;
+                            }
                         }
                     }
                     None => {
                         // no more pending changes
-                        progress.ingest(self, entry, IngestSource::Index).await;
+                        if progress.ingest(self, entry, IngestSource::Index) {
+                            progress.report().await;
+                        }
                     }
                 }
             }
         }
         while let Some((&pc_key, &PendingChange::Insert(pc_value))) = pending_changes_iter.peek() {
             // Add this new entry to the index
-            progress
-                .ingest(
-                    self,
-                    IndexEntry {
-                        key: pc_key,
-                        value: pc_value,
-                    },
-                    IngestSource::PendingChange,
-                )
-                .await;
+            if progress.ingest_pc(self, pc_key, pc_value) {
+                progress.report().await;
+            }
             // Consume pending change.  We don't do that in the `while let`
             // because we want to leave any unmatched items in the iterator so
             // that we can print them out when failing below.
