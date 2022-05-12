@@ -11,7 +11,7 @@ mod btreemap_ext;
 pub mod concurrent_batch;
 mod credentials;
 mod die;
-mod from64;
+pub mod from64;
 pub mod lazy_static_ptr;
 mod lock_set;
 mod logging;

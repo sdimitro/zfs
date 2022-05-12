@@ -7,6 +7,7 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::atomic::Ordering;
 use std::sync::Mutex;
 use std::sync::Once;
+use std::time::Instant;
 
 use futures::FutureExt;
 use tokio::task::JoinHandle;
@@ -23,6 +24,7 @@ pub struct Measurement {
     count: AtomicU64,
     inflight: AtomicU64,
     fut_size: AtomicUsize,
+    nanos: AtomicU64,
 }
 
 impl Measurement {
@@ -34,6 +36,7 @@ impl Measurement {
             count: AtomicU64::new(0),
             inflight: AtomicU64::new(0),
             fut_size: AtomicUsize::new(0),
+            nanos: AtomicU64::new(0),
         }
     }
 
@@ -55,6 +58,7 @@ impl Measurement {
     ) -> impl Future<Output = R> + 'b
     where
         'a: 'b,
+        R: 'b,
     {
         if self.fut_size.load(Ordering::Relaxed) == 0 {
             // Multiple threads may race to set this, but they will all store the same value, so
@@ -70,6 +74,22 @@ impl Measurement {
         })
     }
 
+    pub fn fut_timed<'a, 'b, R>(
+        &'a self,
+        future: impl Future<Output = R> + 'b,
+    ) -> impl Future<Output = R> + 'b
+    where
+        'a: 'b,
+        R: 'b,
+    {
+        let begin = Instant::now();
+        self.fut(future).inspect(move |_| {
+            #[allow(clippy::cast_possible_truncation)]
+            let elapsed = begin.elapsed().as_nanos() as u64;
+            self.nanos.fetch_add(elapsed, Ordering::Relaxed);
+        })
+    }
+
     /// Measure the execution of the provided closure.
     pub fn func<F, R>(&self, f: F) -> R
     where
@@ -79,6 +99,19 @@ impl Measurement {
         self.inflight.fetch_add(1, Ordering::Relaxed);
         let result = f();
         self.inflight.fetch_sub(1, Ordering::Relaxed);
+        result
+    }
+
+    /// Measure the execution of the provided closure.
+    pub fn func_timed<F, R>(&self, f: F) -> R
+    where
+        F: FnOnce() -> R,
+    {
+        let begin = Instant::now();
+        let result = self.func(f);
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed = begin.elapsed().as_nanos() as u64;
+        self.nanos.fetch_add(elapsed, Ordering::Relaxed);
         result
     }
 
@@ -106,6 +139,10 @@ impl Display for Measurement {
             self.count.load(Ordering::Relaxed),
             self.inflight.load(Ordering::Relaxed)
         )?;
+        let nanos = self.nanos.load(Ordering::Relaxed);
+        if nanos != 0 {
+            write!(f, ", {}ms total", nanos / 1_000_000)?;
+        }
         let fut_size = self.fut_size.load(Ordering::Relaxed);
         if fut_size != 0 {
             write!(f, ", fut_size {}B", fut_size)?;

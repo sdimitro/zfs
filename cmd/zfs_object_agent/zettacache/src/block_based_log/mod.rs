@@ -12,7 +12,6 @@ use std::sync::Arc;
 use bytesize::ByteSize;
 use derivative::Derivative;
 use futures::stream;
-use futures::stream::FuturesUnordered;
 use futures::StreamExt;
 use futures_core::Stream;
 use log::*;
@@ -21,15 +20,18 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio_stream::wrappers::ReceiverStream;
+use util::from64::AsUsize;
 use util::measure;
 use util::tunable;
 use util::with_alloctag;
 use util::zettacache_stats::DiskIoType;
 use util::From64;
 
+use crate::aggregating_writer::AggregatingWriter;
 use crate::base_types::*;
 use crate::block_access::BlockAccess;
 use crate::block_access::EncodeType;
+use crate::block_access::DISK_WRITE_MAX_AGGREGATION_SIZE;
 use crate::slab_allocator::SlabAccess;
 use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
@@ -182,7 +184,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
             .map(|(_, extent)| extent)
             .collect::<Vec<_>>();
 
-        // Just buffer a single (16MB) extent between the two tasks.
+        // Just buffer a single (32MB) extent between the two tasks.
         let (extent_tx, mut extent_rx) = tokio::sync::mpsc::channel(1);
 
         {
@@ -322,7 +324,12 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
     where
         F: FnMut(ChunkId, LogOffset, T),
     {
-        let writes_stream = FuturesUnordered::new();
+        // We aggregate more than the BlockAccess layer's MAX_AGGREGATE_SIZE, so that it will not
+        // attempt to aggregate our writes.
+        let mut writer = AggregatingWriter::new(
+            self.block_access.clone(),
+            2 * DISK_WRITE_MAX_AGGREGATION_SIZE.as_usize(),
+        );
 
         let mut remaining_entries = self.pending_entries.as_slice();
         let mut max_entries = None;
@@ -376,17 +383,15 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             self.phys.next_chunk = self.phys.next_chunk.next();
             self.phys.next_chunk_offset.0 += raw_size;
 
-            writes_stream.push(self.block_access.write_raw(
-                extent.location,
-                raw_chunk,
-                DiskIoType::MaintenanceWrite,
-            ));
+            writer.write(extent.location, &raw_chunk);
 
             // head is consumed
             remaining_entries = tail;
         }
 
-        writes_stream.count().await;
+        measure!("BlockBasedLog::flush_impl() AggregatingWriter::flush()")
+            .fut_timed(writer.flush())
+            .await;
         self.pending_entries.truncate(0);
     }
 

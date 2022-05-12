@@ -5,6 +5,7 @@
 #![deny(clippy::print_stdout)]
 #![deny(clippy::print_stderr)]
 
+mod aggregating_writer;
 mod atime_histogram;
 pub mod base_types;
 mod block_access;

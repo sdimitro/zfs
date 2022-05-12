@@ -31,6 +31,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
+use util::from64::AsUsize;
 use util::iter_wrapping;
 use util::measure;
 use util::serde::from_json_slice;
@@ -51,7 +52,10 @@ use crate::base_types::Extent;
 tunable! {
     static ref MIN_SECTOR_SIZE: usize = 512;
     static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = 32;
-    static ref DISK_WRITE_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::mib(1);
+    // Stop aggregating if run would exceed DISK_WRITE_MAX_AGGREGATION_SIZE
+    pub static ref DISK_WRITE_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::kib(128);
+    // CHUNK must be > MAX_AGG_SIZE, see Disk::write()
+    static ref DISK_WRITE_CHUNK: ByteSize = ByteSize::mib(1);
     static ref DISK_WRITE_QUEUE_EMPTY_DELAY: Duration = Duration::from_millis(1);
     static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize = 16;
     pub static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
@@ -275,7 +279,7 @@ impl Disk {
         if !readonly {
             for rx in writer_rxs {
                 std::thread::spawn(move || {
-                    Self::aggregating_writer_thread(
+                    Self::writer_thread(
                         file,
                         &io_stats.stats[DiskIoType::WriteDataForInsert],
                         sector_size,
@@ -285,7 +289,7 @@ impl Disk {
             }
             for rx in metadata_writer_rxs {
                 std::thread::spawn(move || {
-                    Self::aggregating_writer_thread(
+                    Self::writer_thread(
                         file,
                         &io_stats.stats[DiskIoType::MaintenanceWrite],
                         sector_size,
@@ -354,7 +358,7 @@ impl Disk {
         async move { measure!().fut(rx).await.unwrap() }
     }
 
-    fn aggregating_writer_thread(
+    fn writer_thread(
         file: &'static File,
         stat_values: &'static IoStatValues,
         sector_size: usize,
@@ -370,6 +374,10 @@ impl Disk {
                 return (Vec::new(), 0);
             };
             for (&offset, message) in iter {
+                if len > 0 && len + message.bytes.len() > DISK_WRITE_MAX_AGGREGATION_SIZE.as_usize()
+                {
+                    break;
+                }
                 if offset == run[0] + len as u64 {
                     run.push(offset);
                     len += message.bytes.len();
@@ -489,13 +497,14 @@ impl Disk {
             _ => panic!("invalid {:?} for write", io_type),
         };
         // Dispatch this write to a writer thread, determined based on its offset.  The first
-        // DISK_WRITE_MAX_AGGREGATION_SIZE (default 1MB) of the disk goes to the first thread,
-        // the second chunk to the second thread, and so on, wrapping back around to the first
-        // thread.  Note that each block allocator slab (16MB) is mapped to multiple threads, so
-        // the work is distributed to multiple threads even when it's concentrated among a small
-        // number of slabs.
-        let writer =
-            usize::from64(offset / DISK_WRITE_MAX_AGGREGATION_SIZE.as_u64() % txs.len() as u64);
+        // DISK_WRITE_CHUNK (default 1MB) of the disk goes to the first thread, the second chunk
+        // to the second thread, and so on, wrapping back around to the first thread.  Note that
+        // each block allocator slab (32MB) is mapped to multiple threads, so the work is
+        // distributed to multiple threads even when it's concentrated among a small number of
+        // slabs.  The CHUNK (1MB) is larger than the DISK_WRITE_MAX_AGGREGATION_SIZE (128KB) so
+        // that we can find aggregations that cross MAX_AGG_SIZE boundaries (e.g. from offsets
+        // 100KB to 228KB).
+        let writer = usize::from64(offset / DISK_WRITE_CHUNK.as_u64() % txs.len() as u64);
         txs[writer]
             .send(message)
             .unwrap_or_else(|e| panic!("writer_txs[{}].send: {}", writer, e));
