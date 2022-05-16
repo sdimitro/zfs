@@ -67,7 +67,7 @@ impl From<GetObjectError> for GetError {
 impl From<PutObjectError> for PutError {
     fn from(_: PutObjectError) -> Self {
         // XXX S3 put errors are always returned as Unknown, at present.
-        PutError {}
+        panic!("S3 PutObjectErrors are not used");
     }
 }
 

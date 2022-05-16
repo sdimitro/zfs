@@ -76,11 +76,15 @@ impl Display for GetError {
 impl Error for GetError {}
 
 #[derive(Debug)]
-pub struct PutError {}
+pub enum PutError {
+    NoSuchContainer(String),
+}
 
 impl Display for PutError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("put error")
+        match self {
+            PutError::NoSuchContainer(container) => write!(f, "Container not found: {}", container),
+        }
     }
 }
 impl Error for PutError {}

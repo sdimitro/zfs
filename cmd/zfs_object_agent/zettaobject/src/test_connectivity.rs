@@ -9,6 +9,7 @@ use crate::access_stats::ObjectAccessOpType;
 use crate::object_access::OAError;
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
+use crate::object_access::PutError;
 use crate::object_access::RequestError;
 
 #[derive(Debug, Deserialize)]
@@ -34,6 +35,9 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
         )
         .await
     {
+        Err(OAError::RequestError(RequestError::Service(e @ PutError::NoSuchContainer(_)))) => {
+            Err(format!("Connectivity test failed: {}", e))
+        }
         Err(OAError::RequestError(RequestError::Unknown(response))) => {
             /*
              * The Byte-Order-Mark (or BOM), is a special marker added at the very beginning of
@@ -59,10 +63,6 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
         Err(OAError::TimeoutError(_)) => {
             Err("Connectivity test failed with a timeout.".to_string())
         }
-        Err(OAError::RequestError(RequestError::Service(err))) => Err(format!(
-            "Connectivity test failed due to a service error: {}",
-            err
-        )),
         Err(OAError::RequestError(RequestError::Credentials(err))) => Err(format!(
             "Connectivity test failed due to a credentials error: {}",
             err

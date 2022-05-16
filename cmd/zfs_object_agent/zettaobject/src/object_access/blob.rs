@@ -85,9 +85,10 @@ impl MaybeFrom<HttpError> for GetError {
 impl MaybeFrom<HttpError> for PutError {
     fn maybe_from(value: HttpError) -> Result<Self, HttpError> {
         match value {
-            HttpError::StatusCode { status, body: _ } if status.is_client_error() => {
-                Ok(PutError {})
-            }
+            HttpError::StatusCode {
+                status: StatusCode::NOT_FOUND,
+                body,
+            } => Ok(PutError::NoSuchContainer(body)),
             _ => Err(value),
         }
     }
@@ -113,16 +114,24 @@ where
 {
     fn from(e: azure_core::HttpError) -> Self {
         match e {
-            HttpError::StatusCode { status, body } => {
+            HttpError::StatusCode { status, body: _ } => {
                 if status == StatusCode::FORBIDDEN {
                     return Self::InvalidCredentials;
                 }
-                Self::Unknown(
-                    Response::builder()
-                        .status(status)
-                        .body(Bytes::from(body))
-                        .unwrap(),
-                )
+                /*
+                 * XXX we need logic here to handle contentful errors that aren't
+                 * specific to E, like credential and validation issues.
+                 */
+                match E::maybe_from(e) {
+                    Ok(err) => Self::Service(err),
+                    Err(HttpError::StatusCode { status, body }) => Self::Unknown(
+                        Response::builder()
+                            .status(status)
+                            .body(Bytes::from(body))
+                            .unwrap(),
+                    ),
+                    Err(_) => panic!("Type changed during maybe_from"),
+                }
             }
             HttpError::Utf8(err) => Self::InternalError(err.to_string()),
             /*
