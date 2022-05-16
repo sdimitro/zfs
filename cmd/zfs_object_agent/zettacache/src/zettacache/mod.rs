@@ -44,7 +44,6 @@ use util::measure;
 use util::nice_p2size;
 use util::super_trace;
 use util::tunable;
-use util::tunable::LayeredTunable;
 use util::tunable::Percent;
 use util::with_alloctag;
 use util::with_alloctag_hf;
@@ -82,21 +81,11 @@ use crate::superblock::PrimaryPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
 use crate::CacheOpenMode;
 
-#[derive(Debug)]
-struct GhostCacheSizePct(Percent);
-impl LayeredTunable for GhostCacheSizePct {
-    type Input = Percent;
-    fn convert(input: Self::Input) -> Result<Self> {
-        // This value needs to stay < 200 to safely avoid using up all available metadata space
-        // in the cache.
-        Ok(GhostCacheSizePct(Percent::new(
-            input.as_percent().min(200.0),
-        )))
-    }
-}
-tunable! { static ref GHOST_CACHE_SIZE_PCT: GhostCacheSizePct = GhostCacheSizePct(Percent::new(100.0)); }
-
 tunable! {
+    // Track recently evicted index entries which represent this percent of the actual cache
+    // size.  100% means the index will be double its normal size.
+    static ref GHOST_CACHE_SIZE_PCT: Percent = Percent::new(100.0);
+
     static ref DEFAULT_CHECKPOINT_SIZE_PCT: Percent = Percent::new(0.1);
 
     // In order to keep enough free space available in the cache to ingest data during a merge,
@@ -828,7 +817,7 @@ impl ZettaCache {
             operation_log: Default::default(),
             last_atime: Atime(0),
             size_histogram: SizeHistogramPhys::new(
-                total_capacity + GHOST_CACHE_SIZE_PCT.0.apply(total_capacity),
+                total_capacity + GHOST_CACHE_SIZE_PCT.apply(total_capacity),
                 total_capacity,
                 RESERVED_SLABS_PCT.apply(total_capacity),
                 *QUANTILES_IN_SIZE_HISTOGRAM,
@@ -2408,7 +2397,7 @@ impl ZettaCacheState {
         let eviction_atime = self.atime_histogram.atime_for_eviction_target(reduction);
 
         let ghost_size = self.atime_histogram.sum_ghost() + reduction;
-        let ghost_target = GHOST_CACHE_SIZE_PCT.0.apply(self.slab_allocator.capacity());
+        let ghost_target = GHOST_CACHE_SIZE_PCT.apply(self.slab_allocator.capacity());
         let ghost_reduction = ghost_size.checked_sub(ghost_target).unwrap_or_default();
         let ghost_atime = self.atime_histogram.atime_for_ghost_target(ghost_reduction);
         debug!(
@@ -2564,7 +2553,7 @@ impl ZettaCacheState {
     fn clear_hit_data(&mut self) {
         let cache_capacity = self.block_access.total_capacity();
         self.size_histogram = SizeHistogramPhys::new(
-            cache_capacity + GHOST_CACHE_SIZE_PCT.0.apply(cache_capacity),
+            cache_capacity + GHOST_CACHE_SIZE_PCT.apply(cache_capacity),
             cache_capacity,
             cache_capacity - self.slab_allocator.capacity(),
             *QUANTILES_IN_SIZE_HISTOGRAM,
