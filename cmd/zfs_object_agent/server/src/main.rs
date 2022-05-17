@@ -83,6 +83,15 @@ struct Cli {
     #[clap(short = 'd', long, value_name = "DIR")]
     cache_device_dir: Option<PathBuf>,
 
+    /// Specific cache GUID to look for in cache device directory
+    #[clap(
+        short = 'g',
+        long,
+        value_name = "GUID",
+        conflicts_with = "cache-device"
+    )]
+    guid: Option<u64>,
+
     /// Clear the cache when it has incompatible features
     #[clap(long)]
     clear_incompatible_cache: bool,
@@ -271,7 +280,9 @@ fn main() {
 
             let cache_mode = match cli.cache_device {
                 Some(paths) => Some(CacheOpenMode::DeviceList(paths)),
-                None => cli.cache_device_dir.map(CacheOpenMode::DiscoveryDirectory),
+                None => cli.cache_device_dir.map(|cache_device_dir| {
+                    CacheOpenMode::DiscoveryDirectory(cache_device_dir, cli.guid)
+                }),
             };
 
             match zettaobject::init::start(

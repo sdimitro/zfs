@@ -31,6 +31,15 @@ struct Cli {
     )]
     cache_device_dir: PathBuf,
 
+    /// Specific cache GUID to look for in cache device directory
+    #[clap(
+        short = 'g',
+        long,
+        value_name = "GUID",
+        conflicts_with = "cache-device"
+    )]
+    guid: Option<u64>,
+
     /// Sets the verbosity level for logging and debugging
     #[clap(short = 'v', long, parse(from_occurrences), global = true)]
     verbose: u64,
@@ -126,13 +135,13 @@ async fn main() -> Result<(), anyhow::Error> {
                         .rebalance_log_raw(rebalance_log_raw)
                         .atime_histogram(atime_histogram),
                 ),
-                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir, cli.guid),
             )
             .await
         }
         Commands::Superblocks { disks } => {
             let cache_mode = if disks.is_empty() {
-                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir)
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir, cli.guid)
             } else {
                 CacheOpenMode::DeviceList(disks)
             };
@@ -142,21 +151,21 @@ async fn main() -> Result<(), anyhow::Error> {
         Commands::Slabs { detail } => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpSlabs(DumpSlabsOptions { verbosity: detail }),
-                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir, cli.guid),
             )
             .await
         }
         Commands::Space => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpSpaceUsage,
-                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir, cli.guid),
             )
             .await
         }
         Commands::Index => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::VerifyIndex,
-                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir, cli.guid),
             )
             .await
         }

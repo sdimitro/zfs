@@ -21,14 +21,16 @@ use crate::superblock::SuperblockPhys;
 
 pub enum CacheOpenMode {
     DeviceList(Vec<PathBuf>),
-    DiscoveryDirectory(PathBuf),
+    DiscoveryDirectory(PathBuf, Option<u64>),
 }
 
 impl CacheOpenMode {
     pub async fn device_paths(self) -> Result<Vec<PathBuf>> {
         Ok(match self {
             CacheOpenMode::DeviceList(paths) => paths,
-            CacheOpenMode::DiscoveryDirectory(dir) => discover_devices(&dir).await?,
+            CacheOpenMode::DiscoveryDirectory(dir, target_guid) => {
+                discover_devices(&dir, target_guid).await?
+            }
         })
     }
 }
@@ -61,7 +63,7 @@ impl DiscoveredDevice {
     }
 }
 
-async fn discover_devices(dir_path: &Path) -> Result<Vec<PathBuf>> {
+async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<Vec<PathBuf>> {
     let mut caches = HashMap::<u64, BTreeMap<DiskId, DiscoveredDevice>>::new();
 
     let mut discovery = FuturesUnordered::new();
@@ -112,11 +114,12 @@ async fn discover_devices(dir_path: &Path) -> Result<Vec<PathBuf>> {
         };
     }
     filter_invalid_caches(&mut caches);
+    if let Some(guid) = target_guid {
+        caches.retain(|cache_guid, _| *cache_guid == guid);
+    }
     match caches.values().next() {
         Some(cache) => {
             if caches.len() > 1 {
-                // XXX - In the future we probably want to be able to specify a
-                // cache by GUID so we can get past this error.
                 Err(anyhow!(
                     "multiple valid caches found in {dir_path:?}: {:?}",
                     caches.keys().collect::<Vec<_>>(),
