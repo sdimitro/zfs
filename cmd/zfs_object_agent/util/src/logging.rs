@@ -231,6 +231,10 @@ fn setup_console_logging(verbosity: u64) {
         // These are too chatty by default, so increase their minimum log level.
         .logger(Logger::builder().build("rusoto_core::request", LevelFilter::Info))
         .logger(Logger::builder().build("want", LevelFilter::Debug))
+        .logger(Logger::builder().build("azure_storage::core", LevelFilter::Info))
+        .logger(Logger::builder().build("azure_storage_blobs::blob", LevelFilter::Info))
+        .logger(Logger::builder().build("serde_xml_rs::de", LevelFilter::Info))
+        .logger(Logger::builder().build("reqwest::async_impl::client", LevelFilter::Info))
         .build(
             Root::builder()
                 .appender("memory")
@@ -265,6 +269,10 @@ fn setup_logfile(verbosity: u64, logfile: &Path) {
         // These are too chatty by default, so increase their minimum log level.
         .logger(Logger::builder().build("rusoto_core::request", LevelFilter::Info))
         .logger(Logger::builder().build("want", LevelFilter::Debug))
+        .logger(Logger::builder().build("azure_storage::core", LevelFilter::Info))
+        .logger(Logger::builder().build("azure_storage_blobs::blob", LevelFilter::Info))
+        .logger(Logger::builder().build("serde_xml_rs::de", LevelFilter::Info))
+        .logger(Logger::builder().build("reqwest::async_impl::client", LevelFilter::Info))
         .build(
             Root::builder()
                 .appender("memory")

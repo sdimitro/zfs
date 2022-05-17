@@ -113,3 +113,11 @@ loggers:
     level: info
   want:
     level: debug
+  azure_storage::core:
+    level: info
+  azure_storage_blobs::blob:
+    level: info
+  serde_xml_rs::de:
+    level: info
+  reqwest::async_impl::client:
+    level: info

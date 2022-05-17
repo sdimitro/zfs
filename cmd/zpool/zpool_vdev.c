@@ -307,6 +307,11 @@ make_objstore_vdev(nvlist_t *props, const char *protocol, const char *arg)
 	if ((nvlist_lookup_string(props,
 	    zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE), &profile)) == 0) {
 		fnvlist_add_string(vdev, ZPOOL_CONFIG_CRED_PROFILE, profile);
+	} else {
+		fprintf(stderr, gettext("Credentials profile required for "
+		    "objstore vdev %s"), arg);
+		fnvlist_free(vdev);
+		return (NULL);
 	}
 
 	return (vdev);

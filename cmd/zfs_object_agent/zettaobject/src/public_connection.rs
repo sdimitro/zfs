@@ -7,6 +7,7 @@ use futures::stream::StreamExt;
 use log::*;
 use nvpair::NvList;
 use semver::Version;
+use serde::Deserialize;
 use serde::Serialize;
 use util::maybe_die_with;
 use util::message::*;
@@ -18,7 +19,6 @@ use zettacache::ZettaCache;
 use crate::object_access::BucketAccess;
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
-use crate::object_access::S3Credentials;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::return_result;
@@ -95,33 +95,22 @@ impl PublicConnectionState {
     }
 
     async fn get_pools_impl(nvl: NvList) -> Result<Option<NvList>> {
-        // XXX convert to use serde nvlist request and response
-        let region_cstr = nvl.lookup_string("region")?;
-        let endpoint_cstr = nvl.lookup_string("endpoint")?;
-        let region = region_cstr.to_str()?.to_string();
-        let endpoint = endpoint_cstr.to_str()?.to_string();
-        let readonly = nvl.exists("readonly");
-        let credentials_profile: Option<String> = nvl
-            .lookup_string("credentials_profile")
-            .ok()
-            .map(|s| s.to_string_lossy().to_string());
+        #[derive(Debug, Deserialize)]
+        struct GetPoolsRequest {
+            #[serde(flatten)]
+            protocol: ObjectAccessProtocol,
+            #[serde(default)]
+            readonly: bool,
+            bucket: Option<String>,
+            guid: Option<u64>,
+        }
+        let request: GetPoolsRequest = nvpair::from_nvlist(&nvl)?;
 
-        let credentials = match credentials_profile {
-            Some(profile) => S3Credentials::Profile(profile),
-            None => S3Credentials::Automatic,
-        };
-
-        let bucket_access = BucketAccess::new(ObjectAccessProtocol::S3 {
-            endpoint: endpoint.clone(),
-            region: region.clone(),
-            credentials: credentials.clone(),
-        })
-        .await?;
+        let bucket_access = BucketAccess::new(request.protocol.clone()).await?;
 
         let mut buckets = vec![];
-        let bucket_result = nvl.lookup_string("bucket");
-        if let Ok(bucket) = bucket_result {
-            buckets.push(bucket.into_string()?);
+        if let Some(bucket) = request.bucket {
+            buckets.push(bucket);
         } else {
             buckets.append(&mut bucket_access.list_buckets().await);
         }
@@ -129,18 +118,9 @@ impl PublicConnectionState {
         maybe_die_with(|| "in get_pools_impl");
         let response = Arc::new(Mutex::new(NvList::new_unique_names()));
         for buck in buckets {
-            let object_access = ObjectAccess::new(
-                ObjectAccessProtocol::S3 {
-                    endpoint: endpoint.clone(),
-                    region: region.clone(),
-                    credentials: credentials.clone(),
-                },
-                buck,
-                readonly,
-            )
-            .await?;
-            let guid_result = nvl.lookup_uint64("guid");
-            if let Ok(guid) = guid_result {
+            let object_access =
+                ObjectAccess::new(request.protocol.clone(), buck, request.readonly).await?;
+            if let Some(guid) = request.guid {
                 if !Pool::exists(&object_access, PoolGuid(guid)).await {
                     continue;
                 }

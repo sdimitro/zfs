@@ -1868,21 +1868,17 @@ static void
 zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
     pthread_mutex_t *lock, avl_tree_t *cache)
 {
-	char *profile = NULL, *bucket = NULL, *endpoint, *region;
+	char *profile = NULL, *bucket = NULL, *endpoint = NULL;
+	char *region = NULL, *protocol = NULL;
 
 	// TODO: We don't handle multiple search paths yet
 	nvlist_lookup_string(iarg->props, "path", &bucket);
 	if (bucket == NULL && iarg->path != NULL) {
 		bucket = iarg->path[0];
 	}
-	if ((nvlist_lookup_string(iarg->props, "object-endpoint",
-	    &endpoint)) != 0) {
-		return;
-	}
-	if ((nvlist_lookup_string(iarg->props, "object-region",
-	    &region)) != 0) {
-		return;
-	}
+	nvlist_lookup_string(iarg->props, "object-protocol", &protocol);
+	nvlist_lookup_string(iarg->props, "object-endpoint", &endpoint);
+	nvlist_lookup_string(iarg->props, "object-region", &region);
 	nvlist_lookup_string(iarg->props, "object-credentials-profile",
 	    &profile);
 
@@ -1890,11 +1886,15 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 	fnvlist_add_string(msg, AGENT_REQUEST_TYPE, AGENT_TYPE_GET_POOLS);
 	if (bucket != NULL)
 		fnvlist_add_string(msg, AGENT_BUCKET, bucket);
-	fnvlist_add_string(msg, AGENT_REGION, region);
-	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
-	if (profile != NULL) {
+	if (region != NULL)
+		fnvlist_add_string(msg, AGENT_REGION, region);
+	if (endpoint != NULL)
+		fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
+	if (protocol != NULL)
+		fnvlist_add_string(msg, AGENT_PROTOCOL, protocol);
+	if (profile != NULL)
 		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
-	}
+
 	if (iarg->guid != 0)
 		fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
 

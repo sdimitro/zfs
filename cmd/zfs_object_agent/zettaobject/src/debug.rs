@@ -13,7 +13,6 @@ use zettacache::base_types::PoolGuid;
 use crate::base_types::Txg;
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
-use crate::object_access::S3Credentials;
 use crate::pool;
 use crate::pool::Pool;
 use crate::pool::PoolPhys;
@@ -26,30 +25,12 @@ pub struct DebugHandle {
 }
 
 async fn get_object_access(nvl: &NvListRef) -> Arc<ObjectAccess> {
+    let protocol: ObjectAccessProtocol = nvpair::from_nvlist(nvl).unwrap();
     let bucket_name = nvl.lookup_string("bucket").unwrap();
-    let region_str = nvl.lookup_string("region").unwrap();
-    let endpoint = nvl.lookup_string("endpoint").unwrap();
-    let credentials_profile: Option<String> = nvl
-        .lookup_string("credentials_profile")
-        .ok()
-        .map(|s| s.to_string_lossy().to_string());
 
-    let credentials = match credentials_profile {
-        Some(profile) => S3Credentials::Profile(profile),
-        None => S3Credentials::Automatic,
-    };
-
-    ObjectAccess::new(
-        ObjectAccessProtocol::S3 {
-            endpoint: endpoint.to_str().unwrap().to_string(),
-            region: region_str.to_str().unwrap().to_string(),
-            credentials,
-        },
-        bucket_name.to_str().unwrap().to_string(),
-        true,
-    )
-    .await
-    .unwrap()
+    ObjectAccess::new(protocol, bucket_name.to_str().unwrap().to_string(), true)
+        .await
+        .unwrap()
 }
 
 impl DebugHandle {

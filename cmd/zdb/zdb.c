@@ -8665,7 +8665,7 @@ main(int argc, char **argv)
 	};
 
 	while ((c = getopt_long(argc, argv,
-	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMNo:Op:pPqrRsSt:TuU:vVx:XYyZz:",
+	    "a:AB:bcCdDeEf:Fg:GhiI:klLmMNo:Op:pPqrRsSt:T:uU:vVx:XYyZz:",
 	    long_options, NULL)) != -1) {
 		switch (c) {
 		case 'b':

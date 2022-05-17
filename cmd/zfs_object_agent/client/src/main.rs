@@ -40,6 +40,7 @@ use zettaobject::object_access::BlobCredentials;
 use zettaobject::object_access::BucketAccess;
 use zettaobject::Pool;
 mod client;
+use ::util::setup_logging;
 use itertools::Itertools;
 use zettaobject::object_access::ObjectAccess;
 use zettaobject::object_access::ObjectAccessProtocol;
@@ -596,6 +597,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         cli.aws_secret_access_key.as_deref(),
     )
     .await;
+
+    setup_logging(cli.verbose as u64, None, None, false);
 
     match cli.command {
         Commands::S3Rusoto => do_s3_rusoto().await?,
