@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Args;
@@ -38,7 +39,7 @@ struct LoggingArgs {
 
     /// File to log output to
     #[clap(short = 'o', long, value_name = "FILE")]
-    output_file: Option<String>,
+    output_file: Option<PathBuf>,
 
     /// Logging configuration yaml file
     #[clap(
@@ -48,7 +49,7 @@ struct LoggingArgs {
         conflicts_with = "output-file",
         conflicts_with = "verbosity"
     )]
-    log_config: Option<String>,
+    log_config: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -62,11 +63,11 @@ struct Cli {
 
     /// Configuration file to set tunables (toml/json/yaml)
     #[clap(short = 't', long, value_name = "FILE")]
-    config_file: Option<String>,
+    config_file: Option<PathBuf>,
 
     /// Directory for unix-domain sockets
     #[clap(short = 'k', long, value_name = "DIR", default_value = "/etc/zfs")]
-    socket_dir: String,
+    socket_dir: PathBuf,
 
     /// File/device to use for ZettaCache
     #[clap(
@@ -75,12 +76,12 @@ struct Cli {
         value_name = "PATH",
         conflicts_with = "cache-device-dir"
     )]
-    cache_device: Option<Vec<String>>,
+    cache_device: Option<Vec<PathBuf>>,
 
     /// Directory path to use for importing devices that are part of the
     /// ZettaCache
     #[clap(short = 'd', long, value_name = "DIR")]
-    cache_device_dir: Option<String>,
+    cache_device_dir: Option<PathBuf>,
 
     /// Clear the cache when it has incompatible features
     #[clap(long)]
@@ -269,8 +270,8 @@ fn main() {
             });
 
             let cache_mode = match cli.cache_device {
-                Some(paths) => Some(CacheOpenMode::new_device_list(paths)),
-                None => cli.cache_device_dir.map(CacheOpenMode::new_device_dir),
+                Some(paths) => Some(CacheOpenMode::DeviceList(paths)),
+                None => cli.cache_device_dir.map(CacheOpenMode::DiscoveryDirectory),
             };
 
             match zettaobject::init::start(

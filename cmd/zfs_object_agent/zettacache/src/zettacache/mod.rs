@@ -10,6 +10,7 @@ use std::ops::Bound::Excluded;
 use std::ops::Bound::Included;
 use std::ops::Bound::Unbounded;
 use std::ops::Deref;
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -1838,7 +1839,7 @@ impl ZettaCache {
         }
     }
 
-    pub async fn add_disk(&self, path: &str) -> Result<()> {
+    pub async fn add_disk(&self, path: &Path) -> Result<()> {
         self.state.lock().await.add_disk(path)?;
         self.sync_checkpoint().await;
         Ok(())
@@ -2583,7 +2584,7 @@ impl ZettaCacheState {
         );
     }
 
-    fn add_disk(&mut self, path: &str) -> Result<()> {
+    fn add_disk(&mut self, path: &Path) -> Result<()> {
         // We hold the state lock across all these operations to ensure that we're always
         // adding the last DiskId to the SlabAllocator and Primary, in the case of concurrent
         // calls to add_disk().
@@ -2605,7 +2606,7 @@ impl ZettaCacheState {
         // new cache size.
         self.clear_hit_data();
 
-        info!("added {path} as {disk_id:?}");
+        info!("added {path:?} as {disk_id:?}");
         Ok(())
     }
 

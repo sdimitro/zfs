@@ -18,8 +18,8 @@ use crate::pool_destroy;
 use crate::public_connection::PublicServerState;
 use crate::root_connection::RootServerState;
 
-fn lock_socket_dir(socket_dir: &str) {
-    let lock_file = format!("{}/zoa.lock", socket_dir);
+fn lock_socket_dir(socket_dir: &Path) {
+    let lock_file = socket_dir.join("zoa.lock");
     match OpenOptions::new()
         .read(true)
         .write(true)
@@ -53,7 +53,7 @@ fn lock_socket_dir(socket_dir: &str) {
             }
         }
         Err(_) => {
-            error!("Failed to create lock file {}", &lock_file);
+            error!("Failed to create lock file {lock_file:?}");
             std::process::exit(1);
         }
     }
@@ -68,7 +68,7 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
 }
 
 pub fn start(
-    socket_dir: &str,
+    socket_dir: &Path,
     cache_mode: Option<CacheOpenMode>,
     clear_incompatible_cache: bool,
     runtime: Runtime,

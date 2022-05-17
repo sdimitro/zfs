@@ -11,6 +11,8 @@ use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
+use std::path::Path;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -56,7 +58,7 @@ tunable! {
 // Ss: ServerState (consumer's state associated with the server)
 // Cs: ConnectionState (consumer's state associated with the connection)
 pub struct Server<Ss, Cs> {
-    socket_path: String,
+    socket_path: PathBuf,
     socket_permission: u32,
     state: Ss,
     connection_handler: Box<ConnectionHandler<Ss, Cs>>,
@@ -94,7 +96,7 @@ where
     /// established.  It is passed the server_state (Ss) and returns a
     /// connection_state (Cs), which is passed to each of the Handlers.
     pub fn new(
-        socket_path: &str,
+        socket_path: &Path,
         socket_permission: u32,
         server_state: Ss,
         connection_handler: Box<ConnectionHandler<Ss, Cs>>,
@@ -158,7 +160,8 @@ where
         let server = Arc::new(self);
 
         // Create a temp socket file, set permissions and move it to the correct location.
-        let socket_path_tmp = format!("{}.tmp", server.socket_path);
+        let mut socket_path_tmp = server.socket_path.clone();
+        socket_path_tmp.set_extension("tmp");
 
         let _ = std::fs::remove_file(&socket_path_tmp);
         let _ = std::fs::remove_file(&server.socket_path);
@@ -170,13 +173,13 @@ where
         fs::set_permissions(&socket_path_tmp, perms).unwrap();
         fs::rename(socket_path_tmp, &server.socket_path).unwrap();
 
-        info!("Listening on: {}", server.socket_path);
+        info!("Listening on: {:?}", server.socket_path);
 
         tokio::spawn(async move {
             loop {
                 match listener.accept().await {
                     Ok((stream, _)) => {
-                        info!("accepted connection on {}", server.socket_path);
+                        info!("accepted connection on {:?}", server.socket_path);
                         let connection_state = (server.connection_handler)(&server.state);
                         let server = server.clone();
                         tokio::spawn(async move {
@@ -187,7 +190,7 @@ where
                         });
                     }
                     Err(e) => {
-                        warn!("accept() on {} failed: {}", server.socket_path, e);
+                        warn!("accept() on {:?} failed: {e}", server.socket_path);
                     }
                 }
             }

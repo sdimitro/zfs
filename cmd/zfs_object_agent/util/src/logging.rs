@@ -5,6 +5,7 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::panic;
 use std::panic::PanicInfo;
+use std::path::Path;
 use std::process;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -241,7 +242,7 @@ fn setup_console_logging(verbosity: u64) {
     log4rs::init_config(config).unwrap();
 }
 
-fn setup_logfile(verbosity: u64, logfile: &str) {
+fn setup_logfile(verbosity: u64, logfile: &Path) {
     let config = Config::builder()
         .appender(
             Appender::builder()
@@ -277,8 +278,8 @@ fn setup_logfile(verbosity: u64, logfile: &str) {
 
 pub fn setup_logging(
     verbosity: u64,
-    file_name: Option<&str>,
-    log_config: Option<&str>,
+    file_name: Option<&Path>,
+    log_config: Option<&Path>,
     quiet_start: bool,
 ) {
     /*

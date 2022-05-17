@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::mem::size_of;
+use std::path::PathBuf;
 use std::ptr;
 use std::slice;
 
@@ -141,5 +142,5 @@ pub const TYPE_INITIATE_MERGE: &str = "initiate merge";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddDiskRequest {
-    pub path: String,
+    pub path: PathBuf,
 }

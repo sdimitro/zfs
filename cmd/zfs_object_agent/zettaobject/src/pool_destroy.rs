@@ -1,5 +1,7 @@
 use std::collections::HashMap;
 use std::io::ErrorKind;
+use std::path::Path;
+use std::path::PathBuf;
 use std::process;
 use std::sync::Arc;
 use std::time::SystemTime;
@@ -154,7 +156,7 @@ struct PoolDestroyer {
     destroying_pools_map: DestroyingPoolsMap,
 
     // Full path to the zpool-destroy cache file, initialized at startup.
-    destroy_cache_filename: String,
+    destroy_cache_filename: PathBuf,
 }
 
 impl PoolDestroyer {
@@ -205,11 +207,11 @@ impl PoolDestroyer {
             }
             Err(ref error) if error.kind() == ErrorKind::NotFound => {
                 // zpool_destroy.cache file does not exist. No initialization is needed.
-                info!("{} does not exist", &self.destroy_cache_filename);
+                info!("{:?} does not exist", &self.destroy_cache_filename);
                 Ok(())
             }
             Err(error) => Err(anyhow!(
-                "Error opening {}; {:?}",
+                "Error opening {:?}; {:?}",
                 &self.destroy_cache_filename,
                 error
             )),
@@ -223,7 +225,11 @@ impl PoolDestroyer {
     async fn write(&self) -> Result<()> {
         trace!("Writing out destroy cache file.");
 
-        let temp_filename = format!("{}.{}", &self.destroy_cache_filename, process::id());
+        let temp_filename = format!(
+            "{}.{}",
+            self.destroy_cache_filename.to_string_lossy(),
+            process::id()
+        );
 
         fs::write(
             &temp_filename,
@@ -457,7 +463,7 @@ pub async fn remove_not_in_progress() {
     pool_destroyer.write().await.unwrap();
 }
 
-pub async fn init_pool_destroyer(socket_dir: &str) {
+pub async fn init_pool_destroyer(socket_dir: &Path) {
     // The PoolDestroyer should be initialized only once.
     let mut maybe_pool_destroyer = POOL_DESTROYER.lock().await;
     assert!(maybe_pool_destroyer.is_none());
@@ -465,7 +471,7 @@ pub async fn init_pool_destroyer(socket_dir: &str) {
     // Filename for zpool-destroy cache file.
     let mut destroyer = PoolDestroyer {
         destroying_pools_map: Default::default(),
-        destroy_cache_filename: format!("{}/zpool_destroy.cache", socket_dir),
+        destroy_cache_filename: socket_dir.join("zpool_destroy.cache"),
     };
     destroyer.init().await.unwrap();
 

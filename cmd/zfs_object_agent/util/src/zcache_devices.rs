@@ -3,12 +3,14 @@
 //! These structures on the zettacache side are serialized and then deserialized
 //! by the zettacache subcommands.
 
+use std::path::PathBuf;
+
 use serde::Deserialize;
 use serde::Serialize;
 
 #[derive(Serialize, Deserialize)]
 pub struct DeviceEntry {
-    pub name: String,
+    pub name: PathBuf,
     pub size: u64,
 }
 

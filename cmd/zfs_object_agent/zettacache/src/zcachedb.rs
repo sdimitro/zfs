@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use crate::zettacache::zcdb::ZCacheDBHandle;
 use crate::CacheOpenMode;
 
@@ -136,7 +138,7 @@ impl ZettaCacheDBCommand {
 
     async fn issue_pool_state_command(
         command: ZettaCacheDBCommand,
-        paths: Vec<String>,
+        paths: Vec<PathBuf>,
     ) -> Result<(), anyhow::Error> {
         let mut handle = ZCacheDBHandle::open(paths).await?;
         match command {

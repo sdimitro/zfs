@@ -7,6 +7,7 @@ use std::io::Write;
 use std::os::unix::prelude::AsRawFd;
 use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::atomic::Ordering;
 use std::sync::RwLock;
 use std::thread::sleep;
@@ -146,7 +147,8 @@ pub struct Disk {
     #[allow(dead_code)]
     file: &'static File,
 
-    device_path: String,
+    path: PathBuf,
+    canonical_path: PathBuf,
     size: u64,
     sector_size: usize,
     #[derivative(Debug = "ignore")]
@@ -201,7 +203,7 @@ struct WriteMessage {
 }
 
 impl Disk {
-    pub fn new(disk_path: &str, readonly: bool) -> Result<Disk> {
+    pub fn new(path: &Path, readonly: bool) -> Result<Disk> {
         // Note: using std file open so that this func can be non-async.
         // Although this is blocking from a tokio thread, it's used
         // infrequently, and we're already blocking from the ioctls to get the
@@ -210,8 +212,8 @@ impl Disk {
             .read(true)
             .write(!readonly)
             .custom_flags(CUSTOM_OFLAGS)
-            .open(disk_path)
-            .with_context(|| format!("opening disk '{}'", disk_path))?;
+            .open(path)
+            .with_context(|| format!("opening disk {path:?}"))?;
         // see comment in `struct Disk`
         let file = &*Box::leak(Box::new(file));
         let stat = nix::sys::stat::fstat(file.as_raw_fd())?;
@@ -226,15 +228,11 @@ impl Disk {
             size = u64::try_from(stat.st_size)?;
             sector_size = *MIN_SECTOR_SIZE;
         } else {
-            panic!("{}: invalid file type {:?}", disk_path, mode);
+            panic!("{path:?}: invalid file type {mode:?}");
         }
 
-        let device = Path::new(disk_path)
-            .file_name()
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .to_owned();
+        let short_name = path.file_name().unwrap().to_string_lossy().to_string();
+        let canonical_path = Path::new(path).canonicalize()?;
 
         let (reader_tx, reader_rx) = flume::unbounded();
 
@@ -254,11 +252,12 @@ impl Disk {
             metadata_writer_rxs.push(rx);
         }
 
-        let io_stats = &*Box::leak(Box::new(DiskIoStats::new(device)));
+        let io_stats = &*Box::leak(Box::new(DiskIoStats::new(short_name)));
 
         let this = Disk {
             file,
-            device_path: disk_path.to_string(),
+            path: path.to_owned(),
+            canonical_path,
             size,
             sector_size,
             io_stats,
@@ -298,7 +297,7 @@ impl Disk {
                 });
             }
         }
-        info!("opening cache file {}: {:?}", disk_path, this);
+        info!("opening cache file {path:?}: {this:?}");
 
         Ok(this)
     }
@@ -567,7 +566,7 @@ impl BlockAccess {
             .unwrap()
             .iter()
             .map(|d| DeviceEntry {
-                name: d.device_path.to_string(),
+                name: d.path.clone(),
                 size: d.size,
             })
             .collect();
@@ -585,10 +584,8 @@ impl BlockAccess {
         }
     }
 
-    pub fn disk_path(&self, disk: DiskId) -> String {
-        self.disks.read().unwrap()[disk.index()]
-            .device_path
-            .to_string()
+    pub fn disk_path(&self, disk: DiskId) -> PathBuf {
+        self.disks.read().unwrap()[disk.index()].path.clone()
     }
 
     pub fn total_capacity(&self) -> u64 {

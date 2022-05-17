@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fmt::Debug;
+use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::anyhow;
@@ -71,8 +72,8 @@ impl RootServerState {
         }
     }
 
-    pub fn start(socket_dir: &str, cache: Option<ZettaCache>, id: Uuid) {
-        let socket_path = format!("{}/zfs_root_socket", socket_dir);
+    pub fn start(socket_dir: &Path, cache: Option<ZettaCache>, id: Uuid) {
+        let socket_path = socket_dir.join("zfs_root_socket");
         let mut server = Server::new(
             &socket_path,
             0o600,
@@ -143,10 +144,9 @@ impl RootConnectionState {
             let request: CreatePoolRequest = nvpair::from_nvlist(&nvl)?;
             info!("got {:?}", request);
             let object_access = request.object_access.object_access().await?;
-            let result = match Pool::create(&object_access, &request.name, request.id.guid).await {
-                Ok(_) => Ok(()),
-                Err(e) => Err(FailureMessage::new(e)),
-            };
+            let result = Pool::create(&object_access, &request.name, request.id.guid)
+                .await
+                .map_err(FailureMessage::new);
 
             return_result(TYPE_CREATE_POOL, request.id, result, true)
         })

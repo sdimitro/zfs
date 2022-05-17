@@ -334,7 +334,10 @@ pub async fn zcachedb_dump_slabs(
     zcachedb_dump_slabs_print_legend();
     for (disk, device_slabs) in slabs_per_device {
         writeln_stdout!("============================================================");
-        writeln_stdout!("=                        {}", block_access.disk_path(disk));
+        writeln_stdout!(
+            "=                        {:?}",
+            block_access.disk_path(disk)
+        );
         writeln_stdout!("============================================================");
         zcachedb_dump_slabs_report(&device_slabs, slab_size, &buckets, &opts)
     }

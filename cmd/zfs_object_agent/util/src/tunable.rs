@@ -1,5 +1,6 @@
 use std::any::type_name;
 use std::fmt::Debug;
+use std::path::Path;
 use std::sync::atomic::*;
 use std::sync::RwLock;
 use std::time::Duration;
@@ -289,10 +290,14 @@ impl Percent {
     }
 }
 
-pub fn read_config(file_name: &str) -> Result<()> {
+pub fn read_config(file_name: &Path) -> Result<()> {
     let mut config = CONFIG.write().unwrap();
     *config = Config::builder()
-        .add_source(config::File::with_name(file_name))
+        .add_source(config::File::with_name(
+            file_name
+                .to_str()
+                .ok_or_else(|| anyhow!("file name not utf8"))?,
+        ))
         .build()?;
     Ok(())
 }

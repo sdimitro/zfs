@@ -2,6 +2,7 @@
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
 
+use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
@@ -69,11 +70,11 @@ struct Cli {
         value_name = "FILE",
         default_value = "/var/log/perflog"
     )]
-    output_file: String,
+    output_file: PathBuf,
 
     /// Configuration file to set tunables (toml/json/yaml)
     #[clap(short = 't', long, value_name = "FILE")]
-    config_file: Option<String>,
+    config_file: Option<PathBuf>,
 
     #[clap(subcommand)]
     command: Commands,

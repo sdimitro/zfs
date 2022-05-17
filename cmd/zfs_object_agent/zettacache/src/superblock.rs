@@ -214,7 +214,7 @@ impl SuperblockPhys {
         for block_access_disk_id in block_access.disks() {
             match Self::read_impl(block_access, block_access_disk_id).await {
                 Ok(superblock) => writeln_stdout!(
-                    "{:?} - Path: {} Size: {} GUID: {} Primary?: {}",
+                    "{:?} - Path: {:?} Size: {} GUID: {} Primary?: {}",
                     superblock.disk,
                     block_access.disk_path(block_access_disk_id),
                     nice_p2size(block_access.disk_size(block_access_disk_id)),
@@ -225,7 +225,7 @@ impl SuperblockPhys {
                     }
                 ),
                 Err(_) => writeln_stderr!(
-                    "error: {}: not a valid zettacache disk",
+                    "error: {:?}: not a valid zettacache disk",
                     block_access.disk_path(block_access_disk_id)
                 ),
             }

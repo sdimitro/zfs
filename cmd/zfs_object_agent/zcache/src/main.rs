@@ -14,6 +14,8 @@ mod stats;
 mod subcommand;
 mod sync;
 
+use std::path::PathBuf;
+
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
@@ -38,7 +40,7 @@ struct Cli {
 
     /// File to log debugging output to
     #[clap(long, requires = "verbose", value_name = "FILE", global = true)]
-    log_file: Option<String>,
+    log_file: Option<PathBuf>,
 
     #[clap(subcommand)]
     command: Commands,

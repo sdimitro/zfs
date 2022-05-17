@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::path::Path;
 use std::path::PathBuf;
 
 use anyhow::anyhow;
@@ -20,35 +21,27 @@ use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
 
 pub enum CacheOpenMode {
-    DeviceList { device_paths: Vec<String> },
-    Discovery { device_dir: String },
+    DeviceList(Vec<PathBuf>),
+    DiscoveryDirectory(PathBuf),
 }
 
 impl CacheOpenMode {
-    pub fn new_device_list(device_paths: Vec<String>) -> Self {
-        CacheOpenMode::DeviceList { device_paths }
-    }
-
-    pub fn new_device_dir(device_dir: String) -> Self {
-        CacheOpenMode::Discovery { device_dir }
-    }
-
-    pub async fn device_paths(self) -> Result<Vec<String>> {
+    pub async fn device_paths(self) -> Result<Vec<PathBuf>> {
         Ok(match self {
-            CacheOpenMode::DeviceList { device_paths } => device_paths,
-            CacheOpenMode::Discovery { device_dir } => discover_devices(&device_dir).await?,
+            CacheOpenMode::DeviceList(paths) => paths,
+            CacheOpenMode::DiscoveryDirectory(dir) => discover_devices(&dir).await?,
         })
     }
 }
 
 #[derive(Debug)]
 struct DiscoveredDevice {
-    device_path: String,
+    device_path: PathBuf,
     superblock: SuperblockPhys,
 }
 
 impl DiscoveredDevice {
-    fn new(device_path: String, superblock: SuperblockPhys) -> Self {
+    fn new(device_path: PathBuf, superblock: SuperblockPhys) -> Self {
         DiscoveredDevice {
             device_path,
             superblock,
@@ -65,14 +58,11 @@ impl DiscoveredDevice {
             .with_context(|| format!("discovery: read_exact {path:?}"))?;
         let (superblock, _) = BlockAccess::chunk_from_raw_impl::<SuperblockPhys>(&buf)
             .with_context(|| format!("discovery: parse label {path:?}"))?;
-        Ok(DiscoveredDevice::new(
-            path.into_os_string().into_string().unwrap(),
-            superblock,
-        ))
+        Ok(DiscoveredDevice::new(path, superblock))
     }
 }
 
-async fn discover_devices(dir_path: &str) -> Result<Vec<String>> {
+async fn discover_devices(dir_path: &Path) -> Result<Vec<PathBuf>> {
     let mut caches = HashMap::<u64, BTreeMap<DiskId, DiscoveredDevice>>::new();
 
     let mut discovery = FuturesUnordered::new();
@@ -96,7 +86,7 @@ async fn discover_devices(dir_path: &str) -> Result<Vec<String>> {
                     // device import more deterministic (see DLPX-81000) error
                     // out.
                     return Err(anyhow!(
-                        "found two disks with {:?} for cache '{cache_guid}'",
+                        "found two disks with {:?} for cache {cache_guid}",
                         old_device.superblock.disk
                     ));
                 }
@@ -111,7 +101,7 @@ async fn discover_devices(dir_path: &str) -> Result<Vec<String>> {
                 // XXX - In the future we probably want to be able to specify a
                 // cache by GUID so we can get past this error.
                 Err(anyhow!(
-                    "multiple valid caches found in '{dir_path}': {:?}",
+                    "multiple valid caches found in {dir_path:?}: {:?}",
                     caches.keys().collect::<Vec<_>>(),
                 ))
             } else {
@@ -121,7 +111,7 @@ async fn discover_devices(dir_path: &str) -> Result<Vec<String>> {
                     .collect())
             }
         }
-        None => Err(anyhow!("no valid caches found in '{dir_path}'")),
+        None => Err(anyhow!("no valid caches found in {dir_path:?}")),
     }
 }
 

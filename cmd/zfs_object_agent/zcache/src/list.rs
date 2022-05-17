@@ -2,7 +2,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::path::PathBuf;
 
 use anyhow::anyhow;
 use anyhow::Context;
@@ -50,24 +49,24 @@ pub struct List {
 
 impl List {
     /// Derive the device name to display based on command input flags.
-    fn derive_name(&self, path: &str) -> String {
-        let path_buf: PathBuf;
-
+    fn derive_name(&self, path: &Path) -> String {
         let device_path = if self.real_paths {
             // Follow any symlinks to get the underlying device
             // e.g. "/dev/xvdz1" -> "/dev/nvme1n1p1"
-            path_buf = fs::canonicalize(path).unwrap();
-            path_buf.as_path()
+            fs::canonicalize(path).unwrap_or_else(|_| path.to_owned())
         } else {
-            Path::new(path)
+            path.to_owned()
         };
 
         if self.full_paths {
-            device_path.to_str().unwrap()
+            device_path.to_string_lossy().into()
         } else {
-            device_path.file_name().unwrap().to_str().unwrap()
+            device_path
+                .file_name()
+                .unwrap_or(device_path.as_os_str())
+                .to_string_lossy()
+                .into()
         }
-        .to_string()
     }
 
     fn max_name_length(&self, devices: &[DeviceEntry]) -> usize {

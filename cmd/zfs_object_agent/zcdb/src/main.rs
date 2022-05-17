@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::Parser;
 use clap::Subcommand;
 use git_version::git_version;
@@ -21,7 +23,7 @@ static GIT_VERSION: &str = git_version!(
 struct Cli {
     /// File/device to use for ZettaCache
     #[clap(short = 'c', long, value_name = "PATH")]
-    cache_device: Option<Vec<String>>,
+    cache_device: Option<Vec<PathBuf>>,
 
     /// Directory path to use for importing devices that are part of the
     /// ZettaCache
@@ -32,7 +34,7 @@ struct Cli {
         conflicts_with = "cache-device",
         default_value = "/dev/disk/by-id/"
     )]
-    cache_device_dir: String,
+    cache_device_dir: PathBuf,
 
     /// Sets the verbosity level for logging and debugging
     #[clap(short = 'v', long, parse(from_occurrences), global = true)]
@@ -40,7 +42,7 @@ struct Cli {
 
     /// File to log debugging output to
     #[clap(long, requires = "verbose", value_name = "FILE", global = true)]
-    log_file: Option<String>,
+    log_file: Option<PathBuf>,
 
     #[clap(subcommand)]
     command: Commands,
@@ -111,8 +113,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
     // Set up cache paths
     let cache_mode = match cli.cache_device {
-        Some(paths) => CacheOpenMode::new_device_list(paths),
-        None => CacheOpenMode::new_device_dir(cli.cache_device_dir),
+        Some(paths) => CacheOpenMode::DeviceList(paths),
+        None => CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
     };
 
     match cli.command {

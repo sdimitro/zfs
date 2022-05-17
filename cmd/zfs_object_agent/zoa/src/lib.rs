@@ -1,5 +1,8 @@
 use std::ffi::CStr;
+use std::ffi::OsStr;
 use std::os::raw::c_char;
+use std::os::unix::prelude::OsStrExt;
+use std::path::Path;
 
 use foreign_types::ForeignType;
 use libc::c_void;
@@ -24,13 +27,11 @@ pub unsafe extern "C" fn libzoa_init(
     cache_path_ptr: *const c_char, // XXX change to take a list of paths
     handle: *mut *mut zoa_handle_t,
 ) -> i32 {
-    let socket_dir = CStr::from_ptr(socket_dir_ptr)
-        .to_string_lossy()
-        .into_owned();
-    let log_file = CStr::from_ptr(log_file_ptr).to_string_lossy().into_owned();
+    let socket_dir = Path::new(OsStr::from_bytes(CStr::from_ptr(socket_dir_ptr).to_bytes()));
+    let log_file = Path::new(OsStr::from_bytes(CStr::from_ptr(log_file_ptr).to_bytes()));
 
     let verbosity = 2;
-    util::setup_logging(verbosity, Some(log_file.as_str()), None, false);
+    util::setup_logging(verbosity, Some(log_file), None, false);
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -43,16 +44,14 @@ pub unsafe extern "C" fn libzoa_init(
     }
 
     if cache_path_ptr.is_null() {
-        if zettaobject::init::start(&socket_dir, None, false, runtime).is_err() {
+        if zettaobject::init::start(socket_dir, None, false, runtime).is_err() {
             return -1;
         }
     } else {
-        let cache = CStr::from_ptr(cache_path_ptr)
-            .to_string_lossy()
-            .into_owned();
+        let cache_path = Path::new(OsStr::from_bytes(CStr::from_ptr(cache_path_ptr).to_bytes()));
         if zettaobject::init::start(
-            &socket_dir,
-            Some(CacheOpenMode::new_device_list(vec![cache])),
+            socket_dir,
+            Some(CacheOpenMode::DeviceList(vec![cache_path.to_owned()])),
             false,
             runtime,
         )

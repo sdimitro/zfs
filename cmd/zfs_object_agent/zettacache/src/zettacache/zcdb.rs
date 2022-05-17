@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -29,7 +30,7 @@ pub struct ZCacheDBHandle {
 }
 
 impl ZCacheDBHandle {
-    pub async fn dump_superblocks(paths: Vec<String>) -> Result<()> {
+    pub async fn dump_superblocks(paths: Vec<PathBuf>) -> Result<()> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
             match Disk::new(&path, true) {
@@ -45,7 +46,7 @@ impl ZCacheDBHandle {
         Ok(())
     }
 
-    pub async fn open(paths: Vec<String>) -> Result<ZCacheDBHandle> {
+    pub async fn open(paths: Vec<PathBuf>) -> Result<ZCacheDBHandle> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
         for path in paths {
             disks.push(Disk::new(&path, true)?);

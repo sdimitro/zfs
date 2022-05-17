@@ -1,5 +1,7 @@
 //! `zcache add` subcommand
 
+use std::path::PathBuf;
+
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
@@ -15,7 +17,7 @@ use crate::subcommand::ZcacheSubCommand;
 #[derive(Parser)]
 #[clap(about = "Add a disk to the ZettaCache.")]
 pub struct Add {
-    path: String,
+    path: PathBuf,
 }
 
 #[async_trait]
@@ -32,7 +34,7 @@ impl ZcacheSubCommand for Add {
             .await
         {
             Ok(_) => {
-                writeln_stdout!("Disk {} added", self.path);
+                writeln_stdout!("Disk {:?} added", self.path);
             }
             Err(RemoteError::ResultError(_)) => return Err(anyhow!("No cache found")),
             Err(RemoteError::Other(e)) => return Err(e),

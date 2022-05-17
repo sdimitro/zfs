@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
@@ -54,8 +55,8 @@ impl PublicServerState {
         }
     }
 
-    pub fn start(socket_dir: &str, cache: Option<ZettaCache>) {
-        let socket_path = format!("{}/zfs_public_socket", socket_dir);
+    pub fn start(socket_dir: &Path, cache: Option<ZettaCache>) {
+        let socket_path = socket_dir.join("zfs_public_socket");
 
         let mut server = Server::new(
             &socket_path,
