@@ -778,9 +778,8 @@ impl BlockAccess {
         Ok((struct_obj, self.round_up_to_sector(consumed)))
     }
 
-    /// Return the I/O stats collected as a serialized json string.
-    pub fn io_stats_as_json(&self, agent_id: Uuid) -> String {
-        serde_json::to_string(&IoStatsRef {
+    pub fn io_stats<'a>(&self, agent_id: Uuid) -> IoStatsRef<'a> {
+        IoStatsRef {
             cache_runtime_id: agent_id, // used to detect agent restarts across stat snapshots
             timestamp: self.timebase.elapsed(),
             disk_stats: self
@@ -790,8 +789,7 @@ impl BlockAccess {
                 .iter()
                 .map(|disk| disk.io_stats)
                 .collect(),
-        })
-        .unwrap()
+        }
     }
 }
 

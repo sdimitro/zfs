@@ -312,7 +312,8 @@ pub struct IoStats {
     pub disk_stats: Vec<DiskIoStats>,
 }
 
-#[derive(Debug, Serialize)]
+// Note that this must be deserializable as `IoStats`
+#[derive(Debug, Default, Serialize)]
 pub struct IoStatsRef<'a> {
     pub cache_runtime_id: Uuid,
     pub timestamp: Duration,
@@ -405,13 +406,6 @@ pub struct CacheStats {
 }
 
 impl CacheStats {
-    pub fn new() -> CacheStats {
-        CacheStats {
-            cache_runtime_id: Default::default(),
-            timestamp: Duration::default(),
-            stats: Default::default(),
-        }
-    }
     pub fn value(&self, counter: CacheStatCounter) -> u64 {
         self.stats[counter].0.load(Relaxed)
     }

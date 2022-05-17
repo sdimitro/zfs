@@ -14,7 +14,7 @@ pub struct DeviceEntry {
     pub size: u64,
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Default, Serialize, Deserialize)]
 pub struct DeviceList {
     pub devices: Vec<DeviceEntry>,
 }

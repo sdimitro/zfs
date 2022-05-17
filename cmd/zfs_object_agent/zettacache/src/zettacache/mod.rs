@@ -51,7 +51,9 @@ use util::with_alloctag_hf;
 use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::CacheStats;
 use util::zettacache_stats::DiskIoType;
+use util::zettacache_stats::IoStatsRef;
 use util::AlignedBytes;
+use util::DeviceList;
 use util::From64;
 use util::LockSet;
 use util::LockedItem;
@@ -1868,10 +1870,6 @@ impl ZettaCache {
         watch.changed().await.ok();
     }
 
-    pub fn sector_size(&self) -> usize {
-        self.block_access.round_up_to_sector(1)
-    }
-
     pub async fn hits_by_size_data(&self) -> SizeHistogramPhys {
         self.state.lock().await.size_histogram.clone()
     }
@@ -1880,22 +1878,23 @@ impl ZettaCache {
         self.state.lock().await.clear_hit_data();
     }
 
-    pub fn devices_as_json(&self) -> String {
-        serde_json::to_string(&self.block_access.list_devices()).unwrap()
+    pub fn devices(&self) -> DeviceList {
+        self.block_access.list_devices()
     }
 
-    pub fn io_stats_as_json(&self) -> String {
-        self.block_access.io_stats_as_json(self.cache_runtime_id)
+    pub fn io_stats<'a>(&self) -> IoStatsRef<'a> {
+        self.block_access.io_stats(self.cache_runtime_id)
     }
 
-    pub async fn stats_as_json(&self) -> String {
-        let mut stats = CacheStats::clone(&self.stats);
+    pub fn stats(&self) -> CacheStats {
+        let mut stats = (*self.stats).clone();
         stats.cache_runtime_id = self.cache_runtime_id;
         stats.timestamp = self.timebase.elapsed();
-        serde_json::to_string(&stats).unwrap()
+        stats
     }
 }
 
+#[derive(Debug)]
 pub struct ValidIndexValue(IndexValue);
 
 impl ValidIndexValue {

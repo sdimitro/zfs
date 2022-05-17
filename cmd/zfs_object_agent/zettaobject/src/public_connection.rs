@@ -265,7 +265,7 @@ impl PublicConnectionState {
 
             let response = match cache {
                 Some(cache) => Ok(ListDevicesResponse {
-                    devices_json: cache.devices_as_json(),
+                    devices_json: serde_json::to_string(&cache.devices()).unwrap(),
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };
@@ -284,7 +284,7 @@ impl PublicConnectionState {
 
             let response = match cache {
                 Some(cache) => Ok(ZcacheIostatResponse {
-                    iostats_json: cache.io_stats_as_json(),
+                    iostats_json: serde_json::to_string(&cache.io_stats()).unwrap(),
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };
@@ -303,7 +303,7 @@ impl PublicConnectionState {
 
             let response = match cache {
                 Some(cache) => Ok(ZcacheStatsResponse {
-                    stats_json: cache.stats_as_json().await,
+                    stats_json: serde_json::to_string(&cache.stats()).unwrap(),
                 }),
                 None => Err(FailureMessage::new("no zettacache present")),
             };

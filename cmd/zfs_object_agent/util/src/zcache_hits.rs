@@ -14,5 +14,6 @@ pub struct ReportHitsResponse {
     pub cache_lookups: u64,
     pub cache_capacity: u64,
     pub bucket_size: u64,
+    #[serde(default)] // serde_nvlist omits empty Vec's
     pub combined_histogram: Vec<u64>,
 }
