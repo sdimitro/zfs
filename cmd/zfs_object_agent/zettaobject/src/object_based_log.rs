@@ -36,7 +36,10 @@ tunable! {
  * needs to contain a Copy/Clone type so that we can copy it to return from the
  * OBLIterator.
  */
-pub trait ObjectBasedLogEntry: 'static + OnDisk + Copy + Clone + Unpin + Send + Sync {}
+pub trait ObjectBasedLogEntry:
+    'static + Serialize + DeserializeOwned + Copy + Clone + Unpin + Send + Sync
+{
+}
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ObjectBasedLogPhys<T: ObjectBasedLogEntry> {
@@ -83,7 +86,6 @@ struct ObjectBasedLogChunk<T: ObjectBasedLogEntry> {
     txg: Txg,
     entries: Vec<T>,
 }
-impl<T: ObjectBasedLogEntry> OnDisk for ObjectBasedLogChunk<T> {}
 
 impl<T: ObjectBasedLogEntry> ObjectBasedLogChunk<T> {
     fn key(name: &str, generation: u64, chunk: u64) -> String {

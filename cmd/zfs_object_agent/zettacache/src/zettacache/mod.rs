@@ -210,7 +210,6 @@ pub struct Inner {
 pub enum OperationLogEntry {
     Insert(IndexKey, IndexValue),
 }
-impl OnDisk for OperationLogEntry {}
 impl BlockBasedLogEntry for OperationLogEntry {}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
@@ -218,7 +217,6 @@ struct RebalanceLogEntry {
     old: Extent,
     new: Option<DiskLocation>,
 }
-impl OnDisk for RebalanceLogEntry {}
 impl BlockBasedLogEntry for RebalanceLogEntry {}
 
 #[derive(Debug)]

@@ -202,7 +202,6 @@ pub struct PoolPhys {
     #[serde(default)]
     checkpoint_txg: Option<Txg>,
 }
-impl OnDisk for PoolPhys {}
 
 /// contains a pending_frees_log and matching object_size_log
 #[derive(Serialize, Deserialize, Debug)]
@@ -247,7 +246,6 @@ pub struct UberblockPhys {
     #[derivative(Debug(format_with = "util::tersevec"))]
     zfs_config: Vec<u8>,
 }
-impl OnDisk for UberblockPhys {}
 
 #[derive(Serialize, Deserialize, Debug, Default, Clone, Copy)]
 pub struct PoolStatsPhys {
@@ -259,14 +257,12 @@ pub struct PoolStatsPhys {
     // into the `objects` field
     pub objects_count: u64,
 }
-impl OnDisk for PoolStatsPhys {}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 enum ObjectSizeLogEntry {
     Exists(ObjectSize),
     Freed { object: ObjectId },
 }
-impl OnDisk for ObjectSizeLogEntry {}
 impl ObjectBasedLogEntry for ObjectSizeLogEntry {}
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -300,7 +296,6 @@ struct PendingFreesLogEntry {
     block: BlockId,
     size: u32, // in bytes
 }
-impl OnDisk for PendingFreesLogEntry {}
 impl ObjectBasedLogEntry for PendingFreesLogEntry {}
 
 /*

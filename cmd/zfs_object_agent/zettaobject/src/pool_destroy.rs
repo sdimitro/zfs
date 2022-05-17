@@ -43,7 +43,6 @@ pub struct PoolDestroyingPhys {
     total_data_objects: u64,
     destroyed_objects: u64,
 }
-impl OnDisk for PoolDestroyingPhys {}
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 enum PoolDestroyState {

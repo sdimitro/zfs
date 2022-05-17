@@ -6,7 +6,6 @@ use serde::Deserialize;
 use serde::Serialize;
 
 use crate::base_types::Extent;
-use crate::base_types::OnDisk;
 use crate::block_access::BlockAccess;
 use crate::block_allocator::SlabPhysType;
 use crate::block_based_log::BlockBasedLog;
@@ -29,7 +28,6 @@ pub enum SpaceMapEntry {
     Free(Extent),
     SlabInfo(SlabInfoEntry),
 }
-impl OnDisk for SpaceMapEntry {}
 impl BlockBasedLogEntry for SpaceMapEntry {}
 
 pub struct SpaceMap {
@@ -44,7 +42,6 @@ pub struct SpaceMapPhys {
     log: BlockBasedLogPhys<SpaceMapEntry>,
     alloc_entries: u64,
 }
-impl OnDisk for SpaceMapPhys {}
 
 impl SpaceMapPhys {
     pub fn new() -> SpaceMapPhys {

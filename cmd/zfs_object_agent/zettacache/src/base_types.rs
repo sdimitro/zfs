@@ -6,19 +6,12 @@ use std::ops::Add;
 use std::ops::Sub;
 
 use more_asserts::*;
-use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde::Serialize;
 use util::From64;
 
-/*
- * Things that are stored on disk.
- */
-pub trait OnDisk: Serialize + DeserializeOwned {}
-
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct PoolGuid(pub u64);
-impl OnDisk for PoolGuid {}
 impl Display for PoolGuid {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{:020}", self.0)
@@ -27,7 +20,6 @@ impl Display for PoolGuid {
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct BlockId(pub u64);
-impl OnDisk for BlockId {}
 impl Display for BlockId {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{}", self.0)

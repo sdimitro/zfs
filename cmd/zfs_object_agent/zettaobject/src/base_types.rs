@@ -3,13 +3,11 @@ use std::fmt::*;
 use serde::Deserialize;
 use serde::Serialize;
 use zettacache::base_types::BlockId;
-use zettacache::base_types::OnDisk;
 
 use crate::data_object::NUM_DATA_PREFIXES;
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
 pub struct Txg(pub u64);
-impl OnDisk for Txg {}
 impl Display for Txg {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{:020}", self.0)
@@ -28,7 +26,6 @@ impl Txg {
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 pub struct ObjectId(u64);
-impl OnDisk for ObjectId {}
 impl Display for ObjectId {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{:020}", self.0)

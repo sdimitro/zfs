@@ -22,7 +22,6 @@ pub enum StorageObjectLogEntry {
     Alloc { object: ObjectId },
     Free { object: ObjectId },
 }
-impl OnDisk for StorageObjectLogEntry {}
 impl ObjectBasedLogEntry for StorageObjectLogEntry {}
 
 #[derive(Debug)]

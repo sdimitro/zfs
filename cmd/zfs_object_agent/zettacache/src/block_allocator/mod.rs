@@ -1730,7 +1730,6 @@ pub enum SlabPhysType {
     Free,
     Evacuating,
 }
-impl OnDisk for SlabPhysType {}
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 struct SlabAllocationBucketsPhys {
@@ -1738,7 +1737,6 @@ struct SlabAllocationBucketsPhys {
     // (max allocation size, is extent based)
     buckets: Vec<(SlabBucketSize, bool)>,
 }
-impl OnDisk for SlabAllocationBucketsPhys {}
 
 impl SlabAllocationBucketsPhys {
     fn default() -> Self {
@@ -1770,7 +1768,6 @@ pub struct BlockAllocatorPhys {
 
     slab_buckets: SlabAllocationBucketsPhys,
 }
-impl OnDisk for BlockAllocatorPhys {}
 
 impl BlockAllocatorPhys {
     pub fn new(block_access: &BlockAccess) -> BlockAllocatorPhys {
