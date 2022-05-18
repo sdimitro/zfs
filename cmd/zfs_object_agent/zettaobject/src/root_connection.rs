@@ -146,7 +146,7 @@ impl RootConnectionState {
             let object_access = request.object_access.object_access().await?;
             let result = Pool::create(&object_access, &request.name, request.id.guid)
                 .await
-                .map_err(FailureMessage::new);
+                .map_err(|e| FailureMessage::new(e.into()));
 
             return_result(TYPE_CREATE_POOL, request.id, result, true)
         })
@@ -594,7 +594,7 @@ impl RootConnectionState {
                 }
                 None => {
                     debug!("got ClearHitDataRequest, no zettacache present");
-                    Err(FailureMessage::new("zettacache not present"))
+                    Err(FailureMessage::msg("zettacache not present"))
                 }
             };
             // XXX standardize on if response has the same type as request, or with "done" appended
@@ -609,8 +609,11 @@ impl RootConnectionState {
             debug!("got {:?}", request);
 
             let result = match cache {
-                Some(cache) => Ok(cache.add_disk(&request.path).await?),
-                None => Err(FailureMessage::new("zettacache not present")),
+                Some(cache) => cache
+                    .add_disk(&request.path)
+                    .await
+                    .map_err(FailureMessage::new),
+                None => Err(FailureMessage::msg("zettacache not present")),
             };
             return_result(TYPE_ADD_DISK, (), result, true)
         }))
@@ -626,7 +629,7 @@ impl RootConnectionState {
                     cache.sync_checkpoint().await;
                     Ok(())
                 }
-                None => Err(FailureMessage::new("zettacache not present")),
+                None => Err(FailureMessage::msg("zettacache not present")),
             };
             return_result(TYPE_SYNC_CHECKPOINT, (), result, true)
         }))
@@ -642,7 +645,7 @@ impl RootConnectionState {
                     cache.initiate_merge().await;
                     Ok(())
                 }
-                None => Err(FailureMessage::new("zettacache not present")),
+                None => Err(FailureMessage::msg("zettacache not present")),
             };
             return_result(TYPE_INITIATE_MERGE, (), result, true)
         }))

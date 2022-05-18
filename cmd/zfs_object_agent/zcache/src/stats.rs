@@ -4,7 +4,6 @@ use std::cmp::max;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
@@ -21,7 +20,6 @@ use util::zettacache_stats::CacheStatCounter::*;
 use util::zettacache_stats::*;
 
 use crate::remote_channel::RemoteChannel;
-use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
 
 struct StatsDisplay {
@@ -277,20 +275,9 @@ impl StatsDisplay {
         let mut remote = RemoteChannel::new(false).await?;
 
         loop {
-            let latest: CacheStats = match remote.call(TYPE_ZCACHE_STATS, None).await {
-                Ok(response) => {
-                    let stats_json = response.lookup_string("stats_json").unwrap();
-                    serde_json::from_str(stats_json.to_str()?).unwrap()
-                }
-                Err(RemoteError::ResultError(_)) => {
-                    return Err(anyhow!("No cache found"));
-                }
-                Err(RemoteError::Other(e)) => {
-                    writeln_stdout!("remote call error: {}", e);
-                    // typically something like "Connection reset by peer (os error 104)"
-                    return Err(e);
-                }
-            };
+            let response = remote.call(TYPE_ZCACHE_STATS, None).await?;
+            let stats_json = response.lookup_string("stats_json").unwrap();
+            let latest: CacheStats = serde_json::from_str(stats_json.to_str()?).unwrap();
 
             // Periodically display the column headers
             if (iteration % (self.get_terminal_height() - 3) as u64) == 0 {

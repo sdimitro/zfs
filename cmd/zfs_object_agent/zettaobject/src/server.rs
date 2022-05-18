@@ -8,7 +8,9 @@
 //! for more details.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::fmt::Debug;
+use std::fmt::Formatter;
 use std::fs;
 use std::os::unix::prelude::PermissionsExt;
 use std::path::Path;
@@ -503,13 +505,27 @@ pub fn handler_return_ok(response: Option<NvList>) -> HandlerReturn {
     Ok(Box::pin(future::ready(Ok(response))))
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Serialize)]
 #[serde(tag = "err")]
 pub enum FailureMessage {
     Other { message: String },
 }
+impl Debug for FailureMessage {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            FailureMessage::Other { message } => write!(f, "{}", message),
+        }
+    }
+}
 impl FailureMessage {
-    pub fn new<T: ToString>(message: T) -> Self {
+    pub fn new(error: Error) -> Self {
+        FailureMessage::Other {
+            // Note that we use Debug formatting so that the cause/context of the anyhow::Error
+            // will be included.
+            message: format!("{error:?}"),
+        }
+    }
+    pub fn msg<T: ToString>(message: T) -> Self {
         FailureMessage::Other {
             message: message.to_string(),
         }
@@ -528,6 +544,7 @@ impl FailureMessage {
 /// * fields from R
 /// * if result.is_ok(), fields from O
 /// * if result.is_err(), "err" -> EnumVariantName (string)
+/// * if result.is_err(), "errstr" -> stringified error (string)
 /// * if result.is_err(), fields from the varant of E
 pub fn return_result<R, O, E>(
     response_type: &str,
@@ -549,15 +566,16 @@ where
         ok: Option<O>,
         #[serde(flatten)]
         err: Option<E>,
+        errstr: Option<String>,
     }
 
     if let Err(e) = &result {
         error!("sending failure: {:?}", e);
     }
 
-    let (ok, err) = match result {
-        Ok(o) => (Some(o), None),
-        Err(e) => (None, Some(e)),
+    let (ok, errstr, err) = match result {
+        Ok(o) => (Some(o), None, None),
+        Err(e) => (None, Some(format!("{:?}", e)), Some(e)),
     };
 
     let response = Response {
@@ -565,6 +583,7 @@ where
         request: request_id,
         ok,
         err,
+        errstr,
     };
 
     if debug {

@@ -4,7 +4,6 @@ use std::cmp::max;
 use std::cmp::Ordering;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
@@ -21,7 +20,6 @@ use util::writeln_stdout;
 use util::ReportHitsResponse;
 
 use crate::remote_channel::RemoteChannel;
-use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
 
 #[derive(Serialize)]
@@ -199,55 +197,37 @@ impl ZcacheSubCommand for Hits {
 
         // a request to clear hit data
         if self.clear {
-            match remote.call(TYPE_CLEAR_HIT_DATA, None).await {
-                Ok(_) => {
-                    writeln_stdout!("Hits-by-size data cleared");
-                }
-                Err(RemoteError::ResultError(_)) => {
-                    return Err(anyhow!(
-                        "No cache found, so no hits-by-size data is available"
-                    ))
-                }
-                Err(RemoteError::Other(e)) => return Err(e),
-            }
+            remote.call(TYPE_CLEAR_HIT_DATA, None).await?;
+            writeln_stdout!("Hits-by-size data cleared");
             return Ok(());
         }
 
-        match remote.call(TYPE_REPORT_HITS, None).await {
-            Ok(response) => {
-                let response: ReportHitsResponse = nvpair::from_nvlist(&response)?;
-                let quantiles = if self.json {
-                    // For JSON keep all the data points (don't down sample)
-                    response.combined_histogram.len()
-                } else if let Some(quantiles) = self.quantiles {
-                    quantiles
-                } else {
-                    const HEADER_ROWS: usize = 6;
-                    const MIN_QUANTILES: usize = 5;
-                    const BUFFER_ROWS: usize = 2; // for the previous and next command prompts
-                    let terminal_height = max(
-                        HEADER_ROWS + MIN_QUANTILES + BUFFER_ROWS,
-                        match termsize::get() {
-                            None => 24,
-                            Some(size) => size.rows as usize,
-                        },
-                    );
-                    terminal_height - HEADER_ROWS - BUFFER_ROWS
-                };
-                let hits_by_size = HitsBySize::new(response, quantiles);
+        let nvlist = remote.call(TYPE_REPORT_HITS, None).await?;
+        let response: ReportHitsResponse = nvpair::from_nvlist(&nvlist)?;
+        let quantiles = if self.json {
+            // For JSON keep all the data points (don't down sample)
+            response.combined_histogram.len()
+        } else if let Some(quantiles) = self.quantiles {
+            quantiles
+        } else {
+            const HEADER_ROWS: usize = 6;
+            const MIN_QUANTILES: usize = 5;
+            const BUFFER_ROWS: usize = 2; // for the previous and next command prompts
+            let terminal_height = max(
+                HEADER_ROWS + MIN_QUANTILES + BUFFER_ROWS,
+                match termsize::get() {
+                    None => 24,
+                    Some(size) => size.rows as usize,
+                },
+            );
+            terminal_height - HEADER_ROWS - BUFFER_ROWS
+        };
+        let hits_by_size = HitsBySize::new(response, quantiles);
 
-                if self.json {
-                    writeln_stdout!("{}", serde_json::to_string_pretty(&hits_by_size).unwrap());
-                } else {
-                    hits_by_size.print(self.width);
-                }
-            }
-            Err(RemoteError::ResultError(_)) => {
-                return Err(anyhow!(
-                    "No cache found, so no hits-by-size data is available"
-                ));
-            }
-            Err(RemoteError::Other(e)) => return Err(e),
+        if self.json {
+            writeln_stdout!("{}", serde_json::to_string_pretty(&hits_by_size).unwrap());
+        } else {
+            hits_by_size.print(self.width);
         }
         Ok(())
     }

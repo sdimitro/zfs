@@ -232,7 +232,7 @@ impl PublicConnectionState {
                         combined_histogram,
                     })
                 }
-                None => Err(FailureMessage::new("no zettacache present")),
+                None => Err(FailureMessage::msg("no zettacache present")),
             };
             return_result(TYPE_REPORT_HITS, (), response, true)
         }))
@@ -272,7 +272,7 @@ impl PublicConnectionState {
                 Some(cache) => Ok(ZcacheIostatResponse {
                     iostats_json: serde_json::to_string(&cache.io_stats()).unwrap(),
                 }),
-                None => Err(FailureMessage::new("no zettacache present")),
+                None => Err(FailureMessage::msg("no zettacache present")),
             };
             return_result(TYPE_ZCACHE_IOSTAT, (), response, false)
         }))
@@ -291,7 +291,7 @@ impl PublicConnectionState {
                 Some(cache) => Ok(ZcacheStatsResponse {
                     stats_json: serde_json::to_string(&cache.stats()).unwrap(),
                 }),
-                None => Err(FailureMessage::new("no zettacache present")),
+                None => Err(FailureMessage::msg("no zettacache present")),
             };
             return_result(TYPE_ZCACHE_STATS, (), response, false)
         }))

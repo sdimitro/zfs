@@ -5,7 +5,6 @@ use std::sync::atomic::Ordering::Relaxed;
 use std::thread::sleep;
 use std::time::Duration;
 
-use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Local;
@@ -20,7 +19,6 @@ use util::writeln_stdout;
 use util::zettacache_stats::*;
 
 use crate::remote_channel::RemoteChannel;
-use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
 
 struct IoStatDisplay {
@@ -322,31 +320,20 @@ impl IoStatDisplay {
         let mut remote = RemoteChannel::new(false).await?;
 
         loop {
-            let latest = match remote.call(TYPE_ZCACHE_IOSTAT, None).await {
-                Ok(response) => {
-                    let io_stats_json = response.lookup_string("iostats_json")?;
-                    let mut latest: IoStats = serde_json::from_str(io_stats_json.to_str()?)?;
+            let response = remote.call(TYPE_ZCACHE_IOSTAT, None).await?;
+            let io_stats_json = response.lookup_string("iostats_json")?;
+            let mut latest: IoStats = serde_json::from_str(io_stats_json.to_str()?)?;
 
-                    if self.show_devices {
-                        // +2 on device names to account for indenting devices under 'summary'
-                        self.max_name_length = max(self.max_name_length, latest.max_name_len() + 2);
-                        self.max_name_length = max(self.max_name_length, "summary".len());
-                    }
+            if self.show_devices {
+                // +2 on device names to account for indenting devices under 'summary'
+                self.max_name_length = max(self.max_name_length, latest.max_name_len() + 2);
+                self.max_name_length = max(self.max_name_length, "summary".len());
+            }
 
-                    // Create a summary disk stat of all the devices
-                    IoStatDisplay::insert_summary_disk(&mut latest);
+            // Create a summary disk stat of all the devices
+            IoStatDisplay::insert_summary_disk(&mut latest);
 
-                    debug!("iostats_json: {:?}", latest);
-                    latest
-                }
-                Err(RemoteError::ResultError(_)) => {
-                    return Err(anyhow!("No cache found"));
-                }
-                Err(RemoteError::Other(e)) => {
-                    info!("object agent restarted: {}", e);
-                    return Err(e);
-                }
-            };
+            debug!("{latest:?}");
 
             if previous.disk_stats.is_empty()
                 || latest.cache_runtime_id == previous.cache_runtime_id

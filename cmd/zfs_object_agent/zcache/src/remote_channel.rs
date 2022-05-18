@@ -1,3 +1,4 @@
+use std::io::ErrorKind;
 use std::thread::sleep;
 use std::time::Duration;
 
@@ -16,42 +17,7 @@ use util::message::AGENT_REQUEST_TYPE;
 use util::message::AGENT_RESPONSE_TYPE;
 use util::message::TYPE_VERSION;
 
-#[derive(Debug)]
-pub enum RemoteError {
-    ResultError(NvList),
-    Other(anyhow::Error),
-}
-
 const ZOA_MAX_RETRIES: usize = 30;
-
-impl std::fmt::Display for RemoteError {
-    fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        match self {
-            RemoteError::ResultError(list) => write!(f, "Remote error: {:?}", list),
-            RemoteError::Other(e) => e.fmt(f),
-        }
-    }
-}
-
-impl std::error::Error for RemoteError {}
-
-impl From<anyhow::Error> for RemoteError {
-    fn from(e: anyhow::Error) -> Self {
-        RemoteError::Other(e)
-    }
-}
-
-impl From<std::io::Error> for RemoteError {
-    fn from(e: std::io::Error) -> Self {
-        RemoteError::Other(anyhow!(e))
-    }
-}
-
-impl From<std::str::Utf8Error> for RemoteError {
-    fn from(e: std::str::Utf8Error) -> Self {
-        RemoteError::Other(anyhow!(e))
-    }
-}
 
 pub struct RemoteChannel {
     stream: UnixStream,
@@ -71,6 +37,10 @@ impl RemoteChannel {
                         return Ok(stream);
                     }
                     Err(e) => {
+                        if reconnect_retries > ZOA_MAX_RETRIES {
+                            return Err(e)
+                                .context("cannot negotiate version with zfs object agent");
+                        }
                         info!("agent_version failed {}", e.to_string());
                         sleep(nap);
                         reconnect_retries += 1;
@@ -78,7 +48,9 @@ impl RemoteChannel {
                     }
                 },
                 Err(e) => {
-                    if reconnect_retries > ZOA_MAX_RETRIES {
+                    if reconnect_retries > ZOA_MAX_RETRIES
+                        || matches!(e.kind(), ErrorKind::PermissionDenied)
+                    {
                         info!(
                             "cannot connect after {} attempts to zfs object agent {}",
                             reconnect_retries,
@@ -149,11 +121,7 @@ impl RemoteChannel {
     /// before completing this request, it will reconnect and resend the request. Therefore,
     /// the request must be idempotent (i.e. executing the request more than once has the same
     /// effect as executing it only once).
-    pub async fn call(
-        &mut self,
-        request: &str,
-        args: Option<NvList>,
-    ) -> Result<NvList, RemoteError> {
+    pub async fn call(&mut self, request: &str, args: Option<NvList>) -> Result<NvList> {
         loop {
             // send request, retrying as needed
             let mut nvlist = args.clone().unwrap_or_else(NvList::new_unique_names);
@@ -181,18 +149,22 @@ impl RemoteChannel {
             };
             debug!("received response: {:?}", response);
 
-            let response_type = response.lookup_string(AGENT_RESPONSE_TYPE)?;
-            let response_type = response_type.to_str()?;
+            let response_type = response
+                .lookup_string(AGENT_RESPONSE_TYPE)
+                .context("response_type key")?;
+            let response_type = response_type.to_string_lossy();
             if response_type != request {
-                return Err(RemoteError::Other(anyhow!(
+                return Err(anyhow!(
                     "expected response type \"{}\", got \"{}\"",
                     request,
                     response_type
-                )));
+                ));
             }
-
+            if let Ok(errstr) = response.lookup_string("errstr") {
+                return Err(anyhow!(errstr.to_string_lossy().to_string()));
+            }
             if response.exists("err") {
-                return Err(RemoteError::ResultError(response));
+                return Err(anyhow!("{response:?}"));
             }
             return Ok(response);
         }

@@ -3,8 +3,6 @@
 use std::fs;
 use std::path::Path;
 
-use anyhow::anyhow;
-use anyhow::Context;
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::Parser;
@@ -16,7 +14,6 @@ use util::DeviceEntry;
 use util::DeviceList;
 
 use crate::remote_channel::RemoteChannel;
-use crate::remote_channel::RemoteError;
 use crate::subcommand::ZcacheSubCommand;
 
 #[derive(Parser)]
@@ -93,14 +90,9 @@ impl List {
     pub async fn get_device_list() -> Result<DeviceList> {
         let mut remote = RemoteChannel::new(false).await?;
 
-        match remote.call(TYPE_LIST_DEVICES, None).await {
-            Ok(response) => {
-                let devices_json = response.lookup_string("devices_json")?;
-                Ok(serde_json::from_str(devices_json.to_str()?)?)
-            }
-            Err(RemoteError::ResultError(e)) => Err(anyhow!("unexpected error {e:?}")),
-            Err(RemoteError::Other(e)) => Err(e).context("remote call error"),
-        }
+        let response = remote.call(TYPE_LIST_DEVICES, None).await?;
+        let devices_json = response.lookup_string("devices_json")?;
+        Ok(serde_json::from_str(devices_json.to_str()?)?)
     }
 
     async fn list_devices(&self) -> Result<()> {
