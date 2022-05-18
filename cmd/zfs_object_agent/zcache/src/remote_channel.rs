@@ -2,6 +2,7 @@ use std::thread::sleep;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use anyhow::Context;
 use anyhow::Result;
 use log::*;
 use nvpair::NvEncoding;
@@ -14,7 +15,6 @@ use util::message::MessageHeader;
 use util::message::AGENT_REQUEST_TYPE;
 use util::message::AGENT_RESPONSE_TYPE;
 use util::message::TYPE_VERSION;
-use util::writeln_stderr;
 
 #[derive(Debug)]
 pub enum RemoteError {
@@ -84,8 +84,7 @@ impl RemoteChannel {
                             reconnect_retries,
                             e.to_string()
                         );
-                        writeln_stderr!("cannot connect to zfs object agent");
-                        return Err(anyhow!(e));
+                        return Err(e).context("cannot connect to zfs object agent");
                     }
                     info!("open socket failed {}", e.to_string());
                     sleep(nap);

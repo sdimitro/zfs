@@ -144,3 +144,6 @@ pub const TYPE_INITIATE_MERGE: &str = "initiate merge";
 pub struct AddDiskRequest {
     pub path: PathBuf,
 }
+
+// We assume that a single write of this size is atomic.
+pub const SUPERBLOCK_SIZE: usize = 4 * 1024;

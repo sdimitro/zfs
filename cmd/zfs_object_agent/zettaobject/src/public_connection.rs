@@ -12,6 +12,7 @@ use serde::Serialize;
 use util::maybe_die_with;
 use util::message::*;
 use util::tunable;
+use util::DeviceList;
 use util::ReportHitsResponse;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -246,12 +247,14 @@ impl PublicConnectionState {
                 devices_json: String,
             }
 
-            let response = match cache {
-                Some(cache) => Ok(ListDevicesResponse {
-                    devices_json: serde_json::to_string(&cache.devices()).unwrap(),
-                }),
-                None => Err(FailureMessage::new("no zettacache present")),
+            let devices = match cache {
+                Some(cache) => cache.devices(),
+                None => DeviceList::default(),
             };
+
+            let response: Result<ListDevicesResponse, ()> = Ok(ListDevicesResponse {
+                devices_json: serde_json::to_string(&devices).unwrap(),
+            });
             return_result(TYPE_LIST_DEVICES, (), response, true)
         }))
     }

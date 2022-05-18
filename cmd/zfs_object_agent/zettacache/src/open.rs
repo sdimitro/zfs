@@ -13,12 +13,11 @@ use log::info;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use util::From64;
+use util::message::SUPERBLOCK_SIZE;
 
 use crate::base_types::DiskId;
 use crate::block_access::BlockAccess;
 use crate::superblock::SuperblockPhys;
-use crate::superblock::SUPERBLOCK_SIZE;
 
 pub enum CacheOpenMode {
     DeviceList(Vec<PathBuf>),
@@ -52,7 +51,7 @@ impl DiscoveredDevice {
         let mut file = File::open(&path)
             .await
             .with_context(|| format!("discovery: open {path:?}"))?;
-        let mut buf = vec![0u8; usize::from64(SUPERBLOCK_SIZE)];
+        let mut buf = vec![0u8; SUPERBLOCK_SIZE];
         file.read_exact(&mut buf)
             .await
             .with_context(|| format!("discovery: read_exact {path:?}"))?;

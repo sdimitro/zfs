@@ -8,6 +8,7 @@
 mod add;
 mod hits;
 mod iostat;
+mod labelclear;
 mod list;
 mod remote_channel;
 mod stats;
@@ -51,7 +52,7 @@ struct Cli {
 /// 1. Create a new module that implements the sub-command with the `ZcacheSubCommand` trait
 /// and describes the derived sub-command arguments in the struct.
 /// 2. Add an entry to the enum here where it will be parsed and instantiated automatically.
-/// 3. Add a match entry to the match block in `async_main()`.
+/// 3. Add a match entry in `Commands::as_trait()`
 enum Commands {
     Hits(hits::Hits),
     Iostat(iostat::Iostat),
@@ -59,10 +60,26 @@ enum Commands {
     Stats(stats::Stats),
     Add(add::Add),
     Sync(sync::Sync),
+    Labelclear(labelclear::Labelclear),
 
     // clear_hit_data is deprecated/hidden
     #[clap(rename_all = "snake_case")]
     ClearHitData(ClearHitData),
+}
+
+impl Commands {
+    fn as_trait(&self) -> &dyn ZcacheSubCommand {
+        match self {
+            Commands::Hits(hits) => hits,
+            Commands::Iostat(iostat) => iostat,
+            Commands::List(list) => list,
+            Commands::Stats(stats) => stats,
+            Commands::Add(add) => add,
+            Commands::Sync(sync) => sync,
+            Commands::Labelclear(labelclear) => labelclear,
+            Commands::ClearHitData(clear_hit_data) => clear_hit_data,
+        }
+    }
 }
 
 #[tokio::main]
@@ -72,17 +89,7 @@ async fn async_main() -> Result<()> {
     // Set up logging macros
     util::setup_logging(cli.verbose, cli.log_file.as_deref(), None, true);
 
-    match cli.command {
-        Commands::ClearHitData(subcommand) => subcommand.invoke().await?,
-        Commands::Hits(subcommand) => subcommand.invoke().await?,
-        Commands::Iostat(subcommand) => subcommand.invoke().await?,
-        Commands::List(subcommand) => subcommand.invoke().await?,
-        Commands::Stats(subcommand) => subcommand.invoke().await?,
-        Commands::Add(subcommand) => subcommand.invoke().await?,
-        Commands::Sync(subcommand) => subcommand.invoke().await?,
-    }
-
-    Ok(())
+    cli.command.as_trait().invoke().await
 }
 
 #[cfg(test)]

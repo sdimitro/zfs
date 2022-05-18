@@ -74,7 +74,7 @@ impl List {
             .iter()
             .map(|d| self.derive_name(&d.name).len())
             .max()
-            .unwrap()
+            .unwrap_or_default()
     }
 
     fn display_devices(&self, devices: &DeviceList) {
@@ -89,26 +89,26 @@ impl List {
         }
     }
 
-    async fn list_devices(&self) -> Result<()> {
+    // Note, if the agent is running but there is no zettacache, this will return Ok(empty_list)
+    pub async fn get_device_list() -> Result<DeviceList> {
         let mut remote = RemoteChannel::new(false).await?;
 
         match remote.call(TYPE_LIST_DEVICES, None).await {
             Ok(response) => {
                 let devices_json = response.lookup_string("devices_json")?;
-                let devices: DeviceList = serde_json::from_str(devices_json.to_str()?)?;
+                Ok(serde_json::from_str(devices_json.to_str()?)?)
+            }
+            Err(RemoteError::ResultError(e)) => Err(anyhow!("unexpected error {e:?}")),
+            Err(RemoteError::Other(e)) => Err(e).context("remote call error"),
+        }
+    }
 
-                if self.json {
-                    writeln_stdout!("{}", serde_json::to_string_pretty(&devices)?)
-                } else {
-                    self.display_devices(&devices);
-                }
-            }
-            Err(RemoteError::ResultError(_)) => {
-                return Err(anyhow!("No cache found"));
-            }
-            Err(RemoteError::Other(e)) => {
-                return Err(e).context("remote call error");
-            }
+    async fn list_devices(&self) -> Result<()> {
+        let devices = Self::get_device_list().await?;
+        if self.json {
+            writeln_stdout!("{}", serde_json::to_string_pretty(&devices)?)
+        } else {
+            self.display_devices(&devices);
         }
         Ok(())
     }

@@ -18,8 +18,7 @@ use crate::checkpoint::CheckpointId;
 use crate::features::FeatureName;
 use crate::features::SUPPORTED_FEATURES;
 
-// We assume that a single write of this size is atomic.
-pub const SUPERBLOCK_SIZE: u64 = 4 * 1024;
+pub const SUPERBLOCK_SIZE: u64 = util::message::SUPERBLOCK_SIZE as u64;
 
 /// State stored at the beginning of every disk
 #[derive(Serialize, Deserialize, Debug, Clone)]
