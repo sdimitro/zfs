@@ -6,6 +6,7 @@ use std::sync::Arc;
 use futures::future;
 use futures::StreamExt;
 use futures_core::Stream;
+use log::trace;
 use more_asserts::*;
 use safer_ffi::prelude::*;
 use serde::de::Error;
@@ -14,6 +15,7 @@ use serde::Deserialize;
 use serde::Serialize;
 use util::message::slice_to_struct;
 use util::message::struct_to_slice;
+use util::tunable;
 use util::writeln_stdout;
 
 use crate::atime_histogram::AtimeHistogramPhys;
@@ -25,6 +27,11 @@ use crate::pool_id::PoolId;
 use crate::slab_allocator::SlabAccess;
 use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
+
+tunable! {
+    static ref VERIFY_HISTOGRAMS: bool = false;
+    static ref VERIFY_OBSOLETED_HISTOGRAM: bool = true;
+}
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
 #[repr(packed)]
@@ -208,14 +215,26 @@ impl IndexRunPhys {
         self.log.claim(builder);
     }
 
+    /// Note that trimmed entries are not included in the returned iterator.
     pub fn iter(
         &self,
         block_access: Arc<BlockAccess>,
         slab_access: &SlabAccess,
     ) -> impl Stream<Item = IndexEntry> {
-        self.log.iter(block_access, slab_access)
+        let trim_key = self.trim_key;
+        self.log
+            .iter(block_access, slab_access)
+            .filter(move |entry| {
+                future::ready(
+                    trim_key
+                        .map(|trim_key| entry.key > trim_key)
+                        .unwrap_or(true),
+                )
+            })
     }
 
+    /// Note that some trimmed entries may be present in the returned stream, because only entire
+    /// chunks are removed.
     pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
@@ -249,9 +268,10 @@ impl IndexRunPhys {
     }
 
     pub async fn verify_histogram(&self, block_access: Arc<BlockAccess>, slab_access: &SlabAccess) {
-        let mut histogram = AtimeHistogramPhys::new(
+        let mut histogram = AtimeHistogramPhys::with_capacity(
             self.atime_histogram_phys.first_ghost(),
             self.atime_histogram_phys.first_live(),
+            self.atime_histogram_phys.len(),
         );
         self.iter(block_access, slab_access)
             .for_each(|entry| {
@@ -269,6 +289,8 @@ pub struct IndexRun {
     last_key: Option<IndexKey>,
     atime_histogram_phys: AtimeHistogramPhys,
     log: SummarizedBlockBasedLog<IndexEntry>,
+    block_access: Arc<BlockAccess>,
+    slab_allocator: Arc<SlabAllocator>,
 }
 
 #[derive(Debug)]
@@ -290,7 +312,14 @@ impl IndexRun {
             trim_key: phys.trim_key,
             last_key: phys.last_key,
             atime_histogram_phys: phys.atime_histogram_phys,
-            log: SummarizedBlockBasedLog::open(block_access, slab_allocator, phys.log).await,
+            log: SummarizedBlockBasedLog::open(
+                block_access.clone(),
+                slab_allocator.clone(),
+                phys.log,
+            )
+            .await,
+            block_access,
+            slab_allocator,
         };
         index
     }
@@ -298,15 +327,17 @@ impl IndexRun {
     /// Returns new Phys and a Vec which can be passed to ReadOnlyIndexRun::update()
     pub async fn flush(&mut self) -> (IndexRunPhys, IndexFlushDelta) {
         let (log, new_chunks) = self.log.flush().await;
-        (
-            IndexRunPhys {
-                trim_key: self.trim_key,
-                last_key: self.last_key,
-                atime_histogram_phys: self.atime_histogram_phys.clone(),
-                log,
-            },
-            IndexFlushDelta(new_chunks),
-        )
+        let phys = IndexRunPhys {
+            trim_key: self.trim_key,
+            last_key: self.last_key,
+            atime_histogram_phys: self.atime_histogram_phys.clone(),
+            log,
+        };
+        if *VERIFY_HISTOGRAMS {
+            phys.verify_histogram(self.block_access.clone(), self.slab_allocator.access())
+                .await;
+        }
+        (phys, IndexFlushDelta(new_chunks))
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
@@ -347,9 +378,27 @@ impl IndexRun {
     // Logically remove entries at and before `trim_key`, which must be >= the current
     // `trim_key`.  The newly-obsoleted entries must have the provided
     // histogram.
-    pub fn trim(&mut self, trim_key: IndexKey, obsoleted: &AtimeHistogramPhys) {
+    pub async fn trim(&mut self, trim_key: IndexKey, obsoleted: &AtimeHistogramPhys) {
         if let Some(old_trim_key) = self.trim_key {
             assert_ge!(trim_key, old_trim_key);
+        }
+
+        trace!("trimming index from {:?} to {trim_key:?}", self.trim_key);
+        if *VERIFY_OBSOLETED_HISTOGRAM {
+            trace!("trimming obsoleted: {obsoleted}");
+            let mut computed =
+                AtimeHistogramPhys::new(obsoleted.first_ghost(), obsoleted.first_live());
+            let mut count = 0;
+            let mut stream = self.iter();
+            while let Some(entry) = stream.next().await {
+                if entry.key > trim_key {
+                    break;
+                }
+                computed.insert(entry.value);
+                count += 1;
+            }
+            trace!("obsoleted computed from {count} entries: {computed}");
+            obsoleted.assert_eq(&computed);
         }
 
         self.last_key = Some(
@@ -370,11 +419,21 @@ impl IndexRun {
         self.log.num_bytes()
     }
 
+    /// Note that trimmed entries are not included in the returned iterator.
     #[allow(dead_code)]
     pub fn iter(&self) -> impl Stream<Item = IndexEntry> {
-        self.log.iter()
+        let trim_key = self.trim_key;
+        self.log.iter().filter(move |entry| {
+            future::ready(
+                trim_key
+                    .map(|trim_key| entry.key > trim_key)
+                    .unwrap_or(true),
+            )
+        })
     }
 
+    /// Note that some trimmed entries may be present in the returned stream, because only entire
+    /// chunks are removed.
     pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
         self.log.iter_chunks()
     }

@@ -18,11 +18,13 @@ use std::sync::RwLock;
 
 use bimap::BiBTreeMap;
 use bytesize::ByteSize;
+use log::trace;
 use more_asserts::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
 use serde::Deserialize;
 use serde::Serialize;
+use util::measure;
 use util::tunable;
 use util::tunable::Percent;
 use util::From64;
@@ -272,8 +274,12 @@ impl SlabAllocator {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.allocatable.len() as u64 > inner.reserved_slabs {
-            inner.allocatable.pop()
+            let slab = inner.allocatable.pop();
+            trace!("allocating {slab:?}");
+            slab
         } else {
+            measure!("slab allocation failed").hit();
+            trace!("slab allocation failed");
             None
         }
     }
@@ -296,10 +302,13 @@ impl SlabAllocator {
         {
             panic!("Free slabs exhausted.");
         }
-        inner.allocatable.pop().unwrap()
+        let slab = inner.allocatable.pop().unwrap();
+        trace!("allocating reserved {slab:?}");
+        slab
     }
 
     pub fn free(&self, slab: SlabId) {
+        trace!("freeing {slab:?}");
         self.inner.lock().unwrap().freeing.push(slab);
     }
 

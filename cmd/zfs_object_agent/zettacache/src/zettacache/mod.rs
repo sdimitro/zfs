@@ -433,7 +433,7 @@ impl MergeState {
             /// When an old index entry already exists for a newly inserted key, the new entry will
             /// replace the old, so "evict" the old entry: if the entry is a ghost, then there is
             /// nothing to do, otherwise, add the entry to the free list.
-            async fn evict(&mut self, state: &MergeState, entry: IndexEntry) {
+            fn evict(&mut self, state: &MergeState, entry: IndexEntry) {
                 if let Some(extent) = entry.value.extent() {
                     match &state.rebalance {
                         Some(rebalance) => {
@@ -447,13 +447,6 @@ impl MergeState {
                             }
                         }
                         None => self.frees.push(extent),
-                    }
-
-                    if self.entries.len() >= self.chunk_len
-                        || self.frees.len() >= self.chunk_len
-                        || self.cache_updates.len() >= self.chunk_len
-                    {
-                        self.report().await;
                     }
                 }
             }
@@ -527,8 +520,8 @@ impl MergeState {
             /// then there is nothing to send.
             async fn report(&mut self) {
                 if let Some(last_key) = self.last_key {
-                    self.tx
-                        .send(IndexMessage {
+                    measure!("MergeState::merge_task::Progress::report() tx.send(IndexMessage)")
+                        .fut(self.tx.send(IndexMessage {
                             last_key,
                             entries: mem::replace(
                                 &mut self.entries,
@@ -543,9 +536,9 @@ impl MergeState {
                                 Vec::with_capacity(self.chunk_len),
                             ),
                             obsoleted: self.obsoleted.take(),
-                        })
+                        }))
                         .await
-                        .unwrap_or_else(|e| panic!("couldn't send: {}", e));
+                        .unwrap_or_else(|e| panic!("couldn't send: {e}"));
                     trace!(
                         "Collected and sent {} entries and {} frees to next_index_task in {}ms",
                         self.entries.len(),
@@ -568,7 +561,7 @@ impl MergeState {
             }
         }
 
-        debug!("using {:?} as start key for merge", start_key);
+        debug!("using {start_key:?} as start key for merge");
         let mut index_stream;
         let mut progress;
         {
@@ -593,16 +586,14 @@ impl MergeState {
             .range((start_key.map_or(Unbounded, Excluded), Unbounded))
             .peekable();
 
-        let mut index_skips: u64 = 0;
         while let Some(chunk) = index_stream.next().await {
             for &entry in chunk.entries() {
-                // If the next index is already "started", advance the old index to the start point
-                // XXX - would be nice to simply *start* from the start_key, rather than iterate up
-                // to it
+                // If the next index is already "started", advance the old index to the start
+                // point.  The index_stream excludes the trimmed chunks, so this only happens
+                // within the first chunk.
                 if let Some(start_key) = start_key {
                     if entry.key <= start_key {
                         super_trace!("skipping index entry: {:?}", entry.key);
-                        index_skips += 1;
                         continue;
                     }
                 }
@@ -636,7 +627,7 @@ impl MergeState {
                             if entry.value.location().is_some() {
                                 debug!("Insert of {:?} replaces {:?}", pc_value, entry);
                             }
-                            progress.evict(self, entry).await;
+                            progress.evict(self, entry);
                             if progress.ingest_pc(self, pc_key, pc_value) {
                                 progress.report().await;
                             }
@@ -694,7 +685,6 @@ impl MergeState {
             "next={:?}",
             pending_changes_iter.peek().unwrap()
         );
-        debug!("skipped {} index entries", index_skips);
 
         // Send final progress message with final list content
         progress.report().await;
@@ -1344,7 +1334,7 @@ impl ZettaCache {
                                 }
                             }
                             if let Some(last_key) = new_index_phys.last_key() {
-                                old_index.trim(last_key, &progress.obsoleted);
+                                old_index.trim(last_key, &progress.obsoleted).await;
                             }
                         }
                         // merge task complete, replace the current index with the new index
@@ -2019,11 +2009,7 @@ impl ZettaCacheState {
                     self.atime_histogram.remove(old_value);
                     self.atime_histogram.insert(new_value);
                 } else {
-                    trace!(
-                        "pending changes limit reached (now {}), refusing UpdateAtime for {:?}",
-                        pending_len,
-                        key,
-                    );
+                    measure!("pending changes limit reached").hit();
                 }
             }
             btree_map::Entry::Occupied(mut oe) => match oe.get_mut() {

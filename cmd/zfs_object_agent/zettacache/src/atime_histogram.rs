@@ -5,6 +5,7 @@ use std::ops::AddAssign;
 use std::ops::SubAssign;
 
 use derivative::Derivative;
+use either::Either;
 use log::*;
 use more_asserts::*;
 use serde::Deserialize;
@@ -44,6 +45,16 @@ impl AtimeHistogramPhys {
         }
     }
 
+    pub fn with_capacity(first_ghost: Atime, first_live: Atime, len: usize) -> AtimeHistogramPhys {
+        let mut this = AtimeHistogramPhys {
+            histogram: Default::default(),
+            first_ghost,
+            first_live,
+        };
+        this.histogram.resize(len, 0);
+        this
+    }
+
     pub fn first_ghost(&self) -> Atime {
         self.first_ghost
     }
@@ -52,14 +63,22 @@ impl AtimeHistogramPhys {
         self.first_live
     }
 
+    pub fn len(&self) -> usize {
+        self.histogram.len()
+    }
+
     /// Replace self with an empty version, returning the previous value.  The
-    /// first_ghost/live are preserved.
+    /// first_ghost/live are preserved, as well the "capacity".
     pub fn take(&mut self) -> Self {
-        mem::replace(self, Self::new(self.first_ghost, self.first_live))
+        let len = self.histogram.len();
+        mem::replace(
+            self,
+            Self::with_capacity(self.first_ghost, self.first_live, len),
+        )
     }
 
     /// Given an atime "starting point", calculate the "end" atime such that
-    /// self.histogram[start..end].sum() is >= the provided target value or
+    /// `self.histogram[start..end].sum()` is >= the provided target value or
     /// return the next atime past the end of the vector if sum() < "target"
     /// data in the vector. Return "start" if the target value is 0.
     fn atime_for_target(&self, start: Atime, target: u64) -> Atime {
@@ -103,20 +122,36 @@ impl AtimeHistogramPhys {
     pub fn assert_eq(&self, other: &AtimeHistogramPhys) {
         assert_eq!(self.first_ghost, other.first_ghost);
         assert_eq!(self.first_live, other.first_live);
-        assert_eq!(self.histogram.len(), other.histogram.len());
-        for (index, (&value, &other_value)) in self
-            .histogram
-            .iter()
-            .zip(other.histogram.iter())
-            .enumerate()
-        {
-            assert_eq!(
-                value,
-                other_value,
-                "index {} ({:?}) does not match",
-                index,
-                self.first_ghost + index
-            );
+        let zip = if self.histogram.len() < other.histogram.len() {
+            Either::Left(
+                self.histogram
+                    .iter()
+                    .chain(iter::repeat(&0))
+                    .zip(other.histogram.iter()),
+            )
+        } else {
+            Either::Right(
+                self.histogram
+                    .iter()
+                    .zip(other.histogram.iter().chain(iter::repeat(&0))),
+            )
+        };
+
+        let mut message = String::new();
+        for (index, (&value, &other_value)) in zip.enumerate() {
+            if value != other_value {
+                message.push_str(&format!(
+                    "index {} ({:?}) does not match (self={} other={} delta={})\n",
+                    index,
+                    self.first_ghost + index,
+                    value,
+                    other_value,
+                    value - other_value
+                ));
+            }
+        }
+        if !message.is_empty() {
+            panic!("{}", message);
         }
     }
 }
@@ -129,10 +164,15 @@ impl SubAssign<&Self> for AtimeHistogramPhys {
             self.first_ghost + self.histogram.len(),
             rhs.first_ghost + self.histogram.len()
         );
-        for (self_value, rhs_value) in self.histogram[rhs.first_ghost - self.first_ghost..]
+        for (index, (self_value, rhs_value)) in self.histogram[rhs.first_ghost - self.first_ghost..]
             .iter_mut()
             .zip(rhs.histogram.iter())
+            .enumerate()
         {
+            if *self_value < *rhs_value {
+                trace!("rhs: {rhs}");
+                panic!("{:?}: {self_value} < {rhs_value}", rhs.first_ghost + index);
+            }
             *self_value -= *rhs_value;
         }
     }
@@ -251,7 +291,7 @@ impl AtimeHistogram {
         let result = self
             .phys
             .atime_for_target(self.phys.first_live, eviction_size);
-        debug!(
+        trace!(
             "histogram live start at {:?} with {} entries, evicting {} has {:?}",
             self.phys.first_live,
             self.phys.histogram.len(),

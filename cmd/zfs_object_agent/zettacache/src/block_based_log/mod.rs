@@ -1,5 +1,6 @@
 pub mod summarized;
 
+use std::any::type_name;
 use std::cmp::max;
 use std::collections::VecDeque;
 use std::fmt::Debug;
@@ -173,12 +174,17 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
 
     // Since &self is not captured by the returned Stream (its extent list is cloned), callers
     // must ensure that the disk space represented by the extents is not overwritten before the
-    // stream terminates.  i.e. do not call .clear().
+    // stream terminates.  i.e. do not call .clear() or .trim() while the stream is in use.
     pub fn iter_chunks(
         &self,
         block_access: Arc<BlockAccess>,
         slab_access: &SlabAccess,
     ) -> impl Stream<Item = BlockBasedLogChunk<T>> {
+        trace!(
+            "BlockBasedLogPhys::iter_chunks({}) next={:?}",
+            type_name::<T>(),
+            self.next_chunk
+        );
         let extents = self
             .written_extents(slab_access)
             .map(|(_, extent)| extent)
@@ -315,6 +321,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             self.phys.trimmed
         );
         for slab in self.phys.slabs.drain(..usize::from64(slabs_trimmed)) {
+            trace!("freeing trimmed {slab:?}");
             self.slab_allocator.free(slab);
         }
         self.phys.trimmed = offset;
@@ -366,6 +373,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
                 None => {
                     // Last slab has been fully written, allocate a new one
                     let slab = self.slab_allocator.allocate_reserved();
+                    trace!("allocated {slab:?} for BBL<{}>", type_name::<T>());
                     self.phys.slabs.push_back(slab);
                     self.slab_allocator.slab_id_to_extent(slab)
                 }
