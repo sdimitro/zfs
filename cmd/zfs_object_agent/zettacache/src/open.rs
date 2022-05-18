@@ -65,12 +65,30 @@ async fn discover_devices(dir_path: &Path) -> Result<Vec<PathBuf>> {
     let mut caches = HashMap::<u64, BTreeMap<DiskId, DiscoveredDevice>>::new();
 
     let mut discovery = FuturesUnordered::new();
+    let mut canonical_entries = HashSet::new();
     let mut dir = fs::read_dir(dir_path).await?;
     while let Some(entry) = dir.next_entry().await? {
         if entry.metadata().await?.is_dir() {
             continue;
         }
-        discovery.push(DiscoveredDevice::from_path(entry.path()))
+
+        // In certain directories under /dev we've come across device symlinks
+        // that resolve to the same device (e.g. /dev/disk/by-id on AWS). In
+        // order to avoid trying to open the same device twice, we always
+        // resolve device symlinks and skip the ones whose device files we've
+        // encountered already.
+        let path = entry.path();
+        let canonical_path = fs::canonicalize(&path).await?;
+        if canonical_entries.contains(&canonical_path) {
+            continue;
+        }
+        canonical_entries.insert(canonical_path);
+
+        // We use the original directory path here instead of the
+        // resolved/canonical path to avoid surprising the user. E.g. `zcache
+        // list -f` should show device paths from the discovery directory
+        // supplied by the user instead of the resolved device paths.
+        discovery.push(DiscoveredDevice::from_path(path))
     }
     while let Some(result) = discovery.next().await {
         match result {

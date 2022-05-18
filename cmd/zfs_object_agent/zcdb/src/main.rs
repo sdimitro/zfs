@@ -21,18 +21,13 @@ static GIT_VERSION: &str = git_version!(
 #[clap(about = "ZFS ZettaCache Debugger")]
 #[clap(propagate_version = true)]
 struct Cli {
-    /// File/device to use for ZettaCache
-    #[clap(short = 'c', long, value_name = "PATH")]
-    cache_device: Option<Vec<PathBuf>>,
-
     /// Directory path to use for importing devices that are part of the
     /// ZettaCache
     #[clap(
         short = 'd',
         long,
         value_name = "DIR",
-        conflicts_with = "cache-device",
-        default_value = "/dev/disk/by-id/"
+        default_value = "/dev/disk/by-path/"
     )]
     cache_device_dir: PathBuf,
 
@@ -77,8 +72,9 @@ enum Commands {
         atime_histogram: bool,
     },
 
-    /// dump the superblock contents of the specified disks
-    Superblocks,
+    /// dump the superblock contents of the specified disks or all the disks
+    /// from the cache in cache-device-dir
+    Superblocks { disks: Vec<PathBuf> },
 
     /// dump slab info
     Slabs {
@@ -111,12 +107,6 @@ async fn main() -> Result<(), anyhow::Error> {
     // Set up logging macros
     util::setup_logging(cli.verbose, cli.log_file.as_deref(), None, true);
 
-    // Set up cache paths
-    let cache_mode = match cli.cache_device {
-        Some(paths) => CacheOpenMode::DeviceList(paths),
-        None => CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
-    };
-
     match cli.command {
         Commands::Logs {
             nodefaults,
@@ -136,27 +126,39 @@ async fn main() -> Result<(), anyhow::Error> {
                         .rebalance_log_raw(rebalance_log_raw)
                         .atime_histogram(atime_histogram),
                 ),
-                cache_mode,
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
             )
             .await
         }
-        Commands::Superblocks => {
+        Commands::Superblocks { disks } => {
+            let cache_mode = if disks.is_empty() {
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir)
+            } else {
+                CacheOpenMode::DeviceList(disks)
+            };
             ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSuperblocks, cache_mode)
                 .await
         }
         Commands::Slabs { detail } => {
             ZettaCacheDBCommand::issue_command(
                 ZettaCacheDBCommand::DumpSlabs(DumpSlabsOptions { verbosity: detail }),
-                cache_mode,
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
             )
             .await
         }
         Commands::Space => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::DumpSpaceUsage, cache_mode)
-                .await
+            ZettaCacheDBCommand::issue_command(
+                ZettaCacheDBCommand::DumpSpaceUsage,
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
+            )
+            .await
         }
         Commands::Index => {
-            ZettaCacheDBCommand::issue_command(ZettaCacheDBCommand::VerifyIndex, cache_mode).await
+            ZettaCacheDBCommand::issue_command(
+                ZettaCacheDBCommand::VerifyIndex,
+                CacheOpenMode::DiscoveryDirectory(cli.cache_device_dir),
+            )
+            .await
         }
     }
 }
