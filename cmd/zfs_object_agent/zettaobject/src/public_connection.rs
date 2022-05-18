@@ -213,19 +213,22 @@ impl PublicConnectionState {
             let response = match cache {
                 Some(cache) => {
                     let phys = cache.hits_by_size_data().await;
-                    let mut hits_report = Vec::new();
+                    let mut combined_histogram = Vec::new();
+                    let mut real_hits = 0;
                     for (live_hits, ghost_hits) in
                         phys.live_histogram.iter().zip(&phys.ghost_histogram)
                     {
-                        hits_report.push(live_hits + ghost_hits);
+                        real_hits += live_hits;
+                        combined_histogram.push(live_hits + ghost_hits);
                     }
 
                     Ok(ReportHitsResponse {
                         started: phys.started(),
-                        cache_lookups: phys.lookups,
+                        lookups: phys.lookups,
+                        real_hits,
                         cache_capacity: phys.cache_capacity,
                         bucket_size: phys.bucket_size,
-                        combined_histogram: hits_report,
+                        combined_histogram,
                     })
                 }
                 None => Err(FailureMessage::new("no zettacache present")),

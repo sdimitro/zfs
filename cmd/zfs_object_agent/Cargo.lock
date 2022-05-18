@@ -3227,6 +3227,7 @@ dependencies = [
  "chrono",
  "clap",
  "exitcode",
+ "humantime",
  "log",
  "more-asserts",
  "num-traits",

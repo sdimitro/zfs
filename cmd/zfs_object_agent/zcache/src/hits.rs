@@ -2,11 +2,13 @@
 
 use std::cmp::max;
 use std::cmp::Ordering;
+use std::time::Duration;
 
 use anyhow::anyhow;
 use anyhow::Result;
 use async_trait::async_trait;
 use chrono::DateTime;
+use chrono::Local;
 use chrono::Utc;
 use clap::Parser;
 use num_traits::cast::ToPrimitive;
@@ -16,7 +18,6 @@ use util::message::TYPE_REPORT_HITS;
 use util::nice_p2size;
 use util::write_stdout;
 use util::writeln_stdout;
-use util::From64;
 use util::ReportHitsResponse;
 
 use crate::remote_channel::RemoteChannel;
@@ -36,161 +37,127 @@ struct HitsBySize {
 
 impl HitsBySize {
     fn new(report_hits: ReportHitsResponse, quantiles: usize) -> HitsBySize {
-        let mut hits_by_size = HitsBySize {
+        let report_hits = report_hits.resampled(quantiles);
+
+        let mut accumulator = 0;
+        HitsBySize {
             start_time: report_hits.started.into(),
             end_time: Utc::now(),
-            cache_lookups: report_hits.cache_lookups,
-            cache_hits: report_hits.combined_histogram.iter().sum(),
+            cache_lookups: report_hits.lookups,
+            cache_hits: report_hits.real_hits,
             cache_capacity: report_hits.cache_capacity,
             bucket_size: report_hits.bucket_size,
-            hits_report: Vec::new(),
-        };
-        if quantiles == 0 {
-            return hits_by_size;
+            hits_report: report_hits
+                .combined_histogram
+                .iter()
+                .map(|value| {
+                    accumulator += value;
+                    accumulator
+                })
+                .collect(),
         }
-
-        let raw_length = report_hits.combined_histogram.len() as u64;
-        let resampled_report = hits_by_size.resample(quantiles, &report_hits.combined_histogram);
-        hits_by_size.bucket_size =
-            report_hits.bucket_size * raw_length / resampled_report.len() as u64;
-
-        let mut cumulative_hits = 0;
-        for hits in resampled_report.iter() {
-            cumulative_hits += hits;
-            hits_by_size.hits_report.push(cumulative_hits);
-        }
-
-        hits_by_size
     }
 
-    /// Resample a histogram to produce a new histogram with the requested
-    /// number of buckets for the capacity portion of the original histogram.
-    /// This works by dividing each sample in the original histogram into "samples"
-    /// chunks and then adding the number of samples for the physical cache in the
-    /// original histogram of these chunks together for each bucket in the new histogram.
-    fn resample(&self, samples_in_capacity: usize, histogram: &[u64]) -> Vec<u64> {
-        let sub_samples_per_resample = usize::from64(self.cache_capacity / self.bucket_size);
-        let mut sample_iter = histogram.iter();
-        let mut sub_sample_value = 0.0;
-        let mut samples_left = 0;
-        let mut resample: Vec<u64> = Vec::new();
-        'outer: loop {
-            let mut accumulated_value = 0.0;
-            let mut needed_samples = sub_samples_per_resample;
-            while needed_samples > 0 {
-                if samples_left == 0 {
-                    match sample_iter.next() {
-                        Some(sample) => {
-                            sub_sample_value = *sample as f64 / samples_in_capacity as f64;
-                        }
-                        None => break 'outer,
-                    }
-                    samples_left = samples_in_capacity;
-                }
-                let samples_to_add = std::cmp::min(needed_samples, samples_left);
-                accumulated_value += samples_to_add as f64 * sub_sample_value;
-                needed_samples -= samples_to_add;
-                samples_left -= samples_to_add;
-            }
-            resample.push(accumulated_value.round().to_u64().unwrap());
-        }
-        resample
-    }
-
-    fn print(&self) {
-        writeln_stdout!("Data collection started: {}", self.start_time.to_rfc2822());
-        writeln_stdout!("Data collection ended: {}", self.end_time.to_rfc2822());
-        write_stdout!(
-            "Cache Hits by Size ({} lookups with {} hits ",
-            self.cache_lookups,
-            self.cache_hits
+    fn print(&self, requested_histogram_width: Option<usize>) {
+        writeln_stdout!(
+            "Data collection started: {}",
+            self.start_time.with_timezone(&Local).to_rfc2822()
         );
-        let hit_percent = if self.cache_lookups == 0 {
+        writeln_stdout!(
+            "Data collection ended:   {} ({})",
+            self.end_time.with_timezone(&Local).to_rfc2822(),
+            humantime::format_duration(Duration::from_secs(
+                (self.end_time - self.start_time)
+                    .to_std()
+                    .unwrap()
+                    .as_secs()
+            )),
+        );
+        let real_hits_percent = if self.cache_lookups == 0 {
             100.0
         } else {
             self.cache_hits as f64 * 100.0 / self.cache_lookups as f64
         };
         writeln_stdout!(
-            "({:.1}%) in {} cache)",
-            hit_percent,
-            nice_p2size(self.cache_capacity)
+            "Cache Hits: {real_hits_percent:.1}% in {} cache ({} lookups with {} hits)",
+            nice_p2size(self.cache_capacity),
+            self.cache_lookups,
+            self.cache_hits,
         );
 
         if self.hits_report.is_empty() {
             return;
         }
 
-        const HISTOGRAM_WIDTH: usize = 50;
-        const PREFIX_WIDTH: usize = 16;
+        const PREFIX_WIDTH: usize = 18;
+        const MIN_HISTOGRAM_WIDTH: usize = 25;
+        let pentile_width = match requested_histogram_width {
+            Some(value) => max(MIN_HISTOGRAM_WIDTH, value) / 5,
+            None => {
+                let terminal_width = max(
+                    PREFIX_WIDTH + MIN_HISTOGRAM_WIDTH,
+                    match termsize::get() {
+                        None => 80,
+                        Some(size) => size.cols as usize,
+                    },
+                );
+                (terminal_width - PREFIX_WIDTH) / 5
+            }
+        };
+        let histogram_width = pentile_width * 5;
+
         writeln_stdout!(
-            "\n{:>15}{:>2}{:>10}{:>10}{:>10}{:>10}{:>9}",
-            "size : %hit",
+            "\n{:>7$} {:>1}{:>8$}{:>8$}{:>8$}{:>8$}{:>9$}",
+            "size :   hit%",
             0,
             20,
             40,
             60,
             80,
-            100
+            100,
+            PREFIX_WIDTH - 1,
+            pentile_width,
+            pentile_width - 1,
         );
-        writeln_stdout!("{0:-<1$}", "-", HISTOGRAM_WIDTH + PREFIX_WIDTH);
-
-        let histogram_length = self.hits_report.len() as u64;
-        let histogram_capacity = histogram_length * self.bucket_size;
-        let mut cache_size = 0;
+        writeln_stdout!("{0:-<1$}", "-", histogram_width + PREFIX_WIDTH);
 
         for (index, &cumulative_hits) in self.hits_report.iter().enumerate() {
-            cache_size += self.bucket_size;
-            // The last bucket may not be the "full" bucket size
-            if cache_size > histogram_capacity {
-                assert_eq!(
-                    index,
-                    self.hits_report.len() - 1,
-                    "Capacity overflow at histogram index {}",
-                    index
-                );
-                cache_size = histogram_capacity;
-            }
-            if hit_percent > 99.9 && cache_size > self.cache_capacity {
+            let cache_size_at_bucket = (index + 1) as u64 * self.bucket_size;
+            let percent = (cumulative_hits * 100) as f64 / self.cache_lookups as f64;
+            if percent >= 99.95 && cache_size_at_bucket > self.cache_capacity {
                 break;
             }
-            write_stdout!("{: >8} : ", nice_p2size(cache_size));
+            write_stdout!(
+                "{: >8} : {percent: >5.1}% ",
+                nice_p2size(cache_size_at_bucket)
+            );
             if self.cache_hits == 0 {
                 writeln_stdout!();
                 continue;
             }
 
-            let percent = (cumulative_hits * 100) as f64 / self.cache_lookups as f64;
-            let mut stars = if cumulative_hits == 0 {
-                // no hits have been seen yet
-                write_stdout!("  0% ");
-                0
-            } else if percent < 1.0 {
-                // there are a small number of hits
-                write_stdout!(" <1% ");
-                1
-            } else {
-                write_stdout!("{: >3.0}% ", percent);
-                max(percent.to_usize().unwrap() * HISTOGRAM_WIDTH / 100, 1)
-            };
-
-            let real_stars = hit_percent.to_usize().unwrap() * HISTOGRAM_WIDTH / 100;
-            let (spaces, trailing) = match stars.cmp(&real_stars) {
-                Ordering::Greater => {
-                    let trailing = stars - real_stars - 1;
-                    stars = real_stars;
-                    (0, trailing)
-                }
-                Ordering::Less => (real_stars - stars, 0),
-                Ordering::Equal => (0, 0),
+            let total_stars = (histogram_width as f64 * percent / 100.0)
+                .ceil()
+                .to_usize()
+                .unwrap();
+            let bar_position = (histogram_width as f64 * real_hits_percent / 100.0)
+                .ceil()
+                .to_usize()
+                .unwrap();
+            let (stars_before_bar, spaces_before_bar, stars_after_bar) = match total_stars
+                .cmp(&bar_position)
+            {
+                Ordering::Less | Ordering::Equal => (total_stars, bar_position - total_stars, 0),
+                Ordering::Greater => (bar_position, 0, total_stars - bar_position - 1),
             };
             writeln_stdout!(
                 "{:*<3$}{: <4$}|{:*<5$}",
                 "",
                 "",
                 "",
-                stars,
-                spaces,
-                trailing
+                stars_before_bar,
+                spaces_before_bar,
+                stars_after_bar
             );
         }
     }
@@ -200,16 +167,23 @@ impl HitsBySize {
 #[clap(about = "Print out the current hits-by-size histogram.")]
 #[clap(alias = "report_hits")]
 pub struct Hits {
-    /// Divide hit data into this many buckets.
-    #[clap(short = 'q', long, default_value = "20", conflicts_with = "clear")]
-    quantiles: usize,
+    /// Divide hit data into this many buckets (default: based on terminal height, or fit to 24
+    /// rows)
+    #[clap(short = 'q', long, conflicts_with = "clear")]
+    quantiles: Option<usize>,
+
+    /// Display histogram with this many columns (default: based on terminal width, or fit to 80
+    /// columns)
+    #[clap(short = 'w', long, conflicts_with = "clear")]
+    width: Option<usize>,
 
     /// Use JSON output format.
     #[clap(
         short = 'j',
         long,
         conflicts_with = "clear",
-        conflicts_with = "quantiles"
+        conflicts_with = "quantiles",
+        conflicts_with = "width"
     )]
     json: bool,
 
@@ -242,21 +216,30 @@ impl ZcacheSubCommand for Hits {
         match remote.call(TYPE_REPORT_HITS, None).await {
             Ok(response) => {
                 let response: ReportHitsResponse = nvpair::from_nvlist(&response)?;
-                let json_quantiles = response.cache_capacity / response.bucket_size;
-                let hits_by_size = HitsBySize::new(
-                    response,
-                    if self.json {
-                        // For JSON keep all the data points (don't down sample)
-                        usize::from64(json_quantiles)
-                    } else {
-                        self.quantiles
-                    },
-                );
+                let quantiles = if self.json {
+                    // For JSON keep all the data points (don't down sample)
+                    response.combined_histogram.len()
+                } else if let Some(quantiles) = self.quantiles {
+                    quantiles
+                } else {
+                    const HEADER_ROWS: usize = 6;
+                    const MIN_QUANTILES: usize = 5;
+                    const BUFFER_ROWS: usize = 2; // for the previous and next command prompts
+                    let terminal_height = max(
+                        HEADER_ROWS + MIN_QUANTILES + BUFFER_ROWS,
+                        match termsize::get() {
+                            None => 24,
+                            Some(size) => size.rows as usize,
+                        },
+                    );
+                    terminal_height - HEADER_ROWS - BUFFER_ROWS
+                };
+                let hits_by_size = HitsBySize::new(response, quantiles);
 
                 if self.json {
                     writeln_stdout!("{}", serde_json::to_string_pretty(&hits_by_size).unwrap());
                 } else {
-                    hits_by_size.print();
+                    hits_by_size.print(self.width);
                 }
             }
             Err(RemoteError::ResultError(_)) => {
@@ -281,7 +264,8 @@ pub struct ClearHitData;
 impl ZcacheSubCommand for ClearHitData {
     async fn invoke(&self) -> Result<()> {
         let hits = Hits {
-            quantiles: 0,
+            quantiles: None,
+            width: None,
             json: false,
             clear: true,
         };
