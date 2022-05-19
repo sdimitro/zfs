@@ -2,6 +2,7 @@
 #![allow(clippy::print_stderr)]
 #![allow(clippy::print_stdout)]
 
+use core::time;
 use std::collections::BTreeSet;
 use std::error::Error;
 use std::fs;
@@ -9,6 +10,7 @@ use std::fs::File;
 use std::io::prelude::*;
 use std::io::Read;
 use std::sync::Arc;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -523,6 +525,37 @@ async fn do_blob(bucket: String, profile: String) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
+async fn do_blob_loop(bucket: String, seconds: u64) -> Result<(), Box<dyn Error>> {
+    let key = "blob_loop.txt".to_string();
+    let object_access = ObjectAccess::new(
+        ObjectAccessProtocol::Blob {
+            credentials: BlobCredentials::Automatic,
+        },
+        bucket,
+        false,
+    )
+    .await?;
+
+    let start = Instant::now();
+    let mut count = 1;
+    while start.elapsed().as_secs() < seconds {
+        println!("Iteration #{}", count);
+        let content = format!("Iteration #{}", count).as_bytes().to_vec();
+        object_access
+            .put_object_stream(
+                key.clone(),
+                || (ByteStream::from(content.clone()), content.len()),
+                ObjectAccessOpType::MetadataPut,
+            )
+            .await;
+        count += 1;
+
+        thread::sleep(time::Duration::from_secs(10));
+    }
+
+    Ok(())
+}
+
 #[derive(Parser)]
 //#[clap(long_about = None)]
 #[clap(version=GIT_VERSION)]
@@ -551,6 +584,14 @@ struct Cli {
 enum Commands {
     S3Rusoto,
     Blob,
+    BlobLoop {
+        #[clap(
+            short = 's',
+            long,
+            default_value = "172800", // 2 days
+        )]
+        seconds: u64,
+    },
     Create,
     Write,
     Read,
@@ -588,6 +629,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         );
     }
 
+    setup_logging(cli.verbose.try_into().unwrap(), None, None, false);
+
     let object_access = get_object_access(
         &cli.endpoint,
         &cli.region,
@@ -603,6 +646,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     match cli.command {
         Commands::S3Rusoto => do_s3_rusoto().await?,
         Commands::Blob => do_blob(cli.bucket, cli.profile).await?,
+        Commands::BlobLoop { seconds } => do_blob_loop(cli.bucket, seconds).await?,
         Commands::Create => do_create().await?,
         Commands::Write => do_write().await?,
         Commands::Read => do_read().await?,

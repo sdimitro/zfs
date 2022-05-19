@@ -489,7 +489,7 @@ impl ObjectAccess {
         prefix: String,
         start_after: Option<String>,
         use_delimiter: bool,
-    ) -> impl Stream<Item = String> + Send {
+    ) -> impl Stream<Item = String> + Send + '_ {
         self.as_trait()
             .list(prefix, start_after, use_delimiter, false)
     }
@@ -502,7 +502,7 @@ impl ObjectAccess {
         self.list_objects(prefix, start_after, true).collect().await
     }
 
-    pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> {
+    pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> + '_ {
         self.as_trait().list(prefix, None, true, true)
     }
 
@@ -567,7 +567,7 @@ pub trait ObjectAccessTrait: Send + Sync {
         start_after: Option<String>,
         use_delimiter: bool,
         list_prefixes: bool,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send>>;
+    ) -> Pin<Box<dyn Stream<Item = String> + Send + '_>>;
 
     async fn get_object(
         &self,
