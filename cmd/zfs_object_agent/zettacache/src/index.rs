@@ -30,7 +30,7 @@ use crate::slab_allocator::SlabAllocatorBuilder;
 
 tunable! {
     static ref VERIFY_HISTOGRAMS: bool = false;
-    static ref VERIFY_OBSOLETED_HISTOGRAM: bool = true;
+    static ref VERIFY_OBSOLETED_HISTOGRAM: bool = false;
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
