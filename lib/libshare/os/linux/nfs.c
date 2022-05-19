@@ -23,7 +23,7 @@
  * Copyright (c) 2002, 2010, Oracle and/or its affiliates. All rights reserved.
  * Copyright (c) 2011 Gunnar Beutner
  * Copyright (c) 2012 Cyril Plisko. All rights reserved.
- * Copyright (c) 2019, 2020 by Delphix. All rights reserved.
+ * Copyright (c) 2019, 2022 by Delphix. All rights reserved.
  */
 
 #include <dirent.h>
@@ -31,10 +31,13 @@
 #include <string.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <pthread.h>
+#include <stddef.h>
 #include <sys/file.h>
 #include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
+#include <sys/list.h>
 #include <unistd.h>
 #include <libzfs.h>
 #include <libshare.h>
@@ -45,6 +48,8 @@
 #define	ZFS_EXPORTS_FILE	ZFS_EXPORTS_DIR"/zfs.exports"
 #define	ZFS_EXPORTS_LOCK	ZFS_EXPORTS_FILE".lock"
 
+#define	EXPORTFS_PROG		"/usr/sbin/exportfs"
+
 static sa_fstype_t *nfs_fstype;
 
 typedef int (*nfs_shareopt_callback_t)(const char *opt, const char *value,
@@ -52,6 +57,16 @@ typedef int (*nfs_shareopt_callback_t)(const char *opt, const char *value,
 
 typedef int (*nfs_host_callback_t)(FILE *tmpfile, const char *sharepath,
     const char *host, const char *security, const char *access, void *cookie);
+
+static boolean_t exportfs_cache_control = B_FALSE;
+
+typedef struct unshared_dataset_entry {
+	list_node_t	ude_node;
+	char		ude_path[0];
+} unshared_dataset_entry_t;
+
+static pthread_mutex_t	unshared_dataset_lock;
+static list_t		unshared_dataset_list;
 
 /*
  * Invokes the specified callback function for each Solaris share option
@@ -138,10 +153,6 @@ foreach_nfs_host_cb(const char *opt, const char *value, void *pcookie)
 	char *host_dup, *host, *next, *v6Literal;
 	nfs_host_cookie_t *udata = (nfs_host_cookie_t *)pcookie;
 	int cidr_len;
-
-#ifdef DEBUG
-	fprintf(stderr, "foreach_nfs_host_cb: key=%s, value=%s\n", opt, value);
-#endif
 
 	if (strcmp(opt, "sec") == 0)
 		udata->security = value;
@@ -434,12 +445,36 @@ nfs_enable_share(sa_share_impl_t impl_share)
 }
 
 /*
+ * Save the mountpoint so we can flush the rpc caches after
+ * the shares are commited.
+ */
+static int
+save_unshared_dataset(const char *mountpoint)
+{
+	pthread_mutex_lock(&unshared_dataset_lock);
+	unshared_dataset_entry_t *ude =
+	    malloc(sizeof (unshared_dataset_entry_t) +
+	    strlen(mountpoint) + 1);
+	if (ude == NULL)
+		return (SA_NO_MEMORY);
+	strcpy(ude->ude_path, mountpoint);
+	list_insert_tail(&unshared_dataset_list, ude);
+	pthread_mutex_unlock(&unshared_dataset_lock);
+
+	return (SA_OK);
+}
+
+/*
  * Disables NFS sharing for the specified share.
  */
 static int
 nfs_disable_share_impl(sa_share_impl_t impl_share, FILE *tmpfile)
 {
-	(void) impl_share, (void) tmpfile;
+	(void) tmpfile;
+
+	if (exportfs_cache_control)
+		return (save_unshared_dataset(impl_share->sa_mountpoint));
+
 	return (SA_OK);
 }
 
@@ -493,15 +528,59 @@ nfs_clear_shareopts(sa_share_impl_t impl_share)
 }
 
 static int
-nfs_commit_shares(void)
+exportfs_flush_cache_entry(char *mountpoint)
 {
+	ASSERT(exportfs_cache_control);
+
 	char *argv[] = {
-	    "/usr/sbin/exportfs",
-	    "-ra",
+	    EXPORTFS_PROG,
+	    "-F",
+	    mountpoint,
 	    NULL
 	};
 
 	return (libzfs_run_process(argv[0], argv, 0));
+}
+
+static void
+flush_unshared_datasets(void)
+{
+	/*
+	 * After calling exportfs to reexport our shares we need to
+	 * flush the rpc cache entries for datasets that were unshared.
+	 */
+	unshared_dataset_entry_t *ude = NULL;
+	pthread_mutex_lock(&unshared_dataset_lock);
+	while ((ude = list_remove_head(&unshared_dataset_list)) != NULL) {
+		pthread_mutex_unlock(&unshared_dataset_lock);
+		exportfs_flush_cache_entry(ude->ude_path);
+		pthread_mutex_lock(&unshared_dataset_lock);
+		free(ude);
+	}
+	pthread_mutex_unlock(&unshared_dataset_lock);
+}
+
+/*
+ * Reexport all directories including the ones maintained in our
+ * '/etc/exports.d/zfs.exports' file. This will remove entries
+ * that have been deleted from our exports file.
+ */
+static int
+nfs_commit_shares(void)
+{
+	char *exportfs_args = exportfs_cache_control ? "-raN" : "-ra";
+	char *argv[] = {
+	    EXPORTFS_PROG,
+	    exportfs_args,
+	    NULL
+	};
+
+	int rc = libzfs_run_process(argv[0], argv, 0);
+
+	if (exportfs_cache_control)
+		flush_unshared_datasets();
+
+	return (rc);
 }
 
 static const sa_share_ops_t nfs_shareops = {
@@ -515,6 +594,31 @@ static const sa_share_ops_t nfs_shareops = {
 	.commit_shares = nfs_commit_shares,
 };
 
+static boolean_t
+cache_control_supported(void)
+{
+	char *argv[] = {EXPORTFS_PROG, "-vh", NULL};
+	char **lines = NULL;
+	int lines_cnt = 0;
+	int rc;
+	boolean_t supported;
+
+	/*
+	 * Expected output to confirm support for finer-grain cache flushing:
+	 *
+	 * $ exportfs -vh
+	 * supports: no_cache_flush,flush_one_entry
+	 * usage: exportfs [-adfFhiNoruvs] [host:/path]
+	 */
+	rc = libzfs_run_process_get_stdout_nopath(EXPORTFS_PROG, argv, NULL,
+	    &lines, &lines_cnt);
+	supported = (rc == 0 && lines_cnt > 0 &&
+	    strstr(lines[0], "no_cache_flush") != NULL);
+	libzfs_free_str_array(lines, lines_cnt);
+
+	return (supported);
+}
+
 /*
  * Initializes the NFS functionality of libshare.
  */
@@ -522,4 +626,22 @@ void
 libshare_nfs_init(void)
 {
 	nfs_fstype = register_fstype("nfs", &nfs_shareops);
+
+	exportfs_cache_control = cache_control_supported();
+	if (exportfs_cache_control) {
+		pthread_mutex_init(&unshared_dataset_lock, NULL);
+		list_create(&unshared_dataset_list,
+		    sizeof (unshared_dataset_entry_t),
+		    offsetof(unshared_dataset_entry_t, ude_node));
+	}
+}
+
+void
+libshare_nfs_fini(void)
+{
+	if (exportfs_cache_control) {
+		ASSERT(list_is_empty(&unshared_dataset_list));
+		list_destroy(&unshared_dataset_list);
+		pthread_mutex_destroy(&unshared_dataset_lock);
+	}
 }
