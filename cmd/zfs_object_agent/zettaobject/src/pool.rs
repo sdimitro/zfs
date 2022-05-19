@@ -116,7 +116,7 @@ tunable! {
 
     static ref WRITES_INGEST_TO_ZETTACACHE: bool = true;
 
-    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = false;
+    static ref SIBLING_BLOCKS_INGEST_TO_ZETTACACHE: bool = true;
 }
 
 lazy_static! {
