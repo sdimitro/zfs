@@ -181,6 +181,28 @@ impl Extent {
             false => None,
         }
     }
+
+    pub fn merge(self, other: Extent) -> Option<Extent> {
+        if other.location.disk() == self.location.disk()
+            && other.location.offset() == self.location.offset() + self.size
+        {
+            // other is directly after self
+            Some(Self {
+                location: self.location,
+                size: self.size + other.size,
+            })
+        } else if other.location.disk() == self.location.disk()
+            && self.location.offset() == other.location.offset() + other.size
+        {
+            // self is directly after other
+            Some(Self {
+                location: other.location,
+                size: other.size + self.size,
+            })
+        } else {
+            None
+        }
+    }
 }
 
 /// This allows Extents to be compared by their `location`s, ignoring the `size`s.

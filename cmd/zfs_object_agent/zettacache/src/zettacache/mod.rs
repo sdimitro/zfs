@@ -19,6 +19,7 @@ use anyhow::anyhow;
 use anyhow::Result;
 use bytes::Bytes;
 use bytesize::ByteSize;
+use conv::ConvUtil;
 use either::Either;
 use futures::future;
 use futures::stream::FuturesUnordered;
@@ -721,13 +722,35 @@ impl MergeState {
             )
             .await;
 
-        let bytes_copied = map.iter().map(|(old, _)| old.size).sum::<u64>();
+        let mut copied_extents = 0;
+        let mut copied_bytes = 0;
+        let mut evicted_extents = 0;
+        let mut evicted_bytes = 0;
+        for (old, maybe_new) in map.iter() {
+            match maybe_new {
+                Some(_) => {
+                    copied_extents += 1;
+                    copied_bytes += old.size;
+                }
+                None => {
+                    evicted_extents += 1;
+                    evicted_bytes += old.size;
+                }
+            }
+        }
 
         info!(
-            "took {}ms for rebalance to copy {} ({:.1}MB/s)",
+            "took {}ms to rebalance; copied {} ({} entries) ({}/s), evicted {} ({} entries)",
             begin.elapsed().as_millis(),
-            nice_p2size(bytes_copied),
-            (bytes_copied as f64 / 1024f64 / 1024f64) / begin.elapsed().as_secs_f64(),
+            nice_p2size(copied_bytes),
+            copied_extents,
+            nice_p2size(
+                (copied_bytes as f64 / begin.elapsed().as_secs_f64())
+                    .approx_as::<u64>()
+                    .unwrap()
+            ),
+            nice_p2size(evicted_bytes),
+            evicted_extents,
         );
     }
 }

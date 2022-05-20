@@ -366,8 +366,8 @@ impl SlabTrait for BitmapSlab {
             .count() as u64
     }
 
-    // Each extent may cover multiple adjacent allocated slots/blocks on disk. Additionally,
-    // the list of extents are sorted in no particular order.
+    // Return a sorted list of allocated extents; each extent may cover multiple adjacent allocated
+    // slots/blocks on disk.
     fn allocated_extents(&self) -> Vec<Extent> {
         let mut allocated = BitRange::new();
 
@@ -608,6 +608,8 @@ impl SlabTrait for ExtentSlab {
             .count() as u64
     }
 
+    // Return a sorted list of allocated extents; each extent may cover multiple adjacent allocated
+    // slots/blocks on disk.
     fn allocated_extents(&self) -> Vec<Extent> {
         let mut allocated: RangeTree = Default::default();
 
@@ -1290,16 +1292,24 @@ impl BlockAllocator {
             self.slab_buckets.remove_slab(self.slabs.get(id));
         }
 
+        let mut merged = 0;
         let map: BTreeMap<Extent, Option<DiskLocation>> = slabs
             .iter()
-            .flat_map(|&id| self.rebalance_slab(id))
+            .flat_map(|&id| {
+                let (entries, count) = self.rebalance_slab(id);
+                merged += count;
+
+                entries
+            })
+            .map(|(old, new)| (old, new.map(|extent| extent.location)))
             .collect();
 
         info!(
-            "took {}ms to initialize rebalance of {} slabs with {} allocated extents",
+            "took {}ms to initialize rebalance of {} slabs ({} entries, {} merged)",
             begin.elapsed().as_millis(),
             slabs.len(),
             map.len(),
+            merged,
         );
 
         assert!(!self.evacuating_slabs.is_empty());
@@ -1380,7 +1390,8 @@ impl BlockAllocator {
             .collect()
     }
 
-    fn rebalance_slab(&mut self, id: SlabId) -> Vec<(Extent, Option<DiskLocation>)> {
+    // Returns the mapping of old to new, and the number of merged extents.
+    fn rebalance_slab(&mut self, id: SlabId) -> (Vec<(Extent, Option<Extent>)>, usize) {
         trace!("starting rebalance of slab '{:?}'", id);
 
         let slab = self.slabs.get(id);
@@ -1420,22 +1431,57 @@ impl BlockAllocator {
             })
             .collect();
 
-        let map = extents
+        let mut map = extents
             .iter()
-            .map(|&old| {
-                match self.allocate_impl(bucket, u32::try_from(old.size).unwrap()) {
-                    Some(new) => (old, Some(new.location)),
+            .map(
+                |&old| match self.allocate_impl(bucket, u32::try_from(old.size).unwrap()) {
+                    Some(new) => (old, Some(new)),
                     None => {
                         trace!(
-                            "cache rebalance allocation failed for old extent '{:?}' in bucket '{:?}'",
-                            old,
-                            bucket
-                        );
+                        "cache rebalance allocation failed for old extent '{:?}' in bucket '{:?}'",
+                        old,
+                        bucket
+                    );
                         (old, None)
                     }
+                },
+            )
+            .collect::<Vec<_>>();
+
+        let before = map.len();
+        trace!("rebalance of slab {id:?} has {before} entries before merging");
+
+        // In an attempt to reduce the IO cost of a rebalance event, we try to combine any
+        // contiguous entries here, by (when appropriate) combining entries with their neighbor.
+        map.dedup_by(
+            |(a_old, a_new), (b_old, b_new)| match (a_new, b_new, b_old.merge(*a_old)) {
+                (None, None, Some(merged_old)) => {
+                    *b_old = merged_old;
+                    true
                 }
-            })
-            .collect();
+                (Some(a_new), Some(b_new), Some(merged_old)) => {
+                    if let Some(merged_new) = a_new.merge(*b_new) {
+                        *b_old = merged_old;
+                        *b_new = merged_new;
+                        true
+                    } else {
+                        false
+                    }
+                }
+                _ => false,
+            },
+        );
+
+        let after = map.len();
+        let merged = before - after;
+        if before != after {
+            trace!(
+                "rebalance of slab '{:?}' has {} entries after merging ({} entries merged)",
+                id,
+                after,
+                merged,
+            );
+        }
 
         // Since evacuating slabs don't have any allocatable space, we must account for that
         // here; we must do this before we transition to an evacuating slab (evacuating slabs
@@ -1452,7 +1498,8 @@ impl BlockAllocator {
         );
         assert!(old.is_some());
         self.mark_slab_info(id);
-        map
+
+        (map, merged)
     }
 
     // See comment above rebalance_init() for more details.
