@@ -20,9 +20,7 @@ use crate::subcommand::ZcacheSubCommand;
 #[clap(about = "Display zettacache devices")]
 #[clap(alias = "list_devices")]
 pub struct List {
-    /// Display full paths for device instead of only the last component of the path.
-    /// This can be used in conjunction with the real-paths (-r) flag.
-    #[clap(short = 'f', long)]
+    #[clap(short = 'f', long, hide(true))]
     full_paths: bool,
 
     /// Display real paths for devices resolving all symbolic links.
@@ -55,15 +53,7 @@ impl List {
             path.to_owned()
         };
 
-        if self.full_paths {
-            device_path.to_string_lossy().into()
-        } else {
-            device_path
-                .file_name()
-                .unwrap_or(device_path.as_os_str())
-                .to_string_lossy()
-                .into()
-        }
+        device_path.to_string_lossy().into()
     }
 
     fn max_name_length(&self, devices: &[DeviceEntry]) -> usize {
