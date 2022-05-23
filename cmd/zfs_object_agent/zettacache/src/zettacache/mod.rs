@@ -1,5 +1,6 @@
 pub mod zcdb;
 
+use std::cmp::Ordering;
 use std::collections::btree_map;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -224,9 +225,11 @@ impl BlockBasedLogEntry for RebalanceLogEntry {}
 struct IndexMessage {
     last_key: IndexKey,
     entries: Vec<IndexEntry>,
+    entries_atimes: AtimeHistogramPhys,
     frees: Vec<Extent>,
     cache_updates: Vec<IndexEntry>,
-    obsoleted: AtimeHistogramPhys, // entries obsoleted from old index, since last MergeProgress
+    // entries obsoleted from old index, since last MergeProgress
+    obsoleted_atimes: AtimeHistogramPhys,
 }
 
 #[derive(Debug)]
@@ -325,8 +328,9 @@ struct MergeState {
     rebalance: Option<RebalanceState>,
     old_pending_changes: PendingChanges,
     old_operation_log_phys: BlockBasedLogPhys<OperationLogEntry>,
-    eviction_cutoff: Atime,
-    ghost_cutoff: Atime,
+    eviction_cutoff: Atime, // lowest atime of live entries to keep in the new index
+    ghost_cutoff: Atime,    // lowest atime of ghost entries to keep in the new index
+    last_atime: Atime,      // highest atime that could be in the old or new index
     stats: Arc<CacheStats>,
 }
 
@@ -342,7 +346,7 @@ impl MergeState {
     ) {
         let begin = Instant::now();
         while let Some(message) = merge_rx.recv().await {
-            next_index.append(message.entries);
+            next_index.append(message.entries, &message.entries_atimes);
             // The "last key" from the appended entries may not be the last key we actually
             // processed in the merge (e.g, we may have evicted some entries later)
             next_index.update_last_key(message.last_key);
@@ -352,7 +356,7 @@ impl MergeState {
                         next_index,
                         message.frees,
                         message.cache_updates,
-                        message.obsoleted,
+                        message.obsoleted_atimes,
                     )
                     .await,
                 )
@@ -395,6 +399,7 @@ impl MergeState {
             tx: mpsc::Sender<IndexMessage>,
             last_key: Option<IndexKey>,
             entries: Vec<IndexEntry>,
+            entries_atimes: AtimeHistogramPhys,
             frees: Vec<Extent>,
             // This contains a list of entries that will be used to update the index cache. These
             // may originate from new updates (i.e. from the pending changes list), or from disk
@@ -410,16 +415,30 @@ impl MergeState {
         }
 
         impl Progress {
-            fn new(tx: mpsc::Sender<IndexMessage>, first_ghost: Atime, first_live: Atime) -> Self {
+            fn new(
+                tx: mpsc::Sender<IndexMessage>,
+                first_ghost: Atime,
+                first_live: Atime,
+                histogram_len: usize,
+            ) -> Self {
                 let chunk_len = *MERGE_PROGRESS_CHUNK;
                 Self {
                     chunk_len,
                     tx,
                     last_key: None,
                     entries: Vec::with_capacity(chunk_len),
+                    entries_atimes: AtimeHistogramPhys::with_capacity(
+                        first_ghost,
+                        first_live,
+                        histogram_len,
+                    ),
                     frees: Vec::with_capacity(chunk_len),
                     cache_updates: Vec::with_capacity(chunk_len),
-                    obsoleted: AtimeHistogramPhys::new(first_ghost, first_live),
+                    obsoleted: AtimeHistogramPhys::with_capacity(
+                        first_ghost,
+                        first_live,
+                        histogram_len,
+                    ),
                     timer: Instant::now(),
                 }
             }
@@ -428,7 +447,7 @@ impl MergeState {
             /// they are now "obsolete" in the old index, so need to be removed from the atime
             /// histogram.
             fn obsolete(&mut self, entry: IndexEntry) {
-                self.obsoleted.insert(entry.value);
+                self.obsoleted.insert_unchecked(entry.value);
             }
 
             /// When an old index entry already exists for a newly inserted key, the new entry will
@@ -488,9 +507,12 @@ impl MergeState {
                         }
                     }
                 }
-                if entry.value.atime() >= state.eviction_cutoff {
+                // We use `.0` so that the primitive u32 comparison is used, which the compiler
+                // can better optimize compared to calling `<Atime as PartialOrd>::ge()`.
+                if entry.value.atime().0 >= state.eviction_cutoff.0 {
                     // If this entry was evicted during rebalance, don't put it in the new index
                     if entry.value.location().is_some() {
+                        self.entries_atimes.insert_unchecked(entry.value);
                         self.entries.push(entry);
 
                         if matches!(source, IngestSource::PendingChange) {
@@ -506,6 +528,7 @@ impl MergeState {
                     }
                     if entry.value.atime() >= state.ghost_cutoff {
                         // Preserve ghost entry for our ghost history
+                        self.entries_atimes.insert_unchecked(entry.value);
                         self.entries.push(entry);
                     }
                 }
@@ -522,12 +545,13 @@ impl MergeState {
             async fn report(&mut self) {
                 if let Some(last_key) = self.last_key {
                     measure!("MergeState::merge_task::Progress::report() tx.send(IndexMessage)")
-                        .fut(self.tx.send(IndexMessage {
+                        .fut_timed(self.tx.send(IndexMessage {
                             last_key,
                             entries: mem::replace(
                                 &mut self.entries,
                                 Vec::with_capacity(self.chunk_len),
                             ),
+                            entries_atimes: self.entries_atimes.take(),
                             frees: mem::replace(
                                 &mut self.frees,
                                 Vec::with_capacity(self.chunk_len),
@@ -536,7 +560,7 @@ impl MergeState {
                                 &mut self.cache_updates,
                                 Vec::with_capacity(self.chunk_len),
                             ),
-                            obsoleted: self.obsoleted.take(),
+                            obsoleted_atimes: self.obsoleted.take(),
                         }))
                         .await
                         .unwrap_or_else(|e| panic!("couldn't send: {e}"));
@@ -580,6 +604,7 @@ impl MergeState {
                 tx,
                 old_index.first_ghost_atime(),
                 old_index.first_live_atime(),
+                self.last_atime - old_index.first_ghost_atime() + 1,
             );
         }
         let mut pending_changes_iter = self
@@ -587,84 +612,94 @@ impl MergeState {
             .range((start_key.map_or(Unbounded, Excluded), Unbounded))
             .peekable();
 
-        while let Some(chunk) = index_stream.next().await {
-            for &entry in chunk.entries() {
-                // If the next index is already "started", advance the old index to the start
-                // point.  The index_stream excludes the trimmed chunks, so this only happens
-                // within the first chunk.
-                if let Some(start_key) = start_key {
-                    if entry.key <= start_key {
-                        super_trace!("skipping index entry: {:?}", entry.key);
-                        continue;
+        while let Some(chunk) = measure!("MergeState::merge_task index_stream.next()")
+            .fut_timed(index_stream.next())
+            .await
+        {
+            let mut entries = chunk.entries();
+            // If the next index is already "started", advance the old index to the start point.
+            // The index_stream excludes the trimmed chunks, so this only happens within the
+            // first chunk.  This could be done using `binary_search_by_key()`, but in the common
+            // case (not the first chunk), this is faster because only a single check is needed.
+            if let Some(start_key) = start_key {
+                while !entries.is_empty() && entries[0].key <= start_key {
+                    super_trace!("skipping index entry: {:?}", entries[0].key);
+                    entries = &entries[1..];
+                }
+            }
+            loop {
+                // Process run of entries that do not involve pending changes.  This is the most
+                // common and performance-critical path.
+                let contiguous = match pending_changes_iter.peek() {
+                    Some((&pc_key, _)) => {
+                        match entries.binary_search_by_key(&pc_key, |entry| entry.key) {
+                            Ok(index) | Err(index) => index,
+                        }
+                    }
+                    None => entries.len(),
+                };
+                let (contiguous, remainder) = entries.split_at(contiguous);
+                entries = remainder;
+                for &entry in contiguous {
+                    progress.obsolete(entry);
+                    if progress.ingest(self, entry, IngestSource::Index) {
+                        progress.report().await;
                     }
                 }
 
-                // First, process any pending changes which are before this
-                // index entry, which must all be Inserts (AtimeUpdates refer
-                // to existing Index entries).
-                while let Some((&pc_key, &PendingChange::Insert(pc_value))) =
-                    pending_changes_iter.peek()
-                {
-                    if pc_key >= entry.key {
-                        break;
-                    }
-                    // Add this new entry to the index
-                    if progress.ingest_pc(self, pc_key, pc_value) {
-                        progress.report().await
-                    }
-                    pending_changes_iter.next();
-                }
+                let entry = match entries.first() {
+                    Some(&entry) => entry,
+                    None => break,
+                };
 
-                progress.obsolete(entry);
-
-                let next_pc_opt = pending_changes_iter.peek();
-                match next_pc_opt {
-                    Some((&pc_key, &PendingChange::Insert(pc_value))) => {
-                        // Most insertions are processed above. However, if there is an index
-                        // entry with the same key then we are replacing an entry. This may
-                        // be a ghost entry being recached or perhaps a heal() of a bad entry.
-                        if pc_key == entry.key {
-                            // Replace the index entry with the newly inserted entry.
-                            if entry.value.location().is_some() {
-                                debug!("Insert of {:?} replaces {:?}", pc_value, entry);
+                while let Some((&pc_key, &pc)) = pending_changes_iter.peek() {
+                    match pc_key.cmp(&entry.key) {
+                        Ordering::Less => {
+                            // Add this new entry to the index.  It must be an Insert, because an
+                            // UpdateAtime applies to an existing entry.
+                            if let PendingChange::Insert(pc_value) = pc {
+                                if progress.ingest_pc(self, pc_key, pc_value) {
+                                    progress.report().await;
+                                }
+                            } else {
+                                panic!(
+                                    "{pc_key:?} {pc:?} has no corresponding entry in the index run"
+                                );
                             }
-                            progress.evict(self, entry);
-                            if progress.ingest_pc(self, pc_key, pc_value) {
-                                progress.report().await;
-                            }
-                            // this pending change is consumed
                             pending_changes_iter.next();
-                        } else {
-                            assert_gt!(pc_key, entry.key);
-                            if progress.ingest(self, entry, IngestSource::Index) {
-                                progress.report().await;
-                            }
                         }
-                    }
-                    Some((&pc_key, &PendingChange::UpdateAtime(UpdateAtime(pc_value, _)))) => {
-                        if pc_key == entry.key {
-                            // Update this entry with the new atime from the pending change
-                            assert_eq!(pc_value.extent(), entry.value.extent());
-                            if progress.ingest_pc(self, pc_key, pc_value) {
-                                progress.report().await;
+                        Ordering::Equal => {
+                            // Note, obsolete() needs to be called before ingest_pc(), because we
+                            // need to count its obsolescence before reporting.
+                            progress.obsolete(entry);
+                            match pc {
+                                PendingChange::Insert(pc_value) => {
+                                    // We are replacing an entry. This may be a ghost entry being
+                                    // re-cached or a heal() of a bad entry.
+                                    if entry.value.location().is_some() {
+                                        debug!("Insert of {pc_value:?} replaces {entry:?}");
+                                    }
+                                    progress.evict(self, entry);
+                                    if progress.ingest_pc(self, pc_key, pc_value) {
+                                        progress.report().await;
+                                    }
+                                }
+                                PendingChange::UpdateAtime(UpdateAtime(pc_value, _)) => {
+                                    // Replace this entry with the pending change entry that
+                                    // updates the atime.
+                                    assert_eq!(pc_value.extent(), entry.value.extent());
+                                    assert_ge!(pc_value.atime(), entry.value.atime());
+                                    if progress.ingest_pc(self, pc_key, pc_value) {
+                                        progress.report().await;
+                                    }
+                                }
                             }
-
-                            // this pending change is consumed
+                            // Both the pending change and the index run entry are consumed.
                             pending_changes_iter.next();
-                        } else {
-                            // We shouldn't have skipped any, because there has to be a
-                            // corresponding Index entry
-                            assert_gt!(pc_key, entry.key);
-                            if progress.ingest(self, entry, IngestSource::Index) {
-                                progress.report().await;
-                            }
+                            entries = &entries[1..];
+                            break;
                         }
-                    }
-                    None => {
-                        // no more pending changes
-                        if progress.ingest(self, entry, IngestSource::Index) {
-                            progress.report().await;
-                        }
+                        Ordering::Greater => break, // process entry next
                     }
                 }
             }
@@ -2318,6 +2353,7 @@ impl ZettaCacheState {
             old_operation_log_phys: progress.operation_log,
             ghost_cutoff: next_index.first_ghost_atime(),
             eviction_cutoff: next_index.first_live_atime(),
+            last_atime: self.atime,
             old_pending_changes,
             rebalance,
             stats: self.stats.clone(),
@@ -2471,6 +2507,7 @@ impl ZettaCacheState {
         let merge = Arc::new(MergeState {
             ghost_cutoff: ghost_atime,
             eviction_cutoff: eviction_atime,
+            last_atime: self.atime,
             old_pending_changes: std::mem::take(&mut self.pending_changes),
             old_operation_log_phys,
             rebalance,

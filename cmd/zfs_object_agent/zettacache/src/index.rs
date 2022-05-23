@@ -30,6 +30,7 @@ use crate::slab_allocator::SlabAllocatorBuilder;
 
 tunable! {
     static ref VERIFY_HISTOGRAMS: bool = false;
+    static ref VERIFY_APPEND_HISTOGRAM: bool = false;
     static ref VERIFY_OBSOLETED_HISTOGRAM: bool = false;
 }
 
@@ -359,13 +360,26 @@ impl IndexRun {
         self.last_key = Some(key);
     }
 
-    pub fn append(&mut self, list: Vec<IndexEntry>) {
+    /// `atimes` must be the histogram of `list`
+    pub fn append(&mut self, list: Vec<IndexEntry>, atimes: &AtimeHistogramPhys) {
         if let Some(last_entry) = list.last() {
             self.update_last_key(last_entry.key);
         }
-        for entry in &list {
-            self.atime_histogram_phys.insert(entry.value);
+
+        if *VERIFY_APPEND_HISTOGRAM {
+            let mut computed = AtimeHistogramPhys::with_capacity(
+                atimes.first_ghost(),
+                atimes.first_live(),
+                atimes.len(),
+            );
+            for entry in &list {
+                computed.insert_unchecked(entry.value);
+                assert_le!(entry.key, self.last_key.unwrap());
+            }
+            atimes.assert_eq(&computed);
         }
+
+        self.atime_histogram_phys += atimes;
         self.log.append(list);
     }
 
@@ -420,7 +434,6 @@ impl IndexRun {
     }
 
     /// Note that trimmed entries are not included in the returned iterator.
-    #[allow(dead_code)]
     pub fn iter(&self) -> impl Stream<Item = IndexEntry> {
         let trim_key = self.trim_key;
         self.log.iter().filter(move |entry| {

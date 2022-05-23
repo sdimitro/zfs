@@ -400,6 +400,7 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
         measure!("BlockBasedLog::flush_impl() AggregatingWriter::flush()")
             .fut_timed(writer.flush())
             .await;
+        trace!("BBL<{}> flush complete", type_name::<T>());
         self.pending_entries.truncate(0);
     }
 

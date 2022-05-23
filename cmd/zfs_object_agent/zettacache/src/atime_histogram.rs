@@ -105,6 +105,16 @@ impl AtimeHistogramPhys {
         self.histogram[index] += u64::from(value.size());
     }
 
+    /// Like insert(), but higher-performance for bulk inserts.
+    /// Although this function is not `unsafe`, the histogram may become inaccurate or a panic
+    /// may occur if the following conditions are not met:
+    /// - value.atime must be >= self.first_ghost
+    /// - value.atime must be <= the capacity (see with_capacity())
+    pub fn insert_unchecked(&mut self, value: IndexValue) {
+        let index = value.atime().0.wrapping_sub(self.first_ghost.0);
+        self.histogram[index as usize] += u64::from(value.size());
+    }
+
     pub fn remove(&mut self, value: IndexValue) {
         let index = value.atime() - self.first_ghost;
         self.histogram[index] -= u64::from(value.size());
