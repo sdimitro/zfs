@@ -9,7 +9,7 @@ use anyhow::Context;
 use anyhow::Result;
 use futures::stream::FuturesUnordered;
 use futures::StreamExt;
-use log::info;
+use log::*;
 use tokio::fs;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
@@ -55,13 +55,13 @@ impl DiscoveredDevice {
     async fn from_path(path: PathBuf) -> Result<Self> {
         let mut file = File::open(&path)
             .await
-            .with_context(|| format!("discovery: open {path:?}"))?;
+            .with_context(|| format!("open {path:?}"))?;
         let mut buf = vec![0u8; SUPERBLOCK_SIZE];
         file.read_exact(&mut buf)
             .await
-            .with_context(|| format!("discovery: read_exact {path:?}"))?;
+            .with_context(|| format!("read_exact {path:?}"))?;
         let (superblock, _) = BlockAccess::chunk_from_raw_impl::<SuperblockPhys>(&buf)
-            .with_context(|| format!("discovery: parse label {path:?}"))?;
+            .with_context(|| format!("parse label {path:?}"))?;
         Ok(DiscoveredDevice::new(path, superblock))
     }
 }
@@ -98,6 +98,7 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<V
     while let Some(result) = discovery.next().await {
         match result {
             Ok(device) => {
+                debug!("discovery: found device: {device:?}");
                 let cache_guid = device.superblock.guid;
                 let cache = caches.entry(cache_guid).or_default();
                 if let Some(old_device) = cache.insert(device.superblock.disk, device) {
@@ -113,7 +114,7 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<V
                     ));
                 }
             }
-            Err(why) => info!("{why}"),
+            Err(why) => debug!("discovery: error: {why:?}"),
         };
     }
     filter_invalid_caches(&mut caches);
