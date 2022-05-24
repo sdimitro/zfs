@@ -9,6 +9,8 @@ use serde::Serialize;
 use tokio::runtime::Handle;
 use uuid::Uuid;
 use zettacache::base_types::PoolGuid;
+use zettacache::CacheOpenMode;
+use zettacache::ZettaCache;
 
 use crate::base_types::Txg;
 use crate::object_access::ObjectAccess;
@@ -48,7 +50,7 @@ impl DebugHandle {
                 object_access.clone(),
                 guid,
                 None,
-                None,
+                Arc::new(ZettaCache::open(CacheOpenMode::None).await.unwrap()),
                 Uuid::new_v4(),
                 None,
                 false,

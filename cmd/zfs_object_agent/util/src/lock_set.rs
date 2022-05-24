@@ -4,18 +4,24 @@ use std::sync::Arc;
 
 use dashmap::mapref::entry::Entry;
 use dashmap::DashMap;
+use derivative::Derivative;
 
 use crate::super_trace;
 use crate::watch_once;
 
-#[derive(Default, Clone)]
+#[derive(Derivative, Clone)]
+#[derivative(Default(bound = ""))]
 pub struct LockSet<V: Hash + Eq + Copy + Debug> {
     locks: Arc<DashMap<V, watch_once::Receiver<()>>>,
 }
 
+#[derive(Derivative)]
+#[derivative(Debug)]
 pub struct LockedItem<V: Hash + Eq + Copy + Debug> {
     value: V,
+    #[derivative(Debug = "ignore")]
     _tx: watch_once::Sender<()>,
+    #[derivative(Debug = "ignore")]
     set: LockSet<V>,
 }
 
@@ -34,12 +40,6 @@ impl<V: Hash + Eq + Copy + Debug> LockedItem<V> {
 }
 
 impl<V: Hash + Eq + Copy + Debug> LockSet<V> {
-    pub fn new() -> Self {
-        Self {
-            locks: Default::default(),
-        }
-    }
-
     pub async fn lock(&self, value: V) -> LockedItem<V> {
         let tx = loop {
             let rx = {

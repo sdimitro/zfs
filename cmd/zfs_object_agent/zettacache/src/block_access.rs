@@ -544,11 +544,20 @@ impl BlockAccess {
         }
     }
 
-    pub fn add_disk(&self, disk: Disk) -> DiskId {
+    pub fn add_disk(&self, disk: Disk) -> Result<DiskId> {
         let mut disks = self.disks.write().unwrap();
+        for existing_disk in disks.iter() {
+            if disk.canonical_path == existing_disk.canonical_path {
+                return Err(anyhow!(
+                    "disk {:?} ({:?}) is already part of the zettacache",
+                    disk.path,
+                    disk.canonical_path,
+                ));
+            }
+        }
         let id = DiskId::new(disks.len());
         disks.push(disk);
-        id
+        Ok(id)
     }
 
     /// Note: In the future we'll support device removal in which case the

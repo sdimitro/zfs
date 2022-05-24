@@ -5,12 +5,14 @@ use std::io::Write;
 use std::mem;
 use std::path::Path;
 use std::process;
+use std::sync::Arc;
 
 use fs2::FileExt;
 use log::*;
 use tokio::runtime::Runtime;
 use util::register_siguser1_to_dump_tracing;
 use uuid::Uuid;
+use zettacache::CacheOpenError;
 use zettacache::CacheOpenMode;
 use zettacache::ZettaCache;
 
@@ -69,7 +71,7 @@ fn parse_id_from_file(id_path: &Path) -> Result<Uuid, anyhow::Error> {
 
 pub fn start(
     socket_dir: &Path,
-    cache_mode: Option<CacheOpenMode>,
+    cache_mode: CacheOpenMode,
     clear_incompatible_cache: bool,
     runtime: Runtime,
 ) -> Result<(), anyhow::Error> {
@@ -85,12 +87,17 @@ pub fn start(
         // Kick off zpool destroy tasks.
         pool_destroy::init_pool_destroyer(socket_dir).await;
 
-        let cache = match cache_mode {
-            Some(mode) => Some(ZettaCache::open(mode, clear_incompatible_cache).await?),
-            None => None,
+        let cache = match ZettaCache::open(cache_mode.clone()).await {
+            Ok(cache) => Arc::new(cache),
+            Err(CacheOpenError::IncompatibleFeatures(paths, e)) if clear_incompatible_cache => {
+                warn!("Clearing incompatible cache: {e:?}");
+                ZettaCache::create(paths).await?;
+                Arc::new(ZettaCache::open(cache_mode).await?)
+            }
+            Err(e) => return Err(e.into()),
         };
 
-        PublicServerState::start(socket_dir, cache.as_ref().cloned());
+        PublicServerState::start(socket_dir, cache.clone());
 
         let id_path = Path::new("/run/zfs_agent_id");
 

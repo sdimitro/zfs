@@ -19,9 +19,11 @@ use crate::base_types::DiskId;
 use crate::block_access::BlockAccess;
 use crate::superblock::SuperblockPhys;
 
+#[derive(Debug, Clone)]
 pub enum CacheOpenMode {
     DeviceList(Vec<PathBuf>),
     DiscoveryDirectory(PathBuf, Option<u64>), // u64 is the cache guid
+    None,                                     // no zettacache
 }
 
 impl CacheOpenMode {
@@ -31,6 +33,7 @@ impl CacheOpenMode {
             CacheOpenMode::DiscoveryDirectory(dir, target_guid) => {
                 discover_devices(&dir, target_guid).await?
             }
+            CacheOpenMode::None => Default::default(),
         })
     }
 }

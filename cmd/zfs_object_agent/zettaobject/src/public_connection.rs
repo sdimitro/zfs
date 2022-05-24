@@ -12,7 +12,6 @@ use serde::Serialize;
 use util::maybe_die_with;
 use util::message::*;
 use util::tunable;
-use util::DeviceList;
 use util::ReportHitsResponse;
 use zettacache::base_types::*;
 use zettacache::ZettaCache;
@@ -22,9 +21,8 @@ use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
 use crate::pool::*;
 use crate::pool_destroy;
-use crate::server::return_result;
+use crate::server::return_ok;
 use crate::server::ConnectionState;
-use crate::server::FailureMessage;
 use crate::server::HandlerReturn;
 use crate::server::Server;
 
@@ -33,11 +31,11 @@ tunable! {
 }
 
 pub struct PublicServerState {
-    cache: Option<ZettaCache>,
+    cache: Arc<ZettaCache>,
 }
 
 struct PublicConnectionState {
-    cache: Option<ZettaCache>,
+    cache: Arc<ZettaCache>,
     version: Option<Version>,
 }
 
@@ -51,12 +49,12 @@ impl ConnectionState for PublicConnectionState {
 impl PublicServerState {
     fn connection_handler(&self) -> PublicConnectionState {
         PublicConnectionState {
-            cache: self.cache.as_ref().cloned(),
+            cache: self.cache.clone(),
             version: None,
         }
     }
 
-    pub fn start(socket_dir: &Path, cache: Option<ZettaCache>) {
+    pub fn start(socket_dir: &Path, cache: Arc<ZettaCache>) {
         let socket_path = socket_dir.join("zfs_public_socket");
 
         let mut server = Server::new(
@@ -211,30 +209,23 @@ impl PublicConnectionState {
         let cache = self.cache.clone();
         debug!("got ReportHitsRequest");
         Ok(Box::pin(async move {
-            let response = match cache {
-                Some(cache) => {
-                    let phys = cache.hits_by_size_data().await;
-                    let mut combined_histogram = Vec::new();
-                    let mut real_hits = 0;
-                    for (live_hits, ghost_hits) in
-                        phys.live_histogram.iter().zip(&phys.ghost_histogram)
-                    {
-                        real_hits += live_hits;
-                        combined_histogram.push(live_hits + ghost_hits);
-                    }
+            let phys = cache.hits_by_size_data().await;
+            let mut combined_histogram = Vec::new();
+            let mut real_hits = 0;
+            for (live_hits, ghost_hits) in phys.live_histogram.iter().zip(&phys.ghost_histogram) {
+                real_hits += live_hits;
+                combined_histogram.push(live_hits + ghost_hits);
+            }
 
-                    Ok(ReportHitsResponse {
-                        started: phys.started(),
-                        lookups: phys.lookups,
-                        real_hits,
-                        cache_capacity: phys.cache_capacity,
-                        bucket_size: phys.bucket_size,
-                        combined_histogram,
-                    })
-                }
-                None => Err(FailureMessage::msg("no zettacache present")),
+            let response = ReportHitsResponse {
+                started: phys.started(),
+                lookups: phys.lookups,
+                real_hits,
+                cache_capacity: phys.cache_capacity,
+                bucket_size: phys.bucket_size,
+                combined_histogram,
             };
-            return_result(TYPE_REPORT_HITS, (), response, true)
+            return_ok(TYPE_REPORT_HITS, response, true)
         }))
     }
 
@@ -246,16 +237,10 @@ impl PublicConnectionState {
             struct ListDevicesResponse {
                 devices_json: String,
             }
-
-            let devices = match cache {
-                Some(cache) => cache.devices(),
-                None => DeviceList::default(),
+            let response = ListDevicesResponse {
+                devices_json: serde_json::to_string(&cache.devices()).unwrap(),
             };
-
-            let response: Result<ListDevicesResponse, ()> = Ok(ListDevicesResponse {
-                devices_json: serde_json::to_string(&devices).unwrap(),
-            });
-            return_result(TYPE_LIST_DEVICES, (), response, true)
+            return_ok(TYPE_LIST_DEVICES, response, true)
         }))
     }
 
@@ -267,14 +252,10 @@ impl PublicConnectionState {
             struct ZcacheIostatResponse {
                 iostats_json: String,
             }
-
-            let response = match cache {
-                Some(cache) => Ok(ZcacheIostatResponse {
-                    iostats_json: serde_json::to_string(&cache.io_stats()).unwrap(),
-                }),
-                None => Err(FailureMessage::msg("no zettacache present")),
+            let response = ZcacheIostatResponse {
+                iostats_json: serde_json::to_string(&cache.io_stats()).unwrap(),
             };
-            return_result(TYPE_ZCACHE_IOSTAT, (), response, false)
+            return_ok(TYPE_ZCACHE_IOSTAT, response, false)
         }))
     }
 
@@ -286,14 +267,10 @@ impl PublicConnectionState {
             struct ZcacheStatsResponse {
                 stats_json: String,
             }
-
-            let response = match cache {
-                Some(cache) => Ok(ZcacheStatsResponse {
-                    stats_json: serde_json::to_string(&cache.stats()).unwrap(),
-                }),
-                None => Err(FailureMessage::msg("no zettacache present")),
+            let response = ZcacheStatsResponse {
+                stats_json: serde_json::to_string(&cache.stats()).unwrap(),
             };
-            return_result(TYPE_ZCACHE_STATS, (), response, false)
+            return_ok(TYPE_ZCACHE_STATS, response, false)
         }))
     }
 }

@@ -44,14 +44,14 @@ pub unsafe extern "C" fn libzoa_init(
     }
 
     if cache_path_ptr.is_null() {
-        if zettaobject::init::start(socket_dir, None, false, runtime).is_err() {
+        if zettaobject::init::start(socket_dir, CacheOpenMode::None, false, runtime).is_err() {
             return -1;
         }
     } else {
         let cache_path = Path::new(OsStr::from_bytes(CStr::from_ptr(cache_path_ptr).to_bytes()));
         if zettaobject::init::start(
             socket_dir,
-            Some(CacheOpenMode::DeviceList(vec![cache_path.to_owned()])),
+            CacheOpenMode::DeviceList(vec![cache_path.to_owned()]),
             false,
             runtime,
         )

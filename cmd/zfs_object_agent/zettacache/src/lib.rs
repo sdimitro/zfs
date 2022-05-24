@@ -28,6 +28,7 @@ pub use zcachedb::DumpStructuresOptions;
 pub use zcachedb::ZettaCacheDBCommand;
 
 pub use crate::open::CacheOpenMode;
+pub use crate::zettacache::CacheOpenError;
 pub use crate::zettacache::InsertSource;
 pub use crate::zettacache::LockedKey;
 pub use crate::zettacache::LookupResponse;

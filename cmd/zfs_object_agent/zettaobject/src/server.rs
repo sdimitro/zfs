@@ -525,11 +525,6 @@ impl FailureMessage {
             message: format!("{error:?}"),
         }
     }
-    pub fn msg<T: ToString>(message: T) -> Self {
-        FailureMessage::Other {
-            message: message.to_string(),
-        }
-    }
 }
 
 /// Create and return an NvList appropriate to use as a response to the client.
@@ -607,4 +602,11 @@ where
         super_trace!("sending response nvl: {:?}", nvl);
     }
     Ok(Some(nvl))
+}
+
+pub fn return_ok<O>(response_type: &str, response: O, debug: bool) -> Result<Option<NvList>>
+where
+    O: Debug + Serialize,
+{
+    return_result(response_type, (), Ok::<_, ()>(response), debug)
 }

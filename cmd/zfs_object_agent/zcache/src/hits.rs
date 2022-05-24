@@ -141,7 +141,8 @@ impl HitsBySize {
             let bar_position = (histogram_width as f64 * real_hits_percent / 100.0)
                 .ceil()
                 .to_usize()
-                .unwrap();
+                .unwrap()
+                .saturating_sub(1);
             let (stars_before_bar, spaces_before_bar, stars_after_bar) = match total_stars
                 .cmp(&bar_position)
             {

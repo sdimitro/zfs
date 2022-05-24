@@ -278,11 +278,11 @@ fn main() {
                 }
             });
 
-            let cache_mode = match cli.cache_device {
-                Some(paths) => Some(CacheOpenMode::DeviceList(paths)),
-                None => cli.cache_device_dir.map(|cache_device_dir| {
-                    CacheOpenMode::DiscoveryDirectory(cache_device_dir, cli.guid)
-                }),
+            let cache_mode = match (cli.cache_device, cli.cache_device_dir) {
+                (Some(_), Some(_)) => panic!("invalid state"),
+                (Some(devices), None) => CacheOpenMode::DeviceList(devices),
+                (None, Some(dir)) => CacheOpenMode::DiscoveryDirectory(dir, cli.guid),
+                (None, None) => CacheOpenMode::None,
             };
 
             match zettaobject::init::start(

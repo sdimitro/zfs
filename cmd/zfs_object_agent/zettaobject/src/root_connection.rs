@@ -31,6 +31,7 @@ use crate::object_access::ObjectAccessProtocol;
 use crate::pool::*;
 use crate::pool_destroy;
 use crate::server::handler_return_ok;
+use crate::server::return_ok;
 use crate::server::return_result;
 use crate::server::ConnectionState;
 use crate::server::FailureMessage;
@@ -44,13 +45,13 @@ tunable! {
 }
 
 pub struct RootServerState {
-    cache: Option<ZettaCache>,
+    cache: Arc<ZettaCache>,
     id: Uuid,
 }
 
 struct RootConnectionState {
     pool: Option<Arc<Pool>>,
-    cache: Option<ZettaCache>,
+    cache: Arc<ZettaCache>,
     id: Uuid,
     version: Option<Version>,
 }
@@ -66,13 +67,13 @@ impl RootServerState {
     fn connection_handler(&self) -> RootConnectionState {
         RootConnectionState {
             pool: None,
-            cache: self.cache.as_ref().cloned(),
+            cache: self.cache.clone(),
             id: self.id,
             version: None,
         }
     }
 
-    pub fn start(socket_dir: &Path, cache: Option<ZettaCache>, id: Uuid) {
+    pub fn start(socket_dir: &Path, cache: Arc<ZettaCache>, id: Uuid) {
         let socket_path = socket_dir.join("zfs_root_socket");
         let mut server = Server::new(
             &socket_path,
@@ -194,7 +195,7 @@ impl RootConnectionState {
                 object_access,
                 request.id.guid,
                 request.txg,
-                self.cache.as_ref().cloned(),
+                self.cache.clone(),
                 self.id,
                 request.syncing_txg,
                 request.rollback,
@@ -586,19 +587,9 @@ impl RootConnectionState {
                 result: &'static str,
             }
 
-            let result = match cache {
-                Some(cache) => {
-                    debug!("got ClearHitDataRequest");
-                    cache.clear_hit_data().await;
-                    Ok(())
-                }
-                None => {
-                    debug!("got ClearHitDataRequest, no zettacache present");
-                    Err(FailureMessage::msg("zettacache not present"))
-                }
-            };
-            // XXX standardize on if response has the same type as request, or with "done" appended
-            return_result(TYPE_CLEAR_HIT_DATA, (), result, true)
+            debug!("got ClearHitDataRequest");
+            cache.clear_hit_data().await;
+            return_ok(TYPE_CLEAR_HIT_DATA, (), true)
         }))
     }
 
@@ -608,13 +599,10 @@ impl RootConnectionState {
             let request: AddDiskRequest = nvpair::from_nvlist(&nvl)?;
             debug!("got {:?}", request);
 
-            let result = match cache {
-                Some(cache) => cache
-                    .add_disk(&request.path)
-                    .await
-                    .map_err(FailureMessage::new),
-                None => Err(FailureMessage::msg("zettacache not present")),
-            };
+            let result = cache
+                .add_disk(&request.path)
+                .await
+                .map_err(FailureMessage::new);
             return_result(TYPE_ADD_DISK, (), result, true)
         }))
     }
@@ -624,14 +612,8 @@ impl RootConnectionState {
         Ok(Box::pin(async move {
             debug!("got {:?}", nvl);
 
-            let result = match cache {
-                Some(cache) => {
-                    cache.sync_checkpoint().await;
-                    Ok(())
-                }
-                None => Err(FailureMessage::msg("zettacache not present")),
-            };
-            return_result(TYPE_SYNC_CHECKPOINT, (), result, true)
+            cache.sync_checkpoint().await;
+            return_ok(TYPE_SYNC_CHECKPOINT, (), true)
         }))
     }
 
@@ -640,14 +622,8 @@ impl RootConnectionState {
         Ok(Box::pin(async move {
             debug!("got {:?}", nvl);
 
-            let result = match cache {
-                Some(cache) => {
-                    cache.initiate_merge().await;
-                    Ok(())
-                }
-                None => Err(FailureMessage::msg("zettacache not present")),
-            };
-            return_result(TYPE_INITIATE_MERGE, (), result, true)
+            cache.initiate_merge().await;
+            return_ok(TYPE_INITIATE_MERGE, (), true)
         }))
     }
 }

@@ -33,7 +33,11 @@ impl SizeHistogramPhys {
             lookups: 0,
             cache_capacity,
             meta_overhead,
-            bucket_size: histogram_range / quantiles as u64,
+            bucket_size: if quantiles == 0 {
+                0
+            } else {
+                histogram_range / quantiles as u64
+            },
             live_histogram: vec![0; quantiles],
             ghost_histogram: vec![0; quantiles],
         }
