@@ -721,7 +721,7 @@ fn get_credentials_file() -> Result<Ini> {
     Ok(ini::Ini::load_from_file(credentials_file)?)
 }
 
-fn get_azure_storage_client_from_file(
+fn get_azure_storage_client_from_profile_key(
     credentials_profile: String,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     let ini_file = get_credentials_file()?;
@@ -764,16 +764,30 @@ fn get_azure_storage_client_from_file(
 /// sources even if the credentials are invalid.
 async fn get_azure_storage_client_automatic() -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)>
 {
-    get_azure_storage_client_from_env()
-        .or_else(|_| get_azure_storage_client_from_file("default".to_string()))
-        .or(get_azure_storage_client_with_managed_key_profile("default".to_string()).await)
+    match get_azure_storage_client_from_env()
+        .or_else(|_| get_azure_storage_client_from_profile_key("default".to_string()))
+    {
+        Ok(tuple) => Ok(tuple),
+        Err(_) => get_azure_storage_client_with_managed_key_profile("default".to_string()).await,
+    }
 }
 
 async fn get_azure_storage_client(
     credentials: BlobCredentials,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     match credentials {
-        BlobCredentials::Profile(profile) => Ok(get_azure_storage_client_from_file(profile)?),
+        BlobCredentials::Profile(profile) => {
+            // BlobCredentials::Profile is for getting credentials from a profile in an ini file.
+            // The credentials could be directly specified as a pair of azure_account and azure_key.
+            // Alternatively, the profile could just reference an azure_account and the key may then
+            // be fetched via Managed Identity Credential. This are similar  to
+            // BlobCredentials::Key and BlobCredentials::ManagedCredentials respectively, except for
+            // the fact that it is passed via an ini file. We have to try both methods.
+            match get_azure_storage_client_from_profile_key(profile.clone()) {
+                Ok(tuple) => Ok(tuple),
+                Err(_) => get_azure_storage_client_with_managed_key_profile(profile).await,
+            }
+        }
         BlobCredentials::Key {
             azure_account,
             azure_key,
