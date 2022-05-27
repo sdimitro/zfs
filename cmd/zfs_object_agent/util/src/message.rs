@@ -137,12 +137,24 @@ pub const TYPE_LIST_DEVICES: &str = "list devices";
 pub const TYPE_ZCACHE_IOSTAT: &str = "zcache iostat";
 pub const TYPE_ZCACHE_STATS: &str = "zcache stats";
 pub const TYPE_ADD_DISK: &str = "add disk";
+pub const TYPE_EXPAND_DISK: &str = "expand disk";
 pub const TYPE_SYNC_CHECKPOINT: &str = "sync checkpoint";
 pub const TYPE_INITIATE_MERGE: &str = "initiate merge";
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AddDiskRequest {
     pub path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExpandDiskRequest {
+    pub path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct ExpandDiskResponse {
+    pub new_size: u64,
+    pub additional_bytes: u64,
 }
 
 // We assume that a single write of this size is atomic.

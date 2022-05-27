@@ -9,6 +9,7 @@ use std::os::unix::prelude::OpenOptionsExt;
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::atomic::Ordering;
+use std::sync::Mutex;
 use std::sync::RwLock;
 use std::thread::sleep;
 use std::time::Duration;
@@ -35,6 +36,7 @@ use tokio::sync::oneshot;
 use util::from64::AsUsize;
 use util::iter_wrapping;
 use util::measure;
+use util::message::ExpandDiskResponse;
 use util::serde::from_json_slice;
 use util::tunable;
 use util::with_alloctag;
@@ -149,7 +151,7 @@ pub struct Disk {
 
     path: PathBuf,
     canonical_path: PathBuf,
-    size: u64,
+    size: Mutex<u64>,
     sector_size: usize,
     #[derivative(Debug = "ignore")]
     io_stats: &'static DiskIoStats,
@@ -216,20 +218,7 @@ impl Disk {
             .with_context(|| format!("opening disk {path:?}"))?;
         // see comment in `struct Disk`
         let file = &*Box::leak(Box::new(file));
-        let stat = nix::sys::stat::fstat(file.as_raw_fd())?;
-        trace!("stat: {:?}", stat);
-        let mode = SFlag::from_bits_truncate(stat.st_mode);
-        let sector_size;
-        let size;
-        if mode.contains(SFlag::S_IFBLK) {
-            size = blkgetsize64(file)?;
-            sector_size = blksszget(file)?;
-        } else if mode.contains(SFlag::S_IFREG) {
-            size = u64::try_from(stat.st_size)?;
-            sector_size = *MIN_SECTOR_SIZE;
-        } else {
-            panic!("{path:?}: invalid file type {mode:?}");
-        }
+        let (sector_size, size) = disk_sizes(file)?;
 
         let short_name = path.file_name().unwrap().to_string_lossy().to_string();
         let canonical_path = Path::new(path).canonicalize()?;
@@ -258,7 +247,7 @@ impl Disk {
             file,
             path: path.to_owned(),
             canonical_path,
-            size,
+            size: Mutex::new(size),
             sector_size,
             io_stats,
             reader_tx,
@@ -560,11 +549,44 @@ impl BlockAccess {
         Ok(id)
     }
 
+    // Returns the number of bytes added to the disk.
+    pub fn expand_disk(&self, disk: DiskId) -> Result<ExpandDiskResponse> {
+        let disks = self.disks.read().unwrap();
+        let disk = &disks[disk.index()];
+        let (_, new_size) = disk_sizes(disk.file)?;
+        let mut size = disk.size.lock().unwrap();
+        let additional_bytes = new_size.checked_sub(*size).ok_or_else(|| {
+            anyhow!(
+                "{disk:?} {:?} ({:?}) size decreased from {size} to {new_size}",
+                disk.path,
+                disk.canonical_path,
+            )
+        })?;
+        *size = new_size;
+        Ok(ExpandDiskResponse {
+            additional_bytes,
+            new_size,
+        })
+    }
+
     /// Note: In the future we'll support device removal in which case the
     /// DiskId's will probably not be sequential.  By using this accessor we
     /// need not assume anything about the values inside the DiskId's.
     pub fn disks(&self) -> impl Iterator<Item = DiskId> {
         (0..self.disks.read().unwrap().len()).map(DiskId::new)
+    }
+
+    pub fn path_to_disk_id(&self, path: &Path) -> Result<DiskId> {
+        let canonical_path = path.canonicalize()?;
+        self.disks
+            .read()
+            .unwrap()
+            .iter()
+            .position(|disk| disk.canonical_path == canonical_path)
+            .map(DiskId::new)
+            .ok_or_else(|| {
+                anyhow!("disk {path:?} ({canonical_path:?}) is not part of the zettacache")
+            })
     }
 
     // Gather a list of devices for zcache list_devices command.
@@ -576,14 +598,17 @@ impl BlockAccess {
             .iter()
             .map(|d| DeviceEntry {
                 name: d.path.clone(),
-                size: d.size,
+                size: *d.size.lock().unwrap(),
             })
             .collect();
         DeviceList { devices }
     }
 
     pub fn disk_size(&self, disk: DiskId) -> u64 {
-        self.disks.read().unwrap()[disk.index()].size
+        *self.disks.read().unwrap()[disk.index()]
+            .size
+            .lock()
+            .unwrap()
     }
 
     pub fn disk_extent(&self, disk: DiskId) -> Extent {
@@ -818,6 +843,20 @@ fn blksszget(file: &File) -> Result<usize> {
     let ssz_ptr = &mut ssz as *mut usize;
     unsafe { ioctl_blksszget(file.as_raw_fd(), ssz_ptr) }?;
     Ok(ssz)
+}
+
+/// get (sector_size, disk_size), both in bytes
+fn disk_sizes(file: &File) -> Result<(usize, u64)> {
+    let stat = nix::sys::stat::fstat(file.as_raw_fd())?;
+    trace!("stat: {:?}", stat);
+    let mode = SFlag::from_bits_truncate(stat.st_mode);
+    if mode.contains(SFlag::S_IFBLK) {
+        Ok((blksszget(file)?, blkgetsize64(file)?))
+    } else if mode.contains(SFlag::S_IFREG) {
+        Ok((*MIN_SECTOR_SIZE, u64::try_from(stat.st_size)?))
+    } else {
+        panic!("{file:?}: invalid file type {mode:?}");
+    }
 }
 
 /// use pread() to read into an aligned vector

@@ -6,6 +6,7 @@
 #![deny(clippy::print_stderr)]
 
 mod add;
+mod expand;
 mod hits;
 mod iostat;
 mod labelclear;
@@ -59,6 +60,7 @@ enum Commands {
     List(list::List),
     Stats(stats::Stats),
     Add(add::Add),
+    Expand(expand::Expand),
     Sync(sync::Sync),
     Labelclear(labelclear::Labelclear),
 
@@ -75,6 +77,7 @@ impl Commands {
             Commands::List(list) => list,
             Commands::Stats(stats) => stats,
             Commands::Add(add) => add,
+            Commands::Expand(expand) => expand,
             Commands::Sync(sync) => sync,
             Commands::Labelclear(labelclear) => labelclear,
             Commands::ClearHitData(clear_hit_data) => clear_hit_data,

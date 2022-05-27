@@ -19,6 +19,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use anyhow::anyhow;
 use anyhow::Result;
 use arc_swap::ArcSwapAny;
 use arc_swap::ArcSwapOption;
@@ -48,6 +49,7 @@ use tokio::time::sleep_until;
 use util::concurrent_batch::ConcurrentBatch;
 use util::lock_non_send;
 use util::measure;
+use util::message::ExpandDiskResponse;
 use util::nice_p2size;
 use util::super_trace;
 use util::tunable;
@@ -962,6 +964,13 @@ impl ZettaCache {
                 assert!(old.is_none());
                 Ok(())
             }
+        }
+    }
+
+    pub async fn expand_disk(&self, path: &Path) -> Result<ExpandDiskResponse> {
+        match &*self.inner.load() {
+            Some(inner) => inner.expand_disk(path).await,
+            None => Err(anyhow!("disk {path:?} is not part of the zettacache")),
         }
     }
 
@@ -2065,6 +2074,13 @@ impl Inner {
         Ok(())
     }
 
+    // Returns the amount of additional space, in bytes
+    async fn expand_disk(&self, path: &Path) -> Result<ExpandDiskResponse> {
+        let additional_bytes = self.locked.lock().await.expand_disk(path)?;
+        self.sync_checkpoint().await;
+        Ok(additional_bytes)
+    }
+
     async fn initiate_merge(&self) {
         self.locked.lock().await.request_merge();
         self.sync_checkpoint().await;
@@ -2825,6 +2841,29 @@ impl Locked {
 
         info!("added {path:?} as {disk_id:?}");
         Ok(())
+    }
+
+    // Returns the amount of additional space, in bytes.
+    fn expand_disk(&mut self, path: &Path) -> Result<ExpandDiskResponse> {
+        let disk = self.block_access.path_to_disk_id(path)?;
+        let response = self.block_access.expand_disk(disk)?;
+        if response.additional_bytes > 0 {
+            let phys = self.primary.disks.get_mut(&disk).unwrap();
+            let expanded_capacity = Extent::new(disk, phys.size, response.additional_bytes);
+            info!("expanding existing disk {path:?}: {expanded_capacity:?}");
+            self.slab_allocator.extend(expanded_capacity);
+
+            // Update disk size in primary
+            phys.size = response.new_size;
+
+            // The hit data isn't accurate across cache size changes, so clear
+            // it, which also updates the histogram parameters to reflect the
+            // new cache size.
+            self.clear_hit_data();
+        } else {
+            info!("{disk:?} ({path:?}) has no expansion capacity");
+        }
+        Ok(response)
     }
 
     fn request_merge(&mut self) {

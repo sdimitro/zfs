@@ -121,6 +121,7 @@ impl RootConnectionState {
         );
         server.register_handler(TYPE_CLEAR_HIT_DATA, Box::new(Self::clear_hit_data));
         server.register_handler(TYPE_ADD_DISK, Box::new(Self::add_disk));
+        server.register_handler(TYPE_EXPAND_DISK, Box::new(Self::expand_disk));
         server.register_handler(TYPE_SYNC_CHECKPOINT, Box::new(Self::sync_checkpoint));
         server.register_handler(TYPE_INITIATE_MERGE, Box::new(Self::initiate_merge));
         server.register_struct_handler(MessageType::ReadBlock, Box::new(Self::read_block));
@@ -604,6 +605,20 @@ impl RootConnectionState {
                 .await
                 .map_err(FailureMessage::new);
             return_result(TYPE_ADD_DISK, (), result, true)
+        }))
+    }
+
+    fn expand_disk(&mut self, nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            let request: ExpandDiskRequest = nvpair::from_nvlist(&nvl)?;
+            debug!("got {:?}", request);
+
+            let result = cache
+                .expand_disk(&request.path)
+                .await
+                .map_err(FailureMessage::new);
+            return_result(TYPE_EXPAND_DISK, (), result, true)
         }))
     }
 
