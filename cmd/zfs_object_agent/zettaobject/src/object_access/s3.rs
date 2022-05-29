@@ -8,7 +8,7 @@ use std::time::Instant;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use async_stream::stream;
+use async_stream::try_stream;
 use async_trait::async_trait;
 use bytes::Bytes;
 use bytes::BytesMut;
@@ -467,7 +467,7 @@ impl ObjectAccessTrait for S3ObjectAccess {
         start_after: Option<String>,
         use_delimiter: bool,
         list_prefixes: bool,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send>> {
         let mut continuation_token = None;
         // XXX ObjectAccess should really be refcounted (behind Arc)
         let client = self.client.clone();
@@ -476,7 +476,7 @@ impl ObjectAccessTrait for S3ObjectAccess {
             true => Some("/".to_string()),
             false => None,
         };
-        Box::pin(stream! {
+        Box::pin(try_stream! {
             loop {
                 let output = retry(
                     &format!("list {} (after {:?})", prefix, start_after),
@@ -495,8 +495,7 @@ impl ObjectAccessTrait for S3ObjectAccess {
                         Ok(client.list_objects_v2(req).await?)
                     },
                 )
-                .await
-                .unwrap();
+                .await?;
 
                 if list_prefixes {
                     if let Some(prefixes) = output.common_prefixes {

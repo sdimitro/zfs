@@ -492,8 +492,18 @@ impl ObjectAccess {
     ) -> impl Stream<Item = String> + Send + '_ {
         self.as_trait()
             .list(prefix, start_after, use_delimiter, false)
+            .map(|result| result.unwrap())
     }
 
+    pub fn try_list_objects(
+        &self,
+        prefix: String,
+        start_after: Option<String>,
+        use_delimiter: bool,
+    ) -> impl Stream<Item = Result<String>> + Send + '_ {
+        self.as_trait()
+            .list(prefix, start_after, use_delimiter, false)
+    }
     pub async fn collect_objects(
         &self,
         prefix: String,
@@ -503,7 +513,9 @@ impl ObjectAccess {
     }
 
     pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> + '_ {
-        self.as_trait().list(prefix, None, true, true)
+        self.as_trait()
+            .list(prefix, None, true, true)
+            .map(|result| result.unwrap())
     }
 
     pub fn collect_stats(&self) -> HashMap<String, StatMapValue> {
@@ -567,7 +579,7 @@ pub trait ObjectAccessTrait: Send + Sync {
         start_after: Option<String>,
         use_delimiter: bool,
         list_prefixes: bool,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send + '_>>;
+    ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>>;
 
     async fn get_object(
         &self,

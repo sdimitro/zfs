@@ -12,7 +12,7 @@ use std::time::Instant;
 use anyhow::anyhow;
 use anyhow::Context;
 use anyhow::Result;
-use async_stream::stream;
+use async_stream::try_stream;
 use async_trait::async_trait;
 use azure_core::HttpError;
 use azure_identity::token_credentials::ImdsManagedIdentityCredential;
@@ -548,11 +548,11 @@ impl ObjectAccessTrait for BlobObjectAccess {
         start_after: Option<String>,
         use_delimiter: bool,
         list_prefixes: bool,
-    ) -> Pin<Box<dyn Stream<Item = String> + Send + '_>> {
+    ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>> {
         let msg = format!("list {} (after {:?})", prefix, start_after);
         let list_prefix = prefix;
 
-        let stream_result = stream! {
+        Box::pin(try_stream! {
             let output = retry(&msg, None, || async {
                 let container_client = self.get_container_client().await;
                 let list_builder = match use_delimiter {
@@ -575,7 +575,7 @@ impl ObjectAccessTrait for BlobObjectAccess {
                     Ok(res) => Ok(res),
                 }
             })
-            .await.unwrap();
+            .await?;
 
             // XXX The performance of this is likely to be quite bad. We need a better solution. DOSE-1215
             let initial = start_after.unwrap_or("".to_string());
@@ -594,9 +594,7 @@ impl ObjectAccessTrait for BlobObjectAccess {
                     }
                 }
             }
-        };
-
-        Box::pin(stream_result)
+        })
     }
 }
 

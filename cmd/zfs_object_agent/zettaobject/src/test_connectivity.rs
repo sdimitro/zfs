@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use futures::TryStreamExt;
 use rand::Rng;
 use serde::Deserialize;
 use util::writeln_stderr;
@@ -20,15 +21,12 @@ struct Error {
     message: String,
 }
 
-// Test by writing and deleting an object.
-async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String> {
-    let num: u64 = rand::thread_rng().gen();
-    let file = format!("test/test_connectivity_{}", num);
-    let content = "test connectivity to S3".as_bytes().to_vec();
+async fn create_object_test(object_access: &ObjectAccess, key: String) -> Result<(), String> {
+    let content = "test connectivity to object storage".as_bytes().to_vec();
 
     match object_access
         .put_object_timed(
-            file.clone(),
+            key.clone(),
             content.into(),
             ObjectAccessOpType::MetadataPut,
             Some(Duration::from_secs(30)),
@@ -50,7 +48,7 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
             if let Some(index) = body.find("<?xml") {
                 if let Ok(error) = serde_xml_rs::from_str::<Error>(&body[index..]) {
                     return Err(format!(
-                        "Connectivity test failed: {}: {}",
+                        "unable to create: {}, {}",
                         error.code, error.message
                     ));
                 }
@@ -58,21 +56,62 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
 
             // If the error string can not be deserialized as xml, return the entirety of
             // the error back.
-            Err(format!("Connectivity test failed: {}", body))
+            Err(format!("unable to create: {}", body))
         }
-        Err(OAError::TimeoutError(_)) => {
-            Err("Connectivity test failed with a timeout.".to_string())
+        Err(OAError::TimeoutError(_)) => Err("connection timed out.".to_string()),
+        Err(OAError::RequestError(RequestError::Credentials(err))) => {
+            Err(format!("credentials error: {}", err))
         }
-        Err(OAError::RequestError(RequestError::Credentials(err))) => Err(format!(
-            "Connectivity test failed due to a credentials error: {}",
-            err
-        )),
-        Err(err) => Err(format!("Connectivity test failed: {}", err)),
-        Ok(_) => {
-            object_access.delete_object(file).await;
-            Ok(())
-        }
+        Err(err) => Err(format!("{}", err)),
+        Ok(_) => Ok(()),
     }
+}
+
+// Test by writing and deleting an object.
+async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String> {
+    let num: u64 = rand::thread_rng().gen();
+    let prefix = String::from("test/");
+    let file = format!("{}test_connectivity_{}", prefix, num);
+
+    create_object_test(object_access, file.clone()).await?;
+
+    if let Err(e) = object_access
+        .get_object(file.clone(), ObjectAccessOpType::MetadataGet)
+        .await
+    {
+        return Err(format!("unable to find object: {e}"));
+    }
+
+    let objects = object_access
+        .try_list_objects(prefix, None, false)
+        .try_collect::<Vec<_>>()
+        .await;
+
+    let objects = match objects {
+        Ok(objects) => objects,
+        Err(e) => {
+            let content = e.to_string();
+            if let Ok(error) = serde_xml_rs::from_str::<Error>(&content) {
+                return Err(format!("unable to list objects: {}", error.message));
+            } else {
+                return Err(format!("unable to list objects: {}", content));
+            }
+        }
+    };
+
+    if objects != vec![file.clone()] {
+        return Err(format!(
+            "object listing mismatch, expected {}, got {:?}",
+            file, objects
+        ));
+    }
+
+    object_access.delete_object(file.clone()).await;
+    if object_access.object_exists(file.clone()).await {
+        return Err("unable to delete objects".to_string());
+    }
+
+    Ok(())
 }
 
 pub async fn test_connectivity(protocol: ObjectAccessProtocol, bucket: String) {
@@ -86,7 +125,7 @@ pub async fn test_connectivity(protocol: ObjectAccessProtocol, bucket: String) {
 
     std::process::exit(match do_test_connectivity(&object_access).await {
         Err(err) => {
-            writeln_stderr!("{}", err);
+            writeln_stderr!("Connectivity test failed: {}", err);
             1
         }
         Ok(_) => {
