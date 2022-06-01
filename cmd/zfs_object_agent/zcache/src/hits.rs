@@ -67,7 +67,7 @@ impl HitsBySize {
             humantime::format_duration(Duration::from_secs(
                 (self.end_time - self.start_time)
                     .to_std()
-                    .unwrap()
+                    .unwrap_or_default()
                     .as_secs()
             )),
         );
