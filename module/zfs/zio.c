@@ -3871,14 +3871,6 @@ zio_vdev_io_start(zio_t *zio)
 				    SCL_ZIO);
 
 				object_store_update_max_blockid(zio);
-
-				/*
-				 * If there is a spa_config_lock WRITER
-				 * waiting, then keep flushing out the max
-				 * I/O that has been issued.
-				 */
-				if (spa_config_write_wanted(spa, SCL_ZIO))
-					object_store_flush_locked_writes(spa);
 			} else {
 				spa_config_enter(spa, SCL_ZIO, zio, RW_READER);
 			}

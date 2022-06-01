@@ -978,7 +978,6 @@ extern void spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw);
 extern void spa_config_exit(spa_t *spa, int locks, const void *tag);
 extern int spa_config_held(spa_t *spa, int locks, krw_t rw);
 extern void spa_config_enter_read_priority(spa_t *, int);
-extern int spa_config_write_wanted(spa_t *, int locks);
 
 /* Pool vdev add/remove lock */
 extern uint64_t spa_vdev_enter(spa_t *spa);

@@ -515,23 +515,6 @@ spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw)
 	return (1);
 }
 
-int
-spa_config_write_wanted(spa_t *spa, int locks)
-{
-	int locks_wanted = 0;
-	for (int i = 0; i < SCL_LOCKS; i++) {
-		spa_config_lock_t *scl = &spa->spa_config_lock[i];
-		if (!(locks & (1 << i)))
-			continue;
-		mutex_enter(&scl->scl_lock);
-		if (scl->scl_write_wanted) {
-			locks_wanted |= 1 << i;
-		}
-		mutex_exit(&scl->scl_lock);
-	}
-	return (locks_wanted);
-}
-
 /*
  * This function should only be called as an exception since it
  * will not check for any waiting writers and could lead to starvation.
