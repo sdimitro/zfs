@@ -69,13 +69,11 @@
 /* Set this tunable to TRUE to replace corrupt data with 0x2f5baddb10c */
 static int zfs_send_corrupt_data = B_FALSE;
 /*
- * This tunable controls the amount of data (measured in bytes) that will be
- * prefetched by zfs send.  If the main thread is blocking on reads that haven't
- * completed, this variable might need to be increased.  If instead the main
- * thread is issuing new reads because the prefetches have fallen out of the
- * cache, this may need to be decreased.
+ * This tunable controls the amount of memory (measured in bytes) that will be
+ * used to buffer data read for zfs send.  If the main thread is blocking on
+ * reads that haven't completed, this variable might need to be increased.
  */
-static int zfs_send_queue_length = SPA_MAXBLOCKSIZE;
+static int zfs_send_queue_length = 64 * 1024 * 1024;
 /*
  * This tunable controls the length of the queues that zfs send worker threads
  * use to communicate.  If the send_main_thread is blocking on these queues,
