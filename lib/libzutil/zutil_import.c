@@ -1901,8 +1901,10 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 	nvlist_t *resp = zoa_send_recv_msg(hdl, msg,
 	    AGENT_PUBLIC_PROTOCOL_VERSION, ZFS_PUBLIC_SOCKET, NULL);
 
+	nvlist_t *pools = fnvlist_lookup_nvlist(resp, "pools");
+
 	nvpair_t *elem = NULL;
-	while ((elem = nvlist_next_nvpair(resp, elem)) != NULL) {
+	while ((elem = nvlist_next_nvpair(pools, elem)) != NULL) {
 		avl_index_t where;
 		rdsk_node_t *slice;
 		nvlist_t *config;

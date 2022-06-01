@@ -150,7 +150,7 @@ impl RootConnectionState {
                 .await
                 .map_err(|e| FailureMessage::new(e.into()));
 
-            return_result(TYPE_CREATE_POOL, request.id, result, true)
+            return_result(request.id, result, true)
         })
     }
 
@@ -269,7 +269,7 @@ impl RootConnectionState {
                     })
                 }
             };
-            return_result(TYPE_OPEN_POOL, request.id, result, true)
+            return_result(request.id, result, true)
         })
     }
 
@@ -349,13 +349,11 @@ impl RootConnectionState {
                 .await;
             #[derive(Debug, Serialize)]
             struct EndTxgResponse {
-                response_type: &'static str,
                 #[serde(flatten)]
                 stats: PoolStatsPhys,
                 features: HashMap<String, u64>,
             }
             let response = EndTxgResponse {
-                response_type: TYPE_END_TXG,
                 stats,
                 features: features
                     .into_iter()
@@ -488,7 +486,6 @@ impl RootConnectionState {
         }
 
         let mut response = NvList::new_unique_names();
-        response.insert("response_type", TYPE_GET_STATS).unwrap();
         response.insert("token", &request.token).unwrap();
         response.insert("stats", nvl.as_ref()).unwrap();
 
@@ -516,13 +513,8 @@ impl RootConnectionState {
                     .await;
             }
             #[derive(Debug, Serialize)]
-            struct ClosePoolResponse {
-                response_type: &'static str,
-            }
-            let response = ClosePoolResponse {
-                response_type: TYPE_CLOSE_POOL,
-            };
-            return_struct(response, true)
+            struct ClosePoolResponse {}
+            return_struct(ClosePoolResponse {}, true)
         }))
     }
 
@@ -550,14 +542,12 @@ impl RootConnectionState {
 
         #[derive(Debug, Serialize)]
         struct EnableFeatureResponse {
-            response_type: &'static str,
             feature: String,
         }
         let response = EnableFeatureResponse {
-            response_type: TYPE_ENABLE_FEATURE,
             feature: request.feature,
         };
-        handler_return_struct(response, true)
+        Ok(Box::pin(future::ready(return_struct(response, true))))
     }
 
     fn resume_destroy_pool(&mut self, nvl: NvList) -> HandlerReturn {
@@ -575,22 +565,16 @@ impl RootConnectionState {
             let result = pool_destroy::resume_destroy(object_access, request.guid)
                 .await
                 .map_err(FailureMessage::new);
-            return_result(TYPE_RESUME_DESTROY_POOL, (), result, true)
+            return_result((), result, true)
         }))
     }
 
     fn clear_hit_data(&mut self, _nvl: NvList) -> HandlerReturn {
         let cache = self.cache.clone();
         Ok(Box::pin(async move {
-            #[derive(Debug, Serialize)]
-            struct ClearHitDataResponse {
-                response_type: &'static str,
-                result: &'static str,
-            }
-
             debug!("got ClearHitDataRequest");
             cache.clear_hit_data().await;
-            return_ok(TYPE_CLEAR_HIT_DATA, (), true)
+            return_ok((), true)
         }))
     }
 
@@ -604,7 +588,7 @@ impl RootConnectionState {
                 .add_disk(&request.path)
                 .await
                 .map_err(FailureMessage::new);
-            return_result(TYPE_ADD_DISK, (), result, true)
+            return_result((), result, true)
         }))
     }
 
@@ -618,7 +602,7 @@ impl RootConnectionState {
                 .expand_disk(&request.path)
                 .await
                 .map_err(FailureMessage::new);
-            return_result(TYPE_EXPAND_DISK, (), result, true)
+            return_result((), result, true)
         }))
     }
 
@@ -628,7 +612,7 @@ impl RootConnectionState {
             debug!("got {:?}", nvl);
 
             cache.sync_checkpoint().await;
-            return_ok(TYPE_SYNC_CHECKPOINT, (), true)
+            return_ok((), true)
         }))
     }
 
@@ -638,7 +622,7 @@ impl RootConnectionState {
             debug!("got {:?}", nvl);
 
             cache.initiate_merge().await;
-            return_ok(TYPE_INITIATE_MERGE, (), true)
+            return_ok((), true)
         }))
     }
 }
@@ -660,11 +644,4 @@ where
         super_trace!("sending response nvl: {:?}", nvl);
     }
     Ok(Some(nvl))
-}
-
-fn handler_return_struct<T>(response: T, debug: bool) -> HandlerReturn
-where
-    T: Debug + Serialize,
-{
-    Ok(Box::pin(future::ready(return_struct(response, debug))))
 }

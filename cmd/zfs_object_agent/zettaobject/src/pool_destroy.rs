@@ -11,7 +11,6 @@ use anyhow::Result;
 use futures::stream::StreamExt;
 use lazy_static::lazy_static;
 use log::*;
-use nvpair::NvList;
 use serde::Deserialize;
 use serde::Serialize;
 use tokio::fs;
@@ -64,8 +63,8 @@ struct DestroyingCachePhys {
     pools: HashMap<PoolGuid, DestroyingCacheItemPhys>,
 }
 
-#[derive(Serialize, Debug)]
-struct DestroyingPool {
+#[derive(Serialize, Debug, Clone)]
+pub struct DestroyingPool {
     #[serde(flatten)]
     cache_phys: DestroyingCacheItemPhys,
     #[serde(flatten)]
@@ -136,17 +135,6 @@ impl DestroyingPoolsMap {
                 destroying_pool.cache_phys.state == PoolDestroyState::InProgress
             });
         }
-    }
-
-    fn to_nvlist(&self) -> NvList {
-        let mut nvl = NvList::new_unique_names();
-
-        for (guid, destroying_pool) in self.pools.iter() {
-            let nvl_item = nvpair::to_nvlist(destroying_pool).unwrap();
-            nvl.insert(format!("{}", guid), nvl_item.as_ref()).unwrap();
-        }
-
-        nvl
     }
 }
 
@@ -438,7 +426,7 @@ pub async fn resume_destroy(object_access: Arc<ObjectAccess>, guid: PoolGuid) ->
 
 /// Retrieve the PoolDestroyer's list of pools that are either being destroyed or have been
 /// destroyed.
-pub async fn get_destroy_list() -> NvList {
+pub async fn get_destroy_list() -> HashMap<PoolGuid, DestroyingPool> {
     maybe_die_with(|| "in get_destroy_list");
 
     let maybe_pool_destroyer = POOL_DESTROYER.lock().await;
@@ -446,7 +434,8 @@ pub async fn get_destroy_list() -> NvList {
         .as_ref()
         .unwrap()
         .destroying_pools_map
-        .to_nvlist()
+        .pools
+        .clone()
 }
 
 /// Remove pools that have been successfully destroyed from the PoolDestroyer's list of pools.

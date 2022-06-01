@@ -317,11 +317,14 @@ where
                     with_alloctag_hf("Server::start_connection() NvList::lookup_string()", || {
                         nvl.lookup_string(AGENT_REQUEST_TYPE)
                     })?;
-                let request_type = request_type_cstr.to_str()?;
-                match self.nvlist_handlers.get(request_type) {
+                let request_type = request_type_cstr.to_str()?.to_owned();
+                match self.nvlist_handlers.get(&request_type) {
                     Some(HandlerEnum::Serial(handler)) => {
                         let response_opt = handler(&mut state, nvl).await?;
-                        if let Some(response) = response_opt {
+                        if let Some(mut response) = response_opt {
+                            response
+                                .insert(AGENT_RESPONSE_TYPE, request_type.as_str())
+                                .unwrap();
                             responder.respond_with_nvlist(response);
                         }
                     }
@@ -331,7 +334,10 @@ where
                         let responder = responder.clone();
                         tokio::spawn(async move {
                             match fut.await {
-                                Ok(Some(response)) => {
+                                Ok(Some(mut response)) => {
+                                    response
+                                        .insert(AGENT_RESPONSE_TYPE, request_type.as_str())
+                                        .unwrap();
                                     responder.respond_with_nvlist(response);
                                 }
                                 Ok(None) => {}
@@ -513,7 +519,7 @@ pub enum FailureMessage {
 impl Debug for FailureMessage {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
-            FailureMessage::Other { message } => write!(f, "{}", message),
+            FailureMessage::Other { message } => write!(f, "{message}"),
         }
     }
 }
@@ -535,14 +541,14 @@ impl FailureMessage {
 /// (not tuple-like).  FailureMessage is an example.
 ///
 /// The response nvlist will have the following nvpairs:
-/// * "response_type" -> response_type (string)
 /// * fields from R
 /// * if result.is_ok(), fields from O
 /// * if result.is_err(), "err" -> EnumVariantName (string)
 /// * if result.is_err(), "errstr" -> stringified error (string)
 /// * if result.is_err(), fields from the varant of E
+///
+/// Note that the server infrastructure will add the "response_type" nvpair
 pub fn return_result<R, O, E>(
-    response_type: &str,
     request_id: R,
     result: Result<O, E>,
     debug: bool,
@@ -553,8 +559,7 @@ where
     E: Debug + Serialize,
 {
     #[derive(Debug, Serialize)]
-    struct Response<'a, R, O, E> {
-        response_type: &'a str,
+    struct Response<R, O, E> {
         #[serde(flatten)]
         request: R,
         #[serde(flatten)]
@@ -565,16 +570,15 @@ where
     }
 
     if let Err(e) = &result {
-        error!("sending failure: {:?}", e);
+        error!("sending failure: {e:?}");
     }
 
     let (ok, errstr, err) = match result {
         Ok(o) => (Some(o), None, None),
-        Err(e) => (None, Some(format!("{:?}", e)), Some(e)),
+        Err(e) => (None, Some(format!("{e:?}")), Some(e)),
     };
 
     let response = Response {
-        response_type,
         request: request_id,
         ok,
         err,
@@ -582,9 +586,9 @@ where
     };
 
     if debug {
-        trace!("sending response: {:?}", response);
+        trace!("sending response: {response:?}");
     } else {
-        super_trace!("sending response: {:?}", response);
+        super_trace!("sending response: {response:?}");
     }
 
     let nvl = nvpair::to_nvlist(&response)?;
@@ -596,17 +600,17 @@ where
     }
 
     if debug {
-        maybe_die_with(|| format!("before sending response: {:?}", nvl));
-        debug!("sending response nvl: {:?}", nvl);
+        maybe_die_with(|| format!("before sending response: {nvl:?}"));
+        debug!("sending response nvl: {nvl:?}");
     } else {
-        super_trace!("sending response nvl: {:?}", nvl);
+        super_trace!("sending response nvl: {nvl:?}");
     }
     Ok(Some(nvl))
 }
 
-pub fn return_ok<O>(response_type: &str, response: O, debug: bool) -> Result<Option<NvList>>
+pub fn return_ok<O>(response: O, debug: bool) -> Result<Option<NvList>>
 where
     O: Debug + Serialize,
 {
-    return_result(response_type, (), Ok::<_, ()>(response), debug)
+    return_result((), Ok::<_, ()>(response), debug)
 }
