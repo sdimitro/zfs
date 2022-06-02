@@ -75,12 +75,6 @@ libshare_init(void)
 	libshare_smb_init();
 }
 
-__attribute__((destructor)) static void
-libshare_fini(void)
-{
-	libshare_nfs_fini();
-}
-
 int
 sa_enable_share(const char *zfsname, const char *mountpoint,
     const char *shareopts, char *protocol)
