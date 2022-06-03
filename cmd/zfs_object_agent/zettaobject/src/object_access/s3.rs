@@ -165,6 +165,7 @@ impl S3ObjectAccess {
             RequestError::ExpiredCredentials => RequestError::ExpiredCredentials,
             RequestError::InvalidCredentials => RequestError::InvalidCredentials,
             RequestError::TimeSkew => RequestError::TimeSkew,
+            RequestError::EmulatorBug(s) => RequestError::EmulatorBug(s),
         }
     }
 

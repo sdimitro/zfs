@@ -277,11 +277,6 @@ make_objstore_vdev(nvlist_t *props, const char *protocol, const char *arg)
 		    "vdev %s\n"), arg);
 		fnvlist_free(vdev);
 		return (NULL);
-	} else if (err == 0 && !s3) {
-		fprintf(stderr, gettext("Endpoint provided for objstore "
-		    "vdev that doesn't support endpoints %s\n"), arg);
-		fnvlist_free(vdev);
-		return (NULL);
 	} else if (err == 0) {
 		fnvlist_add_string(vdev,
 		    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), endpoint);

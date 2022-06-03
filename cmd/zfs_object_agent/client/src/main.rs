@@ -55,6 +55,13 @@ const BUCKET_NAME: &str = "cloudburst-data-2";
 const POOL_NAME: &str = "testpool";
 const POOL_GUID: u64 = 1234;
 
+// The default URL including port number for Azurite.
+const AZURITE_EMULATOR_URL: &str = "http://127.0.0.1:10000";
+// The well-known account and key used by Azurite.
+const AZURITE_EMULATOR_ACCOUNT: &str = "devstoreaccount1";
+const AZURITE_EMULATOR_ACCOUNT_KEY: &str =
+    "Eby8vdM02xNOcqFlqUwJPLlmEtlCDXJ1OUzFT50uSRZ6IFsuFq2UVErCz4I6tq/K1SZFPTOtr/KBHBeksoGMGw==";
+
 static GIT_VERSION: &str = git_version!(
     fallback = match option_env!("CARGO_ZOA_GITREV") {
         Some(value) => value,
@@ -544,6 +551,8 @@ struct Cli {
     azure_key: Option<String>,
     #[clap(short = 'm', long)]
     managed_identity: bool,
+    #[clap(long, conflicts_with_all = &["managed-identity", "azure-account", "azure-key"])]
+    emulator: bool,
 
     #[clap(short, long, parse(from_occurrences))]
     verbose: usize,
@@ -666,7 +675,17 @@ impl From<Cli> for CliParams {
                     }
                 }
                 Protocol::Blob => ObjectAccessProtocol::Blob {
-                    credentials: if cli.managed_identity {
+                    endpoint: if cli.emulator {
+                        Some(AZURITE_EMULATOR_URL.to_string())
+                    } else {
+                        None
+                    },
+                    credentials: if cli.emulator {
+                        BlobCredentials::Key {
+                            azure_account: AZURITE_EMULATOR_ACCOUNT.to_string(),
+                            azure_key: AZURITE_EMULATOR_ACCOUNT_KEY.to_string(),
+                        }
+                    } else if cli.managed_identity {
                         BlobCredentials::ManagedCredentials {
                             azure_account: cli.azure_account.unwrap(),
                         }

@@ -15,8 +15,8 @@ use anyhow::Result;
 use async_stream::try_stream;
 use async_trait::async_trait;
 use azure_core::HttpError;
-use azure_identity::token_credentials::ImdsManagedIdentityCredential;
-use azure_identity::token_credentials::TokenCredential;
+use azure_identity::ImdsManagedIdentityCredential;
+use azure_identity::TokenCredential;
 use azure_storage::clients::AsStorageClient;
 use azure_storage::clients::StorageAccountClient;
 use azure_storage::clients::StorageClient;
@@ -40,6 +40,7 @@ use more_asserts::assert_le;
 use rusoto_core::ByteStream;
 use tokio::io::AsyncReadExt;
 use tokio::sync::RwLock;
+use url::Url;
 use util::tunable;
 
 use super::retry;
@@ -151,16 +152,12 @@ where
             HttpError::ExecuteRequest(err) => Self::InternalError(err.to_string()),
             HttpError::ReadBytes(err) => Self::InternalError(err.to_string()),
             HttpError::BuildResponse(err) => Self::InternalError(err.to_string()),
-            /*
-             * XXX Long term, we probably want to handle this, but for now this error
-             * probably only happens if we mess up our code for building requests. Panic
-             * to make it easier to debug and develop.
-             */
-            HttpError::StreamReset(err) => panic!("{}", err),
+            HttpError::Url(err) => Self::InternalError(err.to_string()),
             _ => todo!(),
         }
     }
 }
+
 impl<E> From<HttpError> for OAError<E>
 where
     E: MaybeFrom<HttpError> + Display,
@@ -176,8 +173,8 @@ struct BlobBucketClient {
 }
 
 impl BlobBucketClient {
-    async fn new(credentials: BlobCredentials) -> Result<Self> {
-        let (storage_client, expires_on) = get_azure_storage_client(credentials).await?;
+    async fn new(endpoint: Option<String>, credentials: BlobCredentials) -> Result<Self> {
+        let (storage_client, expires_on) = get_azure_storage_client(endpoint, credentials).await?;
         let blob_service = storage_client.as_blob_service_client();
         Ok(Self {
             blob_service,
@@ -198,14 +195,17 @@ impl BlobBucketClient {
 
 pub struct BlobBucketAccess {
     blob_bucket_client: RwLock<BlobBucketClient>,
+    endpoint: Option<String>,
     credentials: BlobCredentials,
 }
 
 impl BlobBucketAccess {
-    pub async fn new(credentials: BlobCredentials) -> Result<Self> {
-        let blob_bucket_client = BlobBucketClient::new(credentials.clone()).await?;
+    pub async fn new(endpoint: Option<String>, credentials: BlobCredentials) -> Result<Self> {
+        let blob_bucket_client =
+            BlobBucketClient::new(endpoint.clone(), credentials.clone()).await?;
         Ok(Self {
             blob_bucket_client: RwLock::new(blob_bucket_client),
+            endpoint,
             credentials,
         })
     }
@@ -214,7 +214,7 @@ impl BlobBucketAccess {
         let mut blob_bucket_client = self.blob_bucket_client.write().await;
         // Expiry might have been checked earlier but we check again after taking the write lock.
         if blob_bucket_client.is_expired() {
-            match BlobBucketClient::new(self.credentials.clone()).await {
+            match BlobBucketClient::new(self.endpoint.clone(), self.credentials.clone()).await {
                 Ok(new_blob_bucket_client) => {
                     info!("BlobServiceClient refreshed after the credential tokens expired");
                     *blob_bucket_client = new_blob_bucket_client;
@@ -290,9 +290,13 @@ struct BlobContainerClient {
 }
 
 impl BlobContainerClient {
-    async fn new(bucket: &str, credentials: BlobCredentials) -> Result<Self> {
+    async fn new(
+        endpoint: Option<String>,
+        bucket: &str,
+        credentials: BlobCredentials,
+    ) -> Result<Self> {
         let (storage_account_client, expires_on) =
-            get_azure_storage_client(credentials.clone()).await?;
+            get_azure_storage_client(endpoint, credentials.clone()).await?;
         let container_client = storage_account_client.as_container_client(bucket);
 
         Ok(Self {
@@ -314,6 +318,7 @@ impl BlobContainerClient {
 
 pub struct BlobObjectAccess {
     blob_container_client: RwLock<BlobContainerClient>,
+    endpoint: Option<String>,
     bucket: String,
     credentials: BlobCredentials,
     access_stats: ObjectAccessStats,
@@ -325,7 +330,13 @@ impl BlobObjectAccess {
         let mut blob_container_client = self.blob_container_client.write().await;
         // Expiry might have been checked earlier but we check again after taking the write lock.
         if blob_container_client.is_expired() {
-            match BlobContainerClient::new(&self.bucket, self.credentials.clone()).await {
+            match BlobContainerClient::new(
+                self.endpoint.clone(),
+                &self.bucket,
+                self.credentials.clone(),
+            )
+            .await
+            {
                 Ok(new_container_client) => {
                     info!("ContainerClient refreshed after the credential tokens expired");
                     *blob_container_client = new_container_client;
@@ -358,13 +369,19 @@ impl BlobObjectAccess {
         self.update_container_client().await
     }
 
-    pub async fn new(bucket: &str, credentials: BlobCredentials) -> Result<Self> {
-        let blob_client = BlobContainerClient::new(bucket, credentials.clone()).await?;
+    pub async fn new(
+        endpoint: Option<String>,
+        bucket: &str,
+        credentials: BlobCredentials,
+    ) -> Result<Self> {
+        let blob_client =
+            BlobContainerClient::new(endpoint.clone(), bucket, credentials.clone()).await?;
 
         Ok(Self {
             blob_container_client: RwLock::new(blob_client),
             access_stats: Default::default(),
             outstanding_ops: Default::default(),
+            endpoint,
             bucket: bucket.to_string(),
             credentials,
         })
@@ -372,6 +389,10 @@ impl BlobObjectAccess {
 
     pub fn bucket(&self) -> String {
         self.bucket.clone()
+    }
+
+    pub fn endpoint(&self) -> Option<String> {
+        self.endpoint.clone()
     }
 
     pub fn credentials_profile(&self) -> Option<String> {
@@ -386,8 +407,41 @@ impl BlobObjectAccess {
     where
         T: MaybeFrom<HttpError> + Display,
     {
-        let http_error: Box<HttpError> = e.downcast().unwrap();
-        OAError::from(*http_error)
+        match e.downcast::<HttpError>() {
+            Ok(http_error) => OAError::from(*http_error),
+            Err(err) => {
+                match err.downcast::<azure_storage::Error>() {
+                    Ok(az_err) => {
+                        match *az_err {
+                            azure_storage::Error::CoreError(azure_core::Error::Other(
+                                other_error,
+                            )) => {
+                                // Azurite does not support soft-delete. But it also does not tell
+                                // us that the delete is permanent by including
+                                // "x-ms-delete-type-permanent" in the header. The azure-sdk
+                                // looks for this header and not finding it, throws a CoreError.
+                                // See: https://github.com/Azure/azure-sdk-for-rust/issues/780
+                                // This is propagated as RequestError::EmulatorBug.
+                                if other_error
+                                    .to_string()
+                                    .contains("x-ms-delete-type-permanent")
+                                {
+                                    OAError::RequestError(RequestError::EmulatorBug(format!(
+                                        "EmulatorBug: {other_error}"
+                                    )))
+                                } else {
+                                    OAError::Other(anyhow!(
+                                        "azure_storage::Error::CoreError: {other_error}"
+                                    ))
+                                }
+                            }
+                            _ => OAError::Other(anyhow!("azure_storage::Error: {az_err}")),
+                        }
+                    }
+                    Err(e) => OAError::Other(anyhow!(e)),
+                }
+            }
+        }
     }
 }
 
@@ -496,14 +550,17 @@ impl ObjectAccessTrait for BlobObjectAccess {
                         match blob_client.delete().execute().await {
                             Err(e) => {
                                 debug!("error while deleting: {}", e);
-                                let err = Self::convert_error::<ObjectStoreError>(e);
-                                if let OAError::RequestError(RequestError::Service(
-                                    ObjectStoreError::NoSuchKey,
-                                )) = err
-                                {
-                                    Ok(None)
-                                } else {
-                                    Err(err)
+                                match Self::convert_error::<ObjectStoreError>(e) {
+                                    OAError::RequestError(RequestError::Service(
+                                        ObjectStoreError::NoSuchKey,
+                                    )) => Ok(None),
+                                    OAError::RequestError(RequestError::EmulatorBug(s)) => {
+                                        trace!(
+                                            "Hit emulator error which is expected; ignoring {s}"
+                                        );
+                                        Ok(None)
+                                    }
+                                    err => Err(err),
                                 }
                             }
                             Ok(res) => {
@@ -639,7 +696,7 @@ async fn get_azure_storage_client_with_managed_key(
     // There is a new AutoRefreshingTokenCredential wrapper in the repo that has not been released
     // yet. Once it is released, we should consider using it.
     // See: https://github.com/Azure/azure-sdk-for-rust/pull/673
-    let creds = ImdsManagedIdentityCredential {};
+    let creds = ImdsManagedIdentityCredential::default();
 
     let bearer_token = creds.get_token("https://storage.azure.com/").await?;
     let expires_on = bearer_token.expires_on;
@@ -653,39 +710,74 @@ async fn get_azure_storage_client_with_managed_key(
     Ok((client, Some(expires_on)))
 }
 
+fn get_azure_storage_emulator_client(
+    blob_storage: &str,
+    azure_account: &str,
+    azure_key: &str,
+) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
+    let http_client = azure_core::new_http_client();
+    let blob_storage_url = Url::parse(blob_storage).unwrap();
+
+    // We care only about the blob service but the API expects URLs to the other ones as well.
+    // So, we just pass the default values.
+    let queue_storage_url = Url::parse("http://127.0.0.1:10001").unwrap();
+    let table_storage_url = Url::parse("http://127.0.0.1:10002").unwrap();
+    let filesystem_url = Url::parse("http://127.0.0.1:10004").unwrap();
+
+    validate_azure_key(azure_key)?;
+
+    Ok((
+        StorageAccountClient::new_emulator_with_account(
+            http_client,
+            &blob_storage_url,
+            &table_storage_url,
+            &queue_storage_url,
+            &filesystem_url,
+            azure_account,
+            azure_key,
+        )
+        .as_storage_client(),
+        None,
+    ))
+}
+
 fn get_azure_storage_client_from_key(
+    endpoint: Option<String>,
     azure_account: &str,
     azure_key: &str,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     let http_client = azure_core::new_http_client();
     validate_azure_key(azure_key)?;
 
-    Ok((
-        StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
-            .as_storage_client(),
-        None,
-    ))
+    match endpoint {
+        Some(endpoint) => get_azure_storage_emulator_client(&endpoint, azure_account, azure_key),
+        None => Ok((
+            StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
+                .as_storage_client(),
+            None,
+        )),
+    }
 }
 
-fn get_azure_storage_client_from_env() -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
+fn get_azure_storage_client_from_env(
+    endpoint: Option<String>,
+) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     let http_client = azure_core::new_http_client();
-    let storage_client = match env::var("AZURE_CONNECTION_STRING") {
-        Ok(connection_string) => {
+    match env::var("AZURE_CONNECTION_STRING") {
+        Ok(connection_string) => Ok((
             StorageAccountClient::new_connection_string(http_client.clone(), &connection_string)?
-                .as_storage_client()
-        }
+                .as_storage_client(),
+            None,
+        )),
         Err(_) => {
             let azure_account = env::var("AZURE_ACCOUNT")?;
             let azure_key = env::var("AZURE_KEY")?;
 
-            validate_azure_key(&azure_key)?;
-            StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
-                .as_storage_client()
+            get_azure_storage_client_from_key(endpoint, &azure_account, &azure_key)
         }
-    };
-
-    Ok((storage_client, None))
+    }
 }
+
 fn get_credentials_file() -> Result<Ini> {
     let home_dir = dirs_next::home_dir();
     if home_dir.is_none() {
@@ -720,6 +812,7 @@ fn get_credentials_file() -> Result<Ini> {
 }
 
 fn get_azure_storage_client_from_profile_key(
+    endpoint: Option<String>,
     credentials_profile: String,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     let ini_file = get_credentials_file()?;
@@ -744,14 +837,7 @@ fn get_azure_storage_client_from_profile_key(
         Some(azure_key) => azure_key,
     };
 
-    validate_azure_key(azure_key)?;
-
-    let http_client = azure_core::new_http_client();
-    Ok((
-        StorageAccountClient::new_access_key(http_client, azure_account, azure_key)
-            .as_storage_client(),
-        None,
-    ))
+    get_azure_storage_client_from_key(endpoint, azure_account, azure_key)
 }
 
 /// Create a StorageClient after getting credentials the following sources in order:
@@ -760,10 +846,11 @@ fn get_azure_storage_client_from_profile_key(
 /// 3. managed identities.
 /// Once credentials have been successfully obtained from a source, we do not try the rest of the
 /// sources even if the credentials are invalid.
-async fn get_azure_storage_client_automatic() -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)>
-{
-    match get_azure_storage_client_from_env()
-        .or_else(|_| get_azure_storage_client_from_profile_key("default".to_string()))
+async fn get_azure_storage_client_automatic(
+    endpoint: Option<String>,
+) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
+    match get_azure_storage_client_from_env(endpoint.clone())
+        .or_else(|_| get_azure_storage_client_from_profile_key(endpoint, "default".to_string()))
     {
         Ok(tuple) => Ok(tuple),
         Err(_) => get_azure_storage_client_with_managed_key_profile("default".to_string()).await,
@@ -771,6 +858,7 @@ async fn get_azure_storage_client_automatic() -> Result<(Arc<StorageClient>, Opt
 }
 
 async fn get_azure_storage_client(
+    endpoint: Option<String>,
     credentials: BlobCredentials,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     match credentials {
@@ -781,7 +869,7 @@ async fn get_azure_storage_client(
             // be fetched via Managed Identity Credential. This are similar  to
             // BlobCredentials::Key and BlobCredentials::ManagedCredentials respectively, except for
             // the fact that it is passed via an ini file. We have to try both methods.
-            match get_azure_storage_client_from_profile_key(profile.clone()) {
+            match get_azure_storage_client_from_profile_key(endpoint.clone(), profile.clone()) {
                 Ok(tuple) => Ok(tuple),
                 Err(_) => get_azure_storage_client_with_managed_key_profile(profile).await,
             }
@@ -790,12 +878,15 @@ async fn get_azure_storage_client(
             azure_account,
             azure_key,
         } => Ok(get_azure_storage_client_from_key(
+            endpoint,
             &azure_account,
             &azure_key,
         )?),
         BlobCredentials::ManagedCredentials { azure_account } => {
             Ok(get_azure_storage_client_with_managed_key(&azure_account).await?)
         }
-        BlobCredentials::Automatic => Ok(get_azure_storage_client_automatic().await?),
+        BlobCredentials::Automatic => {
+            Ok(get_azure_storage_client_automatic(endpoint.clone()).await?)
+        }
     }
 }

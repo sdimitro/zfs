@@ -173,6 +173,7 @@ pub enum ObjectAccessProtocol {
         credentials: S3Credentials,
     },
     Blob {
+        endpoint: Option<String>,
         credentials: BlobCredentials,
     },
 }
@@ -200,6 +201,7 @@ impl<'de> Deserialize<'de> for ObjectAccessProtocol {
                 credentials: S3Credentials,
             },
             Blob {
+                endpoint: Option<String>,
                 credentials: BlobCredentials,
             },
         }
@@ -212,6 +214,7 @@ impl<'de> Deserialize<'de> for ObjectAccessProtocol {
                 credentials_profile: Option<String>,
             },
             Blob {
+                endpoint: Option<String>,
                 credentials_profile: Option<String>,
             },
         }
@@ -239,9 +242,13 @@ impl<'de> Deserialize<'de> for ObjectAccessProtocol {
                 region,
                 credentials,
             }),
-            Upgrader::Serialized(Serialized::Blob { credentials }) => {
-                Ok(Self::Blob { credentials })
-            }
+            Upgrader::Serialized(Serialized::Blob {
+                credentials,
+                endpoint,
+            }) => Ok(Self::Blob {
+                credentials,
+                endpoint,
+            }),
             Upgrader::S3Legacy {
                 endpoint,
                 region,
@@ -261,8 +268,10 @@ impl<'de> Deserialize<'de> for ObjectAccessProtocol {
                 credentials: credentials_profile.into(),
             }),
             Upgrader::Socket(Socket::Blob {
+                endpoint,
                 credentials_profile,
             }) => Ok(Self::Blob {
+                endpoint,
                 credentials: credentials_profile.into(),
             }),
         }
@@ -295,8 +304,11 @@ impl ObjectAccess {
                 S3ObjectAccess::new(&endpoint, &region, &bucket, credentials),
                 readonly,
             )),
-            ObjectAccessProtocol::Blob { credentials } => {
-                let oa = BlobObjectAccess::new(&bucket, credentials).await?;
+            ObjectAccessProtocol::Blob {
+                credentials,
+                endpoint,
+            } => {
+                let oa = BlobObjectAccess::new(endpoint, &bucket, credentials).await?;
                 Ok(ObjectAccess::from_blob(oa, readonly))
             }
         }
@@ -359,6 +371,7 @@ impl ObjectAccess {
                 },
             },
             ObjectAccessEnum::Blob(oa) => ObjectAccessProtocol::Blob {
+                endpoint: oa.endpoint(),
                 credentials: match oa.credentials_profile() {
                     Some(profile) => BlobCredentials::Profile(profile),
                     None => BlobCredentials::Automatic,
@@ -545,8 +558,11 @@ impl BucketAccess {
                     inner: BucketAccessEnum::S3(ba),
                 }))
             }
-            ObjectAccessProtocol::Blob { credentials } => {
-                let ba = BlobBucketAccess::new(credentials).await?;
+            ObjectAccessProtocol::Blob {
+                credentials,
+                endpoint,
+            } => {
+                let ba = BlobBucketAccess::new(endpoint, credentials).await?;
                 Ok(Arc::new(BucketAccess {
                     inner: BucketAccessEnum::Azure(ba),
                 }))
@@ -624,6 +640,7 @@ pub enum RequestError<E: Display> {
     InvalidCredentials,
     /// The request time and the server time were too far out of sync
     TimeSkew,
+    EmulatorBug(String),
 }
 
 impl<E: Display> Display for RequestError<E> {
@@ -636,6 +653,7 @@ impl<E: Display> Display for RequestError<E> {
             RequestError::ExpiredCredentials => f.write_str("Expired credentials"),
             RequestError::InvalidCredentials => f.write_str("Invalid credentials"),
             RequestError::TimeSkew => f.write_str("Request time too skewed"),
+            RequestError::EmulatorBug(s) => s.fmt(f),
         }
     }
 }

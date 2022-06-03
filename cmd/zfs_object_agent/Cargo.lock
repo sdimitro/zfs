@@ -90,6 +90,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "async-lock"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e97a171d191782fba31bb902b14ad94e24a68145032b7eedf871ab0bc0d077b6"
+dependencies = [
+ "event-listener",
+]
+
+[[package]]
 name = "async-stream"
 version = "0.3.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -227,6 +236,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "azure_core"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ca4393afee90ad13c987a2cbfeb5bbb0b9fb3c86585e42ed3ed151babaa93da1"
+dependencies = [
+ "async-trait",
+ "base64",
+ "bytes",
+ "chrono",
+ "dyn-clone",
+ "futures",
+ "getrandom",
+ "http",
+ "log",
+ "oauth2",
+ "pin-project",
+ "rand",
+ "reqwest",
+ "rustc_version",
+ "serde",
+ "serde_derive",
+ "serde_json",
+ "thiserror",
+ "url",
+ "uuid 1.0.0",
+]
+
+[[package]]
 name = "azure_identity"
 version = "0.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -234,7 +271,7 @@ checksum = "ebda98657980528a8f0f0f7cc85c88c7dabc160e026bf258d06e54b77b698b08"
 dependencies = [
  "async-timer",
  "async-trait",
- "azure_core",
+ "azure_core 0.1.1",
  "chrono",
  "futures",
  "log",
@@ -247,6 +284,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "azure_identity"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f2dc06f2cd86f196a9d33258bc486d611720420e39cf3ff15d0fb6a81f75bd72"
+dependencies = [
+ "async-lock",
+ "async-timer",
+ "async-trait",
+ "azure_core 0.2.2",
+ "base64",
+ "chrono",
+ "futures",
+ "log",
+ "oauth2",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "thiserror",
+ "url",
+ "uuid 1.0.0",
+]
+
+[[package]]
 name = "azure_storage"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -254,7 +314,7 @@ checksum = "22c413e8459badf86c9e6e0c84f5894609663bcc8fa5eb1e49bfb985273dac58"
 dependencies = [
  "RustyXML",
  "async-trait",
- "azure_core",
+ "azure_core 0.1.1",
  "base64",
  "bytes",
  "chrono",
@@ -273,14 +333,41 @@ dependencies = [
 ]
 
 [[package]]
+name = "azure_storage"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7a9f2aee687da9817f7b332e1e01dda51cd9f7a0a68a5abcfec7c4c494a65546"
+dependencies = [
+ "RustyXML",
+ "async-trait",
+ "azure_core 0.2.2",
+ "base64",
+ "bytes",
+ "chrono",
+ "futures",
+ "hmac 0.12.1",
+ "http",
+ "log",
+ "once_cell",
+ "serde",
+ "serde-xml-rs",
+ "serde_derive",
+ "serde_json",
+ "sha2 0.10.2",
+ "thiserror",
+ "url",
+ "uuid 1.0.0",
+]
+
+[[package]]
 name = "azure_storage_blobs"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a70ec6fab8a2cae5d774098267870c0f3fbef1cb63cac12afab38b8c17cc8d97"
 dependencies = [
  "RustyXML",
- "azure_core",
- "azure_storage",
+ "azure_core 0.1.1",
+ "azure_storage 0.1.0",
  "base64",
  "bytes",
  "chrono",
@@ -295,6 +382,31 @@ dependencies = [
  "thiserror",
  "url",
  "uuid 0.8.2",
+]
+
+[[package]]
+name = "azure_storage_blobs"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d17982127c4a34736a60656ddbd05b1714420686b6e6304145ee3b4501395e75"
+dependencies = [
+ "RustyXML",
+ "azure_core 0.2.2",
+ "azure_storage 0.2.0",
+ "base64",
+ "bytes",
+ "chrono",
+ "futures",
+ "http",
+ "log",
+ "md5",
+ "serde",
+ "serde-xml-rs",
+ "serde_derive",
+ "serde_json",
+ "thiserror",
+ "url",
+ "uuid 1.0.0",
 ]
 
 [[package]]
@@ -694,6 +806,7 @@ checksum = "f2fb860ca6fafa5552fb6d0e816a69c8e49f0908bf524e30a90d97c85892d506"
 dependencies = [
  "block-buffer 0.10.2",
  "crypto-common",
+ "subtle",
 ]
 
 [[package]]
@@ -774,6 +887,12 @@ dependencies = [
  "libc",
  "str-buf",
 ]
+
+[[package]]
+name = "event-listener"
+version = "2.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "77f3309417938f28bf8228fcff79a4a37103981e3e186d2ccd19c74b38f4eb71"
 
 [[package]]
 name = "exitcode"
@@ -1114,6 +1233,15 @@ checksum = "2a2a2320eb7ec0ebe8da8f744d7812d9fc4cb4d09344ac01898dbcb6a20ae69b"
 dependencies = [
  "crypto-mac",
  "digest 0.9.0",
+]
+
+[[package]]
+name = "hmac"
+version = "0.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c49c37c09c17a53d937dfbb742eb3a961d65a994e6bcdcf37e7399d0cc8ab5e"
+dependencies = [
+ "digest 0.10.3",
 ]
 
 [[package]]
@@ -2149,7 +2277,7 @@ dependencies = [
  "digest 0.9.0",
  "futures",
  "hex",
- "hmac",
+ "hmac 0.11.0",
  "http",
  "hyper",
  "log",
@@ -3254,10 +3382,10 @@ dependencies = [
  "arr_macro",
  "async-stream",
  "async-trait",
- "azure_core",
- "azure_identity",
- "azure_storage",
- "azure_storage_blobs",
+ "azure_core 0.2.2",
+ "azure_identity 0.3.0",
+ "azure_storage 0.2.0",
+ "azure_storage_blobs 0.2.0",
  "base64",
  "bincode",
  "bytes",
@@ -3295,6 +3423,7 @@ dependencies = [
  "stream-reduce",
  "tokio",
  "tokio-stream",
+ "url",
  "util",
  "uuid 1.0.0",
  "zettacache",
@@ -3357,10 +3486,10 @@ name = "zoa_test"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "azure_core",
- "azure_identity",
- "azure_storage",
- "azure_storage_blobs",
+ "azure_core 0.1.1",
+ "azure_identity 0.1.1",
+ "azure_storage 0.1.0",
+ "azure_storage_blobs 0.1.0",
  "chrono",
  "clap",
  "futures",

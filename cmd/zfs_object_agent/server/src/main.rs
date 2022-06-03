@@ -231,13 +231,14 @@ fn main() {
             });
         }
         Some(Commands::TestConnectivityBlob {
-            endpoint: _, // XXX DLPX-80615
+            endpoint,
             bucket,
             azure_account,
             azure_key,
             managed_identity,
         }) => {
             let protocol = ObjectAccessProtocol::Blob {
+                endpoint,
                 credentials: if managed_identity {
                     BlobCredentials::ManagedCredentials { azure_account }
                 } else {
