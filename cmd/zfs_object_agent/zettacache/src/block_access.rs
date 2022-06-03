@@ -55,12 +55,14 @@ use crate::base_types::Extent;
 
 tunable! {
     static ref MIN_SECTOR_SIZE: usize = 512;
-    static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = 32;
-    // Stop aggregating if run would exceed DISK_WRITE_MAX_AGGREGATION_SIZE
+    // Stop aggregating if run would exceed DISK_READ/WRITE_MAX_AGGREGATION_SIZE
+    pub static ref DISK_READ_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::kib(128);
     pub static ref DISK_WRITE_MAX_AGGREGATION_SIZE: ByteSize = ByteSize::kib(128);
     // CHUNK must be > MAX_AGG_SIZE, see Disk::write()
-    static ref DISK_WRITE_CHUNK: ByteSize = ByteSize::mib(1);
+    static ref DISK_AGG_CHUNK: ByteSize = ByteSize::mib(1);
     static ref DISK_WRITE_QUEUE_EMPTY_DELAY: Duration = Duration::from_millis(1);
+    static ref DISK_READ_QUEUE_EMPTY_DELAY: Duration = Duration::from_micros(10);
+    static ref DISK_WRITE_MAX_QUEUE_DEPTH: usize = 32;
     static ref DISK_METADATA_WRITE_MAX_QUEUE_DEPTH: usize = 16;
     pub static ref DISK_READ_MAX_QUEUE_DEPTH: usize = 64;
 }
@@ -151,7 +153,7 @@ pub struct Disk {
     #[derivative(Debug = "ignore")]
     io_stats: &'static DiskIoStats,
     #[derivative(Debug = "ignore")]
-    reader_tx: flume::Sender<ReadMessage>,
+    reader_txs: Vec<mpsc::UnboundedSender<ReadMessage>>,
     #[derivative(Debug = "ignore")]
     writer_txs: Vec<mpsc::UnboundedSender<WriteMessage>>,
     #[derivative(Debug = "ignore")]
@@ -218,8 +220,6 @@ impl Disk {
         let short_name = path.file_name().unwrap().to_string_lossy().to_string();
         let canonical_path = Path::new(path).canonicalize()?;
 
-        let (reader_tx, reader_rx) = flume::unbounded();
-
         let mut writer_txs = Vec::new();
         let mut writer_rxs = Vec::new();
         for _ in 0..*DISK_WRITE_MAX_QUEUE_DEPTH {
@@ -236,6 +236,14 @@ impl Disk {
             metadata_writer_rxs.push(rx);
         }
 
+        let mut reader_txs = Vec::new();
+        let mut reader_rxs = Vec::new();
+        for _ in 0..*DISK_READ_MAX_QUEUE_DEPTH {
+            let (tx, rx) = mpsc::unbounded_channel();
+            reader_txs.push(tx);
+            reader_rxs.push(rx);
+        }
+
         let io_stats = &*Box::leak(Box::new(DiskIoStats::new(short_name)));
 
         let this = Disk {
@@ -245,16 +253,15 @@ impl Disk {
             size: Mutex::new(size),
             sector_size,
             io_stats,
-            reader_tx,
+            reader_txs,
             writer_txs,
             metadata_writer_txs,
         };
 
-        for _ in 0..*DISK_READ_MAX_QUEUE_DEPTH {
-            let rx = reader_rx.clone();
-            // note, we want to use a "std" thread here rather than
-            // tokio::task::spawn_blocking() because the latter has a limit of how many
-            // threads it will create (default 512)
+        // note, we use "std" threads rather than tokio::task::spawn_blocking() because the
+        // latter has a limit of how many threads it will create (default 512)
+
+        for rx in reader_rxs {
             let file = this.file.clone();
             std::thread::spawn(move || {
                 Self::reader_thread(file, io_stats, sector_size, rx);
@@ -293,32 +300,91 @@ impl Disk {
         file: Arc<File>,
         io_stats: &'static DiskIoStats,
         sector_size: usize,
-        rx: flume::Receiver<ReadMessage>,
+        mut rx: mpsc::UnboundedReceiver<ReadMessage>,
     ) {
-        // When all the Senders of receiver `rx` are dropped (i.e. when the
-        // respective Disk of this thread is dropped), `recv()` will return an
-        // error and this thread will terminate without being leaked.
-        while let Ok(message) = rx.recv() {
-            let op = OpInProgress::new(&io_stats.stats[message.io_type]);
-            let vec = measure!()
-                .func(|| {
-                    pread_aligned(
-                        &file,
-                        message.offset.try_into().unwrap(),
-                        message.size,
-                        sector_size,
-                    )
-                })
+        /// returns (offsets, total_bytes)
+        fn find_run<'a, I: Iterator<Item = (&'a u64, &'a ReadMessage)>>(
+            mut iter: I,
+        ) -> Option<(Vec<u64>, usize, DiskIoType)> {
+            let (mut run, mut len, io_type) = if let Some((&offset, message)) = iter.next() {
+                (vec![offset], message.size, message.io_type)
+            } else {
+                return None;
+            };
+            for (&offset, message) in iter {
+                if len > 0 && len + message.size > DISK_READ_MAX_AGGREGATION_SIZE.as_usize() {
+                    break;
+                }
+                if message.io_type != io_type {
+                    break;
+                }
+                if offset == run[0] + len as u64 {
+                    run.push(offset);
+                    len += message.size;
+                } else {
+                    break;
+                }
+            }
+            Some((run, len, io_type))
+        }
+
+        let read_impl = |offset: u64, size, io_type| {
+            let op = OpInProgress::new(&io_stats.stats[io_type]);
+            let vec = measure!("pread_aligned")
+                .func(|| pread_aligned(&file, offset.try_into().unwrap(), size, sector_size))
                 .unwrap();
             assert_eq!(
                 vec.len(),
-                message.size,
+                size,
                 "fd={}, offset={}",
                 file.as_raw_fd(),
-                message.offset
+                offset
             );
-            op.end(message.size as u64);
-            message.tx.send(vec.into()).unwrap();
+            op.end(size as u64);
+            AlignedBytes::from(vec)
+        };
+
+        let mut sorted: BTreeMap<u64, ReadMessage> = BTreeMap::new();
+        let mut prev_offset = 0;
+
+        // When all the Senders of receiver `rx` are dropped (i.e. when the
+        // respective Disk of this thread is dropped), `blocking_recv()` will
+        // return an error and this thread will terminate without being leaked.
+        loop {
+            // Look for next run of messages in sorted queue
+            if let Some((run, len, io_type)) = find_run(iter_wrapping(&sorted, prev_offset)) {
+                // Issue one read for this run (which may have multiple messages)
+                let first_offset = run[0];
+                let bytes = read_impl(first_offset, len, io_type);
+                for offset in run {
+                    let message = sorted.remove(&offset).unwrap();
+                    assert_eq!(message.io_type, io_type);
+                    let relative_offset = (message.offset - first_offset).as_usize();
+                    let slice = &bytes[relative_offset..relative_offset + message.size];
+                    message.tx.send(bytes.slice_ref(slice)).unwrap();
+                }
+                prev_offset = first_offset;
+            } else {
+                // Nothing in `sorted`; wait for a message
+                let message = match rx.blocking_recv() {
+                    Some(message) => message,
+                    None => return,
+                };
+                sorted.insert(message.offset, message);
+                // Delay a bit to allow for more messages to arrive, to improve our chances of
+                // aggregation.
+                sleep(*DISK_READ_QUEUE_EMPTY_DELAY);
+            }
+
+            // Receive as many messages as we can without blocking
+            while let Ok(message) = rx.try_recv() {
+                if let Some(message) = sorted.insert(message.offset, message) {
+                    // duplicate read inserted; issue the old one immediately
+                    measure!("duplicate read").hit();
+                    let bytes = read_impl(message.offset, message.size, message.io_type);
+                    message.tx.send(bytes).unwrap();
+                }
+            }
         }
     }
 
@@ -342,8 +408,10 @@ impl Disk {
             tx,
         };
 
-        // note: reader_tx is unbounded, so .send() will not block
-        self.reader_tx.send(message).unwrap();
+        let reader = usize::from64(offset / DISK_AGG_CHUNK.as_u64() % self.reader_txs.len() as u64);
+        self.reader_txs[reader]
+            .send(message)
+            .unwrap_or_else(|e| panic!("reader_txs[{}].send: {}", reader, e));
         async move { measure!().fut(rx).await.unwrap() }
     }
 
@@ -489,14 +557,14 @@ impl Disk {
             _ => panic!("invalid {:?} for write", io_type),
         };
         // Dispatch this write to a writer thread, determined based on its offset.  The first
-        // DISK_WRITE_CHUNK (default 1MB) of the disk goes to the first thread, the second chunk
+        // DISK_AGG_CHUNK (default 1MB) of the disk goes to the first thread, the second chunk
         // to the second thread, and so on, wrapping back around to the first thread.  Note that
         // each block allocator slab (32MB) is mapped to multiple threads, so the work is
         // distributed to multiple threads even when it's concentrated among a small number of
         // slabs.  The CHUNK (1MB) is larger than the DISK_WRITE_MAX_AGGREGATION_SIZE (128KB) so
         // that we can find aggregations that cross MAX_AGG_SIZE boundaries (e.g. from offsets
         // 100KB to 228KB).
-        let writer = usize::from64(offset / DISK_WRITE_CHUNK.as_u64() % txs.len() as u64);
+        let writer = usize::from64(offset / DISK_AGG_CHUNK.as_u64() % txs.len() as u64);
         txs[writer]
             .send(message)
             .unwrap_or_else(|e| panic!("writer_txs[{}].send: {}", writer, e));

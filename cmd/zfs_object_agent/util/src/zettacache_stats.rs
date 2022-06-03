@@ -38,7 +38,7 @@ use crate::nice_p2size;
 use crate::write_stdout;
 
 /// The zettacache disk I/O types that are collected and displayed for each disk.
-#[derive(Debug, Enum, Copy, Clone, Serialize, Deserialize)]
+#[derive(Debug, Enum, Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub enum DiskIoType {
     ReadDataForLookup,
     ReadIndexForLookup,
