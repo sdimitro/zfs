@@ -349,10 +349,9 @@ impl IoStats {
     pub fn max_name_len(&self) -> usize {
         self.disk_stats
             .iter()
-            .max_by_key(|stats| stats.name.len())
-            .unwrap()
-            .name
-            .len()
+            .map(|stats| stats.name.len())
+            .max()
+            .unwrap_or_default()
     }
 }
 
