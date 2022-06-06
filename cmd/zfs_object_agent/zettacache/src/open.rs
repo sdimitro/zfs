@@ -1,6 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::os::unix::fs::FileTypeExt;
 use std::path::Path;
 use std::path::PathBuf;
 
@@ -56,6 +57,12 @@ impl DiscoveredDevice {
         let mut file = File::open(&path)
             .await
             .with_context(|| format!("open {path:?}"))?;
+
+        let filetype = file.metadata().await?.file_type();
+        if !filetype.is_block_device() && !filetype.is_file() {
+            return Err(anyhow!("{path:?} is not a file nor a block device"));
+        }
+
         let mut buf = vec![0u8; SUPERBLOCK_SIZE];
         file.read_exact(&mut buf)
             .await
