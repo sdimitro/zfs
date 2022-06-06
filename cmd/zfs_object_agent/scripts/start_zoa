@@ -70,4 +70,4 @@ else
 	done
 fi
 
-/sbin/zfs_object_agent ${PARAMS}
+exec /sbin/zfs_object_agent ${PARAMS}
