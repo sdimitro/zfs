@@ -7,6 +7,7 @@
 #  - ZOA_CONFIG: Configuration file to set tunables (toml/json/yaml)
 #  - ZOA_LOG_CONFIG : log4rs configuration
 #  - ZETTACACHE_DEVICES: File[s]/device[s] to use for ZettaCache
+#  - ZETTACACHE_DIRECTORY: Directory to use for ZettaCache device discovery.
 #
 
 DEV_WAIT=300
@@ -40,7 +41,27 @@ if [[ ! -z $ZOA_CONFIG ]]; then
 	PARAMS="${PARAMS} -t ${ZOA_CONFIG}"
 fi
 
-if [[ ! -z $ZETTACACHE_DEVICES ]]; then
+#
+# The "-c" and "-d" options are mutually exclusive. Thus, if both
+# ZETTACACHE_DEVICES and ZETTACACHE_DIRECTORY are provided, we could
+# wind up in a situation where starting the agent fails (e.g. if we
+# naively used both "-c" and "-d" simultaneously).
+#
+# Rather than failing, if ZETTACACHE_DEVICES is supplied, we prioritize
+# that over ZETTACACHE_DIRECTORY. This way, we prefer to not fail, and
+# prefer the more user supplied configuraiton that specifies exactly
+# which devices to use.
+#
+# Additionally, if neither ZETTACACHE_DEVICES nor ZETTACACHE_DIRECTORY
+# is supplied, we use "-d" but with a default value. This way, if the
+# agent/service is being used, and disks were dynamically added (e.g.
+# via "zcache add"), those devices should be automatically discovered
+# after an agent/service restart, rather than restarting without any
+# cache (which would effectively undo any prior "zcache add").
+#
+if [[ -z $ZETTACACHE_DEVICES ]]; then
+	PARAMS="$PARAMS -d ${ZETTACACHE_DIRECTORY:-/dev}"
+else
 	echo "ZettaCache: ${ZETTACACHE_DEVICES}"
 	ZETTACACHE_DEVICES=(${ZETTACACHE_DEVICES//,/\ })
 	for dev in "${ZETTACACHE_DEVICES[@]}"; do
