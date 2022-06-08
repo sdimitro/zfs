@@ -80,8 +80,16 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<V
     let mut canonical_entries = HashSet::new();
     let mut dir = fs::read_dir(dir_path).await?;
     while let Some(entry) = dir.next_entry().await? {
-        if entry.metadata().await?.is_dir() {
-            continue;
+        match entry.metadata().await {
+            Ok(meta) => {
+                if meta.is_dir() {
+                    continue;
+                }
+            }
+            Err(why) => {
+                debug!("discovery: {entry:?}.metadata() failed. error: {why:?}");
+                continue;
+            }
         }
 
         // In certain directories under /dev we've come across device symlinks
@@ -90,18 +98,25 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<V
         // resolve device symlinks and skip the ones whose device files we've
         // encountered already.
         let path = entry.path();
-        let canonical_path = fs::canonicalize(&path).await?;
-        if canonical_entries.contains(&canonical_path) {
-            continue;
-        }
-        canonical_entries.insert(canonical_path);
+        match fs::canonicalize(&path).await {
+            Ok(canonical_path) => {
+                if !canonical_entries.contains(&canonical_path) {
+                    canonical_entries.insert(canonical_path);
 
-        // We use the original directory path here instead of the
-        // resolved/canonical path to avoid surprising the user. E.g. `zcache
-        // list -f` should show device paths from the discovery directory
-        // supplied by the user instead of the resolved device paths.
-        discovery.push(DiscoveredDevice::from_path(path))
+                    // We use the original directory path here instead of the
+                    // resolved/canonical path to avoid surprising the user. E.g. `zcache
+                    // list -f` should show device paths from the discovery directory
+                    // supplied by the user instead of the resolved device paths.
+                    discovery.push(DiscoveredDevice::from_path(path))
+                }
+            }
+            Err(why) => {
+                debug!("discovery: fs::canonicalize({path:?}) failed. error: {why:?}");
+                continue;
+            }
+        }
     }
+
     while let Some(result) = discovery.next().await {
         match result {
             Ok(device) => {
