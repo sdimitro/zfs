@@ -14,6 +14,7 @@ use anyhow::Context;
 use anyhow::Result;
 use async_stream::try_stream;
 use async_trait::async_trait;
+use azure_core::prelude::NextMarker;
 use azure_core::HttpError;
 use azure_identity::ImdsManagedIdentityCredential;
 use azure_identity::TokenCredential;
@@ -259,28 +260,34 @@ impl BlobBucketAccess {
 impl BucketAccessTrait for BlobBucketAccess {
     async fn list_buckets(&self) -> Vec<String> {
         let msg = "list_buckets";
-        let list_output = retry(msg, None, || async {
-            let result = self
-                .get_bucket_client()
-                .await
-                .list_containers()
-                .execute()
-                .await
-                .map_err(|e| {
+        let mut next_marker: Option<NextMarker> = None;
+        let mut buckets = Vec::new();
+
+        loop {
+            let list_output = retry(msg, None, || async {
+                let bucket_client = self.get_bucket_client().await;
+                let list_containers_builder = bucket_client.list_containers();
+                let list_containers_builder = if let Some(nm) = next_marker.as_ref() {
+                    list_containers_builder.next_marker(nm.clone())
+                } else {
+                    list_containers_builder
+                };
+
+                list_containers_builder.execute().await.map_err(|e| {
                     debug!("{}: {}", msg, e);
                     Self::convert_error::<ObjectStoreError>(e)
-                });
+                })
+            })
+            .await
+            .unwrap();
 
-            result
-        })
-        .await;
+            buckets.extend(list_output.incomplete_vector.iter().map(|c| c.name.clone()));
 
-        list_output
-            .unwrap()
-            .incomplete_vector
-            .iter()
-            .map(|c| c.name.clone())
-            .collect()
+            next_marker = list_output.incomplete_vector.next_marker().cloned();
+            if next_marker.is_none() {
+                return buckets;
+            }
+        }
     }
 }
 
@@ -608,47 +615,59 @@ impl ObjectAccessTrait for BlobObjectAccess {
     ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>> {
         let msg = format!("list {} (after {:?})", prefix, start_after);
         let list_prefix = prefix;
+        let mut next_marker: Option<NextMarker> = None;
 
         Box::pin(try_stream! {
-            let output = retry(&msg, None, || async {
-                let container_client = self.get_container_client().await;
-                let list_builder = match use_delimiter {
-                    true =>
-                        container_client
-                            .list_blobs()
-                            .prefix(list_prefix.as_str())
-                            .delimiter("/"),
-                    false =>
-                        container_client
-                            .list_blobs()
-                            .prefix(list_prefix.as_str())
-                };
-                match list_builder.execute().await
-                {
-                    Err(e) => {
-                        debug!("{}: {}", &msg, e);
-                        Err(Self::convert_error::<ObjectStoreError>(e))
+            loop {
+                let output = retry(&msg, None, || async {
+                    let container_client = self.get_container_client().await;
+                    let list_builder = match use_delimiter {
+                        true =>
+                            container_client
+                                .list_blobs()
+                                .prefix(list_prefix.as_str())
+                                .delimiter("/"),
+                        false =>
+                            container_client
+                                .list_blobs()
+                                .prefix(list_prefix.as_str())
+                    };
+                    let list_builder = if let Some(nm) = next_marker.as_ref() {
+                        list_builder.next_marker(nm.clone())
+                    } else {
+                        list_builder
+                    };
+                    match list_builder.execute().await
+                    {
+                        Err(e) => {
+                            debug!("{}: {}", &msg, e);
+                            Err(Self::convert_error::<ObjectStoreError>(e))
+                        }
+                        Ok(res) => Ok(res),
                     }
-                    Ok(res) => Ok(res),
-                }
-            })
-            .await?;
+                })
+                .await?;
 
-            // XXX The performance of this is likely to be quite bad. We need a better solution. DOSE-1215
-            let initial = start_after.unwrap_or("".to_string());
-            if list_prefixes {
-                if let Some(prefixes) = output.blobs.blob_prefix {
-                    for blob_prefix in prefixes {
-                        if initial < blob_prefix.name {
-                            yield blob_prefix.name;
+                // XXX The performance of this is likely to be quite bad. We need a better solution. DOSE-1215
+                let initial = start_after.clone().unwrap_or_default();
+                if list_prefixes {
+                    if let Some(prefixes) = output.blobs.blob_prefix {
+                        for blob_prefix in prefixes {
+                            if initial < blob_prefix.name {
+                                yield blob_prefix.name;
+                            }
+                        }
+                    }
+                } else {
+                    for blob in output.blobs.blobs {
+                        if initial < blob.name {
+                            yield blob.name;
                         }
                     }
                 }
-            } else {
-                for blob in output.blobs.blobs {
-                    if initial < blob.name {
-                        yield blob.name;
-                    }
+                next_marker = output.next_marker.clone();
+                if (next_marker.is_none()) {
+                    break;
                 }
             }
         })

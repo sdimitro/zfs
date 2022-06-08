@@ -9,6 +9,7 @@ use std::fs;
 use std::fs::File;
 use std::io::prelude::*;
 use std::io::Read;
+use std::num::NonZeroU32;
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
@@ -456,8 +457,7 @@ async fn get_object_access(cli_params: CliParams) -> Arc<ObjectAccess> {
         .unwrap()
 }
 
-async fn do_blob(cli_params: CliParams) -> Result<(), Box<dyn Error>> {
-    let key = "blob2.txt".to_string();
+async fn do_blob(cli_params: CliParams, count: NonZeroU32) -> Result<(), Box<dyn Error>> {
     let bucket_access = BucketAccess::new(cli_params.oa_protocol.clone()).await?;
     let buckets = bucket_access.list_buckets().await;
     println!("List containers {:?}", buckets);
@@ -468,21 +468,24 @@ async fn do_blob(cli_params: CliParams) -> Result<(), Box<dyn Error>> {
     let object_access = ObjectAccess::new(cli_params.oa_protocol, cli_params.bucket, false).await?;
 
     let content = "I want to go to azure".as_bytes().to_vec();
-    object_access
-        .put_object_stream(
-            key.clone(),
-            || (ByteStream::from(content.clone()), content.len()),
-            ObjectAccessOpType::MetadataPut,
-        )
-        .await;
+    for n in 0..count.get() {
+        let key = format!("blob_{}.txt", n);
+        object_access
+            .put_object_stream(
+                key.clone(),
+                || (ByteStream::from(content.clone()), content.len()),
+                ObjectAccessOpType::MetadataPut,
+            )
+            .await;
 
-    let bytes = object_access
-        .get_object(key.clone(), ObjectAccessOpType::ReadsGet)
-        .await?;
-    println!("Get blob data [{}]: {:?}", key, bytes);
+        let bytes = object_access
+            .get_object(key.clone(), ObjectAccessOpType::ReadsGet)
+            .await?;
+        println!("Get blob data [{}]: {:?}", key, bytes);
 
-    let stat = object_access.stat_object(key.clone()).await;
-    println!("Last modified: [{}]: {:?}", key, stat);
+        let stat = object_access.stat_object(key.clone()).await;
+        println!("Last modified: [{}]: {:?}", key, stat);
+    }
 
     println!(
         "List blobs {:?}",
@@ -492,7 +495,10 @@ async fn do_blob(cli_params: CliParams) -> Result<(), Box<dyn Error>> {
             .await
     );
 
-    object_access.delete_object(key).await;
+    for n in 0..count.get() {
+        let key = format!("blob_{}.txt", n);
+        object_access.delete_object(key).await;
+    }
 
     Ok(())
 }
@@ -563,7 +569,10 @@ struct Cli {
 #[derive(Clone, Subcommand)]
 enum Commands {
     S3Rusoto,
-    Blob,
+    Blob {
+        #[clap(short = 'c', long, default_value = "10")]
+        count: NonZeroU32,
+    },
     BlobLoop {
         #[clap(
             short = 's',
@@ -736,7 +745,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     match cli.command {
         Commands::S3Rusoto => do_s3_rusoto().await?,
-        Commands::Blob => do_blob(cli_params).await?,
+        Commands::Blob { count } => do_blob(cli_params, count).await?,
         Commands::BlobLoop { seconds } => do_blob_loop(&object_access, seconds).await?,
         Commands::Create => do_create().await?,
         Commands::Write => do_write().await?,
