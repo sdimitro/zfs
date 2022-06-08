@@ -23,7 +23,7 @@ use crate::size_histogram::SizeHistogramPhys;
 use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::slab_allocator::SlabAllocatorPhys;
-use crate::zettacache::MergeProgressPhys;
+use crate::zettacache::merge::MergeProgressPhys;
 use crate::zettacache::OperationLogEntry;
 
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
