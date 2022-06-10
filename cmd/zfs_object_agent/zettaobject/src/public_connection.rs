@@ -3,6 +3,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::Mutex;
 
+use anyhow::Context;
 use futures::stream::StreamExt;
 use log::*;
 use nvpair::NvList;
@@ -23,7 +24,9 @@ use crate::pool::*;
 use crate::pool_destroy;
 use crate::pool_destroy::DestroyingPool;
 use crate::server::return_ok;
+use crate::server::return_result;
 use crate::server::ConnectionState;
+use crate::server::FailureMessage;
 use crate::server::HandlerReturn;
 use crate::server::Server;
 
@@ -99,8 +102,24 @@ impl PublicConnectionState {
                 bucket: Option<String>,
                 guid: Option<u64>,
             }
-            let request: GetPoolsRequest = nvpair::from_nvlist(&nvl)?;
-            let bucket_access = BucketAccess::new(request.protocol.clone()).await?;
+            let request: GetPoolsRequest =
+                match nvpair::from_nvlist(&nvl).context("bad or insufficient parameters") {
+                    Ok(request) => request,
+                    Err(e) => {
+                        let result = Err::<(), _>(FailureMessage::new(e));
+                        return return_result((), result, true);
+                    }
+                };
+            let bucket_access = match BucketAccess::new(request.protocol.clone())
+                .await
+                .context("connection error")
+            {
+                Ok(bucket_access) => bucket_access,
+                Err(e) => {
+                    let result = Err::<(), _>(FailureMessage::new(e));
+                    return return_result((), result, true);
+                }
+            };
             let buckets = if let Some(bucket) = request.bucket {
                 vec![bucket]
             } else {

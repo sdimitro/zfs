@@ -1901,6 +1901,13 @@ zpool_find_import_agent(libpc_handle_t *hdl, importargs_t *iarg,
 	nvlist_t *resp = zoa_send_recv_msg(hdl, msg,
 	    AGENT_PUBLIC_PROTOCOL_VERSION, ZFS_PUBLIC_SOCKET, NULL);
 
+	char *err;
+	if (nvlist_lookup_string(resp, "errstr", &err) == 0) {
+		fprintf(stderr, "Agent pool scan failed: %s\n", err);
+		fnvlist_free(resp);
+		return;
+	}
+
 	nvlist_t *pools = NULL;
 	(void) nvlist_lookup_nvlist(resp, "pools", &pools);
 
