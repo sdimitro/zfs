@@ -1,5 +1,6 @@
 use std::time::Instant;
 
+use anyhow::Result;
 use futures::future;
 use futures::stream::FuturesOrdered;
 use futures::stream::StreamExt;
@@ -48,7 +49,7 @@ pub struct CheckpointPhys {
 }
 
 impl CheckpointPhys {
-    pub async fn read(block_access: &BlockAccess, extents: &[Extent]) -> Self {
+    pub async fn read(block_access: &BlockAccess, extents: &[Extent]) -> Result<Self> {
         let raw = extents
             .iter()
             .map(|&extent| block_access.read_raw(extent, DiskIoType::MaintenanceRead))
@@ -58,9 +59,9 @@ impl CheckpointPhys {
                 future::ready(vec)
             })
             .await;
-        let (this, _): (Self, usize) = block_access.chunk_from_raw(&raw).unwrap();
+        let (this, _) = block_access.chunk_from_raw(&raw)?;
         debug!("got {:#?}", this);
-        this
+        Ok(this)
     }
 
     pub async fn write(

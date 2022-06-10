@@ -551,8 +551,7 @@ impl Inner {
         let (mut primary, primary_disk, guid, extra_disks) =
             PrimaryPhys::read(&block_access).await.unwrap();
 
-        // XXX proper error handling
-        let mut checkpoint = CheckpointPhys::read(&block_access, &primary.checkpoint).await;
+        let mut checkpoint = CheckpointPhys::read(&block_access, &primary.checkpoint).await?;
         assert_eq!(checkpoint.id, primary.checkpoint_id);
 
         let mut size_changed = false;

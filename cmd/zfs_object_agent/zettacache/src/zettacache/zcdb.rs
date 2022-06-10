@@ -54,7 +54,7 @@ impl ZCacheDBHandle {
         let block_access = Arc::new(BlockAccess::new(disks, true));
 
         let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
-        let checkpoint = Arc::new(CheckpointPhys::read(&block_access, &primary.checkpoint).await);
+        let checkpoint = Arc::new(CheckpointPhys::read(&block_access, &primary.checkpoint).await?);
 
         let mut slab_builder = SlabAllocatorBuilder::new(checkpoint.slab_allocator.clone());
         // We should be able to get away without claiming the metadata space,
