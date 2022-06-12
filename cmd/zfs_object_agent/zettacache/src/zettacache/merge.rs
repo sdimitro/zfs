@@ -103,7 +103,9 @@ impl MergeMessage {
         let timer = Instant::now();
         let free_count = frees.len();
         let cache_updates_count = cache_updates.len();
-        let (new_index, index_delta) = next_index.flush().await;
+        let (new_index, index_delta) = measure!("new_progress() next_index.flush()")
+            .fut_timed(next_index.flush())
+            .await;
         let message = MergeProgress {
             new_index,
             index_delta,
@@ -265,6 +267,8 @@ impl Progress {
     /// nothing to send.
     async fn report(&mut self) {
         if let Some(last_key) = self.last_key {
+            let entries_len = self.entries.len();
+            let frees_len = self.frees.len();
             measure!("Progress::report() tx.send(IndexMessage)")
                 .fut_timed(self.tx.send(IndexMessage {
                     last_key,
@@ -280,9 +284,7 @@ impl Progress {
                 .await
                 .unwrap_or_else(|e| panic!("couldn't send: {e}"));
             trace!(
-                "Collected and sent {} entries and {} frees to next_index_task in {}ms",
-                self.entries.len(),
-                self.frees.len(),
+                "Collected and sent {entries_len} entries and {frees_len} frees to next_index_task after {}ms",
                 self.timer.elapsed().as_millis()
             );
             self.timer = Instant::now();

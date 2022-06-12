@@ -1,3 +1,6 @@
+pub mod lock;
+pub mod lock_non_send;
+
 use core::fmt;
 use std::fmt::Display;
 use std::future::Future;
@@ -49,6 +52,27 @@ impl Measurement {
         });
     }
 
+    fn begin(&self) {
+        self.count.fetch_add(1, Ordering::Relaxed);
+        self.inflight.fetch_add(1, Ordering::Relaxed);
+    }
+
+    fn end(&self) {
+        self.inflight.fetch_sub(1, Ordering::Relaxed);
+    }
+
+    fn begin_timed(&self) -> Instant {
+        self.begin();
+        Instant::now()
+    }
+
+    fn end_timed(&self, begin: Instant) {
+        self.end();
+        #[allow(clippy::cast_possible_truncation)]
+        let elapsed = begin.elapsed().as_nanos() as u64;
+        self.nanos.fetch_add(elapsed, Ordering::Relaxed);
+    }
+
     /// Wrap the provided future in one that will measure its execution.
     // Lifetime annotations say that self must live longer than the `future` argument.  This is
     // typically satisfied by `&'static self`, i.e. the static Measurement created by `measure!()`.
@@ -66,12 +90,9 @@ impl Measurement {
             // times.
             self.fut_size.store(size_of_val(&future), Ordering::Relaxed);
         }
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.inflight.fetch_add(1, Ordering::Relaxed);
+        self.begin();
         // We don't use an async function or closure because it doubles the size of the future.
-        future.inspect(move |_| {
-            self.inflight.fetch_sub(1, Ordering::Relaxed);
-        })
+        future.inspect(|_| self.end())
     }
 
     pub fn fut_timed<'a, 'b, R>(
@@ -95,10 +116,9 @@ impl Measurement {
     where
         F: FnOnce() -> R,
     {
-        self.count.fetch_add(1, Ordering::Relaxed);
-        self.inflight.fetch_add(1, Ordering::Relaxed);
+        self.begin();
         let result = f();
-        self.inflight.fetch_sub(1, Ordering::Relaxed);
+        self.end();
         result
     }
 
@@ -107,11 +127,9 @@ impl Measurement {
     where
         F: FnOnce() -> R,
     {
-        let begin = Instant::now();
+        let begin = self.begin_timed();
         let result = self.func(f);
-        #[allow(clippy::cast_possible_truncation)]
-        let elapsed = begin.elapsed().as_nanos() as u64;
-        self.nanos.fetch_add(elapsed, Ordering::Relaxed);
+        self.end_timed(begin);
         result
     }
 

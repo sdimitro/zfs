@@ -44,7 +44,8 @@ use tokio::sync::OwnedSemaphorePermit;
 use tokio::sync::Semaphore;
 use tokio::time::sleep_until;
 use util::concurrent_batch::ConcurrentBatch;
-use util::lock_non_send;
+use util::lock_measured;
+use util::lock_non_send_measured;
 use util::measure;
 use util::message::ExpandDiskResponse;
 use util::nice_p2size;
@@ -819,7 +820,7 @@ impl Inner {
                     CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64()
                         - cache.demand_buffer_bytes_available.available_permits() as u64,
                 );
-                measure!().fut(lock_non_send(&locked)).await.update_stats();
+                lock_non_send_measured!(&locked).await.update_stats();
             }
         });
 
@@ -881,7 +882,7 @@ impl Inner {
         loop {
             // if there is no current merging state, check to see if a merge should be started
             {
-                let mut locked = self.locked.lock().await;
+                let mut locked = lock_measured!(&self.locked).await;
                 if locked.merge.is_none() {
                     assert!(merging.is_none());
                     merging = locked.try_start_merge_task(self.old_index.clone()).await;
@@ -931,7 +932,7 @@ impl Inner {
                             );
 
                             {
-                                let mut locked = self.locked.lock().await;
+                                let mut locked = lock_non_send_measured!(&self.locked).await;
                                 let begin = Instant::now();
 
                                 // free the extent ranges associated with the evicted blocks
@@ -993,7 +994,7 @@ impl Inner {
                             let mut old_index = self.old_index.write().await;
                             let mut new_index_opt = self.new_index.write().await;
 
-                            let mut locked = self.locked.lock().await;
+                            let mut locked = lock_measured!(&self.locked).await;
                             locked.rotate_index(&mut old_index, new_index).await;
                             locked.block_allocator.rebalance_fini();
                             *new_index_opt = None;
@@ -1052,7 +1053,10 @@ impl Inner {
             let begin = Instant::now();
             // Bind to a variable here so that we can drop the state lock before waiting for the
             // batch of reads to complete.
-            let outstanding_reads = lock_non_send(&self.locked).await.outstanding_reads.rotate();
+            let outstanding_reads = lock_non_send_measured!(&self.locked)
+                .await
+                .outstanding_reads
+                .rotate();
             outstanding_reads.await;
             debug!(
                 "waited for outstanding_reads in {}ms",
@@ -1065,7 +1069,7 @@ impl Inner {
             // index/operation_log will actually have the correct contents.  See above comments
             // on how the ConcurrentBatch is manipulated.
             let begin = Instant::now();
-            let outstanding_writes = lock_non_send(&self.locked)
+            let outstanding_writes = lock_non_send_measured!(&self.locked)
                 .await
                 .outstanding_writes
                 .rotate();
@@ -1078,7 +1082,7 @@ impl Inner {
 
         let (old_index_phys, delta) = self.old_index.write().await.flush().await;
         assert!(delta.is_empty());
-        let mut locked = self.locked.lock().await;
+        let mut locked = lock_measured!(&self.locked).await;
 
         // Now that we have the state lock, we need to wait for outstanding i/os again, because
         // more i/os could have been initiated while we were waiting above.  Those i/os will
@@ -1183,7 +1187,7 @@ impl Inner {
         let fut_or_f = {
             // We don't want to hold the state lock while reading from disk so we use
             // lock_non_send() to ensure that we can't hold it across .await.
-            let mut locked = measure!().fut(lock_non_send(&self.locked)).await;
+            let mut locked = lock_non_send_measured!(&self.locked).await;
 
             let got_value = |locked: &mut Locked, f: F, counter, value| {
                 if count_ghost_hits {
@@ -1265,7 +1269,7 @@ impl Inner {
             Some(entry) => {
                 // Again, we don't want to hold the state lock while reading from disk so we use
                 // lock_non_send() to ensure that we can't hold it across .await.
-                let mut locked = measure!().fut(lock_non_send(&self.locked)).await;
+                let mut locked = lock_non_send_measured!(&self.locked).await;
 
                 // The LockedKey prevents an entry for this key from being inserted while we
                 // weren't holding the state lock.
@@ -1282,7 +1286,7 @@ impl Inner {
             None => {
                 // key not in index
                 super_trace!("lookup {key:?}: cache miss after reading index");
-                let mut locked = measure!().fut(lock_non_send(&self.locked)).await;
+                let mut locked = lock_non_send_measured!(&self.locked).await;
                 f(&mut locked, None)
             }
         };
@@ -1344,11 +1348,10 @@ impl Inner {
             bytes
         };
         let len = bytes.len() as u64;
-        let fut = measure!().fut(lock_non_send(&self.locked)).await.insert(
-            locked_key,
-            &self.pool_guids,
-            bytes,
-        );
+        let fut =
+            lock_non_send_measured!(&self.locked)
+                .await
+                .insert(locked_key, &self.pool_guids, bytes);
         match measure!().fut(fut).await {
             Ok(_) => {
                 self.stats.track_bytes(InsertBytes, len);
@@ -1483,20 +1486,20 @@ impl Inner {
     }
 
     async fn add_disk(&self, path: &Path) -> Result<()> {
-        self.locked.lock().await.add_disk(path)?;
+        lock_measured!(&self.locked).await.add_disk(path)?;
         self.sync_checkpoint().await;
         Ok(())
     }
 
     // Returns the amount of additional space, in bytes
     async fn expand_disk(&self, path: &Path) -> Result<ExpandDiskResponse> {
-        let additional_bytes = self.locked.lock().await.expand_disk(path)?;
+        let additional_bytes = lock_measured!(&self.locked).await.expand_disk(path)?;
         self.sync_checkpoint().await;
         Ok(additional_bytes)
     }
 
     async fn initiate_merge(&self) {
-        self.locked.lock().await.request_merge();
+        lock_measured!(&self.locked).await.request_merge();
         self.sync_checkpoint().await;
     }
 
@@ -1519,11 +1522,11 @@ impl Inner {
     }
 
     async fn hits_by_size_data(&self) -> SizeHistogramPhys {
-        self.locked.lock().await.size_histogram.clone()
+        lock_measured!(&self.locked).await.size_histogram.clone()
     }
 
     async fn clear_hit_data(&self) {
-        self.locked.lock().await.clear_hit_data();
+        lock_measured!(&self.locked).await.clear_hit_data();
     }
 
     fn devices(&self) -> DeviceList {
