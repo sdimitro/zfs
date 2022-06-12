@@ -49,7 +49,6 @@
 #include <sys/mount.h>
 #include <pwd.h>
 #include <grp.h>
-#include <ucred.h>
 #ifdef HAVE_IDMAP
 #include <idmap.h>
 #include <aclutils.h>
@@ -1418,14 +1417,15 @@ badlabel:
 			    prop == ZFS_PROP_SHARESMB) &&
 			    strcmp(strval, "on") != 0 &&
 			    strcmp(strval, "off") != 0) {
-				zfs_share_proto_t proto;
+				enum sa_protocol proto;
 
 				if (prop == ZFS_PROP_SHARESMB)
-					proto = PROTO_SMB;
+					proto = SA_PROTOCOL_SMB;
 				else
-					proto = PROTO_NFS;
+					proto = SA_PROTOCOL_NFS;
 
-				if (zfs_parse_options(strval, proto) != SA_OK) {
+				if (sa_validate_shareopts(strval, proto) !=
+				    SA_OK) {
 					zfs_error_aux(hdl, dgettext(TEXT_DOMAIN,
 					    "'%s' cannot be set to invalid "
 					    "options"), propname);
@@ -3580,14 +3580,14 @@ create_parents(libzfs_handle_t *hdl, char *target, int prefixlen)
 			goto ancestorerr;
 		}
 
-		if (zfs_share(h) != 0) {
+		if (zfs_share(h, NULL) != 0) {
 			opname = dgettext(TEXT_DOMAIN, "share");
 			goto ancestorerr;
 		}
 
 		zfs_close(h);
 	}
-	zfs_commit_all_shares();
+	zfs_commit_shares(NULL);
 
 	return (0);
 

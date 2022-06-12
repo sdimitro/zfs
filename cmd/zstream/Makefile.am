@@ -1,20 +1,17 @@
-include $(top_srcdir)/config/Rules.am
-
-sbin_PROGRAMS = zstream
+sbin_PROGRAMS   += zstream
+CPPCHECKTARGETS += zstream
 
 zstream_SOURCES = \
-	zstream.c \
-	zstream.h \
-	zstream_dump.c \
-	zstream_redup.c \
-	zstream_token.c
+	%D%/zstream.c \
+	%D%/zstream.h \
+	%D%/zstream_dump.c \
+	%D%/zstream_redup.c \
+	%D%/zstream_token.c
 
 zstream_LDADD = \
-	$(abs_top_builddir)/lib/libzfs/libzfs.la \
-	$(abs_top_builddir)/lib/libzfs_core/libzfs_core.la \
-	$(abs_top_builddir)/lib/libnvpair/libnvpair.la
-
-include $(top_srcdir)/config/CppCheck.am
+	lib/libzfs.la \
+	lib/libzfs_core.la \
+	lib/libnvpair.la
 
 install-exec-hook:
 	cd $(DESTDIR)$(sbindir) && $(LN_S) -f zstream zstreamdump

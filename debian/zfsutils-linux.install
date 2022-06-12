@@ -17,6 +17,7 @@ lib/systemd/system-preset/
 usr/lib/systemd/system-generators/zfs-mount-generator
 usr/lib/modules-load.d/ lib/
 lib/udev/
+debian/tmp/etc/bash_completion.d/zfs etc/bash_completion.d/
 debian/tmp/etc/default/zfs etc/default/
 debian/tmp/etc/zfs/zfs-functions etc/zfs/
 etc/zfs/zpool.d/

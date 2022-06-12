@@ -28,6 +28,7 @@
 #include <sys/socket.h>
 #include <sys/zfs_context.h>
 #include <object_agent.h>
+#include <umem.h>
 #ifdef HAVE_LIBZOA
 #include <libzoa.h>
 #endif
@@ -38,6 +39,8 @@
 
 static char zoa_sock_dir[] = "/tmp/zoa.sock.XXXXXX";
 static char zoa_log_file[PATH_MAX] = "/tmp/zoa.log";
+
+int start_zfs_object_agent(char *, void **);
 
 /*
  * Wait until the specified unix socket starts accepting connections.
@@ -77,17 +80,20 @@ zoa_socket_init_wait(char *zoa_sock_str)
 static int
 zoa_init_wait(char *zoa_sock_dir)
 {
-	char zoa_sock[PATH_MAX];
+	char *zoa_sock = umem_alloc(PATH_MAX, UMEM_NOFAIL);
 
 	snprintf(zoa_sock, PATH_MAX, "%s/zfs_root_socket", zoa_sock_dir);
 	if (zoa_socket_init_wait(zoa_sock) != 0) {
+		umem_free(zoa_sock, PATH_MAX);
 		return (-1);
 	}
 
 	snprintf(zoa_sock, PATH_MAX, "%s/zfs_public_socket", zoa_sock_dir);
 	if (zoa_socket_init_wait(zoa_sock) != 0) {
+		umem_free(zoa_sock, PATH_MAX);
 		return (-1);
 	}
+	umem_free(zoa_sock, PATH_MAX);
 
 	return (0);
 }

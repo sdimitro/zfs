@@ -4171,10 +4171,11 @@ char *
 zpool_vdev_name(libzfs_handle_t *hdl, zpool_handle_t *zhp, nvlist_t *nv,
     int name_flags)
 {
-	char *path, *type, *env;
+	char *type, *tpath;
+	const char *path;
 	uint64_t value;
 	char buf[PATH_BUF_LEN];
-	char tmpbuf[PATH_BUF_LEN];
+	char tmpbuf[PATH_BUF_LEN * 2];
 
 	/*
 	 * vdev_name will be "root"/"root-0" for the root vdev, but it is the
@@ -4184,19 +4185,11 @@ zpool_vdev_name(libzfs_handle_t *hdl, zpool_handle_t *zhp, nvlist_t *nv,
 	if (zhp != NULL && strcmp(type, "root") == 0)
 		return (zfs_strdup(hdl, zpool_get_name(zhp)));
 
-	env = getenv("ZPOOL_VDEV_NAME_PATH");
-	if (env && (strtoul(env, NULL, 0) > 0 ||
-	    !strncasecmp(env, "YES", 3) || !strncasecmp(env, "ON", 2)))
+	if (libzfs_envvar_is_set("ZPOOL_VDEV_NAME_PATH"))
 		name_flags |= VDEV_NAME_PATH;
-
-	env = getenv("ZPOOL_VDEV_NAME_GUID");
-	if (env && (strtoul(env, NULL, 0) > 0 ||
-	    !strncasecmp(env, "YES", 3) || !strncasecmp(env, "ON", 2)))
+	if (libzfs_envvar_is_set("ZPOOL_VDEV_NAME_GUID"))
 		name_flags |= VDEV_NAME_GUID;
-
-	env = getenv("ZPOOL_VDEV_NAME_FOLLOW_LINKS");
-	if (env && (strtoul(env, NULL, 0) > 0 ||
-	    !strncasecmp(env, "YES", 3) || !strncasecmp(env, "ON", 2)))
+	if (libzfs_envvar_is_set("ZPOOL_VDEV_NAME_FOLLOW_LINKS"))
 		name_flags |= VDEV_NAME_FOLLOW_LINKS;
 
 	if (nvlist_lookup_uint64(nv, ZPOOL_CONFIG_NOT_PRESENT, &value) == 0 ||
@@ -4204,7 +4197,9 @@ zpool_vdev_name(libzfs_handle_t *hdl, zpool_handle_t *zhp, nvlist_t *nv,
 		(void) nvlist_lookup_uint64(nv, ZPOOL_CONFIG_GUID, &value);
 		(void) snprintf(buf, sizeof (buf), "%llu", (u_longlong_t)value);
 		path = buf;
-	} else if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &path) == 0) {
+	} else if (nvlist_lookup_string(nv, ZPOOL_CONFIG_PATH, &tpath) == 0) {
+		path = tpath;
+
 		if (name_flags & VDEV_NAME_FOLLOW_LINKS) {
 			char *rp = realpath(path, NULL);
 			if (rp) {
@@ -5232,7 +5227,7 @@ zpool_get_vdev_prop(zpool_handle_t *zhp, const char *vdevname, vdev_prop_t prop,
 {
 	nvlist_t *reqnvl, *reqprops;
 	nvlist_t *retprops = NULL;
-	uint64_t vdev_guid;
+	uint64_t vdev_guid = 0;
 	int ret;
 
 	if ((ret = zpool_vdev_guid(zhp, vdevname, &vdev_guid)) != 0)
@@ -5291,7 +5286,7 @@ zpool_get_all_vdev_props(zpool_handle_t *zhp, const char *vdevname,
     nvlist_t **outnvl)
 {
 	nvlist_t *nvl = NULL;
-	uint64_t vdev_guid;
+	uint64_t vdev_guid = 0;
 	int ret;
 
 	if ((ret = zpool_vdev_guid(zhp, vdevname, &vdev_guid)) != 0)

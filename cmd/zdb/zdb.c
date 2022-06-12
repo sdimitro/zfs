@@ -3219,13 +3219,18 @@ dump_znode_symlink(sa_handle_t *hdl)
 {
 	int sa_symlink_size = 0;
 	char linktarget[MAXPATHLEN];
-	linktarget[0] = '\0';
 	int error;
 
 	error = sa_size(hdl, sa_attr_table[ZPL_SYMLINK], &sa_symlink_size);
 	if (error || sa_symlink_size == 0) {
 		return;
 	}
+	if (sa_symlink_size >= sizeof (linktarget)) {
+		(void) printf("symlink size %d is too large\n",
+		    sa_symlink_size);
+		return;
+	}
+	linktarget[sa_symlink_size] = '\0';
 	if (sa_lookup(hdl, sa_attr_table[ZPL_SYMLINK],
 	    &linktarget, sa_symlink_size) == 0)
 		(void) printf("\ttarget	%s\n", linktarget);
@@ -7442,7 +7447,7 @@ verify_checkpoint(spa_t *spa)
 		if (err != 0) {
 			(void) printf("\nAgent checkpoint detected, "
 			    "uberblock not found for txg %llu: %s\n",
-			    checkpoint_txg, strerror(err));
+			    (u_longlong_t)checkpoint_txg, strerror(err));
 			return (err);
 		}
 		(void) printf("\nAgent checkpoint uberblock found:\n");
@@ -8581,7 +8586,6 @@ int
 main(int argc, char **argv)
 {
 	int c;
-	struct rlimit rl = { 1024, 1024 };
 	spa_t *spa = NULL;
 	objset_t *os = NULL;
 	int dump_all = 1;
@@ -8600,9 +8604,6 @@ main(int argc, char **argv)
 	char *spa_config_path_env, *objset_str;
 	boolean_t target_is_spa = B_TRUE, dataset_lookup = B_FALSE;
 	nvlist_t *cfg = NULL;
-
-	(void) setrlimit(RLIMIT_NOFILE, &rl);
-	(void) enable_extended_FILE_stdio(-1, -1);
 
 	dprintf_setup(&argc, argv);
 
