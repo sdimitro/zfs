@@ -1,3 +1,4 @@
+use std::cmp::max;
 use std::sync::Arc;
 
 use tokio::sync::RwLock;
@@ -40,7 +41,7 @@ impl AggregatingWriter {
                 None => {
                     let mut vec = with_alloctag("AggregatingWriter PendingWrite", || {
                         AlignedVec::with_capacity(
-                            self.capacity,
+                            max(self.capacity, data.len()),
                             self.block_access.round_up_to_sector(1),
                         )
                     });
