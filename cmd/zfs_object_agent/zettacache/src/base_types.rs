@@ -2,8 +2,10 @@ use std::borrow::Borrow;
 use std::cmp::min;
 use std::fmt::*;
 use std::num::NonZeroU64;
+use std::num::ParseIntError;
 use std::ops::Add;
 use std::ops::Sub;
+use std::str::FromStr;
 
 use more_asserts::*;
 use serde::Deserialize;
@@ -15,6 +17,38 @@ pub struct PoolGuid(pub u64);
 impl Display for PoolGuid {
     fn fmt(&self, f: &mut Formatter) -> Result {
         write!(f, "{:020}", self.0)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, Hash)]
+pub struct CacheGuid(pub u64);
+impl CacheGuid {
+    pub fn new() -> Self {
+        CacheGuid(rand::random())
+    }
+}
+impl Default for CacheGuid {
+    fn default() -> Self {
+        CacheGuid::new()
+    }
+}
+impl FromStr for CacheGuid {
+    type Err = ParseIntError;
+    fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+        s.parse().map(CacheGuid)
+    }
+}
+
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct DiskGuid(pub u64);
+impl DiskGuid {
+    pub fn new() -> Self {
+        DiskGuid(rand::random())
+    }
+}
+impl Default for DiskGuid {
+    fn default() -> Self {
+        DiskGuid::new()
     }
 }
 

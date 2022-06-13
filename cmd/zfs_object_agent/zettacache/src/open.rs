@@ -16,6 +16,8 @@ use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use util::message::SUPERBLOCK_SIZE;
 
+use crate::base_types::CacheGuid;
+use crate::base_types::DiskGuid;
 use crate::base_types::DiskId;
 use crate::block_access::BlockAccess;
 use crate::superblock::SuperblockPhys;
@@ -23,8 +25,8 @@ use crate::superblock::SuperblockPhys;
 #[derive(Debug, Clone)]
 pub enum CacheOpenMode {
     DeviceList(Vec<PathBuf>),
-    DiscoveryDirectory(PathBuf, Option<u64>), // u64 is the cache guid
-    None,                                     // no zettacache
+    DiscoveryDirectory(PathBuf, Option<CacheGuid>),
+    None, // no zettacache
 }
 
 impl CacheOpenMode {
@@ -73,8 +75,8 @@ impl DiscoveredDevice {
     }
 }
 
-async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<Vec<PathBuf>> {
-    let mut caches = HashMap::<u64, BTreeMap<DiskId, DiscoveredDevice>>::new();
+async fn discover_devices(dir_path: &Path, target_guid: Option<CacheGuid>) -> Result<Vec<PathBuf>> {
+    let mut caches = HashMap::<_, BTreeMap<_, _>>::new();
 
     let mut discovery = FuturesUnordered::new();
     let mut canonical_entries = HashSet::new();
@@ -121,28 +123,26 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<V
         match result {
             Ok(device) => {
                 debug!("discovery: found device: {device:?}");
-                let cache_guid = device.superblock.guid;
+                let cache_guid = device.superblock.cache_guid;
                 let cache = caches.entry(cache_guid).or_default();
-                if let Some(old_device) = cache.insert(device.superblock.disk, device) {
-                    // If we crash in the middle of a zcache-add for one device
-                    // and then do zcache-add for another device, we may get
-                    // into a situation where discovery runs into two devices
-                    // with the same DiskID and cache GUID. Until we make cache
-                    // device import more deterministic (see DLPX-81000) error
-                    // out.
+                let disk_guid = device.superblock.disk_guid;
+                if let Some(old_device) = cache.insert((device.superblock.disk, disk_guid), device)
+                {
                     return Err(anyhow!(
-                        "found two disks with {:?} for cache {cache_guid}",
-                        old_device.superblock.disk
+                        "found two disks with {:?} for {cache_guid:?} with {disk_guid:?}",
+                        old_device.superblock.disk,
                     ));
                 }
             }
             Err(why) => debug!("discovery: error: {why:?}"),
         };
     }
-    filter_invalid_caches(&mut caches);
+
+    caches.retain(|&guid, disks| is_valid_cache(guid, disks));
     if let Some(guid) = target_guid {
         caches.retain(|cache_guid, _| *cache_guid == guid);
     }
+
     match caches.values().next() {
         Some(cache) => {
             if caches.len() > 1 {
@@ -161,25 +161,51 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<u64>) -> Result<V
     }
 }
 
-fn filter_invalid_caches(caches: &mut HashMap<u64, BTreeMap<DiskId, DiscoveredDevice>>) {
-    // Only retain caches that have a primary block
-    caches.retain(|_, disks| disks.values().any(|disk| disk.superblock.primary.is_some()));
+fn is_valid_cache(
+    cache_guid: CacheGuid,
+    disks: &mut BTreeMap<(DiskId, Option<DiskGuid>), DiscoveredDevice>,
+) -> bool {
+    let primary = disks
+        .values()
+        .find(|&disk| disk.superblock.primary.is_some());
 
-    // Only retain caches whose devices we've discovered
-    caches.retain(|cache_guid, disks| {
-        let mut disk_ids_from_discovery = HashSet::new();
-        let mut disk_ids_from_primary = HashSet::new();
-        for (&disk_id, disk) in disks {
-            disk_ids_from_discovery.insert(disk_id);
-            if let Some(primary) = &disk.superblock.primary {
-                disk_ids_from_primary = primary.disks.keys().copied().collect();
-            }
+    match primary {
+        Some(disk) => {
+            let disks_from_primary = disk
+                .superblock
+                .primary
+                .as_ref()
+                .unwrap()
+                .disks
+                .iter()
+                .map(|(k, v)| (*k, v.guid))
+                .collect::<HashMap<_, _>>();
+
+            // Only retain disks with IDs that are part of the primary block
+            disks.retain(
+                |(id, disk_guid), _| match (disks_from_primary.get(id), *disk_guid) {
+                    (Some(&guid_from_primary), Some(guid_from_superblock)) => {
+                        guid_from_superblock == guid_from_primary
+                    }
+                    (Some(_guid_from_primary), None) => true,
+                    (None, _) => false,
+                },
+            );
+
+            // If we are missing any device mentioned in the primary block,
+            // then this cache is invalid
+            let disks_ids_from_discovery = disks
+                .keys()
+                .map(|(id, _)| id)
+                .copied()
+                .collect::<HashSet<_>>();
+            let disk_ids_from_primary = disks_from_primary.keys().copied().collect::<HashSet<_>>();
+            disk_ids_from_primary
+                .difference(&disks_ids_from_discovery)
+                .inspect(|id| info!("cache {cache_guid:?} can't find {id:?}"))
+                .count()
+                == 0
         }
-        assert!(!disk_ids_from_primary.is_empty());
-        disk_ids_from_primary
-            .difference(&disk_ids_from_discovery)
-            .inspect(|id| info!("cache {cache_guid} can't find {id:?}"))
-            .count()
-            == 0
-    });
+        None => false,
+    }
 }

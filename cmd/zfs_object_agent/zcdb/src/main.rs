@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use clap::Subcommand;
 use git_version::git_version;
+use zettacache::base_types::CacheGuid;
 use zettacache::CacheOpenMode;
 use zettacache::DumpSlabsOptions;
 use zettacache::DumpStructuresOptions;
@@ -33,7 +34,7 @@ struct Cli {
 
     /// Specific cache GUID to look for in cache device directory
     #[clap(short = 'g', long, value_name = "GUID")]
-    guid: Option<u64>,
+    guid: Option<CacheGuid>,
 
     /// Sets the verbosity level for logging and debugging
     #[clap(short = 'v', long, parse(from_occurrences), global = true)]

@@ -28,6 +28,7 @@ lazy_static! {
         SLAB_ALLOCATOR.clone(),
         SLAB_SIZE_32MB.clone(),
         TRIMMED_INDEX.clone(),
+        DISK_GUIDS.clone(),
     ]
     .map(|feature: Feature| (feature.name, feature.info))
     .into_iter()
@@ -46,6 +47,10 @@ lazy_static! {
     };
     pub static ref TRIMMED_INDEX: Feature = Feature {
         name: FeatureName("com.delphix:trimmed_index".to_string()),
+        info: FeatureType::Upgradeable
+    };
+    pub static ref DISK_GUIDS: Feature = Feature {
+        name: FeatureName("com.delphix:disk_guids".to_string()),
         info: FeatureType::Upgradeable
     };
 }

@@ -25,7 +25,10 @@ pub const SUPERBLOCK_SIZE: u64 = util::message::SUPERBLOCK_SIZE as u64;
 pub struct SuperblockPhys {
     pub primary: Option<PrimaryPhys>,
     pub disk: DiskId,
-    pub guid: u64,
+    #[serde(alias = "guid")]
+    pub cache_guid: CacheGuid,
+    #[serde(default)]
+    pub disk_guid: Option<DiskGuid>,
 }
 
 /// Subset of SuperblockPhys that's needed to get the feature flags.
@@ -33,19 +36,24 @@ pub struct SuperblockPhys {
 struct SuperblockFeaturesPhys {
     primary: Option<PrimaryFeaturesPhys>,
     disk: DiskId,
-    guid: u64,
+    #[serde(alias = "guid")]
+    cache_guid: CacheGuid,
 }
 
 /// State stored about every disk
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct DiskPhys {
     pub size: u64,
-    // XXX put sector size in here too and verify it matches what the disk says now?
+    #[serde(default)]
+    pub guid: DiskGuid,
 }
 
 impl DiskPhys {
     pub fn new(size: u64) -> Self {
-        Self { size }
+        Self {
+            size,
+            guid: DiskGuid::new(),
+        }
     }
 }
 
@@ -55,6 +63,8 @@ pub struct PrimaryPhys {
     pub checkpoint_id: CheckpointId,
     pub feature_flags: Vec<FeatureName>,
     pub disks: BTreeMap<DiskId, DiskPhys>,
+    #[serde(default)]
+    pub sector_size: Option<u64>,
 
     // Each extent is a single slab, but the last extent can be a fraction of a
     // slab.  The remainder of that slab is uninitialized padding.
@@ -68,17 +78,27 @@ pub struct PrimaryFeaturesPhys {
 }
 
 impl PrimaryPhys {
-    pub fn new(disks: BTreeMap<DiskId, DiskPhys>, checkpoint_extents: Vec<Extent>) -> Self {
+    pub fn new(
+        disks: BTreeMap<DiskId, DiskPhys>,
+        sector_size: u64,
+        checkpoint_extents: Vec<Extent>,
+    ) -> Self {
         PrimaryPhys {
             checkpoint_id: CheckpointId(0),
             feature_flags: SUPPORTED_FEATURES.keys().cloned().collect(),
             disks,
+            sector_size: Some(sector_size),
             checkpoint: checkpoint_extents,
         }
     }
 
     /// Write superblocks to all disks.
-    pub async fn write_all(&self, primary_disk: DiskId, guid: u64, block_access: &BlockAccess) {
+    pub async fn write_all(
+        &self,
+        primary_disk: DiskId,
+        cache_guid: CacheGuid,
+        block_access: &BlockAccess,
+    ) {
         // Write the non-primary disks first, so that newly-added disks will
         // have their superblocks present before the primary superblock is
         // updated to indicate that they are part of the cache.  If we wrote all
@@ -92,7 +112,8 @@ impl PrimaryPhys {
                 let phys = SuperblockPhys {
                     primary: None,
                     disk,
-                    guid,
+                    cache_guid,
+                    disk_guid: Some(self.disks.get(&disk).unwrap().guid),
                 };
                 phys.write(block_access, disk).await;
             })
@@ -103,7 +124,8 @@ impl PrimaryPhys {
         let phys = SuperblockPhys {
             primary: Some(self.clone()),
             disk: primary_disk,
-            guid,
+            cache_guid,
+            disk_guid: Some(self.disks.get(&primary_disk).unwrap().guid),
         };
         phys.write(block_access, primary_disk).await;
     }
@@ -114,17 +136,19 @@ impl PrimaryPhys {
             .map(|phys| phys.feature_flags)
     }
 
-    /// Return value is (Self, primary_disk, guid, extra_disks)
-    pub async fn read(block_access: &BlockAccess) -> Result<(Self, DiskId, u64, Vec<DiskId>)> {
+    /// Return value is (Self, primary_disk, cache_guid, extra_disks)
+    pub async fn read(
+        block_access: &BlockAccess,
+    ) -> Result<(Self, DiskId, CacheGuid, Vec<DiskId>)> {
         let results = SuperblockPhys::read_all(block_access).await;
 
-        let (primary, primary_disk, guid) = results
+        let (mut primary, primary_disk, cache_guid) = results
             .iter()
             .find_map(|result| {
                 if let Ok(phys) = result {
                     phys.primary
                         .as_ref()
-                        .map(|primary| (primary.clone(), phys.disk, phys.guid))
+                        .map(|primary| (primary.clone(), phys.disk, phys.cache_guid))
                 } else {
                     None
                 }
@@ -144,10 +168,20 @@ impl PrimaryPhys {
             // XXX proper error handling
             // XXX we should be able to reorder them?
             if let Ok(phys) = result {
-                assert_eq!(DiskId::new(id), phys.disk);
-                assert_eq!(phys.guid, guid);
+                let disk = DiskId::new(id);
+                assert_eq!(disk, phys.disk);
                 assert!(phys.primary.is_none() || phys.disk == primary_disk);
+                assert_eq!(phys.cache_guid, cache_guid);
+                if let Some(disk_guid) = phys.disk_guid {
+                    assert_eq!(disk_guid, primary.disks.get(&disk).unwrap().guid);
+                }
             }
+        }
+        let sector_size = block_access.round_up_to_sector::<u64>(1);
+        if let Some(recorded_sector_size) = primary.sector_size {
+            assert_eq!(recorded_sector_size, sector_size);
+        } else {
+            primary.sector_size = Some(sector_size);
         }
 
         assert_eq!(
@@ -159,7 +193,7 @@ impl PrimaryPhys {
             results.len() - extra_disks.len()
         );
 
-        Ok((primary, primary_disk, guid, extra_disks))
+        Ok((primary, primary_disk, cache_guid, extra_disks))
     }
 }
 
@@ -213,11 +247,12 @@ impl SuperblockPhys {
         for block_access_disk_id in block_access.disks() {
             match Self::read_impl(block_access, block_access_disk_id).await {
                 Ok(superblock) => writeln_stdout!(
-                    "{:?} - Path: {:?} Size: {} GUID: {} Primary?: {}",
+                    "{:?} - Path: {:?} Size: {} {:?} {:?} Primary?: {}",
                     superblock.disk,
                     block_access.disk_path(block_access_disk_id),
                     nice_p2size(block_access.disk_size(block_access_disk_id)),
-                    superblock.guid,
+                    superblock.disk_guid,
+                    superblock.cache_guid,
                     match &superblock.primary {
                         Some(primary) => format!("{:#?}", primary),
                         None => "No".to_string(),
@@ -233,17 +268,17 @@ impl SuperblockPhys {
 }
 
 impl PrimaryFeaturesPhys {
-    /// Return value is (Self, primary_disk, guid, extra_disks)
+    /// Return value is (Self, primary_disk, cache_guid, extra_disks)
     pub async fn read(block_access: &BlockAccess) -> Result<Self> {
         let results = SuperblockFeaturesPhys::read_all(block_access).await;
 
-        let (primary, primary_disk, guid) = results
+        let (primary, primary_disk, cache_guid) = results
             .iter()
             .find_map(|result| {
                 if let Ok(phys) = result {
                     phys.primary
                         .as_ref()
-                        .map(|primary| (primary.clone(), phys.disk, phys.guid))
+                        .map(|primary| (primary.clone(), phys.disk, phys.cache_guid))
                 } else {
                     None
                 }
@@ -255,7 +290,7 @@ impl PrimaryFeaturesPhys {
             // XXX we should be able to reorder them?
             if let Ok(phys) = result {
                 assert_eq!(DiskId::new(id), phys.disk);
-                assert_eq!(phys.guid, guid);
+                assert_eq!(phys.cache_guid, cache_guid);
                 assert!(phys.primary.is_none() || phys.disk == primary_disk);
             }
         }

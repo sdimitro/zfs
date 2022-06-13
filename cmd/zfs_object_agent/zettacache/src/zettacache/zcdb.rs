@@ -8,6 +8,7 @@ use util::writeln_stderr;
 use util::writeln_stdout;
 
 use super::CheckpointPhys;
+use crate::base_types::CacheGuid;
 use crate::base_types::DiskId;
 use crate::block_access::BlockAccess;
 use crate::block_access::Disk;
@@ -24,7 +25,7 @@ pub struct ZCacheDBHandle {
     block_access: Arc<BlockAccess>,
     primary: PrimaryPhys,
     primary_disk: DiskId,
-    guid: u64,
+    guid: CacheGuid,
     checkpoint: Arc<CheckpointPhys>,
     slab_builder: SlabAllocatorBuilder,
 }
@@ -74,7 +75,7 @@ impl ZCacheDBHandle {
 
     pub async fn dump_space(&self) {
         writeln_stdout!("Superblock: {}", nice_p2size(SUPERBLOCK_SIZE));
-        writeln_stdout!("  Primary {:?}, GUID: {}", self.primary_disk, self.guid);
+        writeln_stdout!("  Primary {:?}, {:?}", self.primary_disk, self.guid);
         writeln_stdout!();
 
         let slabs_capacity = self

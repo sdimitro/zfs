@@ -211,7 +211,7 @@ type PendingChanges = BTreeMap<IndexKey, PendingChange>;
 struct Locked {
     block_access: Arc<BlockAccess>,
     primary: PrimaryPhys,
-    guid: u64,
+    guid: CacheGuid,
     primary_disk: DiskId,
     block_allocator: BlockAllocator,
     pending_changes: PendingChanges,
@@ -449,7 +449,7 @@ impl Inner {
         }
         let block_access = BlockAccess::new(disks, false);
 
-        let guid: u64 = rand::random();
+        let guid = CacheGuid::new();
 
         let total_capacity = block_access.total_capacity();
         info!("creating cache from {} disks", block_access.disks().count());
@@ -483,6 +483,7 @@ impl Inner {
                 .disks()
                 .map(|disk| (disk, DiskPhys::new(block_access.disk_size(disk))))
                 .collect(),
+            block_access.round_up_to_sector(1),
             checkpoint_extents,
         )
         .write_all(DiskId::new(0), guid, &block_access)
@@ -605,7 +606,7 @@ impl Inner {
         }
 
         info!(
-            "opening ZettaCache {} with {} disks",
+            "opening ZettaCache {:?} with {} disks",
             guid,
             primary.disks.len()
         );

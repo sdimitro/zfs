@@ -11,6 +11,7 @@ use util::writeln_stderr;
 use util::TrackingAllocator;
 use util::ALLOCATOR_PRINT_MIN_ALLOCS;
 use util::ALLOCATOR_PRINT_MIN_BYTES;
+use zettacache::base_types::CacheGuid;
 use zettacache::CacheOpenMode;
 use zettaobject::object_access::BlobCredentials;
 use zettaobject::object_access::ObjectAccessProtocol;
@@ -90,7 +91,7 @@ struct Cli {
         value_name = "GUID",
         conflicts_with = "cache-device"
     )]
-    guid: Option<u64>,
+    guid: Option<CacheGuid>,
 
     /// Clear the cache when it has incompatible features
     #[clap(long)]
