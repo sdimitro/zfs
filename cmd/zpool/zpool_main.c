@@ -1655,6 +1655,14 @@ zpool_do_create(int argc, char **argv)
 		goto errout;
 	}
 
+	/* Allocate props before passing it */
+	if (props == NULL &&
+	    nvlist_alloc(&props, NV_UNIQUE_NAME, 0) != 0) {
+		(void) fprintf(stderr,
+		    gettext("internal error: out of memory\n"));
+		return (1);
+	}
+
 	char *profile;
 	if ((nvlist_lookup_string(props,
 	    zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE), &profile)) == 0) {

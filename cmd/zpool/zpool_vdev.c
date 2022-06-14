@@ -1721,6 +1721,15 @@ construct_spec(nvlist_t *props, int argc, char **argv)
 			    argv[1])) == NULL) {
 				goto spec_out;
 			}
+
+			/*
+			 * Add object-protocol as a property so that it is set
+			 * as a zpool property.
+			 */
+			fnvlist_add_string(props,
+			    zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL),
+			    fulltype);
+
 			argc -= 2;
 			argv += 2;
 		} else {
