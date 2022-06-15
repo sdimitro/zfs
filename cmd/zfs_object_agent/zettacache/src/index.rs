@@ -252,12 +252,16 @@ impl IndexRunPhys {
         self.log.iter_summary_chunks(block_access, slab_access)
     }
 
-    pub fn log_bytes(&self) -> u64 {
+    pub fn num_bytes(&self) -> u64 {
         self.log.bytes()
     }
 
     pub fn log_capacity_bytes(&self, slab_access: &SlabAccess) -> u64 {
         self.log.capacity_bytes(slab_access)
+    }
+
+    pub fn len(&self) -> u64 {
+        self.log.len()
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
@@ -339,6 +343,12 @@ impl IndexRun {
                 .await;
         }
         (phys, IndexFlushDelta(new_chunks))
+    }
+
+    pub async fn flush_no_delta(&mut self) -> IndexRunPhys {
+        let (phys, delta) = self.flush().await;
+        assert!(delta.is_empty());
+        phys
     }
 
     pub fn atime_histogram(&self) -> &AtimeHistogramPhys {
@@ -443,12 +453,6 @@ impl IndexRun {
                     .unwrap_or(true),
             )
         })
-    }
-
-    /// Note that some trimmed entries may be present in the returned stream, because only entire
-    /// chunks are removed.
-    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<IndexEntry>> {
-        self.log.iter_chunks()
     }
 
     pub fn trim_key(&self) -> Option<IndexKey> {

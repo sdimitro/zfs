@@ -176,6 +176,11 @@ pub struct ZettaCache {
     locked_keys: Arc<LockSet<(PoolGuid, BlockId)>>,
 }
 
+struct Indices {
+    old: IndexRun,
+    new: Option<ReadOnlyIndexRun>, // merging into this
+}
+
 /// If there are no devices in the cache, there will not be an instance of the Inner struct.  It
 /// is instantiated when the first device is added, and dropped when the last device is removed.
 struct Inner {
@@ -185,11 +190,10 @@ struct Inner {
     checkpoint_synced: watch::Receiver<CheckpointId>,
     checkpoint_wanted: std::sync::Mutex<watch::Sender<CheckpointId>>,
 
-    // lock ordering: index first then locked
-    old_index: Arc<tokio::sync::RwLock<IndexRun>>,
-    new_index: Arc<tokio::sync::RwLock<Option<ReadOnlyIndexRun>>>, // merging into this
+    // lock ordering: indices first then locked
+    indices: tokio::sync::RwLock<Indices>,
     // XXX may need to break up this big lock.  At least we aren't holding it while doing i/o
-    locked: Arc<tokio::sync::Mutex<Locked>>,
+    locked: tokio::sync::Mutex<Locked>,
     stats: Arc<CacheStats>,
     timebase: Instant, // used when collecting stats
     demand_buffer_bytes_available: Arc<Semaphore>,
@@ -636,7 +640,7 @@ impl Inner {
         let old_index = IndexRun::open(
             block_access.clone(),
             slab_allocator.clone(),
-            checkpoint.old_index,
+            checkpoint.old_index.clone(),
         )
         .await;
 
@@ -748,11 +752,22 @@ impl Inner {
             locked.clear_hit_data();
         }
 
+        let merging = match checkpoint.merge_progress {
+            Some(progress) => Some(
+                locked
+                    .resume_merge_task(checkpoint.old_index, old_pending_changes.unwrap(), progress)
+                    .await,
+            ),
+            None => None,
+        };
+
         let this = Arc::new(Self {
             slab_allocator: locked.slab_allocator.clone(),
-            old_index: Arc::new(tokio::sync::RwLock::new(old_index)),
-            new_index: Arc::new(tokio::sync::RwLock::new(new_index)),
-            locked: Arc::new(tokio::sync::Mutex::new(locked)),
+            indices: tokio::sync::RwLock::new(Indices {
+                old: old_index,
+                new: new_index,
+            }),
+            locked: tokio::sync::Mutex::new(locked),
             demand_buffer_bytes_available: Arc::new(Semaphore::new(usize::from64(
                 CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64(),
             ))),
@@ -768,21 +783,6 @@ impl Inner {
             checkpoint_wanted: std::sync::Mutex::new(checkpoint_wanted_tx),
         });
 
-        let merging = match checkpoint.merge_progress {
-            Some(progress) => Some(
-                this.locked
-                    .lock()
-                    .await
-                    .resume_merge_task(
-                        this.old_index.clone(),
-                        old_pending_changes.unwrap(),
-                        progress,
-                    )
-                    .await,
-            ),
-            None => None,
-        };
-
         let my_cache = this.clone();
         measure!("checkpoint_task").spawn(async move {
             my_cache
@@ -790,7 +790,7 @@ impl Inner {
                 .await;
         });
 
-        let locked = this.locked.clone();
+        let inner = this.clone();
         measure!("atime interval").spawn(async move {
             // XXX maybe we should bump the atime after a set number of
             // accesses, so each histogram bucket starts with the same count.
@@ -799,29 +799,28 @@ impl Inner {
             let mut interval = tokio::time::interval(*ATIME_INTERVAL);
             loop {
                 interval.tick().await;
-                let mut locked = locked.lock().await;
+                let mut locked = lock_non_send_measured!(&inner.locked).await;
                 locked.atime = locked.atime.next();
             }
         });
 
-        let locked = this.locked.clone();
-        let cache = this.clone();
+        let inner = this.clone();
         measure!("stats interval").spawn(async move {
             let mut interval = tokio::time::interval(*STATS_INTERVAL);
             loop {
                 interval.tick().await;
 
-                cache.stats.track_instantaneous(
+                inner.stats.track_instantaneous(
                     SpeculativeBufferBytesAvailable,
                     CACHE_INSERT_SPECULATIVE_BUFFER_SIZE.as_u64()
-                        - cache.speculative_buffer_bytes_available.available_permits() as u64,
+                        - inner.speculative_buffer_bytes_available.available_permits() as u64,
                 );
-                cache.stats.track_instantaneous(
+                inner.stats.track_instantaneous(
                     DemandBufferBytesAvailable,
                     CACHE_INSERT_DEMAND_BUFFER_SIZE.as_u64()
-                        - cache.demand_buffer_bytes_available.available_permits() as u64,
+                        - inner.demand_buffer_bytes_available.available_permits() as u64,
                 );
-                lock_non_send_measured!(&locked).await.update_stats();
+                lock_non_send_measured!(&inner.locked).await.update_stats();
             }
         });
 
@@ -882,12 +881,13 @@ impl Inner {
         let mut completed_merge = false;
         loop {
             // if there is no current merging state, check to see if a merge should be started
-            {
+            if merging.is_none() {
+                let mut indices = self.indices.write().await;
                 let mut locked = lock_measured!(&self.locked).await;
-                if locked.merge.is_none() {
-                    assert!(merging.is_none());
-                    merging = locked.try_start_merge_task(self.old_index.clone()).await;
-                }
+                assert!(locked.merge.is_none());
+                merging = locked
+                    .try_start_merge_task(indices.old.flush_no_delta().await)
+                    .await;
             }
             if let Some((rx, new_index_phys)) = &mut merging {
                 let begin = Instant::now();
@@ -969,14 +969,13 @@ impl Inner {
                             } // drop Locked lock
 
                             *new_index_phys = progress.new_index;
-                            let mut old_index = self.old_index.write().await;
-                            let mut new_index_opt = self.new_index.write().await;
-                            match &mut *new_index_opt {
+                            let mut indices = self.indices.write().await;
+                            match &mut indices.new {
                                 Some(new_index) => {
                                     new_index.update(new_index_phys.clone(), &progress.index_delta);
                                 }
                                 None => {
-                                    *new_index_opt = Some(
+                                    indices.new = Some(
                                         ReadOnlyIndexRun::open(
                                             self.block_access.clone(),
                                             self.slab_allocator.clone(),
@@ -987,18 +986,16 @@ impl Inner {
                                 }
                             }
                             if let Some(last_key) = new_index_phys.last_key() {
-                                old_index.trim(last_key, &progress.obsoleted).await;
+                                indices.old.trim(last_key, &progress.obsoleted).await;
                             }
                         }
                         // merge task complete, replace the current index with the new index
                         Some(MergeMessage::Complete(new_index)) => {
-                            let mut old_index = self.old_index.write().await;
-                            let mut new_index_opt = self.new_index.write().await;
-
+                            let mut indices = self.indices.write().await;
                             let mut locked = lock_measured!(&self.locked).await;
-                            locked.rotate_index(&mut old_index, new_index).await;
+                            locked.rotate_index(&mut indices.old, new_index).await;
                             locked.block_allocator.rebalance_fini();
-                            *new_index_opt = None;
+                            indices.new = None;
                             merging = None;
                             completed_merge = true;
                             // When a merge completes, we immediately flush a checkpoint, so that
@@ -1081,8 +1078,7 @@ impl Inner {
             );
         }
 
-        let (old_index_phys, delta) = self.old_index.write().await.flush().await;
-        assert!(delta.is_empty());
+        let old_index_phys = self.indices.write().await.old.flush_no_delta().await;
         let mut locked = lock_measured!(&self.locked).await;
 
         // Now that we have the state lock, we need to wait for outstanding i/os again, because
@@ -1179,12 +1175,10 @@ impl Inner {
         Fut: Future<Output = R> + Send,
     {
         let key = locked_key.key(&self.pool_guids);
-        // Hold the index lock over the whole operation so that the index can't change after we
-        // get the value from it.  Lock ordering requires that we lock the index before locking
+        // Hold the indices lock over the whole operation so that the index can't change after we
+        // get the value from it.  Lock ordering requires that we lock the indices before locking
         // the state.
-        let old_index_guard = self.old_index.read().await;
-        let new_index_guard = self.new_index.read().await;
-
+        let indices = self.indices.read().await;
         let fut_or_f = {
             // We don't want to hold the state lock while reading from disk so we use
             // lock_non_send() to ensure that we can't hold it across .await.
@@ -1246,8 +1240,8 @@ impl Inner {
 
         super_trace!("lookup {key:?}: no PendingChange, no index_cache; reading index");
 
-        let mut index = Either::Left(&*old_index_guard);
-        if let Some(new_index) = &*new_index_guard {
+        let mut index = Either::Left(&indices.old);
+        if let Some(new_index) = &indices.new {
             if let Some(new_last_key) = new_index.last_key() {
                 // Note, if equal then it's already been moved to the new index.
                 if key <= new_last_key {
@@ -1867,7 +1861,7 @@ impl Locked {
     /// Restart a merge task from the saved checkpoint state
     async fn resume_merge_task(
         &mut self,
-        old_index: Arc<tokio::sync::RwLock<IndexRun>>,
+        old_index: IndexRunPhys,
         old_pending_changes: PendingChanges,
         progress: MergeProgressPhys,
     ) -> (mpsc::Receiver<MergeMessage>, IndexRunPhys) {
@@ -1907,7 +1901,12 @@ impl Locked {
         self.merge = Some(merge.clone());
 
         (
-            merge.spawn_tasks(self.block_access.clone(), old_index, next_index),
+            merge.spawn_tasks(
+                self.block_access.clone(),
+                self.slab_allocator.clone(),
+                old_index,
+                next_index,
+            ),
             progress.new_index,
         )
     }
@@ -1974,7 +1973,7 @@ impl Locked {
     /// Start a new merge task if there are enough pending changes
     async fn try_start_merge_task(
         &mut self,
-        old_index: Arc<tokio::sync::RwLock<IndexRun>>,
+        old_index: IndexRunPhys,
     ) -> Option<(mpsc::Receiver<MergeMessage>, IndexRunPhys)> {
         if !self.need_merge() {
             return None;
@@ -2050,10 +2049,16 @@ impl Locked {
             remap,
             stats: self.stats.clone(),
         });
+        assert!(self.merge.is_none());
         self.merge = Some(merge.clone());
 
         Some((
-            merge.spawn_tasks(self.block_access.clone(), old_index, next_index),
+            merge.spawn_tasks(
+                self.block_access.clone(),
+                self.slab_allocator.clone(),
+                old_index,
+                next_index,
+            ),
             next_index_phys,
         ))
     }

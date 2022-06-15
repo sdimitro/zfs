@@ -39,6 +39,8 @@ use crate::index::IndexKey;
 use crate::index::IndexRun;
 use crate::index::IndexRunPhys;
 use crate::index::IndexValue;
+use crate::slab_allocator::SlabAccess;
+use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
 
 tunable! {
@@ -359,13 +361,14 @@ impl MergeState {
     async fn merge_task(
         &self,
         tx: mpsc::Sender<IndexMessage>,
-        old_index_lock: Arc<tokio::sync::RwLock<IndexRun>>,
+        old_index_phys: IndexRunPhys,
         start_key: Option<IndexKey>,
-        block_access: &BlockAccess,
+        block_access: Arc<BlockAccess>,
+        slab_access: &SlabAccess,
     ) {
         // We don't currently support concurrent free()'s while the remap is in-progress.
         // Thus, we need to do the remap first, prior to moving forward with the merge.
-        self.remap(block_access).await;
+        self.remap(&block_access).await;
 
         let begin = Instant::now();
 
@@ -373,21 +376,20 @@ impl MergeState {
         let mut index_stream;
         let mut progress;
         {
-            let old_index = old_index_lock.read().await;
             info!(
                 "writing new index to merge {} pending changes into index of {} entries ({}), eviction cutoff {:?}, ghost cutoff {:?}",
                 self.old_pending_changes.len(),
-                old_index.len(),
-                nice_p2size(old_index.num_bytes()),
+                old_index_phys.len(),
+                nice_p2size(old_index_phys.num_bytes()),
                 self.eviction_cutoff,
                 self.ghost_cutoff,
             );
-            index_stream = old_index.iter_chunks();
+            index_stream = old_index_phys.iter_chunks(block_access, slab_access);
             progress = Progress::new(
                 tx,
-                old_index.first_ghost_atime(),
-                old_index.first_live_atime(),
-                self.last_atime - old_index.first_ghost_atime() + 1,
+                old_index_phys.atime_histogram().first_ghost(),
+                old_index_phys.atime_histogram().first_live(),
+                self.last_atime - old_index_phys.atime_histogram().first_ghost() + 1,
             );
         }
         let mut pending_changes_iter = self
@@ -575,7 +577,8 @@ impl MergeState {
     pub(super) fn spawn_tasks(
         self: Arc<MergeState>,
         block_access: Arc<BlockAccess>,
-        old_index: Arc<tokio::sync::RwLock<IndexRun>>,
+        slab_allocator: Arc<SlabAllocator>,
+        old_index: IndexRunPhys,
         mut next_index: IndexRun,
     ) -> mpsc::Receiver<MergeMessage> {
         // The checkpoint task will be constantly reading from the channel, so we don't really
@@ -589,7 +592,13 @@ impl MergeState {
         let spawn_merge = self.clone();
         measure!("MergeState::merge_task()").spawn(async move {
             spawn_merge
-                .merge_task(merge_tx, old_index, start_key, &block_access)
+                .merge_task(
+                    merge_tx,
+                    old_index,
+                    start_key,
+                    block_access,
+                    slab_allocator.access(),
+                )
                 .await;
         });
 

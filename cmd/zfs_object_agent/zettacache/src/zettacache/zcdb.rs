@@ -102,11 +102,11 @@ impl ZCacheDBHandle {
             "next spacemap",
             self.checkpoint.block_allocator.spacemap_next_bytes(),
         );
-        print_meta("index", self.checkpoint.old_index.log_bytes());
+        print_meta("index", self.checkpoint.old_index.num_bytes());
         print_meta("operation log", self.checkpoint.operation_log.bytes());
 
         if let Some(progress) = self.checkpoint.merge_progress.clone() {
-            print_meta("next index", progress.new_index.log_bytes());
+            print_meta("next index", progress.new_index.num_bytes());
             print_meta("next operation log", progress.operation_log.bytes());
         }
         writeln_stdout!("-------------------------------");

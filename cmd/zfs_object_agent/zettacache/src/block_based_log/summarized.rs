@@ -150,6 +150,10 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLogPhys<T> {
         self.chunk_summary.bytes() + self.this.bytes()
     }
 
+    pub fn len(&self) -> u64 {
+        self.this.len()
+    }
+
     pub fn capacity_bytes(&self, slab_access: &SlabAccess) -> u64 {
         self.chunk_summary.capacity_bytes(slab_access) + self.this.capacity_bytes(slab_access)
     }
@@ -212,12 +216,6 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
         self.phys
             .this
             .iter(self.block_access.clone(), self.slab_allocator.access())
-    }
-
-    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        self.phys
-            .this
-            .iter_chunks(self.block_access.clone(), self.slab_allocator.access())
     }
 
     /// Returns the exact location/size of this chunk (not the whole contiguous extent)
@@ -469,10 +467,6 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     /// Iterates the on-disk state; panics if there are pending changes.
     pub fn iter(&self) -> impl Stream<Item = T> {
         self.readonly.iter()
-    }
-
-    pub fn iter_chunks(&self) -> impl Stream<Item = BlockBasedLogChunk<T>> {
-        self.readonly.iter_chunks()
     }
 
     /// See ReadOnlySummarizedBlockBasedLog::lookup_by_key()
