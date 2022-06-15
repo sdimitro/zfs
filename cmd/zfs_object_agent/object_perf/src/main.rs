@@ -44,8 +44,8 @@ struct Cli {
     bucket: String,
 
     /// credentials profile
-    #[clap(short = 'p', long, default_value = "default")]
-    profile: String,
+    #[clap(short = 'p', long)]
+    profile: Option<String>,
 
     /// Object size in KiB
     #[clap(short = 's', long, default_value = "1024")]
@@ -64,13 +64,8 @@ struct Cli {
     verbosity: u64,
 
     /// File to log output to
-    #[clap(
-        short = 'o',
-        long,
-        value_name = "FILE",
-        default_value = "/var/log/perflog"
-    )]
-    output_file: PathBuf,
+    #[clap(short = 'o', long, value_name = "FILE")]
+    output_file: Option<PathBuf>,
 
     /// Configuration file to set tunables (toml/json/yaml)
     #[clap(short = 't', long, value_name = "FILE")]
@@ -92,18 +87,20 @@ enum Commands {
 async fn main() {
     let cli = Cli::parse();
 
-    util::setup_logging(
-        cli.verbosity,
-        Some(&cli.output_file),
-        cli.config_file.as_deref(),
-        false,
-    );
+    if let Some(file_name) = cli.config_file {
+        if let Err(error) = util::tunable::read_config(&file_name) {
+            println!("error: reading config: {}", error);
+            std::process::exit(1);
+        }
+    }
+
+    util::setup_logging(cli.verbosity, cli.output_file.as_deref(), None, true);
 
     let duration = Duration::from_secs(cli.time);
     let objsize_bytes = cli.object_size * 1024;
 
     println!(
-        "endpoint: {}, region: {}, bucket: {} profile: {}",
+        "endpoint: {}, region: {}, bucket: {} profile: {:?}",
         cli.endpoint, cli.region, cli.bucket, cli.profile
     );
 
@@ -111,7 +108,10 @@ async fn main() {
         ObjectAccessProtocol::S3 {
             endpoint: cli.endpoint,
             region: cli.region,
-            credentials: S3Credentials::Profile(cli.profile.to_owned()),
+            credentials: match cli.profile {
+                Some(profile) => S3Credentials::Profile(profile),
+                None => S3Credentials::Automatic,
+            },
         },
         cli.bucket,
         false,
