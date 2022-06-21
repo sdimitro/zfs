@@ -62,6 +62,12 @@ jobs:
         sudo cp -r $HOME/.aws /root
     - name: Tests
       run: |
+        # The github CI package build doesn't enable any ZFS services by
+        # default. Since the object agent service is available on the test VM,
+        # ZTS tries to use it. Since it depends on the zfs-mount service, we
+        # enable it here. If we don't the agent will fail to start, and the
+        # workflow will hang.
+        sudo systemctl enable --now zfs-mount
         /usr/share/zfs/zfs-tests.sh -v -s 3G -r object_store
       env:
         LD_LIBRARY_PATH: /lib/x86_64-linux-gnu
