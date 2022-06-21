@@ -5,14 +5,16 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
+use clap::Args;
 use clap::Parser;
 use clap::Subcommand;
 use git_version::git_version;
 use uuid::Uuid;
+use zettaobject::object_access::BlobCredentials;
 use zettaobject::object_access::ObjectAccess;
 use zettaobject::object_access::ObjectAccessProtocol;
 use zettaobject::object_access::S3Credentials;
-mod s3perf;
+mod perf;
 
 const ENDPOINT: &str = "https://s3-us-west-2.amazonaws.com";
 const REGION: &str = "us-west-2";
@@ -25,12 +27,8 @@ static GIT_VERSION: &str = git_version!(
     }
 );
 
-#[derive(Parser)]
-#[clap(version=GIT_VERSION)]
-#[clap(name = "zfs_object_perf")]
-#[clap(about = "ZFS object storage performance tests")]
-#[clap(propagate_version = true)]
-struct Cli {
+#[derive(Args)]
+struct S3Args {
     /// S3 endpoint
     #[clap(short = 'e', long, default_value = ENDPOINT)]
     endpoint: String,
@@ -46,9 +44,31 @@ struct Cli {
     /// credentials profile
     #[clap(short = 'p', long)]
     profile: Option<String>,
+}
 
+#[derive(Args)]
+struct BlobArgs {
+    /// Blob endpoint
+    #[clap(short = 'e', long)]
+    endpoint: Option<String>,
+
+    /// Blob bucket
+    #[clap(short = 'b', long, default_value = BUCKET_NAME)]
+    bucket: String,
+
+    /// credentials profile
+    #[clap(short = 'p', long)]
+    profile: Option<String>,
+}
+
+#[derive(Parser)]
+#[clap(version=GIT_VERSION)]
+#[clap(name = "zfs_object_perf")]
+#[clap(about = "ZFS object storage performance tests")]
+#[clap(propagate_version = true)]
+struct Cli {
     /// Object size in KiB
-    #[clap(short = 's', long, default_value = "1024")]
+    #[clap(short = 's', long, default_value = "2048")]
     object_size: u64,
 
     /// number of concurrent GET/PUT operations
@@ -77,10 +97,31 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// write test
-    Write,
-    /// read test
-    Read,
+    /// Write s3 test
+    #[clap(alias = "write")]
+    WriteS3 {
+        #[clap(flatten)]
+        s3_args: S3Args,
+    },
+
+    /// Read s3 test
+    #[clap(alias = "read")]
+    ReadS3 {
+        #[clap(flatten)]
+        s3_args: S3Args,
+    },
+
+    /// Write blob test
+    WriteBlob {
+        #[clap(flatten)]
+        blob_args: BlobArgs,
+    },
+
+    /// Read blob test
+    ReadBlob {
+        #[clap(flatten)]
+        blob_args: BlobArgs,
+    },
 }
 
 #[tokio::main]
@@ -99,31 +140,26 @@ async fn main() {
     let duration = Duration::from_secs(cli.time);
     let objsize_bytes = cli.object_size * 1024;
 
-    println!(
-        "endpoint: {}, region: {}, bucket: {} profile: {:?}",
-        cli.endpoint, cli.region, cli.bucket, cli.profile
-    );
-
-    let object_access = ObjectAccess::new(
-        ObjectAccessProtocol::S3 {
-            endpoint: cli.endpoint,
-            region: cli.region,
-            credentials: match cli.profile {
-                Some(profile) => S3Credentials::Profile(profile),
-                None => S3Credentials::Automatic,
-            },
-        },
-        cli.bucket,
-        false,
-    )
-    .await
-    .unwrap();
-
     let key_prefix = format!("zfs_object_perf/{}/", Uuid::new_v4());
     println!("Using prefix: '{}'", key_prefix);
     match cli.command {
-        Commands::Write => {
-            s3perf::write_test(
+        Commands::WriteS3 { s3_args } => {
+            let object_access = ObjectAccess::new(
+                ObjectAccessProtocol::S3 {
+                    endpoint: s3_args.endpoint,
+                    region: s3_args.region,
+                    credentials: match s3_args.profile {
+                        Some(profile) => S3Credentials::Profile(profile),
+                        None => S3Credentials::Automatic,
+                    },
+                },
+                s3_args.bucket,
+                false,
+            )
+            .await
+            .unwrap();
+
+            perf::write_test(
                 object_access,
                 key_prefix,
                 objsize_bytes,
@@ -133,8 +169,73 @@ async fn main() {
             .await
             .unwrap();
         }
-        Commands::Read => {
-            s3perf::read_test(
+        Commands::ReadS3 { s3_args } => {
+            let object_access = ObjectAccess::new(
+                ObjectAccessProtocol::S3 {
+                    endpoint: s3_args.endpoint,
+                    region: s3_args.region,
+                    credentials: match s3_args.profile {
+                        Some(profile) => S3Credentials::Profile(profile),
+                        None => S3Credentials::Automatic,
+                    },
+                },
+                s3_args.bucket,
+                false,
+            )
+            .await
+            .unwrap();
+
+            perf::read_test(
+                object_access,
+                key_prefix,
+                objsize_bytes,
+                cli.qdepth,
+                duration,
+            )
+            .await
+            .unwrap();
+        }
+        Commands::WriteBlob { blob_args } => {
+            let object_access = ObjectAccess::new(
+                ObjectAccessProtocol::Blob {
+                    endpoint: blob_args.endpoint,
+                    credentials: match blob_args.profile {
+                        Some(profile) => BlobCredentials::Profile(profile),
+                        None => BlobCredentials::Automatic,
+                    },
+                },
+                blob_args.bucket,
+                false,
+            )
+            .await
+            .unwrap();
+
+            perf::write_test(
+                object_access,
+                key_prefix,
+                objsize_bytes,
+                cli.qdepth,
+                duration,
+            )
+            .await
+            .unwrap();
+        }
+        Commands::ReadBlob { blob_args } => {
+            let object_access = ObjectAccess::new(
+                ObjectAccessProtocol::Blob {
+                    endpoint: blob_args.endpoint,
+                    credentials: match blob_args.profile {
+                        Some(profile) => BlobCredentials::Profile(profile),
+                        None => BlobCredentials::Automatic,
+                    },
+                },
+                blob_args.bucket,
+                false,
+            )
+            .await
+            .unwrap();
+
+            perf::read_test(
                 object_access,
                 key_prefix,
                 objsize_bytes,
