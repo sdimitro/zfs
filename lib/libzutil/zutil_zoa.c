@@ -437,8 +437,12 @@ zoa_create_connection_nvl(const char *protocol, const char *endpoint,
 {
 	nvlist_t *nvl = fnvlist_alloc();
 	fnvlist_add_string(nvl, AGENT_PROTOCOL, protocol);
-	fnvlist_add_string(nvl, AGENT_ENDPOINT, endpoint);
-	fnvlist_add_string(nvl, AGENT_REGION, region);
+	if (endpoint != NULL) {
+		fnvlist_add_string(nvl, AGENT_ENDPOINT, endpoint);
+	}
+	if (region != NULL) {
+		fnvlist_add_string(nvl, AGENT_REGION, region);
+	}
 	fnvlist_add_string(nvl, AGENT_BUCKET, bucket);
 	fnvlist_add_string(nvl, AGENT_CRED_PROFILE, creds_profile);
 

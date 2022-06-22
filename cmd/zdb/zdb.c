@@ -8531,15 +8531,21 @@ zdb_embedded_block(char *thing)
 static nvlist_t *
 make_objectstore_prop(void)
 {
-	if (endpoint == NULL) {
-		(void) fprintf(stderr,
-		    "object-store endpoint not specified.\n");
-		usage();
-	}
-	if (region == NULL) {
-		(void) fprintf(stderr,
-		    "object-store region not specified.\n");
-		usage();
+	// We default to s3 for compatibility's sake
+	if (protocol == NULL)
+		protocol = "s3";
+
+	if (strcmp(protocol, "s3") == 0) {
+		if (endpoint == NULL) {
+			(void) fprintf(stderr,
+			"object-store endpoint not specified.\n");
+			usage();
+		}
+		if (region == NULL) {
+			(void) fprintf(stderr,
+			"object-store region not specified.\n");
+			usage();
+		}
 	}
 	if (bucket == NULL) {
 		(void) fprintf(stderr,
@@ -8547,16 +8553,16 @@ make_objectstore_prop(void)
 		usage();
 	}
 
-	// We default to s3 for compatibility's sake
-	if (protocol == NULL)
-		protocol = "s3";
-
 	nvlist_t *nv = fnvlist_alloc();
 	fnvlist_add_string(nv, ZPOOL_CONFIG_PATH, bucket);
-	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
-	    endpoint);
-	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION),
-	    region);
+	if (endpoint != NULL) {
+		fnvlist_add_string(nv,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT), endpoint);
+	}
+	if (region != NULL) {
+		fnvlist_add_string(nv,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION), region);
+	}
 	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_CRED_PROFILE),
 	    creds_profile);
 	fnvlist_add_string(nv, zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL),

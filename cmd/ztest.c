@@ -208,8 +208,8 @@ typedef struct ztest_shared_opts {
 #define	DEFAULT_POOL "ztest"
 #define	DEFAULT_VDEV_DIR "/tmp"
 #define	DEFAULT_PROTOCOL "s3"
-#define	DEFAULT_ENDPOINT "https://s3-us-west-2.amazonaws.com"
-#define	DEFAULT_REGION "us-west-2"
+#define	DEFAULT_S3_ENDPOINT "https://s3-us-west-2.amazonaws.com"
+#define	DEFAULT_S3_REGION "us-west-2"
 #define	DEFAULT_CREDS_PROFILE "default"
 #define	DEFAULT_ZOA_LOG "/tmp/zoa.log"
 #define	DEFAULT_VDEV_COUNT 5
@@ -242,8 +242,6 @@ static const ztest_shared_opts_t ztest_opts_defaults = {
 	.zo_dir = DEFAULT_VDEV_DIR,
 	.zo_obj_store = 0,
 	.zo_obj_store_protocol = DEFAULT_PROTOCOL,
-	.zo_obj_store_endpoint = DEFAULT_ENDPOINT,
-	.zo_obj_store_region = DEFAULT_REGION,
 	.zo_obj_store_bucket = { '\0' },
 	.zo_obj_store_creds_profile = DEFAULT_CREDS_PROFILE,
 	.zo_zoa_log_file = DEFAULT_ZOA_LOG,
@@ -789,9 +787,9 @@ static ztest_option_t option_table[] = {
 	{ 'L',	"object-protocol", "STRING", "Object-store protocol",
 	    NO_DEFAULT, DEFAULT_PROTOCOL},
 	{ 'O',	"object-endpoint", "URI", "Object-store endpoint",
-	    NO_DEFAULT, DEFAULT_ENDPOINT},
+	    NO_DEFAULT, NULL},
 	{ 'A',	"object-region", "STRING", "Object-store region",
-	    NO_DEFAULT, DEFAULT_REGION},
+	    NO_DEFAULT, NULL},
 	{ 'b',	"object-bucket", "STRING", "Object-store bucket",
 	    NO_DEFAULT, NULL},
 	{ 'z',	"object-credentials-profile", "STRING",
@@ -1152,6 +1150,18 @@ process_options(int argc, char **argv)
 
 	if (zo->zo_obj_store) {
 		ztest_opts.zo_metaslab_force_ganging = SPA_MAXBLOCKSIZE + 1;
+		if (strcmp(zo->zo_obj_store_protocol, "s3") == 0) {
+			if (*zo->zo_obj_store_endpoint == '\0') {
+				(void) strlcpy(zo->zo_obj_store_endpoint,
+				    DEFAULT_S3_ENDPOINT,
+				    sizeof (zo->zo_obj_store_endpoint));
+			}
+			if (*zo->zo_obj_store_region == '\0') {
+				(void) strlcpy(zo->zo_obj_store_region,
+				    DEFAULT_S3_REGION,
+				    sizeof (zo->zo_obj_store_region));
+			}
+		}
 	}
 
 	/* When raid choice is 'random' add a draid pool 50% of the time */
@@ -1285,10 +1295,16 @@ make_vdev_obj_store(void)
 	    ztest_opts.zo_obj_store_bucket);
 	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_PROTOCOL),
 	    ztest_opts.zo_obj_store_protocol);
-	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
-	    ztest_opts.zo_obj_store_endpoint);
-	fnvlist_add_string(vdev, zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION),
-	    ztest_opts.zo_obj_store_region);
+	if (*ztest_opts.zo_obj_store_endpoint != '\0') {
+		fnvlist_add_string(vdev,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_ENDPOINT),
+		    ztest_opts.zo_obj_store_endpoint);
+	}
+	if (*ztest_opts.zo_obj_store_region != '\0') {
+		fnvlist_add_string(vdev,
+		    zpool_prop_to_name(ZPOOL_PROP_OBJ_REGION),
+		    ztest_opts.zo_obj_store_region);
+	}
 	fnvlist_add_string(vdev, ZPOOL_CONFIG_CRED_PROFILE,
 	    ztest_opts.zo_obj_store_creds_profile);
 	return (vdev);
@@ -6985,9 +7001,11 @@ ztest_run_zdb(char *pool, uint64_t guid)
 
 	if (ztest_opts.zo_obj_store) {
 		ASSERT3P(guid, !=, 0);
-		snprintf(loc, len, "-p %s -a %s -g %s -B %s -f %s %llu",
+		snprintf(loc, len, "-T %s %s %s %s %s -B %s -f %s %llu",
 		    ztest_opts.zo_obj_store_protocol,
+		    *ztest_opts.zo_obj_store_endpoint == '\0' ? "" : "-a",
 		    ztest_opts.zo_obj_store_endpoint,
+		    *ztest_opts.zo_obj_store_region == '\0' ? "" : "-g",
 		    ztest_opts.zo_obj_store_region,
 		    ztest_opts.zo_obj_store_bucket,
 		    ztest_opts.zo_obj_store_creds_profile,
