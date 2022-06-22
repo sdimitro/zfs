@@ -146,7 +146,7 @@ enum Commands {
     },
     /// test connectivity blob
     TestConnectivityBlob {
-        /// Azure-Blob endpoint
+        /// Optional Azure-Blob endpoint (for emulator or custom domain)
         #[clap(short = 'e', long)]
         endpoint: Option<String>,
 

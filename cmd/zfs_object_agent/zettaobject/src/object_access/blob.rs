@@ -685,6 +685,7 @@ fn validate_azure_key(azure_key: &str) -> Result<()> {
 }
 
 async fn get_azure_storage_client_with_managed_key_profile(
+    endpoint: Option<String>,
     profile: String,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     let ini_file = get_credentials_file()?;
@@ -699,13 +700,19 @@ async fn get_azure_storage_client_with_managed_key_profile(
         Some(azure_account) => azure_account,
     };
 
-    get_azure_storage_client_with_managed_key(azure_account).await
+    get_azure_storage_client_with_managed_key(endpoint, azure_account).await
 }
 
 async fn get_azure_storage_client_with_managed_key(
+    endpoint: Option<String>,
     azure_account: &str,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
-    // azure-sdk-for-net checks for an optional env variable "IDENTITY_HEADER" and calls unwrap on
+    // azure-sdk-for-rust APIs that accepts an endpoint does not yet support a bearer_token.
+    if endpoint.is_some() {
+        return Err(anyhow!("Endpoint unsupported with managed-identity"));
+    }
+
+    // azure-sdk-for-rust checks for an optional env variable "IDENTITY_HEADER" and calls unwrap on
     // it. Until this bug is fixed, we have to workaround it by setting this variable.
     // See: https://github.com/Azure/azure-sdk-for-rust/issues/420
     env::set_var("IDENTITY_HEADER", "");
@@ -735,7 +742,8 @@ fn get_azure_storage_emulator_client(
     azure_key: &str,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
     let http_client = azure_core::new_http_client();
-    let blob_storage_url = Url::parse(blob_storage).unwrap();
+    let blob_storage_url =
+        Url::parse(blob_storage).map_err(|err| anyhow!("Invalid endpoint: {}", err))?;
 
     // We care only about the blob service but the API expects URLs to the other ones as well.
     // So, we just pass the default values.
@@ -868,11 +876,13 @@ fn get_azure_storage_client_from_profile_key(
 async fn get_azure_storage_client_automatic(
     endpoint: Option<String>,
 ) -> Result<(Arc<StorageClient>, Option<DateTime<Utc>>)> {
-    match get_azure_storage_client_from_env(endpoint.clone())
-        .or_else(|_| get_azure_storage_client_from_profile_key(endpoint, "default".to_string()))
-    {
+    match get_azure_storage_client_from_env(endpoint.clone()).or_else(|_| {
+        get_azure_storage_client_from_profile_key(endpoint.clone(), "default".to_string())
+    }) {
         Ok(tuple) => Ok(tuple),
-        Err(_) => get_azure_storage_client_with_managed_key_profile("default".to_string()).await,
+        Err(_) => {
+            get_azure_storage_client_with_managed_key_profile(endpoint, "default".to_string()).await
+        }
     }
 }
 
@@ -890,7 +900,9 @@ async fn get_azure_storage_client(
             // the fact that it is passed via an ini file. We have to try both methods.
             match get_azure_storage_client_from_profile_key(endpoint.clone(), profile.clone()) {
                 Ok(tuple) => Ok(tuple),
-                Err(_) => get_azure_storage_client_with_managed_key_profile(profile).await,
+                Err(_) => {
+                    get_azure_storage_client_with_managed_key_profile(endpoint, profile).await
+                }
             }
         }
         BlobCredentials::Key {
@@ -902,7 +914,7 @@ async fn get_azure_storage_client(
             &azure_key,
         )?),
         BlobCredentials::ManagedCredentials { azure_account } => {
-            Ok(get_azure_storage_client_with_managed_key(&azure_account).await?)
+            Ok(get_azure_storage_client_with_managed_key(endpoint, &azure_account).await?)
         }
         BlobCredentials::Automatic => {
             Ok(get_azure_storage_client_automatic(endpoint.clone()).await?)
