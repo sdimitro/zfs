@@ -543,44 +543,41 @@ impl ObjectAccessTrait for BlobObjectAccess {
 
     async fn delete_objects(&self, stream: &mut (dyn Stream<Item = String> + Send + Unpin)) {
         stream
-            .chunks(*OBJECT_DELETION_BATCH_SIZE)
-            .for_each(|chunk| async move {
+            .map(|key| async move {
                 let op = self.access_stats.begin(ObjectAccessOpType::ObjectDelete);
-                let msg = format!("delete {} objects including {}", chunk.len(), &chunk[0]);
-                for key in chunk.iter() {
-                    retry(&msg, None, || async {
-                        let begin = Instant::now();
-                        let blob_client = self
-                            .get_container_client()
-                            .await
-                            .as_blob_client(key.clone());
-                        match blob_client.delete().execute().await {
-                            Err(e) => {
-                                debug!("error while deleting: {}", e);
-                                match Self::convert_error::<ObjectStoreError>(e) {
-                                    OAError::RequestError(RequestError::Service(
-                                        ObjectStoreError::NoSuchKey,
-                                    )) => Ok(None),
-                                    OAError::RequestError(RequestError::EmulatorBug(s)) => {
-                                        trace!(
-                                            "Hit emulator error which is expected; ignoring {s}"
-                                        );
-                                        Ok(None)
-                                    }
-                                    err => Err(err),
+                let msg = format!("delete object {key}");
+                retry(&msg, None, || async {
+                    let begin = Instant::now();
+                    let blob_client = self
+                        .get_container_client()
+                        .await
+                        .as_blob_client(key.clone());
+                    match blob_client.delete().execute().await {
+                        Err(e) => {
+                            debug!("error while deleting: {}", e);
+                            match Self::convert_error::<ObjectStoreError>(e) {
+                                OAError::RequestError(RequestError::Service(
+                                    ObjectStoreError::NoSuchKey,
+                                )) => Ok(None),
+                                OAError::RequestError(RequestError::EmulatorBug(s)) => {
+                                    trace!("Hit emulator error which is expected; ignoring {s}");
+                                    Ok(None)
                                 }
-                            }
-                            Ok(res) => {
-                                trace!("deleted {} in {}ms", key, begin.elapsed().as_millis());
-                                Ok(Some(res))
+                                err => Err(err),
                             }
                         }
-                    })
-                    .await
-                    .unwrap();
-                }
-                op.end_multiple(0, chunk.len() as u64);
+                        Ok(res) => {
+                            trace!("deleted {key} in {}ms", begin.elapsed().as_millis());
+                            Ok(Some(res))
+                        }
+                    }
+                })
+                .await
+                .unwrap();
+                op.end(0);
             })
+            .buffered(*OBJECT_DELETION_BATCH_SIZE)
+            .count()
             .await;
     }
 
