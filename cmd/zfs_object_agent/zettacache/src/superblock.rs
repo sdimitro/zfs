@@ -25,7 +25,7 @@ pub const SUPERBLOCK_SIZE: u64 = util::message::SUPERBLOCK_SIZE as u64;
 pub struct SuperblockPhys {
     pub primary: Option<PrimaryPhys>,
     pub disk: DiskId,
-    #[serde(alias = "guid")]
+    #[serde(rename = "guid")]
     pub cache_guid: CacheGuid,
     #[serde(default)]
     pub disk_guid: Option<DiskGuid>,
@@ -36,7 +36,7 @@ pub struct SuperblockPhys {
 struct SuperblockFeaturesPhys {
     primary: Option<PrimaryFeaturesPhys>,
     disk: DiskId,
-    #[serde(alias = "guid")]
+    #[serde(rename = "guid")]
     cache_guid: CacheGuid,
 }
 

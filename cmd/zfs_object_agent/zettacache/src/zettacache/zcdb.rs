@@ -14,10 +14,12 @@ use crate::block_access::BlockAccess;
 use crate::block_access::Disk;
 use crate::block_allocator::zcdb::zcachedb_dump_slabs;
 use crate::block_allocator::zcdb::zcachedb_dump_spacemaps;
+use crate::features::check_features;
 use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::superblock::PrimaryPhys;
 use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
+use crate::CacheOpenError;
 use crate::DumpSlabsOptions;
 use crate::DumpStructuresOptions;
 
@@ -49,10 +51,14 @@ impl ZCacheDBHandle {
 
     pub async fn open(paths: Vec<PathBuf>) -> Result<ZCacheDBHandle> {
         let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in paths {
-            disks.push(Disk::new(&path, true)?);
+        for path in &paths {
+            disks.push(Disk::new(path, true)?);
         }
         let block_access = Arc::new(BlockAccess::new(disks, true));
+
+        let feature_flags = PrimaryPhys::read_features(&block_access).await?;
+        check_features(&feature_flags)
+            .map_err(|e| CacheOpenError::IncompatibleFeatures(paths, e))?;
 
         let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
         let checkpoint = Arc::new(CheckpointPhys::read(&block_access, &primary.checkpoint).await?);

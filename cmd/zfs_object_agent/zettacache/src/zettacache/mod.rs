@@ -313,6 +313,7 @@ impl ZettaCache {
         let inner = match Inner::open(mode).await {
             Ok(inner) => Some(inner),
             Err(CacheOpenError::NoDevices) => None,
+            Err(e @ CacheOpenError::IncompatibleFeatures(_, _)) => return Err(e),
             Err(e) => {
                 error!("could not open zettacache: {e}");
                 None
