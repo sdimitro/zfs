@@ -72,7 +72,7 @@ impl Perf {
         duration: Duration,
     ) {
         let num_objects = object_access
-            .list_objects(key_prefix.clone(), None, true)
+            .list_objects(key_prefix.clone(), true)
             .fold(0, |count, _key| async move { count + 1 })
             .await;
         let mut key_id = 0;
@@ -167,7 +167,7 @@ pub async fn write_test(
     println!("{:#?}", perf.metrics.put);
 
     object_access
-        .delete_objects(object_access.list_objects(key_prefix, None, false))
+        .delete_objects(object_access.list_objects(key_prefix, false))
         .await;
 
     Ok(())
@@ -199,7 +199,7 @@ pub async fn read_test(
     println!("{:#?}", perf.metrics.get);
 
     object_access
-        .delete_objects(object_access.list_objects(key_prefix, None, false))
+        .delete_objects(object_access.list_objects(key_prefix, false))
         .await;
 
     Ok(())

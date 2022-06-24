@@ -22,6 +22,10 @@ impl Txg {
             Some(Txg(self.0 - rhs))
         }
     }
+
+    pub fn from_key(key: &str) -> Self {
+        Txg(key.rsplit_once('/').unwrap().1.parse().unwrap())
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash)]
@@ -42,5 +46,11 @@ impl ObjectId {
 
     pub fn prefix(self) -> u64 {
         self.0 % NUM_DATA_PREFIXES
+    }
+
+    /// This function parses a key into an object id. It works for any key
+    /// where the last path component is the object id.
+    pub fn from_key(key: &str) -> Self {
+        ObjectId(key.rsplit_once('/').unwrap().1.parse().unwrap())
     }
 }

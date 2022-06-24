@@ -153,4 +153,8 @@ impl ObjectBlockMap {
             f(object);
         }
     }
+
+    pub fn raw_set(&self) -> BTreeSet<ObjectId> {
+        self.state.read().unwrap().map.clone()
+    }
 }

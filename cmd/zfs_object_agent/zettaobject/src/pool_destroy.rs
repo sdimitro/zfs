@@ -303,7 +303,7 @@ fn delete_pool_objects(
         object_access
             .delete_objects(
                 object_access
-                    .list_objects(prefix, None, false)
+                    .list_objects(prefix, false)
                     // Skip the super object as we use it to track the progress made by this task.
                     .filter(|o| futures::future::ready(super_object.ne(o)))
                     .inspect(|_| {

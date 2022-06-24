@@ -5,7 +5,6 @@ use std::time::Instant;
 use anyhow::Context;
 use anyhow::Result;
 use futures::future;
-use futures::future::join;
 use futures::future::join_all;
 use futures::stream;
 use futures::stream::StreamExt;
@@ -68,9 +67,7 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLogPhys<T> {
         object_access
             .delete_objects(
                 generations
-                    .flat_map(|generation| {
-                        Box::pin(object_access.list_objects(generation, None, false))
-                    })
+                    .flat_map(|generation| Box::pin(object_access.list_objects(generation, false)))
                     .inspect(|key| trace!("cleanup: old generation chunk {}", key)),
             )
             .await;
@@ -148,7 +145,6 @@ pub struct ObjectBasedLog<T: ObjectBasedLogEntry> {
     pub num_chunks: u64,
     pub num_entries: u64,
     pending_entries: Vec<T>,
-    recovered: bool,
     pending_flushes: Vec<JoinHandle<()>>,
 }
 
@@ -165,7 +161,6 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
             num_flushed_chunks: 0,
             num_chunks: 0,
             num_entries: 0,
-            recovered: true,
             pending_entries: Vec::new(),
             pending_flushes: Vec::new(),
         }
@@ -182,7 +177,6 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
             num_flushed_chunks: phys.num_chunks,
             num_chunks: phys.num_chunks,
             num_entries: phys.num_entries,
-            recovered: false,
             pending_entries: Vec::new(),
             pending_flushes: Vec::new(),
         }
@@ -195,66 +189,6 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
     }
     */
 
-    /// Return this log's parent prefix (e.g. zfs/15238822373695050151/PendingFreesLog)
-    pub fn parent_prefix(&self) -> String {
-        self.name.rsplitn(2, '/').last().unwrap().to_string()
-    }
-
-    /// Recover after a system crash, where the kernel also crashed and we are discarding
-    /// any changes after the current txg.
-    pub async fn cleanup(&mut self) {
-        // collect chunks past the end, in the current generation
-        let shared_state = self.shared_state.clone();
-        let last_generation_key = format!("{}/{:020}/", self.name, self.generation);
-        let start_after = if self.num_chunks == 0 {
-            None
-        } else {
-            Some(ObjectBasedLogChunk::<T>::key(
-                &self.name,
-                self.generation,
-                self.num_chunks - 1,
-            ))
-        };
-        let current_generation_cleanup = async move {
-            shared_state
-                .object_access
-                .delete_objects(
-                    shared_state
-                        .object_access
-                        .list_objects(last_generation_key, start_after, true)
-                        .inspect(|key| {
-                            info!(
-                                "cleanup: deleting future chunk of current generation: {}",
-                                key
-                            )
-                        }),
-                )
-                .await;
-        };
-
-        // collect chunks from the partially-complete future generation
-        let shared_state = self.shared_state.clone();
-        let next_generation_key = format!("{}/{:020}/", self.name, self.generation + 1);
-        let next_generation_cleanup = async move {
-            shared_state
-                .object_access
-                .delete_objects(
-                    shared_state
-                        .object_access
-                        .list_objects(next_generation_key, None, true)
-                        .inspect(|key| {
-                            info!("cleanup: deleting chunk of future generation: {}", key)
-                        }),
-                )
-                .await;
-        };
-
-        // execute both cleanup's concurrently
-        join(current_generation_cleanup, next_generation_cleanup).await;
-
-        self.recovered = true;
-    }
-
     pub fn to_phys(&self) -> ObjectBasedLogPhys<T> {
         ObjectBasedLogPhys {
             generation: self.generation,
@@ -266,7 +200,6 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
     }
 
     pub fn append(&mut self, txg: Txg, entry: T) {
-        assert!(self.recovered);
         // XXX assert that txg is the same as the txg for the other pending entries?
         self.pending_entries.push(entry);
         // XXX should be based on chunk size (bytes)?  Or maybe should just be unlimited.
@@ -276,8 +209,6 @@ impl<T: ObjectBasedLogEntry> ObjectBasedLog<T> {
     }
 
     pub fn initiate_flush(&mut self, txg: Txg) {
-        assert!(self.recovered);
-
         let chunk = ObjectBasedLogChunk {
             guid: self.shared_state.guid,
             txg,

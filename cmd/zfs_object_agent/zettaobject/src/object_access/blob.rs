@@ -610,7 +610,8 @@ impl ObjectAccessTrait for BlobObjectAccess {
         use_delimiter: bool,
         list_prefixes: bool,
     ) -> Pin<Box<dyn Stream<Item = Result<String>> + Send + '_>> {
-        let msg = format!("list {} (after {:?})", prefix, start_after);
+        assert!(start_after.is_none());
+        let msg = format!("list {}", prefix);
         let list_prefix = prefix;
         let mut next_marker: Option<NextMarker> = None;
 
@@ -645,22 +646,16 @@ impl ObjectAccessTrait for BlobObjectAccess {
                 })
                 .await?;
 
-                // XXX The performance of this is likely to be quite bad. We need a better solution. DOSE-1215
-                let initial = start_after.clone().unwrap_or_default();
                 if list_prefixes {
                     if let Some(prefixes) = output.blobs.blob_prefix {
                         for blob_prefix in prefixes {
-                            if initial < blob_prefix.name {
                                 yield blob_prefix.name;
-                            }
                         }
                     }
                 } else {
                     for blob in output.blobs.blobs {
-                        if initial < blob.name {
                             yield blob.name;
                         }
-                    }
                 }
                 next_marker = output.next_marker.clone();
                 if (next_marker.is_none()) {
@@ -668,6 +663,10 @@ impl ObjectAccessTrait for BlobObjectAccess {
                 }
             }
         })
+    }
+
+    fn supports_list_after(&self) -> bool {
+        false
     }
 }
 

@@ -77,4 +77,8 @@ where
     pub fn is_empty(&self) -> bool {
         self.pending.is_empty()
     }
+
+    pub fn last(&self) -> K {
+        self.first + self.pending.len()
+    }
 }

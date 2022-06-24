@@ -7794,6 +7794,35 @@ dump_agent_metadata(spa_t *spa)
 	printf("Uberblock (object agent):\n");
 	print_zoa_nvlist(uberblock_phys);
 	fnvlist_free(uberblock_phys);
+
+	nvlist_t *leaked_objects = NULL;
+	VERIFY0(libzoa_find_leaks(zoa_handle, &leaked_objects));
+	uint_t leaks_len, missing_len;
+	uint64_t *leaks = fnvlist_lookup_uint64_array(leaked_objects, "leaked",
+	    &leaks_len);
+	uint64_t *missing = fnvlist_lookup_uint64_array(leaked_objects,
+	    "missing", &missing_len);
+
+	if (leaks_len > 0) {
+		printf("Leaked object store objects detected: %u, [%llu",
+		    leaks_len, leaks[0]);
+		for (uint_t i = 1; i < leaks_len; i++) {
+			printf(", %llu", leaks[i]);
+			if (i % 4 == 0)
+				printf("\n\t");
+		}
+		printf("]\n");
+	}
+	if (missing_len > 0) {
+		printf("Missing object store objects detected: %u, [%llu",
+		    missing_len, missing[0]);
+		for (uint_t i = 1; i < missing_len; i++) {
+			printf(", %llu", missing[i]);
+			if (i % 4 == 0)
+				printf("\n\t");
+		}
+		printf("]\n");
+	}
 }
 #endif
 

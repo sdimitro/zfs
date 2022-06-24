@@ -23,11 +23,8 @@ use bytesize::ByteSize;
 use derivative::Derivative;
 use futures::future;
 use futures::future::join3;
-use futures::future::join5;
-use futures::future::Either;
 use futures::future::Future;
 use futures::stream;
-use futures::stream::select_all::select_all;
 use futures::stream::*;
 use futures::FutureExt;
 use lazy_static::lazy_static;
@@ -397,32 +394,17 @@ impl UberblockPhys {
             .await;
     }
 
-    async fn delete_many(object_access: &ObjectAccess, guid: PoolGuid, txgs: Vec<Txg>) {
-        object_access
-            .delete_objects(stream::iter(
-                txgs.into_iter().map(|txg| Self::key(guid, txg)),
-            ))
-            .await;
-    }
-
     async fn cleanup_older_uberblocks(object_access: &ObjectAccess, ub: UberblockPhys) {
-        let mut txgs: Vec<Txg> = object_access
-            .collect_objects(format!("zfs/{}/txg/", ub.guid), None)
-            .await
-            .iter()
-            .map(|prefix| {
-                Txg(prefix.rsplit('/').collect::<Vec<&str>>()[0]
-                    .parse::<u64>()
-                    .unwrap())
-            })
-            .collect();
-
-        txgs.retain(|txg| txg < &ub.txg);
-        if txgs.is_empty() {
-            return;
-        }
-        debug!("Deleting old uberblocks: {:?}", txgs);
-        Self::delete_many(object_access, ub.guid, txgs).await;
+        object_access
+            .delete_objects(
+                object_access
+                    .list_objects(format!("zfs/{}/txg/", ub.guid), true)
+                    .map(|prefix| Txg::from_key(prefix.as_str()))
+                    .filter(|&txg| future::ready(txg < ub.txg))
+                    .inspect(|txg| debug!("deleting old uberblock {txg:?}"))
+                    .map(|txg| Self::key(ub.guid, txg)),
+            )
+            .await;
     }
 }
 
@@ -735,83 +717,6 @@ impl PoolState {
         f(guard.as_mut().unwrap())
     }
 
-    async fn cleanup_uberblock_objects(&self, last_txg: Txg) {
-        let shared_state = &self.shared_state;
-        let txg_key = format!("zfs/{}/txg/", shared_state.guid);
-        let start_after = Some(UberblockPhys::key(shared_state.guid, last_txg));
-        shared_state
-            .object_access
-            .delete_objects(
-                shared_state
-                    .object_access
-                    .list_objects(txg_key, start_after, true)
-                    .inspect(|key| info!("cleanup: deleting future uberblock: {}", key)),
-            )
-            .await;
-    }
-
-    /// Remove log objects from log at prefix starting at next_id
-    async fn cleanup_orphaned_logs(&self, prefix: String, next_id: ReclaimLogId) {
-        let shared_state = &self.shared_state.clone();
-        let start_after = Some(format!("{}/{}", prefix, next_id));
-        shared_state
-            .object_access
-            .delete_objects(
-                shared_state
-                    .object_access
-                    .list_objects(prefix, start_after, false)
-                    .inspect(|key| info!("cleanup: deleting orphaned log object: {}", key)),
-            )
-            .await;
-    }
-
-    /// Remove any log objects that are invalid (i.e. created as part of an
-    /// in-progress txg before the kernel or agent crashed)
-    async fn cleanup_log_objects(&self) {
-        let mut syncing_state = self.syncing_state.lock().unwrap().take().unwrap();
-        let next_log_id = ReclaimLogId(
-            syncing_state
-                .reclaim_info
-                .reclaim_logs
-                .len()
-                .try_into()
-                .unwrap(),
-        );
-
-        let begin = Instant::now();
-
-        // Cleanup any orphaned pending_frees and object_size logs (from next_log_id and greater)
-        // This occurs if we crash after splitting a log but didn't complete syncing the txg
-        let pending_frees_log_prefix = syncing_state.reclaim_info.reclaim_logs[0]
-            .pending_frees_log
-            .parent_prefix();
-        let object_size_log_prefix = syncing_state.reclaim_info.reclaim_logs[0]
-            .object_size_log
-            .parent_prefix();
-
-        let frees_log_stream = FuturesUnordered::new();
-        let size_log_stream = FuturesUnordered::new();
-        for log in syncing_state.reclaim_info.reclaim_logs.iter_mut() {
-            frees_log_stream.push(log.pending_frees_log.cleanup());
-            size_log_stream.push(log.object_size_log.cleanup());
-        }
-        join5(
-            syncing_state.storage_object_log.cleanup(),
-            frees_log_stream.count(),
-            size_log_stream.count(),
-            self.cleanup_orphaned_logs(pending_frees_log_prefix, next_log_id),
-            self.cleanup_orphaned_logs(object_size_log_prefix, next_log_id),
-        )
-        .await;
-        assert!(self.syncing_state.lock().unwrap().is_none());
-        *self.syncing_state.lock().unwrap() = Some(syncing_state);
-
-        info!(
-            "cleanup: found and deleted log objects in {}ms",
-            begin.elapsed().as_millis()
-        );
-    }
-
     /// Remove any data objects that were created as part of an in-progress txg
     /// before the kernel crashed.
     async fn cleanup_data_objects(&self) {
@@ -823,8 +728,12 @@ impl PoolState {
 
         oa.delete_objects(
             select_all(DataObject::prefixes(shared_state.guid).map(|prefix| {
-                let start_after = Some(format!("{}{}", prefix, last_obj));
-                oa.list_objects(prefix, start_after, true).boxed()
+                let start_after = format!("{}{}", prefix, last_obj);
+                match oa.try_list_after(prefix, true, start_after) {
+                    Some(stream) => stream.left_stream(),
+                    None => stream::empty().right_stream(),
+                }
+                .boxed()
             }))
             .inspect(|_| count += 1),
         )
@@ -835,6 +744,10 @@ impl PoolState {
             count,
             begin.elapsed().as_millis()
         );
+    }
+
+    pub fn object_block_set(&self) -> BTreeSet<ObjectId> {
+        self.object_block_map.raw_set()
     }
 }
 
@@ -1100,7 +1013,6 @@ impl Pool {
                 let last_txg = pool
                     .state
                     .with_syncing_state(|syncing_state| syncing_state.last_txg);
-                let state = pool.state.clone();
                 if last_txg != phys.last_txg {
                     // We opened an older TXG.  Before cleaning up (deleting)
                     // future TXG's, update the super object to the old TXG, so
@@ -1109,20 +1021,9 @@ impl Pool {
                     let new_phys = PoolPhys { last_txg, ..phys };
                     new_phys.put(&object_access).await;
                 }
-
-                // Note: cleanup_log_objects() take()'s the syncing_state, so
-                // the other concurrently-executed cleanups can not access the
-                // syncing state.  That's why we need to pass in the last_txg.
-                join3(
-                    pool.state.clone().cleanup_log_objects(),
-                    pool.state.clone().cleanup_uberblock_objects(last_txg),
-                    if syncing_txg.is_some() {
-                        Either::Left(future::ready(()))
-                    } else {
-                        Either::Right(state.cleanup_data_objects())
-                    },
-                )
-                .await;
+                if syncing_txg.is_none() {
+                    pool.state.cleanup_data_objects().await;
+                }
             }
             Ok((pool, Some(ub), next_block))
         }
@@ -1131,70 +1032,74 @@ impl Pool {
     async fn get_recovered_objects(
         state: &Arc<PoolState>,
         shared_state: &Arc<PoolSharedState>,
-        txg: Txg,
+        final_write: BlockId,
     ) -> BTreeMap<ObjectId, DataObject> {
-        let begin = Instant::now();
-        let last_obj = state.object_block_map.last_object();
-        let list_stream = FuturesUnordered::new();
-        for prefix in DataObject::prefixes(shared_state.guid) {
-            let shared_state = shared_state.clone();
-            list_stream.push(async move {
-                let start_after = Some(format!("{}{}", prefix, last_obj));
-                shared_state
-                    .object_access
-                    .collect_objects(prefix, start_after)
-                    .await
-            });
+        if shared_state.object_access.supports_list_after() {
+            let recovered = recover_list(state, shared_state).await;
+            assert!(recovered
+                .iter()
+                .next_back()
+                .map(|(k, _)| k.as_min_block() <= final_write)
+                .unwrap_or(true));
+            return recovered;
         }
 
-        let recovered = list_stream
-            .flat_map(|vec| {
-                let sub_stream = FuturesUnordered::new();
-                for key in vec {
-                    let shared_state = shared_state.clone();
-                    sub_stream.push(future::ready(async move {
-                        DataObject::get_from_key(
-                            &shared_state.object_access,
-                            key,
-                            ObjectAccessOpType::ReadsGet,
-                        )
-                        .await
-                    }));
-                }
-                sub_stream
-            })
-            .buffer_unordered(50)
-            .fold(BTreeMap::new(), |mut map, data_res| async move {
-                let data = data_res.unwrap();
-                debug!(
-                    "resume: found {:?}, next {:?}",
-                    data.header.object, data.header.next_block
-                );
-                assert_eq!(data.header.guid, shared_state.guid);
-                assert_eq!(data.header.min_txg, txg);
-                assert_eq!(data.header.max_txg, txg);
-                map.insert(data.header.object, data);
-                map
-            })
-            .await;
-        info!(
-            "resume: listed and read {} objects in {}ms",
-            recovered.len(),
-            begin.elapsed().as_millis()
-        );
+        let mut recovered = BTreeMap::new();
+        let (last_object, _) = DataObject::get(
+            &shared_state.object_access,
+            shared_state.guid,
+            state.object_block_map.last_object(),
+        )
+        .await
+        .unwrap();
+
+        let mut next_id = ObjectId::new(last_object.header.next_block);
+        loop {
+            while let Ok(object) = DataObject::get_uncached(
+                &shared_state.object_access,
+                shared_state.guid,
+                next_id,
+                ObjectAccessOpType::ReadsGet,
+            )
+            .await
+            {
+                next_id = ObjectId::new(object.header.next_block);
+                recovered.insert(object.header.object, object);
+            }
+            if next_id.as_min_block() >= final_write {
+                break;
+            }
+            if let Some(object) = DataObject::next_uncached(
+                &shared_state.object_access,
+                shared_state.guid,
+                next_id,
+                ObjectId::new(final_write),
+            )
+            .await
+            {
+                next_id = ObjectId::new(object.header.next_block);
+                recovered.insert(object.header.object, object);
+            } else {
+                break;
+            }
+        }
+
         recovered
     }
 
     pub async fn resume_complete(&self) {
         let state = &self.state;
-        let txg = self.state.with_syncing_state(|syncing_state| {
+        let (txg, final_write) = self.state.with_syncing_state(|syncing_state| {
             // verify that we're in resuming state
             assert!(!syncing_state.pending_object.is_pending());
-            syncing_state.syncing_txg.unwrap()
+            (
+                syncing_state.syncing_txg.unwrap(),
+                syncing_state.pending_unordered_writes.last(),
+            )
         });
         let shared_state = &state.shared_state;
 
-        let recovered_objects = Self::get_recovered_objects(state, shared_state, txg).await;
+        let recovered_objects = Self::get_recovered_objects(state, shared_state, final_write).await;
 
         self.state.with_syncing_state(|syncing_state| {
             let mut recovered_objects_iter = recovered_objects.into_iter().peekable();
@@ -1937,6 +1842,63 @@ impl Pool {
             }
         });
     }
+}
+
+async fn recover_list(
+    state: &Arc<PoolState>,
+    shared_state: &Arc<PoolSharedState>,
+) -> BTreeMap<ObjectId, DataObject> {
+    assert!(shared_state.object_access.supports_list_after());
+
+    let begin = Instant::now();
+    let last_obj = state.object_block_map.last_object();
+    let list_stream = FuturesUnordered::new();
+    for prefix in DataObject::prefixes(shared_state.guid) {
+        let shared_state = shared_state.clone();
+        list_stream.push(async move {
+            let start_after = format!("{}{}", prefix, last_obj);
+            shared_state
+                .object_access
+                .try_list_after(prefix, true, start_after)
+                .unwrap()
+                .collect::<Vec<String>>()
+                .await
+        });
+    }
+    let recovered = list_stream
+        .flat_map(|vec| {
+            let sub_stream = FuturesUnordered::new();
+            for key in vec {
+                let shared_state = shared_state.clone();
+                sub_stream.push(future::ready(async move {
+                    DataObject::get_from_key(
+                        &shared_state.object_access,
+                        key,
+                        ObjectAccessOpType::ReadsGet,
+                    )
+                    .await
+                }));
+            }
+            sub_stream
+        })
+        .buffer_unordered(50)
+        .fold(BTreeMap::new(), |mut map, data_res| async move {
+            let data = data_res.unwrap();
+            debug!(
+                "resume: found {:?}, next {:?}",
+                data.header.object, data.header.next_block
+            );
+            assert_eq!(data.header.guid, shared_state.guid);
+            map.insert(data.header.object, data);
+            map
+        })
+        .await;
+    info!(
+        "resume: listed and read {} objects in {}ms",
+        recovered.len(),
+        begin.elapsed().as_millis()
+    );
+    recovered
 }
 
 async fn handle_final_owner(

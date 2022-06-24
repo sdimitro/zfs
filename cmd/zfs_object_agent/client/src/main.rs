@@ -396,7 +396,7 @@ async fn do_list_pools(
         // Lookup all objects in the pool.
         if list_all_objects {
             object_access
-                .list_objects(pool_key, None, false)
+                .list_objects(pool_key, false)
                 .for_each(|object| async move { println!("    {}", object) })
                 .await;
         }
@@ -410,7 +410,7 @@ async fn do_destroy_old_pools(
 ) -> Result<(), Box<dyn Error>> {
     for pool_keys in find_old_pools(object_access, min_age).await {
         object_access
-            .delete_objects(object_access.list_objects(pool_keys, None, false))
+            .delete_objects(object_access.list_objects(pool_keys, false))
             .await;
     }
     Ok(())
@@ -490,7 +490,7 @@ async fn do_blob(cli_params: CliParams, count: NonZeroU32) -> Result<(), Box<dyn
     println!(
         "List blobs {:?}",
         object_access
-            .list_objects("".to_string(), None, true)
+            .list_objects("".to_string(), true)
             .collect::<Vec<String>>()
             .await
     );

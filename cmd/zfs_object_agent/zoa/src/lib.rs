@@ -119,3 +119,17 @@ pub unsafe extern "C" fn libzoa_get_uberblock_phys(
     let res = handle.get_uberblock_phys(PoolGuid(guid), Txg(txg));
     set_out_nvl(out, res)
 }
+
+/// # Safety
+/// In order to use this function safely:
+/// * out must be a valid pointer to a not-necessarily valid pointer to an nvlist_t.
+/// * handle must be a pointer that was previously returned by libzoa_init().
+#[no_mangle]
+pub unsafe extern "C" fn libzoa_find_leaks(
+    raw_handle: *mut zoa_handle_t,
+    out: *mut *mut nvpair_sys::nvlist_t,
+) -> i32 {
+    let handle = raw_handle.cast::<DebugHandle>().as_mut().unwrap();
+    let res = handle.find_leaks();
+    set_out_nvl(out, res)
+}

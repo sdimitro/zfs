@@ -1,5 +1,7 @@
+use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use futures::StreamExt;
 use log::debug;
 use log::error;
 use nix::errno::Errno;
@@ -13,6 +15,7 @@ use zettacache::CacheOpenMode;
 use zettacache::ZettaCache;
 
 use crate::base_types::Txg;
+use crate::data_object::DataObject;
 use crate::object_access::ObjectAccess;
 use crate::object_access::ObjectAccessProtocol;
 use crate::pool;
@@ -124,5 +127,27 @@ impl DebugHandle {
             Self::serialize_and_error(UberblockPhys::get(object_access, guid, txg).await)
         };
         self.runtime.block_on(future)
+    }
+
+    pub fn find_leaks(&self) -> Result<NvList, Errno> {
+        let object_access = self.object_access.as_ref().unwrap();
+        let pool = self.pool.as_ref().unwrap();
+        let found = self.runtime.block_on(
+            DataObject::list_all(object_access, pool.state.shared_state.guid)
+                .collect::<BTreeSet<_>>(),
+        );
+        let map_set = pool.state.object_block_set();
+        let leaked = (&found - &map_set)
+            .into_iter()
+            .map(|id| id.as_min_block().0)
+            .collect::<Vec<_>>();
+        let missing = (&map_set - &found)
+            .into_iter()
+            .map(|id| id.as_min_block().0)
+            .collect::<Vec<_>>();
+        let mut nvl = NvList::new_unique_names();
+        nvl.insert("leaked", leaked.as_slice()).unwrap();
+        nvl.insert("missing", missing.as_slice()).unwrap();
+        Ok(nvl)
     }
 }

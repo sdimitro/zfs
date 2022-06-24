@@ -500,29 +500,44 @@ impl ObjectAccess {
     pub fn list_objects(
         &self,
         prefix: String,
-        start_after: Option<String>,
         use_delimiter: bool,
     ) -> impl Stream<Item = String> + Send + '_ {
         self.as_trait()
-            .list(prefix, start_after, use_delimiter, false)
+            .list(prefix, None, use_delimiter, false)
             .map(|result| result.unwrap())
     }
 
     pub fn try_list_objects(
         &self,
         prefix: String,
-        start_after: Option<String>,
         use_delimiter: bool,
     ) -> impl Stream<Item = Result<String>> + Send + '_ {
-        self.as_trait()
-            .list(prefix, start_after, use_delimiter, false)
+        self.as_trait().list(prefix, None, use_delimiter, false)
     }
-    pub async fn collect_objects(
+
+    pub fn try_list_after(
         &self,
         prefix: String,
-        start_after: Option<String>,
-    ) -> Vec<String> {
-        self.list_objects(prefix, start_after, true).collect().await
+        use_delimiter: bool,
+        start_after: String,
+    ) -> Option<impl Stream<Item = String> + '_> {
+        if self.as_trait().supports_list_after() {
+            Some(
+                self.as_trait()
+                    .list(prefix, Some(start_after), use_delimiter, false)
+                    .map(|result| result.unwrap()),
+            )
+        } else {
+            None
+        }
+    }
+
+    pub fn supports_list_after(&self) -> bool {
+        self.as_trait().supports_list_after()
+    }
+
+    pub async fn collect_objects(&self, prefix: String) -> Vec<String> {
+        self.list_objects(prefix, true).collect().await
     }
 
     pub fn list_prefixes(&self, prefix: String) -> impl Stream<Item = String> + '_ {
@@ -589,6 +604,14 @@ pub trait BucketAccessTrait: Send + Sync {
 
 #[async_trait]
 pub trait ObjectAccessTrait: Send + Sync {
+    /// start_after indicates whether the list should start only after a particular
+    /// object. However, for performance reasons, some backends may not implement
+    /// this functionality. On those backends, an empty stream may be returned. As a
+    /// result, this parameter should only be used in code paths that fail gracefully,
+    /// providing best-effort functionality.
+    ///
+    /// To determine whether start_after is supported for a given backend, use
+    /// supports_list_after().
     fn list(
         &self,
         prefix: String,
@@ -620,6 +643,8 @@ pub trait ObjectAccessTrait: Send + Sync {
     async fn delete_objects(&self, stream: &mut (dyn Stream<Item = String> + Send + Unpin));
 
     fn collect_stats(&self) -> HashMap<String, StatMapValue>;
+
+    fn supports_list_after(&self) -> bool;
 }
 
 #[derive(Debug)]

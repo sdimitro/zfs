@@ -518,4 +518,8 @@ impl ObjectAccessTrait for S3ObjectAccess {
             }
         })
     }
+
+    fn supports_list_after(&self) -> bool {
+        true
+    }
 }

@@ -83,7 +83,7 @@ async fn do_test_connectivity(object_access: &ObjectAccess) -> Result<(), String
     }
 
     let objects = object_access
-        .try_list_objects(prefix, None, false)
+        .try_list_objects(prefix, false)
         .try_collect::<Vec<_>>()
         .await;
 

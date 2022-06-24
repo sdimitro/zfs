@@ -12,8 +12,11 @@ use anyhow::Context;
 use anyhow::Result;
 use bytes::Bytes;
 use bytesize::ByteSize;
+use futures::future;
 use futures::stream;
 use futures::FutureExt;
+use futures::Stream;
+use futures::StreamExt;
 use log::*;
 use more_asserts::*;
 use rusoto_core::ByteStream;
@@ -39,6 +42,10 @@ tunable! {
     static ref DATA_OBJ_RANGED_GET: bool = false;
     static ref DATA_OBJ_TRY_HEADER_SIZE: ByteSize = ByteSize::kib(16);
     static ref OBJECT_CACHE_SIZE: usize = 100;
+
+    // Number of block IDs to scan in parallel for recovery phase when the agent crashes in the
+    // middle of a TXG.
+    static ref RECOVERY_SCAN_COUNT: usize = 500;
 }
 
 lazy_static_ptr! {
@@ -497,6 +504,38 @@ impl DataObject {
 
     pub fn is_empty(&self) -> bool {
         self.blocks.is_empty()
+    }
+
+    pub async fn next_uncached(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+        start_from: ObjectId,
+        end_with: ObjectId,
+    ) -> Option<Self> {
+        stream::iter(
+            (0..)
+                .map(|i| ObjectId::new(start_from.as_min_block() + i))
+                .take_while(|&object| object <= end_with)
+                .map(|object| async move {
+                    Self::get_uncached(object_access, guid, object, ObjectAccessOpType::ReadsGet)
+                        .await
+                }),
+        )
+        .buffered(*RECOVERY_SCAN_COUNT)
+        .filter_map(|result| future::ready(result.ok()))
+        .next()
+        .await
+    }
+
+    pub fn list_all(
+        object_access: &ObjectAccess,
+        guid: PoolGuid,
+    ) -> impl Stream<Item = ObjectId> + '_ {
+        stream::select_all(Self::prefixes(guid).map(|prefix| {
+            object_access
+                .list_objects(prefix, false)
+                .map(|str| ObjectId::from_key(&str))
+        }))
     }
 }
 
