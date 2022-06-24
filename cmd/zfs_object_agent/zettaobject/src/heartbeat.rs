@@ -38,7 +38,7 @@ tunable! {
     pub static ref HEARTBEAT_TIMEOUT: Duration = *LEASE_DURATION / 5;
 }
 
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
 pub struct HeartbeatPhys {
     pub timestamp: SystemTime,
     pub hostname: String,

@@ -1,4 +1,5 @@
 use std::fmt::Display;
+use std::fmt::Write;
 use std::iter;
 use std::mem;
 use std::ops::AddAssign;
@@ -150,14 +151,15 @@ impl AtimeHistogramPhys {
         let mut message = String::new();
         for (index, (&value, &other_value)) in zip.enumerate() {
             if value != other_value {
-                message.push_str(&format!(
-                    "index {} ({:?}) does not match (self={} other={} delta={})\n",
+                let _ = writeln!(
+                    message,
+                    "index {} ({:?}) does not match (self={} other={} delta={})",
                     index,
                     self.first_ghost + index,
                     value,
                     other_value,
                     value - other_value
-                ));
+                );
             }
         }
         if !message.is_empty() {

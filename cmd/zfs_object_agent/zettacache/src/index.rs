@@ -47,7 +47,7 @@ impl IndexKey {
     }
 }
 
-#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq)]
+#[derive(Serialize, Deserialize, Debug, Copy, Clone, PartialEq, Eq)]
 #[repr(packed)]
 pub struct IndexValue {
     location: Option<DiskLocation>,
@@ -313,7 +313,7 @@ impl IndexRun {
         slab_allocator: Arc<SlabAllocator>,
         phys: IndexRunPhys,
     ) -> Self {
-        let index = Self {
+        Self {
             trim_key: phys.trim_key,
             last_key: phys.last_key,
             atime_histogram_phys: phys.atime_histogram_phys,
@@ -325,8 +325,7 @@ impl IndexRun {
             .await,
             block_access,
             slab_allocator,
-        };
-        index
+        }
     }
 
     /// Returns new Phys and a Vec which can be passed to ReadOnlyIndexRun::update()
@@ -489,13 +488,12 @@ impl ReadOnlyIndexRun {
         slab_allocator: Arc<SlabAllocator>,
         phys: IndexRunPhys,
     ) -> Self {
-        let index = Self {
+        Self {
             trim_key: phys.trim_key,
             last_key: phys.last_key,
             log: ReadOnlySummarizedBlockBasedLog::open(block_access, slab_allocator, phys.log)
                 .await,
-        };
-        index
+        }
     }
 
     pub fn last_key(&self) -> Option<IndexKey> {

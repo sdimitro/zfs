@@ -202,14 +202,13 @@ mod test {
         let (tx, rx) = watch_once::channel::<Value>();
         let (started_tx, started_rx) = oneshot::channel::<()>();
         let join_handle = tokio::spawn(async move {
-            let v = cache
+            cache
                 .get(key, move |_| {
                     started_tx.send(()).ok();
                     async move { Ok(rx.recv().await.unwrap()) }
                 })
                 .await
-                .unwrap();
-            v
+                .unwrap()
         });
 
         (started_rx, Sender { tx, join_handle })

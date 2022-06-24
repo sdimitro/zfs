@@ -114,7 +114,7 @@ pub fn start(
         RootServerState::start(socket_dir, cache, id);
 
         // keep the process from exiting
-        let () = futures::future::pending().await;
+        futures::future::pending::<()>().await;
         Ok(())
     })
 }

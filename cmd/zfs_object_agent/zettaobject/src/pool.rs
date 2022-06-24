@@ -1779,7 +1779,7 @@ impl Pool {
         }
         sleep(*CLAIM_DURATION * 3).await;
 
-        return handle_final_owner(object_access, guid, id).await;
+        handle_final_owner(object_access, guid, id).await
     }
 
     pub async fn claim(&mut self, id: Uuid) -> Result<(), PoolOpenError> {

@@ -329,13 +329,13 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
     /// Returns (value, chunk_cache_hit), where the value is the value corresponding to the key
     /// argument if found, and chunk_cache_hit that tells us whether we found the value on the
     /// chunk cache (true) or had to reach out to disk (false).
-    pub async fn lookup_by_key(
-        &self,
+    pub async fn lookup_by_key<'a>(
+        &'a self,
         key: &T::Key,
-    ) -> (Option<BlockBasedLogValueGuard<'_, T>>, bool) {
+    ) -> (Option<BlockBasedLogValueGuard<'a, T>>, bool) {
         let (value, chunk_cache_hit) = self.lookup_by_key_impl(key).await;
         (
-            value.map(|v| BlockBasedLogValueGuard {
+            value.map(|v| BlockBasedLogValueGuard::<'a, _> {
                 inner: v,
                 _marker: &PhantomData,
             }),
@@ -470,10 +470,10 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
     }
 
     /// See ReadOnlySummarizedBlockBasedLog::lookup_by_key()
-    pub async fn lookup_by_key(
-        &self,
+    pub async fn lookup_by_key<'a>(
+        &'a self,
         key: &T::Key,
-    ) -> (Option<BlockBasedLogValueGuard<'_, T>>, bool) {
+    ) -> (Option<BlockBasedLogValueGuard<'a, T>>, bool) {
         self.readonly.lookup_by_key(key).await
     }
 }
