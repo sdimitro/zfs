@@ -8,6 +8,8 @@ Before=zfs-mount.service
 ConditionVirtualization=!container
 
 [Service]
+Type=forking
+TimeoutStartSec=300
 Environment="RUST_BACKTRACE=1"
 Environment="AWS_SECRET_ACCESS_KEY="
 Environment="AWS_ACCESS_KEY_ID="

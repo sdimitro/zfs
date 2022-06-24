@@ -9,6 +9,24 @@
 #  - ZETTACACHE_DIRECTORY: Directory to use for ZettaCache device discovery.
 #
 
+#
+# Wait for the agent to start listening to requests. This function
+# will loop until "zcache list" can communicate with the agent or
+# systemd times out the service.
+#
+function wait_for_agent()
+{
+	start=$SECONDS
+	while :; do
+		zcache list
+		if [[ $? -eq 0 ]]; then
+			echo "Succeded in: $((SECONDS - start)) seconds"
+			return
+		fi
+		echo "Elapsed wait time: $((SECONDS - start)) seconds"
+	done
+}
+
 ZOA_LOG_CONFIG="${ZOA_LOG_CONFIG:-/etc/zfs/zoa_log4rs.yml}"
 PARAMS="-l ${ZOA_LOG_CONFIG} --clear-incompatible-cache"
 echo "Logging config: ${ZOA_LOG_CONFIG}"
@@ -19,4 +37,5 @@ if [[ ! -z $ZOA_CONFIG ]]; then
 fi
 PARAMS="$PARAMS -d ${ZETTACACHE_DIRECTORY:-/dev}"
 
-exec /sbin/zfs_object_agent ${PARAMS}
+/sbin/zfs_object_agent ${PARAMS} &
+wait_for_agent
