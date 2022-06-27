@@ -221,18 +221,18 @@ impl<T: SummarizedBlockBasedLogEntry> ReadOnlySummarizedBlockBasedLog<T> {
     /// Returns the exact location/size of this chunk (not the whole contiguous extent)
     fn chunk_extent(&self, chunk_id: ChunkId) -> Extent {
         let chunk_id = usize::from64(chunk_id.0);
-        let chunk_summary = self.chunks[chunk_id];
+        let chunk_offset = self.chunks[chunk_id].offset;
         let chunk_size = if chunk_id == self.chunks.len() - 1 {
-            self.phys.this.next_chunk_offset - chunk_summary.offset
+            self.phys.this.next_chunk_offset - chunk_offset
         } else {
-            self.chunks[chunk_id + 1].offset - chunk_summary.offset
+            self.chunks[chunk_id + 1].offset - chunk_offset
         };
 
         Extent {
             location: self
                 .phys
                 .this
-                .offset_to_location(self.slab_allocator.access(), chunk_summary.offset),
+                .offset_to_location(self.slab_allocator.access(), chunk_offset),
             size: chunk_size,
         }
     }
@@ -395,14 +395,12 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
         let mut new_chunks = Vec::new();
         self.this
             .flush_impl(|_, offset, first_entry| {
+                let first_key = first_entry.key();
                 let entry = BlockBasedLogChunkSummaryEntry {
                     offset,
                     first_entry,
                 };
-                new_chunks.push(SummaryEntry {
-                    offset,
-                    first_key: first_entry.key(),
-                });
+                new_chunks.push(SummaryEntry { offset, first_key });
                 self.chunk_summary.push(entry);
             })
             .await;
@@ -443,8 +441,8 @@ impl<T: SummarizedBlockBasedLogEntry> SummarizedBlockBasedLog<T> {
         );
         self.trim_key = Some(trim_key);
         if let Some(chunk_id) = self.readonly.lookup_chunk_by_key(&trim_key) {
-            let chunk_summary = self.readonly.chunks[usize::from64(chunk_id.0)];
-            self.this.trim(chunk_summary.offset);
+            let chunk_offset = self.readonly.chunks[usize::from64(chunk_id.0)].offset;
+            self.this.trim(chunk_offset);
         }
     }
 

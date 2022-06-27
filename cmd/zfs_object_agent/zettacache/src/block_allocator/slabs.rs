@@ -13,7 +13,7 @@ use crate::block_access::BlockAccess;
 use crate::block_allocator::EvacuatingSlab;
 use crate::block_allocator::ExtentSlab;
 use crate::block_allocator::SlabPhysType;
-use crate::slab_allocator::SlabAllocatorBuilder;
+use crate::slab_allocator::SlabAccess;
 use crate::space_map::SpaceMapEntry;
 use crate::space_map::SpaceMapPhys;
 
@@ -33,7 +33,10 @@ impl Slabs {
 
     /// Panics if not present
     pub fn get_mut(&mut self, id: SlabId) -> &mut Slab {
-        let slab = self.0.get_mut(id).unwrap();
+        let slab = self
+            .0
+            .get_mut(id)
+            .unwrap_or_else(|| panic!("{id:?} not present"));
         assert_eq!(slab.id, id);
         slab
     }
@@ -70,7 +73,7 @@ impl Slabs {
 
     pub async fn open(
         block_access: Arc<BlockAccess>,
-        slab_builder: &mut SlabAllocatorBuilder,
+        slab_access: &SlabAccess,
         spacemap: &SpaceMapPhys,
         spacemap_next: &SpaceMapPhys,
     ) -> Self {
@@ -84,51 +87,44 @@ impl Slabs {
 
         let mut import_cb = |entry| match entry {
             SpaceMapEntry::Alloc(extent) => {
-                let slab_id = slab_builder.extent_to_slab_id(extent);
-                slabs.get_mut(slab_id).import_alloc(extent)
+                let slab_id = slab_access.extent_to_slab_id(extent);
+                slabs.get_mut(slab_id).import_alloc(extent);
             }
             SpaceMapEntry::Free(extent) => {
-                let slab_id = slab_builder.extent_to_slab_id(extent);
-                slabs.get_mut(slab_id).import_free(extent)
+                let slab_id = slab_access.extent_to_slab_id(extent);
+                slabs.get_mut(slab_id).import_free(extent);
             }
-            SpaceMapEntry::SlabInfo(info) => {
-                let slab_extent = slab_builder.slab_id_to_extent(info.slab_id);
-                match info.slab_type {
+            SpaceMapEntry::SlabInfo(slab_id, slab_type) => {
+                let slab_extent = slab_access.slab_id_to_extent(slab_id);
+                match slab_type {
                     SlabPhysType::BitmapBased { block_size } => {
                         slabs.insert(
-                            info.slab_id,
-                            BitmapSlab::new_slab(info.slab_id, slab_extent, block_size),
+                            slab_id,
+                            BitmapSlab::new_slab(slab_id, slab_extent, block_size),
                         );
                     }
                     SlabPhysType::ExtentBased { max_size } => {
                         slabs.insert(
-                            info.slab_id,
-                            ExtentSlab::new_slab(info.slab_id, slab_extent, max_size),
+                            slab_id,
+                            ExtentSlab::new_slab(slab_id, slab_extent, max_size),
                         );
                     }
                     SlabPhysType::Free => {
-                        let old = slabs.remove(info.slab_id);
-                        assert!(old.is_some());
+                        let removed = slabs.remove(slab_id);
+                        assert!(removed.is_some());
                     }
                     SlabPhysType::Evacuating => {
-                        slabs.insert(
-                            info.slab_id,
-                            EvacuatingSlab::new_slab(info.slab_id, slab_extent),
-                        );
+                        slabs.insert(slab_id, EvacuatingSlab::new_slab(slab_id, slab_extent));
                     }
                 }
             }
         };
         spacemap
-            .load(block_access.clone(), slab_builder.access(), &mut import_cb)
+            .load(block_access.clone(), slab_access, &mut import_cb)
             .await;
         spacemap_next
-            .load(block_access.clone(), slab_builder.access(), &mut import_cb)
+            .load(block_access.clone(), slab_access, &mut import_cb)
             .await;
-
-        for slab in slabs.iter() {
-            slab_builder.claim(slab.id);
-        }
 
         info!(
             "read {} of spacemaps and processed {} entries in {}ms",

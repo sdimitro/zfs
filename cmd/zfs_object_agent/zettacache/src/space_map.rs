@@ -17,16 +17,10 @@ use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::slab_allocator::SlabId;
 
 #[derive(Debug, Serialize, Deserialize, Copy, Clone)]
-pub struct SlabInfoEntry {
-    pub slab_id: SlabId,
-    pub slab_type: SlabPhysType,
-}
-
-#[derive(Debug, Serialize, Deserialize, Copy, Clone)]
 pub enum SpaceMapEntry {
     Alloc(Extent),
     Free(Extent),
-    SlabInfo(SlabInfoEntry),
+    SlabInfo(SlabId, SlabPhysType),
 }
 impl BlockBasedLogEntry for SpaceMapEntry {}
 
@@ -107,10 +101,7 @@ impl SpaceMap {
     }
 
     pub fn mark_slab_info(&mut self, slab_id: SlabId, slab_type: SlabPhysType) {
-        self.log.push(SpaceMapEntry::SlabInfo(SlabInfoEntry {
-            slab_id,
-            slab_type,
-        }));
+        self.log.push(SpaceMapEntry::SlabInfo(slab_id, slab_type));
     }
 
     pub async fn flush(&mut self) -> SpaceMapPhys {

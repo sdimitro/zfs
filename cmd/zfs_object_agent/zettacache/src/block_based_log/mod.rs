@@ -218,8 +218,8 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
                 let mut total_consumed = 0;
                 while total_consumed < extent_bytes.len() {
                     // XXX handle checksum error here
-                    let (chunk, consumed): (BlockBasedLogChunk<T>, usize) = block_access
-                        .chunk_from_raw(&extent_bytes[total_consumed..])
+                    let (chunk, consumed) = block_access
+                        .chunk_from_raw::<BlockBasedLogChunk<T>>(&extent_bytes[total_consumed..])
                         .unwrap();
                     assert_lt!(chunk.id, next_chunk);
                     if chunk_tx.send(chunk).await.is_err() {

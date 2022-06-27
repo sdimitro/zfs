@@ -18,7 +18,7 @@ use std::sync::RwLock;
 
 use bimap::BiBTreeMap;
 use bytesize::ByteSize;
-use log::trace;
+use log::*;
 use more_asserts::*;
 use rand::seq::SliceRandom;
 use rand::thread_rng;
@@ -191,7 +191,7 @@ impl SlabAllocatorBuilder {
 
     pub fn claim(&mut self, slab_id: SlabId) {
         let removed = self.allocatable.remove(&slab_id);
-        assert!(removed);
+        assert!(removed, "{slab_id:?} claimed twice");
     }
 
     pub fn build(self) -> SlabAllocator {
@@ -218,6 +218,7 @@ impl SlabAllocatorBuilder {
         self.access.extent_to_slab_id(extent)
     }
 
+    #[allow(dead_code)]
     pub fn slab_size(&self) -> u64 {
         self.access.slab_size()
     }
@@ -332,8 +333,8 @@ impl SlabAllocator {
         let inner = self.inner.lock().unwrap();
         let target_free_slabs =
             inner.reserved_slabs + TARGET_AVAILABLE_SLABS_PCT.apply(self.access.num_slabs());
-        let current_free_slabs = inner.allocatable.len() as u64;
-        target_free_slabs.saturating_sub(current_free_slabs)
+        let current_free_slabs = inner.allocatable.len() + inner.freeing.len();
+        target_free_slabs.saturating_sub(current_free_slabs as u64)
     }
 
     /// Release the space held by freed slabs, allowing them to be re-allocated.  This is safe to

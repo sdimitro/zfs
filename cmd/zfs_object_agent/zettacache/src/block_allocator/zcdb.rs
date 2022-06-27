@@ -16,6 +16,7 @@ use super::SlabEnum;
 use super::Slabs;
 use crate::block_access::BlockAccess;
 use crate::block_allocator::SlabId;
+use crate::slab_allocator::SlabAccess;
 use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::DumpSlabsOptions;
 
@@ -301,11 +302,11 @@ fn zcachedb_dump_slabs_print_legend() {
 
 pub async fn zcachedb_dump_slabs(
     block_access: Arc<BlockAccess>,
-    slab_builder: &mut SlabAllocatorBuilder,
+    slab_access: &SlabAccess,
     phys: BlockAllocatorPhys,
     opts: DumpSlabsOptions,
 ) {
-    let slab_size = slab_builder.slab_size();
+    let slab_size = slab_access.slab_size();
     let buckets = phys.slab_buckets.buckets.clone();
     let mut cache_slabs = vec![];
     let mut slabs_per_device = HashMap::new();
@@ -314,7 +315,7 @@ pub async fn zcachedb_dump_slabs(
     }
     let slabs = Slabs::open(
         block_access.clone(),
-        slab_builder,
+        slab_access,
         &phys.spacemap,
         &phys.spacemap_next,
     )

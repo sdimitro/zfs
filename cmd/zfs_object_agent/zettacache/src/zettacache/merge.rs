@@ -373,10 +373,8 @@ impl MergeState {
         let begin = Instant::now();
 
         debug!("using {start_key:?} as start key for merge");
-        let mut index_stream;
-        let mut progress;
-        {
-            info!(
+
+        info!(
                 "writing new index to merge {} pending changes into index of {} entries ({}), eviction cutoff {:?}, ghost cutoff {:?}",
                 self.old_pending_changes.len(),
                 old_index_phys.len(),
@@ -384,14 +382,13 @@ impl MergeState {
                 self.eviction_cutoff,
                 self.ghost_cutoff,
             );
-            index_stream = old_index_phys.iter_chunks(block_access, slab_access);
-            progress = Progress::new(
-                tx,
-                old_index_phys.atime_histogram().first_ghost(),
-                old_index_phys.atime_histogram().first_live(),
-                self.last_atime - old_index_phys.atime_histogram().first_ghost() + 1,
-            );
-        }
+        let mut index_stream = old_index_phys.iter_chunks(block_access, slab_access);
+        let mut progress = Progress::new(
+            tx,
+            old_index_phys.atime_histogram().first_ghost(),
+            old_index_phys.atime_histogram().first_live(),
+            self.last_atime - old_index_phys.atime_histogram().first_ghost() + 1,
+        );
         let mut pending_changes_iter = self
             .old_pending_changes
             .range((start_key.map_or(Unbounded, Excluded), Unbounded))

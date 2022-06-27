@@ -1,3 +1,4 @@
+use std::any::type_name;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::fmt::Display;
@@ -872,7 +873,15 @@ impl BlockAccess {
 
         let struct_obj: T = match header.encoding {
             EncodeType::Json => from_json_slice(serde_slice)?,
-            EncodeType::Bincode => Self::bincode_options().deserialize(serde_slice)?,
+            EncodeType::Bincode => Self::bincode_options()
+                .deserialize(serde_slice)
+                .with_context(|| {
+                    format!(
+                        "{header:?} {}-byte payload for {}: {serde_slice:?}",
+                        type_name::<T>(),
+                        serde_slice.len()
+                    )
+                })?,
             EncodeType::BincodeFixint => Self::bincode_fixint_options().deserialize(serde_slice)?,
         };
         Ok((struct_obj, buf.len() - remainder_slice.len()))

@@ -31,6 +31,7 @@ use util::RangeTree;
 use self::slabs::Slabs;
 use crate::base_types::*;
 use crate::block_access::BlockAccess;
+use crate::slab_allocator::SlabAccess;
 use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::slab_allocator::SlabId;
@@ -111,11 +112,11 @@ trait SlabTrait {
     fn free(&mut self, extent: Extent);
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap);
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap);
+    fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap);
     fn max_size(&self) -> u32;
     fn capacity_bytes(&self) -> u64;
     fn free_space(&self) -> u64;
     fn allocated_space(&self) -> u64;
-    fn phys_type(&self) -> SlabPhysType;
     fn num_segments(&self) -> u64;
     fn allocated_extents(&self) -> Vec<Extent>;
     fn dump_info(&self);
@@ -327,10 +328,13 @@ impl SlabTrait for BitmapSlab {
         u64::from(self.total_slots - self.allocatable.len()) * u64::from(self.slot_size)
     }
 
-    fn phys_type(&self) -> SlabPhysType {
-        SlabPhysType::BitmapBased {
-            block_size: self.slot_size,
-        }
+    fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap) {
+        spacemap.mark_slab_info(
+            id,
+            SlabPhysType::BitmapBased {
+                block_size: self.slot_size,
+            },
+        );
     }
 
     fn dump_info(&self) {
@@ -574,10 +578,13 @@ impl SlabTrait for ExtentSlab {
         self.total_space - self.free_space()
     }
 
-    fn phys_type(&self) -> SlabPhysType {
-        SlabPhysType::ExtentBased {
-            max_size: self.max_allowed_alloc_size,
-        }
+    fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap) {
+        spacemap.mark_slab_info(
+            id,
+            SlabPhysType::ExtentBased {
+                max_size: self.max_allowed_alloc_size,
+            },
+        );
     }
 
     fn dump_info(&self) {
@@ -693,8 +700,8 @@ impl SlabTrait for EvacuatingSlab {
         0
     }
 
-    fn phys_type(&self) -> SlabPhysType {
-        SlabPhysType::Evacuating
+    fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap) {
+        spacemap.mark_slab_info(id, SlabPhysType::Evacuating);
     }
 
     fn dump_info(&self) {
@@ -757,11 +764,11 @@ impl Slab {
     }
 
     fn import_alloc(&mut self, extent: Extent) {
-        self.inner.as_mut_dyn().import_alloc(extent);
+        self.inner.as_mut_dyn().import_alloc(extent)
     }
 
     fn import_free(&mut self, extent: Extent) {
-        self.inner.as_mut_dyn().import_free(extent);
+        self.inner.as_mut_dyn().import_free(extent)
     }
 
     fn allocate(&mut self, size: u32) -> Option<Extent> {
@@ -770,24 +777,24 @@ impl Slab {
     }
 
     fn free(&mut self, extent: Extent) {
-        self.inner.as_mut_dyn().free(extent);
+        self.inner.as_mut_dyn().free(extent)
     }
 
     fn mark_slab_info(&self, spacemap: &mut SpaceMap) {
-        spacemap.mark_slab_info(self.id, self.inner.as_dyn().phys_type());
+        self.inner.as_dyn().mark_slab_info(self.id, spacemap);
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
-        self.inner.as_mut_dyn().flush_to_spacemap(spacemap);
         self.is_dirty = false;
         self.is_allocd = false;
+        self.inner.as_mut_dyn().flush_to_spacemap(spacemap)
     }
 
     fn condense_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
         // By leaving a new mark with the slab info when condensing we make the entries in the old
         // spacemap obsolete.
         self.mark_slab_info(spacemap);
-        self.inner.as_mut_dyn().condense_to_spacemap(spacemap);
+        self.inner.as_mut_dyn().condense_to_spacemap(spacemap)
     }
 
     fn max_size(&self) -> u32 {
@@ -823,7 +830,7 @@ impl Slab {
 
     fn dump_info(&self) {
         writeln_stdout!("{:?}", self.id);
-        self.inner.as_dyn().dump_info();
+        self.inner.as_dyn().dump_info()
     }
 
     fn location(&self) -> DiskLocation {
@@ -975,12 +982,12 @@ impl BlockAllocatorBuilder {
     /// Claims the slabs used by the block allocator with the SlabAllocatorBuilder.
     pub async fn new(
         block_access: Arc<BlockAccess>,
-        slab_builder: &mut SlabAllocatorBuilder,
+        slab_access: &SlabAccess,
         phys: BlockAllocatorPhys,
     ) -> Self {
         let slabs = Slabs::open(
             block_access.clone(),
-            slab_builder,
+            slab_access,
             &phys.spacemap,
             &phys.spacemap_next,
         )
@@ -992,7 +999,13 @@ impl BlockAllocatorBuilder {
         }
     }
 
-    pub async fn build(self, slab_allocator: Arc<SlabAllocator>) -> BlockAllocator {
+    pub fn claim(&self, slab_builder: &mut SlabAllocatorBuilder) {
+        for slab in self.slabs.iter() {
+            slab_builder.claim(slab.id);
+        }
+    }
+
+    pub fn build(self, slab_allocator: Arc<SlabAllocator>) -> BlockAllocator {
         let phys = self.phys;
         let slabs = self.slabs;
         let block_access = self.block_access;
@@ -1399,10 +1412,10 @@ impl BlockAllocator {
             .slab_buckets
             .get_bucket_size_for_allocation_size(slab.max_size());
 
-        let extents: Vec<Extent> = slab
+        let extents = slab
             .allocated_extents()
-            .iter()
-            .flat_map(|&old| {
+            .into_iter()
+            .flat_map(|old| {
                 match slab.inner {
                     SlabEnum::BitmapBased(_) => {
                         let extent_size = u32::try_from(old.size).unwrap();
@@ -1429,7 +1442,7 @@ impl BlockAllocator {
                     SlabEnum::Evacuating(_) => panic!("invalid slab type"),
                 }
             })
-            .collect();
+            .collect::<Vec<_>>();
 
         let mut map = extents
             .iter()
@@ -1437,11 +1450,7 @@ impl BlockAllocator {
                 |&old| match self.allocate_impl(bucket, u32::try_from(old.size).unwrap()) {
                     Some(new) => (old, Some(new)),
                     None => {
-                        trace!(
-                        "cache rebalance allocation failed for old extent '{:?}' in bucket '{:?}'",
-                        old,
-                        bucket
-                    );
+                        trace!("cache rebalance allocation failed for old {old:?} in {bucket:?}");
                         (old, None)
                     }
                 },
@@ -1476,10 +1485,7 @@ impl BlockAllocator {
         let merged = before - after;
         if before != after {
             trace!(
-                "rebalance of slab '{:?}' has {} entries after merging ({} entries merged)",
-                id,
-                after,
-                merged,
+                "rebalance of {id:?} has {after} entries after merging ({merged} entries merged)",
             );
         }
 

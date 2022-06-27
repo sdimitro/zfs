@@ -120,7 +120,7 @@ tunable! {
 
     static ref QUANTILES_IN_SIZE_HISTOGRAM: usize = 100;
 
-    // Buffers for incomming data blocks: the "demand" buffer is for read-miss blocks. The
+    // Buffers for incoming data blocks: the "demand" buffer is for read-miss blocks. The
     // "speculative" buffer is for blocks being written. Note that ingesting a single block from
     // an object can result in "inflation" since the entire object must be held in memory. But
     // this is mitigated by the fact that we typically ingest the entire object on writes, and
@@ -624,13 +624,14 @@ impl Inner {
 
         let block_builder = BlockAllocatorBuilder::new(
             block_access.clone(),
-            &mut slab_builder,
+            slab_builder.access(),
             checkpoint.block_allocator,
         )
         .await;
+        block_builder.claim(&mut slab_builder);
 
         let slab_allocator = Arc::new(slab_builder.build());
-        let block_allocator = block_builder.build(slab_allocator.clone()).await;
+        let block_allocator = block_builder.build(slab_allocator.clone());
 
         let operation_log = BlockBasedLog::open(
             block_access.clone(),
@@ -784,11 +785,9 @@ impl Inner {
             checkpoint_wanted: std::sync::Mutex::new(checkpoint_wanted_tx),
         });
 
-        let my_cache = this.clone();
+        let inner = this.clone();
         measure!("checkpoint_task").spawn(async move {
-            my_cache
-                .checkpoint_task(checkpoint_wanted_rx, merging)
-                .await;
+            inner.checkpoint_task(checkpoint_wanted_rx, merging).await;
         });
 
         let inner = this.clone();
@@ -993,8 +992,8 @@ impl Inner {
                         // merge task complete, replace the current index with the new index
                         Some(MergeMessage::Complete(new_index)) => {
                             let mut indices = self.indices.write().await;
-                            let mut locked = lock_measured!(&self.locked).await;
-                            locked.rotate_index(&mut indices.old, new_index).await;
+                            let mut locked = lock_non_send_measured!(&self.locked).await;
+                            locked.rotate_index(&mut indices.old, new_index);
                             locked.block_allocator.rebalance_fini();
                             indices.new = None;
                             merging = None;
@@ -1482,20 +1481,22 @@ impl Inner {
     }
 
     async fn add_disk(&self, path: &Path) -> Result<()> {
-        lock_measured!(&self.locked).await.add_disk(path)?;
+        lock_non_send_measured!(&self.locked).await.add_disk(path)?;
         self.sync_checkpoint().await;
         Ok(())
     }
 
     // Returns the amount of additional space, in bytes
     async fn expand_disk(&self, path: &Path) -> Result<ExpandDiskResponse> {
-        let additional_bytes = lock_measured!(&self.locked).await.expand_disk(path)?;
+        let additional_bytes = lock_non_send_measured!(&self.locked)
+            .await
+            .expand_disk(path)?;
         self.sync_checkpoint().await;
         Ok(additional_bytes)
     }
 
     async fn initiate_merge(&self) {
-        lock_measured!(&self.locked).await.request_merge();
+        lock_non_send_measured!(&self.locked).await.request_merge();
         self.sync_checkpoint().await;
     }
 
@@ -1518,11 +1519,14 @@ impl Inner {
     }
 
     async fn hits_by_size_data(&self) -> SizeHistogramPhys {
-        lock_measured!(&self.locked).await.size_histogram.clone()
+        lock_non_send_measured!(&self.locked)
+            .await
+            .size_histogram
+            .clone()
     }
 
     async fn clear_hit_data(&self) {
-        lock_measured!(&self.locked).await.clear_hit_data();
+        lock_non_send_measured!(&self.locked).await.clear_hit_data();
     }
 
     fn devices(&self) -> DeviceList {
@@ -2066,7 +2070,7 @@ impl Locked {
 
     /// Switch to the new index returned from the merge task and clear the merging state.
     /// Called with the old index write-locked.
-    async fn rotate_index(&mut self, old_index: &mut IndexRun, new_index: IndexRun) {
+    fn rotate_index(&mut self, old_index: &mut IndexRun, new_index: IndexRun) {
         let mut merge = Arc::try_unwrap(self.merge.take().unwrap())
             .expect("unable to unwrap merge state during index rotation");
 

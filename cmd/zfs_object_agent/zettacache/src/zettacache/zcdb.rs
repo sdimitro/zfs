@@ -218,7 +218,7 @@ impl ZCacheDBHandle {
     pub async fn dump_slabs(&mut self, opts: DumpSlabsOptions) {
         zcachedb_dump_slabs(
             self.block_access.clone(),
-            &mut self.slab_builder,
+            self.slab_builder.access(),
             self.checkpoint.block_allocator.clone(),
             opts,
         )
