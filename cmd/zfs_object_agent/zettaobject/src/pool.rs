@@ -1032,16 +1032,10 @@ impl Pool {
     async fn get_recovered_objects(
         state: &Arc<PoolState>,
         shared_state: &Arc<PoolSharedState>,
-        final_write: BlockId,
+        last_replayed_write: BlockId,
     ) -> BTreeMap<ObjectId, DataObject> {
         if shared_state.object_access.supports_list_after() {
-            let recovered = recover_list(state, shared_state).await;
-            assert!(recovered
-                .iter()
-                .next_back()
-                .map(|(k, _)| k.as_min_block() <= final_write)
-                .unwrap_or(true));
-            return recovered;
+            return recover_list(state, shared_state).await;
         }
 
         let mut recovered = BTreeMap::new();
@@ -1066,14 +1060,15 @@ impl Pool {
                 next_id = ObjectId::new(object.header.next_block);
                 recovered.insert(object.header.object, object);
             }
-            if next_id.as_min_block() >= final_write {
-                break;
-            }
             if let Some(object) = DataObject::next_uncached(
                 &shared_state.object_access,
                 shared_state.guid,
                 next_id,
-                ObjectId::new(final_write),
+                // The kernel knows about all writes after last_replayed_write.  Therefore, all
+                // objects after it must be in the object store. As long as we get
+                // the first one (which, if it exists, must start at last_replayed_write + 1), they
+                // will all be found in the next get_uncached loop.
+                ObjectId::new(last_replayed_write + 1),
             )
             .await
             {
@@ -1089,7 +1084,7 @@ impl Pool {
 
     pub async fn resume_complete(&self) {
         let state = &self.state;
-        let (txg, final_write) = self.state.with_syncing_state(|syncing_state| {
+        let (txg, last_replayed_write) = self.state.with_syncing_state(|syncing_state| {
             // verify that we're in resuming state
             assert!(!syncing_state.pending_object.is_pending());
             (
@@ -1099,7 +1094,8 @@ impl Pool {
         });
         let shared_state = &state.shared_state;
 
-        let recovered_objects = Self::get_recovered_objects(state, shared_state, final_write).await;
+        let recovered_objects =
+            Self::get_recovered_objects(state, shared_state, last_replayed_write).await;
 
         self.state.with_syncing_state(|syncing_state| {
             let mut recovered_objects_iter = recovered_objects.into_iter().peekable();
