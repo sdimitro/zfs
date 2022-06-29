@@ -13,6 +13,7 @@ mod labelclear;
 mod list;
 mod remote_channel;
 mod stats;
+mod status;
 mod subcommand;
 mod sync;
 
@@ -63,6 +64,7 @@ enum Commands {
     Expand(expand::Expand),
     Sync(sync::Sync),
     Labelclear(labelclear::Labelclear),
+    Status(status::Status),
 
     // clear_hit_data is deprecated/hidden
     #[clap(rename_all = "snake_case")]
@@ -81,6 +83,7 @@ impl Commands {
             Commands::Sync(sync) => sync,
             Commands::Labelclear(labelclear) => labelclear,
             Commands::ClearHitData(clear_hit_data) => clear_hit_data,
+            Commands::Status(status) => status,
         }
     }
 }

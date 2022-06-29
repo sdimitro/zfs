@@ -248,9 +248,9 @@ impl IoStatDisplay {
         for disk_stat in stat_delta.disk_stats.iter() {
             if self.show_time {
                 if self.interval_is_subsecond {
-                    writeln_stdout!("{}", Local::now().format("%Y-%m-%d %H:%M:%S%.3f UTC"));
+                    writeln_stdout!("{}", Local::now().format("%Y-%m-%d %H:%M:%S%.3f %z"));
                 } else {
-                    writeln_stdout!("{}", Local::now().format("%Y-%m-%d %H:%M:%S UTC"));
+                    writeln_stdout!("{}", Local::now().format("%Y-%m-%d %H:%M:%S %z"));
                 }
             }
             writeln_stdout!();

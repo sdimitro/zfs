@@ -13,6 +13,7 @@ use std::mem;
 use std::mem::size_of;
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -61,8 +62,10 @@ use util::zettacache_stats::IoStatsRef;
 use util::AlignedBytes;
 use util::DeviceList;
 use util::From64;
+use util::IndexStatus;
 use util::LockSet;
 use util::LockedItem;
+use util::ZcacheStatus;
 use uuid::Uuid;
 
 use self::merge::MergeMessage;
@@ -427,6 +430,13 @@ impl ZettaCache {
     pub fn devices(&self) -> DeviceList {
         match &*self.inner.load() {
             Some(inner) => inner.devices(),
+            None => Default::default(),
+        }
+    }
+
+    pub async fn status(&self) -> ZcacheStatus {
+        match &*self.inner.load() {
+            Some(inner) => inner.status().await,
             None => Default::default(),
         }
     }
@@ -1531,6 +1541,20 @@ impl Inner {
 
     fn devices(&self) -> DeviceList {
         self.block_access.list_devices()
+    }
+
+    async fn status(&self) -> ZcacheStatus {
+        let indices = self.indices.read().await;
+        let pending_changes = &self.stats.stats[PendingChanges];
+
+        ZcacheStatus {
+            index: IndexStatus {
+                bytes: indices.old.num_bytes(),
+                entries: indices.old.len(),
+                pending_changes: pending_changes.0.load(Relaxed),
+            },
+            devices: self.block_access.list_device_status(),
+        }
     }
 
     fn io_stats<'a>(&self) -> IoStatsRef<'a> {

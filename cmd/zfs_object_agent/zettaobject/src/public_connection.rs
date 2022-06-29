@@ -90,6 +90,7 @@ impl PublicConnectionState {
         server.register_handler(TYPE_LIST_DEVICES, Box::new(Self::list_devices));
         server.register_handler(TYPE_ZCACHE_IOSTAT, Box::new(Self::zcache_iostat));
         server.register_handler(TYPE_ZCACHE_STATS, Box::new(Self::zcache_stats));
+        server.register_handler(TYPE_ZCACHE_STATUS, Box::new(Self::zcache_status));
     }
 
     fn get_pools(&mut self, nvl: NvList) -> HandlerReturn {
@@ -240,6 +241,21 @@ impl PublicConnectionState {
                 stats_json: serde_json::to_string(&cache.stats()).unwrap(),
             };
             return_ok(response, false)
+        }))
+    }
+
+    fn zcache_status(&mut self, _: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        debug!("got StatusRequest");
+        Ok(Box::pin(async move {
+            #[derive(Debug, Serialize)]
+            struct StatusResponse {
+                status_json: String,
+            }
+            let response = StatusResponse {
+                status_json: serde_json::to_string(&cache.status().await).unwrap(),
+            };
+            return_ok(response, true)
         }))
     }
 }

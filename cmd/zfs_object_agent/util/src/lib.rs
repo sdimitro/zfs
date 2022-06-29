@@ -27,6 +27,7 @@ pub mod watch_once;
 pub mod write_stdout;
 mod zcache_devices;
 mod zcache_hits;
+mod zcache_status;
 pub mod zettacache_stats;
 
 pub use alloc::with_alloctag;
@@ -60,3 +61,6 @@ pub use write_stdout::flush_stdout;
 pub use zcache_devices::DeviceEntry;
 pub use zcache_devices::DeviceList;
 pub use zcache_hits::ReportHitsResponse;
+pub use zcache_status::DeviceStatus;
+pub use zcache_status::IndexStatus;
+pub use zcache_status::ZcacheStatus;

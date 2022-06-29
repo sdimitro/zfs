@@ -47,6 +47,7 @@ use util::AlignedBytes;
 use util::AlignedVec;
 use util::DeviceEntry;
 use util::DeviceList;
+use util::DeviceStatus;
 use util::From64;
 use uuid::Uuid;
 
@@ -662,7 +663,7 @@ impl BlockAccess {
             })
     }
 
-    // Gather a list of devices for zcache list_devices command.
+    /// Gather a list of devices for `zcache list` command.
     pub fn list_devices(&self) -> DeviceList {
         let devices = self
             .disks
@@ -675,6 +676,20 @@ impl BlockAccess {
             })
             .collect();
         DeviceList { devices }
+    }
+
+    /// Gather a list of devices with status for `zcache status` command.
+    pub fn list_device_status(&self) -> Vec<DeviceStatus> {
+        self.disks
+            .read()
+            .unwrap()
+            .iter()
+            .map(|d| DeviceStatus {
+                path: d.path.clone(),
+                canonical_path: d.canonical_path.clone(),
+                size: *d.size.lock().unwrap(),
+            })
+            .collect()
     }
 
     pub fn disk_size(&self, disk: DiskId) -> u64 {
