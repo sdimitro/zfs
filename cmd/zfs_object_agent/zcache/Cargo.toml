@@ -13,6 +13,7 @@ chrono = "0.4"
 async-trait = "0.1.51"
 clap={version="3.1.6",features=["derive"]}
 exitcode = "1.1.2"
+git-version = "0.3.5"
 humantime = "2.1.0"
 log = "0.4"
 more-asserts = "0.2.1"

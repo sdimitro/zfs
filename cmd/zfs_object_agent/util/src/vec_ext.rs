@@ -243,7 +243,7 @@ pub struct VecMap<K, V> {
 
 impl<K, V> VecMap<K, V>
 where
-    K: Into<usize> + Copy,
+    K: From<usize> + Into<usize> + Copy,
 {
     /// Returns old value (or None if not present)
     pub fn insert(&mut self, key: K, value: V) -> Option<V> {
@@ -285,6 +285,10 @@ where
         self.vec[index].take()
     }
 
+    pub fn contains_key(&self, key: &K) -> bool {
+        self.get(*key).is_some()
+    }
+
     pub fn values(&self) -> impl Iterator<Item = &V> {
         self.vec.iter().filter_map(|v| v.as_ref())
     }
@@ -313,6 +317,38 @@ where
         self.vec[range].iter_mut().filter_map(|v| v.as_mut())
     }
 
+    pub fn iter(&self) -> impl DoubleEndedIterator<Item = (K, &V)> {
+        self.vec
+            .iter()
+            .enumerate()
+            .flat_map(|(k, v)| v.as_ref().map(|v| (k.into(), v)))
+    }
+
+    pub fn iter_mut(&mut self) -> impl DoubleEndedIterator<Item = (K, &mut V)> {
+        self.vec
+            .iter_mut()
+            .enumerate()
+            .flat_map(|(k, v)| v.as_mut().map(|v| (k.into(), v)))
+    }
+
+    pub fn keys(&self) -> impl DoubleEndedIterator<Item = K> + '_ {
+        self.iter().map(|(k, _)| k)
+    }
+
+    pub fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&K, &mut V) -> bool,
+    {
+        for k in 0..self.vec.len() {
+            let k = k.into();
+            if let Some(v) = self.get_mut(k) {
+                if !f(&k, v) {
+                    self.remove(k);
+                }
+            }
+        }
+    }
+
     /// Returns the number of elements in the map.
     pub fn len(&self) -> usize {
         self.num_entries
@@ -320,5 +356,33 @@ where
 
     pub fn is_empty(&self) -> bool {
         self.len() == 0
+    }
+}
+
+impl<K, V> VecMap<K, V>
+where
+    K: From<usize> + Into<usize> + Copy,
+    V: Default,
+{
+    pub fn get_mut_or_default(&mut self, key: K) -> &mut V {
+        if self.contains_key(&key) {
+            return self.get_mut(key).unwrap();
+        }
+        let old = self.insert(key, Default::default());
+        assert!(old.is_none());
+        self.get_mut(key).unwrap()
+    }
+}
+
+impl<K, V> FromIterator<(K, V)> for VecMap<K, V>
+where
+    K: From<usize> + Into<usize> + Copy,
+{
+    fn from_iter<T: IntoIterator<Item = (K, V)>>(iter: T) -> VecMap<K, V> {
+        let mut map = VecMap::default();
+        for (k, v) in iter.into_iter() {
+            map.insert(k, v);
+        }
+        map
     }
 }

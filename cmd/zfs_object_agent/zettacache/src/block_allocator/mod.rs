@@ -27,6 +27,7 @@ use util::with_alloctag;
 use util::writeln_stdout;
 use util::BitRange;
 use util::RangeTree;
+use util::VecMap;
 
 use self::slabs::Slabs;
 use crate::base_types::*;
@@ -110,12 +111,13 @@ trait SlabTrait {
     fn import_free(&mut self, extent: Extent);
     fn allocate(&mut self, size: u32) -> Option<Extent>;
     fn free(&mut self, extent: Extent);
-    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap);
+    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) -> (u64, u64);
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap);
     fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap);
     fn max_size(&self) -> u32;
     fn capacity_bytes(&self) -> u64;
     fn free_space(&self) -> u64;
+    fn freeing_space(&self) -> u64;
     fn allocated_space(&self) -> u64;
     fn num_segments(&self) -> u64;
     fn allocated_extents(&self) -> Vec<Extent>;
@@ -249,12 +251,14 @@ impl SlabTrait for BitmapSlab {
         self.freeing.insert(slot);
     }
 
-    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
+    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) -> (u64, u64) {
         // It could happen that a segment was allocated and then freed within the same checkpoint
         // period at which point it would be part of both `allocating` and `freeing` sets. For
         // this reason we always record `allocating` first, before `freeing`, on our spacemaps.
         // Note that segments cannot be freed and then allocated within the same checkpoint
         // period.
+
+        let allocated_bytes = u64::from(self.allocatable.len()) * u64::from(self.slot_size);
         for (slot, run) in self.allocating.iter_ranges() {
             spacemap.alloc(Extent {
                 location: self.slot_to_location(slot),
@@ -264,6 +268,7 @@ impl SlabTrait for BitmapSlab {
         self.allocating.clear();
 
         // Space freed during this checkpoint is now available for reallocation.
+        let freed_bytes = u64::from(self.freeing.len()) * u64::from(self.slot_size);
         for (slot, run) in self.freeing.iter_ranges() {
             spacemap.free(Extent {
                 location: self.slot_to_location(slot),
@@ -274,6 +279,8 @@ impl SlabTrait for BitmapSlab {
             });
         }
         self.freeing.clear();
+
+        (allocated_bytes, freed_bytes)
     }
 
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap) {
@@ -316,8 +323,13 @@ impl SlabTrait for BitmapSlab {
         u64::from(self.allocatable.len()) * u64::from(self.slot_size)
     }
 
+    fn freeing_space(&self) -> u64 {
+        u64::from(self.freeing.len()) * u64::from(self.slot_size)
+    }
+
     fn allocated_space(&self) -> u64 {
-        u64::from(self.total_slots - self.allocatable.len()) * u64::from(self.slot_size)
+        u64::from(self.total_slots - self.allocatable.len() - self.freeing.len())
+            * u64::from(self.slot_size)
     }
 
     fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap) {
@@ -497,7 +509,7 @@ impl SlabTrait for ExtentSlab {
         self.freeing.add(offset, size);
     }
 
-    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
+    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) -> (u64, u64) {
         self.freeing.verify_space();
         self.allocating.verify_space();
         self.allocatable.verify_space();
@@ -509,6 +521,7 @@ impl SlabTrait for ExtentSlab {
         // this reason we always record `allocating` first, before `freeing`, on our spacemaps.
         // Note that segments cannot be freed and then allocated within the same checkpoint
         // period.
+        let allocated_bytes = self.allocating.space();
         for (&start, &size) in self.allocating.iter() {
             self.allocatable.verify_absent(start, size);
             spacemap.alloc(Extent::new(disk, start, size));
@@ -516,12 +529,15 @@ impl SlabTrait for ExtentSlab {
         self.allocating.clear();
 
         // Space freed during this checkpoint is now available for reallocation.
+        let freed_bytes = self.freeing.space();
         for (&start, &size) in self.freeing.iter() {
             self.allocating.verify_absent(start, size);
             spacemap.free(Extent::new(disk, start, size));
             with_alloctag(Self::ALLOCATABLE_TAG, || self.allocatable.add(start, size));
         }
         self.freeing.clear();
+
+        (allocated_bytes, freed_bytes)
     }
 
     fn condense_to_spacemap(&self, spacemap: &mut SpaceMap) {
@@ -556,8 +572,12 @@ impl SlabTrait for ExtentSlab {
         self.allocatable.space()
     }
 
+    fn freeing_space(&self) -> u64 {
+        self.freeing.space()
+    }
+
     fn allocated_space(&self) -> u64 {
-        self.total_space - self.free_space()
+        self.total_space - self.free_space() - self.freeing_space()
     }
 
     fn mark_slab_info(&self, id: SlabId, spacemap: &mut SpaceMap) {
@@ -658,8 +678,8 @@ impl SlabTrait for EvacuatingSlab {
         );
     }
 
-    fn flush_to_spacemap(&mut self, _: &mut SpaceMap) {
-        panic!("attempting to flush evacuating slab",);
+    fn flush_to_spacemap(&mut self, _: &mut SpaceMap) -> (u64, u64) {
+        panic!("attempting to flush evacuating slab");
     }
 
     fn condense_to_spacemap(&self, _: &mut SpaceMap) {
@@ -675,6 +695,10 @@ impl SlabTrait for EvacuatingSlab {
     }
 
     fn free_space(&self) -> u64 {
+        0
+    }
+
+    fn freeing_space(&self) -> u64 {
         0
     }
 
@@ -766,7 +790,8 @@ impl Slab {
         self.inner.as_dyn().mark_slab_info(self.id, spacemap);
     }
 
-    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
+    // Returns (bytes_allocated, bytes_freed)
+    fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) -> (u64, u64) {
         self.is_dirty = false;
         self.is_allocd = false;
         self.inner.as_mut_dyn().flush_to_spacemap(spacemap)
@@ -785,6 +810,10 @@ impl Slab {
 
     fn free_space(&self) -> u64 {
         self.inner.as_dyn().free_space()
+    }
+
+    fn freeing_space(&self) -> u64 {
+        self.inner.as_dyn().freeing_space()
     }
 
     fn allocated_space(&self) -> u64 {
@@ -991,6 +1020,7 @@ impl BlockAllocatorBuilder {
         let phys = self.phys;
         let slabs = self.slabs;
         let block_access = self.block_access;
+        let removing_disks = slab_allocator.removing_disks().collect::<HashSet<_>>();
 
         let next_slab_to_condense = phys.next_slab_to_condense;
 
@@ -1001,22 +1031,33 @@ impl BlockAllocatorBuilder {
             phys.spacemap_next,
         );
 
-        let mut available_space = 0u64;
         let mut evacuating_slabs = Vec::new();
+        let mut noalloc_state = VecMap::<_, HashSet<_>>::default();
+        let mut per_disk_stats = block_access
+            .disks()
+            .map(|disk| (disk, DiskStats::default()))
+            .collect::<VecMap<_, _>>();
         let mut slabs_by_bucket: BTreeMap<SlabBucketSize, Vec<SlabBucketEntry>> = BTreeMap::new();
         for slab in slabs.iter() {
-            available_space += slab.free_space();
+            let slab_disk = slab.location().disk();
 
-            match &slab.inner {
-                SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => {
-                    slabs_by_bucket
-                        .entry(SlabBucketSize(slab.max_size()))
-                        .or_default()
-                        .push(slab.to_slab_bucket_entry());
-                }
-                SlabEnum::Evacuating(_) => {
-                    evacuating_slabs.push(slab.id);
-                }
+            let disk_stats = per_disk_stats.get_mut(slab_disk).unwrap();
+            disk_stats.free_bytes += slab.free_space();
+            disk_stats.alloc_bytes += slab.allocated_space();
+
+            if matches!(slab.inner, SlabEnum::Evacuating(_)) {
+                evacuating_slabs.push(slab.id);
+            }
+
+            if let Some(&disk) = removing_disks.get(&slab_disk) {
+                noalloc_state.get_mut_or_default(disk).insert(slab.id);
+                disk_stats.noalloc_bytes += slab.free_space();
+            } else {
+                assert_eq!(disk_stats.noalloc_bytes, 0);
+                slabs_by_bucket
+                    .entry(SlabBucketSize(slab.max_size()))
+                    .or_default()
+                    .push(slab.to_slab_bucket_entry());
             }
         }
 
@@ -1031,13 +1072,24 @@ impl BlockAllocatorBuilder {
             dirty_slabs: Default::default(),
             slab_allocator,
             evacuating_slabs,
+            noalloc_state,
             slab_buckets,
-            available_space,
-            freeing_space: 0,
+            per_disk_stats,
             checkpoint_allocated_bytes: 0,
             block_access,
         }
     }
+}
+
+#[derive(Default)]
+struct DiskStats {
+    // The amount of allocated space in the slabs held by the block_allocator
+    alloc_bytes: u64,
+    // The amount of free space in the slabs held by the block_allocator (includes noalloc_bytes)
+    free_bytes: u64,
+    // The number of bytes that are free in the noalloc_slabs but is not available for
+    // allocations
+    noalloc_bytes: u64,
 }
 
 pub struct BlockAllocator {
@@ -1088,10 +1140,34 @@ pub struct BlockAllocator {
     slab_allocator: Arc<SlabAllocator>,
     evacuating_slabs: Vec<SlabId>,
 
+    // This field contains all the data related to the removal logic. Each disk ID that is used
+    // as a key in this map is a device marked for removal. The value is the set of slabs that
+    // are part of that disk (which are managed by the BlockAllocator). These slabs are not in
+    // the allocatable buckets, so they are not allocatable.  The removal logic uses this field
+    // as follows:
+    //
+    // [1] When we mark a device for removal in the block allocator (see `mark_noalloc_disk()`)
+    // we move any slabs that belong to that disk, away from the allocation buckets, into a new
+    // disk entry in `noalloc_state` as a set (effectively marking the slabs as unavailable for
+    // future allocations).
+    // [2] Later, when there is enough free space in the cache for the allocated_space from those
+    // noalloc slabs, the merge code will submit a remap to move that allocated space to slabs of
+    // non-removing disks.
+    // [3] When the remap code empties all the noalloc slabs of the removing disk and gives them
+    // back to the slab_allocator then we no longer need that disk ID key and we remove it from
+    // our map.
+    //
+    // For details about cancellation see `unmark_noalloc_disk()`.
+    //
+    // This field is essentially a marker. Its keys are disk IDs of devices that are being
+    // removed AND have allocated space in the block allocator. So if a device marked for removal
+    // has no slabs currently in-use from the block allocator, it will not be in the map.
+    noalloc_state: VecMap<DiskId, HashSet<SlabId>>,
+
     slab_buckets: SlabAllocationBuckets,
 
-    available_space: u64,
-    freeing_space: u64,
+    // Space statistics per disk
+    per_disk_stats: VecMap<DiskId, DiskStats>,
 
     // used only by incoming rate heuristic for condensing
     checkpoint_allocated_bytes: u64,
@@ -1132,15 +1208,17 @@ impl BlockAllocator {
         bucket.insert(new_slab.to_slab_bucket_entry());
 
         let extent = new_slab.allocate(request_size).unwrap();
+
+        self.stats_add_new_slab(&new_slab);
+        self.stats_track_allocation(extent);
+
         let old = self.slabs.insert(new_id, new_slab);
         assert!(old.is_none());
-        self.available_space += self.slab_allocator.slab_size();
+
         self.mark_slab_info(new_id);
         self.dirty_slab_id(new_id);
         trace!("{new_id:?} added to {bucket_size:?}");
 
-        self.available_space -= extent.size;
-        self.checkpoint_allocated_bytes += extent.size;
         Some(extent)
     }
 
@@ -1191,8 +1269,7 @@ impl BlockAllocator {
                             extent
                         );
                         self.dirty_slab_id(id);
-                        self.available_space -= extent.size;
-                        self.checkpoint_allocated_bytes += extent.size;
+                        self.stats_track_allocation(extent);
                         return Some(extent);
                     }
                     None => {
@@ -1234,8 +1311,125 @@ impl BlockAllocator {
 
         let slab_id = self.slab_allocator.extent_to_slab_id(extent);
         self.slabs.get_mut(slab_id).free(extent);
-        self.freeing_space += extent.size;
+
+        self.stats_track_free(extent);
         self.dirty_slab_id(slab_id);
+    }
+
+    pub fn add_disk(&mut self, disk: DiskId) {
+        let inserted = self.per_disk_stats.insert(disk, Default::default());
+        assert!(inserted.is_none());
+    }
+
+    pub fn remove_disk(&mut self, disk: DiskId) {
+        self.stats_verify_disk_is_empty(disk);
+        let removed = self.per_disk_stats.remove(disk);
+        assert!(removed.is_some());
+        assert!(self.noalloc_state.get(disk).is_none());
+    }
+
+    /// Remove all slabs that belong to `disk` from our sorted slab buckets,
+    /// effectively forbidding any future allocations from them.
+    pub fn mark_noalloc_disk(&mut self, disk: DiskId) {
+        let disk_stats = self.per_disk_stats.get_mut(disk).unwrap();
+        for bucket in self.slab_buckets.0.values_mut() {
+            bucket.by_freeness.retain(|entry| {
+                let slab = self.slabs.get(entry.slab_id);
+                if slab.location().disk() != disk {
+                    true
+                } else {
+                    self.noalloc_state
+                        .get_mut_or_default(disk)
+                        .insert(entry.slab_id);
+
+                    disk_stats.noalloc_bytes += slab.free_space();
+                    false
+                }
+            });
+
+            // Even if we removed all the disk's slabs from the allocation bucket the bucket can
+            // still point to one of those slabs if we allocated from it recently.
+            if let Some(bucket_current) = bucket.last_allocated {
+                if let Some(noalloc_slabs) = self.noalloc_state.get(disk) {
+                    if noalloc_slabs.contains(&bucket_current.slab_id) {
+                        bucket.advance();
+                    }
+                }
+            }
+        }
+
+        // Make sure we also track any slabs from that disk that have already been submitted for
+        // evacuation.
+        for &slab_id in self.evacuating_slabs.iter() {
+            if self.slabs.get(slab_id).location().disk() == disk {
+                self.noalloc_state.get_mut_or_default(disk).insert(slab_id);
+            }
+        }
+
+        // If the supplied `disk` had any free data the space of that data should equal the
+        // amount of space marked as non-allocatable.
+        assert_eq!(disk_stats.free_bytes, disk_stats.noalloc_bytes);
+    }
+
+    /// Place any slabs marked as non-allocatable back to the sorted slab
+    /// buckets allowing us to allocate from them again.
+    pub fn unmark_noalloc_disk(&mut self, disk: DiskId) {
+        // Remaping the disk's data may have already finished, at which point there is nothing
+        // for us to do here.
+        if !self.disk_is_pending_remap(disk) {
+            self.stats_verify_disk_is_empty(disk);
+            return;
+        }
+
+        let disk_stats = self.per_disk_stats.get_mut(disk).unwrap();
+        self.noalloc_state
+            .get_mut(disk)
+            .unwrap()
+            .retain(|&slab_id| {
+                let slab = self.slabs.get(slab_id);
+                disk_stats.noalloc_bytes -= slab.free_space();
+
+                // Note: Any noalloc slabs that are marked as evacuating (e.g. they are currently
+                // being remapped) are not part of the allocation buckets and their free space
+                // is not accounted in the block allocator. Given that plus the fact that they
+                // will be released back to the slab allocator once remap is done, we want to
+                // skip them.
+                if matches!(slab.inner, SlabEnum::Evacuating(_)) {
+                    return true;
+                }
+
+                let bucket_size = self
+                    .slab_buckets
+                    .get_bucket_size_for_allocation_size(slab.max_size());
+                self.slab_buckets
+                    .get_bucket_for_bucket_size(bucket_size)
+                    .insert(slab.to_slab_bucket_entry());
+
+                false
+            });
+        // At this point everything is either back to allocatable or is currently evacuating.
+        // Either way there noalloc_bytes should be zero.
+        assert_eq!(disk_stats.noalloc_bytes, 0);
+
+        // If the remap for this disk was never submitted, it's set of noalloc slabs should be
+        // empty, in which case we can finish cleaning up its noalloc_state entry here.
+        if self.noalloc_state.get(disk).unwrap().is_empty() {
+            self.noalloc_state.remove(disk);
+        }
+    }
+
+    fn noalloc_slabs_to_remap(&self, disk: DiskId) -> Vec<SlabId> {
+        match self.noalloc_state.get(disk) {
+            Some(slabs) => slabs.iter().copied().collect(),
+            None => Vec::new(),
+        }
+    }
+
+    /// Returns true if the disk is marked for removal and it is waiting for a remap to empty its
+    /// slabs from the block allocator. Otherwise, the device is either non-removing or it is
+    /// removing but has no slabs in-use from the block allocator.
+    pub fn disk_is_pending_remap(&self, disk: DiskId) -> bool {
+        self.noalloc_state.contains_key(&disk)
     }
 
     // This function is the entry-point to starting the cache rebalancing process. This will select
@@ -1255,36 +1449,55 @@ impl BlockAllocator {
     // the rebalance process as finished. This allows the allocator to transition the slabs that
     // were undergoing evacuation to free slabs, such that the slabs can later be used for
     // allocation.
-    pub fn rebalance_init(&mut self) -> Option<BTreeMap<Extent, Option<DiskLocation>>> {
+    pub fn rebalance_init(
+        &mut self,
+        removing_disk: Option<DiskId>,
+    ) -> Option<BTreeMap<Extent, Option<DiskLocation>>> {
         // For now, ensure rebalance_fini() is called before this function can be called a second
         // time.
         assert!(self.evacuating_slabs.is_empty());
 
         let begin = Instant::now();
 
-        let slabs = self.slabs_to_rebalance();
+        let slabs = match removing_disk {
+            Some(disk) => self.noalloc_slabs_to_remap(disk),
+            None => self.slabs_to_rebalance(),
+        };
         if slabs.is_empty() {
             info!("cache rebalance is not needed");
             return None;
         }
 
-        info!("initializing rebalance of {} slabs", slabs.len());
+        info!(
+            "initializing rebalance of {} slabs {}",
+            slabs.len(),
+            if removing_disk.is_some() {
+                "(triggered by removal)"
+            } else {
+                ""
+            }
+        );
 
-        // In order to ensure the allocations performed in rebalance_slab() (called below) are
-        // not satisfied by any of the slabs we're going to rebalance, we need to remove these
-        // slabs from the list of slabs available for allocation. Further, we must remove all
-        // slabs before we do any allocations, to ensure we don't move an extent multiple times;
-        // otherwise, data corruption could occur, as the data contained in the extents, can be
-        // moved by the caller in any order.
-        //
-        // For example, if we mark an extent as moving from disk location A to B, and then again
-        // from B to C, the final data contained at disk location C could be incorrect, if the
-        // caller does the move of B to C before the move of A to B. Since we do not enforce the
-        // order in which the caller will do the copies, we need to ensure this cannot happen, by
-        // never moving an extent more than once.
-        for &id in slabs.iter() {
-            trace!("prepping slab '{:?}' for rebalancing", id);
-            self.slab_buckets.remove_slab(self.slabs.get(id));
+        if removing_disk.is_none() {
+            // In order to ensure the allocations performed in rebalance_slab() (called below) are
+            // not satisfied by any of the slabs we're going to rebalance, we need to remove these
+            // slabs from the list of slabs available for allocation. Further, we must remove all
+            // slabs before we do any allocations, to ensure we don't move an extent multiple times;
+            // otherwise, data corruption could occur, as the data contained in the extents, can be
+            // moved by the caller in any order.
+            //
+            // For example, if we mark an extent as moving from disk location A to B, and then again
+            // from B to C, the final data contained at disk location C could be incorrect, if the
+            // caller does the move of B to C before the move of A to B. Since we do not enforce the
+            // order in which the caller will do the copies, we need to ensure this cannot happen,
+            // by never moving an extent more than once.
+            //
+            // Note that for removal we've already removed the removing disk's slabs from allocation
+            // buckets so there should be nothing to remove.
+            for &id in slabs.iter() {
+                trace!("prepping slab '{:?}' for rebalancing", id);
+                self.slab_buckets.remove_slab(self.slabs.get(id));
+            }
         }
 
         let mut merged = 0;
@@ -1306,6 +1519,10 @@ impl BlockAllocator {
             map.len(),
             merged,
         );
+
+        if let Some(disk) = removing_disk {
+            self.stats_verify_disk_is_empty(disk);
+        }
 
         assert!(!self.evacuating_slabs.is_empty());
         Some(map)
@@ -1344,7 +1561,10 @@ impl BlockAllocator {
             .slabs
             .iter()
             .filter(|&slab| match slab.inner {
-                SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => true,
+                SlabEnum::BitmapBased(_) | SlabEnum::ExtentBased(_) => {
+                    // Skip over slabs from disks being removed
+                    !self.noalloc_state.contains_key(&slab.location().disk())
+                }
                 SlabEnum::Evacuating(_) => false,
             })
             .map(|slab| slab.to_slab_bucket_entry())
@@ -1474,8 +1694,12 @@ impl BlockAllocator {
         // Since evacuating slabs don't have any allocatable space, we must account for that
         // here; we must do this before we transition to an evacuating slab (evacuating slabs
         // have no free space).
-        let slab = self.slabs.get(id);
-        self.available_space -= slab.free_space();
+        self.stats_track_slab_evacuation(id);
+
+        // XXX: Currently it is not possible to call `BlockAllocator.free()` from the
+        // checkpoint_task in-between the point that we flush a checkpoint and the point that we
+        // start a rebalance_init(). Thet is expected to change once DLPX-80824 lands.
+        assert_eq!(self.slabs.get(id).freeing_space(), 0);
 
         trace!("marking slab '{:?}' as evacuating", id);
 
@@ -1498,6 +1722,13 @@ impl BlockAllocator {
             // evacuating slabs cannot allocate() or free(); thus, they should never be dirty.
             assert!(!self.slabs.get(id).is_dirty);
 
+            // if slab is part of removing disk, remove it from the noalloc slabs.
+            let slab_disk = self.slabs.get(id).location().disk();
+            if let Some(noalloc_set) = self.noalloc_state.get_mut(slab_disk) {
+                let removed = noalloc_set.remove(&id);
+                assert!(removed);
+            }
+
             self.slab_allocator.free(id);
             self.slabs.remove(id);
 
@@ -1510,6 +1741,11 @@ impl BlockAllocator {
             };
             target_spacemap.mark_slab_info(id, SlabPhysType::Free);
         }
+
+        // This could be the end of the remap of a removing disk. If that's the case the set of
+        // (noalloc) slabs for that disk should be empty, which means we can remove its entry
+        // from the noalloc_state.
+        self.noalloc_state.retain(|_, slabs| !slabs.is_empty());
     }
 
     /// Return number of slabs to condense, based on the "spacemap badness" ratio.  Note that the
@@ -1606,7 +1842,9 @@ impl BlockAllocator {
         let begin = Instant::now();
         let old_pending = self.spacemap.pending_len() + self.spacemap_next.pending_len();
         let ndirty_slabs = self.dirty_slabs.len();
-        let mut allocd_slabs: u64 = 0;
+        let mut allocd_slabs = 0u64;
+        let mut total_allocated = 0;
+        let mut total_freed = 0;
         for slab_id in mem::take(&mut self.dirty_slabs) {
             if !self.slabs.exists(slab_id) {
                 // This can happen if the slab was evacuated.
@@ -1632,16 +1870,20 @@ impl BlockAllocator {
             } else {
                 &mut self.spacemap_next
             };
-            slab.flush_to_spacemap(target_spacemap);
+            let (allocated, freed) = slab.flush_to_spacemap(target_spacemap);
+
+            self.stats_flush_freeing(slab_id, freed);
+            total_allocated += allocated;
+            total_freed += freed;
         }
         debug!(
-            "flushed {} slabs ({} allocd), {} entries in {}ms",
-            ndirty_slabs,
-            allocd_slabs,
+            "flushed {} entries ({} allocd, {} freed) to {ndirty_slabs} ({allocd_slabs} allocated from) in {}ms",
             nice_number_count(
                 (self.spacemap.pending_len() + self.spacemap_next.pending_len() - old_pending)
                     as f64
             ),
+            nice_p2size(total_allocated),
+            nice_p2size(total_freed),
             begin.elapsed().as_millis()
         );
     }
@@ -1691,9 +1933,6 @@ impl BlockAllocator {
         self.flush_dirty();
         let (spacemap, spacemap_next) = self.flush_impl().await;
         self.resort_buckets();
-
-        self.available_space += self.freeing_space;
-        self.freeing_space = 0;
         self.checkpoint_allocated_bytes = 0;
 
         if completed_merge {
@@ -1737,14 +1976,110 @@ impl BlockAllocator {
         phys
     }
 
-    /// Return the amount of space in unallocated blocks.  This does not include space in empty
-    /// slabs.
-    pub fn available(&self) -> u64 {
-        self.available_space
+    /// Return the amount of allocated space in slabs that are marked for removal.
+    pub fn removing_bytes(&self) -> u64 {
+        self.noalloc_state
+            .keys()
+            .map(|disk| self.per_disk_stats.get(disk).unwrap().alloc_bytes)
+            .sum()
     }
 
-    pub fn freeing(&self) -> u64 {
-        self.freeing_space
+    pub fn disk_allocated_bytes(&self, disk: DiskId) -> u64 {
+        self.per_disk_stats.get(disk).unwrap().alloc_bytes
+    }
+
+    /// Return the amount of space in unallocated blocks.  This does not include
+    /// space in empty slabs.
+    pub fn free_bytes(&self) -> u64 {
+        self.per_disk_stats
+            .values()
+            .map(|stats| stats.free_bytes)
+            .sum::<u64>()
+    }
+
+    /// Return the amount of space in unallocated blocks that's available for
+    /// allocations.  This does not include space in empty slabs nor space in
+    /// slabs that are part of a device being removed.
+    pub fn allocatable_bytes(&self) -> u64 {
+        let free_bytes = self
+            .per_disk_stats
+            .values()
+            .map(|stats| stats.free_bytes)
+            .sum::<u64>();
+        let noalloc_bytes = self
+            .per_disk_stats
+            .values()
+            .map(|stats| stats.noalloc_bytes)
+            .sum::<u64>();
+        free_bytes - noalloc_bytes
+    }
+
+    /// Incorporate this newly-created slab's free space into the BlockAllocator's `per_disk_stats`.
+    fn stats_add_new_slab(&mut self, slab: &Slab) {
+        self.per_disk_stats
+            .get_mut(slab.location().disk())
+            .unwrap()
+            .free_bytes += slab.capacity_bytes();
+    }
+
+    /// Track the newly-allocated `extent` in the BlockAllocator's `per_disk_stats`.
+    fn stats_track_allocation(&mut self, extent: Extent) {
+        let disk_stats = self.per_disk_stats.get_mut(extent.location.disk()).unwrap();
+        disk_stats.free_bytes -= extent.size;
+        disk_stats.alloc_bytes += extent.size;
+        assert_eq!(
+            disk_stats.noalloc_bytes, 0,
+            "can't allocate from non-allocatable disk"
+        );
+        self.checkpoint_allocated_bytes += extent.size;
+    }
+
+    /// Track the `extent` that was just freed in the BlockAllocator's `per_disk_stats`.
+    fn stats_track_free(&mut self, extent: Extent) {
+        let disk = extent.location.disk();
+
+        let disk_stats = self.per_disk_stats.get_mut(disk).unwrap();
+        disk_stats.alloc_bytes -= extent.size;
+        if !self.noalloc_state.contains_key(&disk) {
+            assert_eq!(disk_stats.noalloc_bytes, 0);
+        }
+    }
+
+    /// Update the `free_bytes` of the disk where `slab_id` belongs to with the amount that was
+    /// just `freed` when flushing that slab. If that slab is part of a removing disk then
+    /// `noalloc_bytes` from that disk is also incremented by `freed`.
+    fn stats_flush_freeing(&mut self, slab_id: SlabId, freed: u64) {
+        let disk = self.slabs.get(slab_id).location().disk();
+
+        let disk_stats = self.per_disk_stats.get_mut(disk).unwrap();
+        disk_stats.free_bytes += freed;
+        if self.noalloc_state.contains_key(&disk) {
+            disk_stats.noalloc_bytes += freed;
+        }
+    }
+
+    /// Remove any space accounted for the supplied slab from `per_disk_stats` as we are
+    /// preparing it for evacuation.
+    fn stats_track_slab_evacuation(&mut self, slab_id: SlabId) {
+        let slab = self.slabs.get(slab_id);
+        let slab_disk = slab.location().disk();
+
+        let disk_stats = self.per_disk_stats.get_mut(slab_disk).unwrap();
+        disk_stats.free_bytes -= slab.free_space();
+        disk_stats.alloc_bytes -= slab.allocated_space();
+        if self.noalloc_state.contains_key(&slab_disk) {
+            disk_stats.noalloc_bytes -= slab.free_space();
+        } else {
+            assert_eq!(disk_stats.noalloc_bytes, 0);
+        }
+    }
+
+    /// Verify that the supplied `disk` doesn't contribute any space in `per_disk_stats`.
+    fn stats_verify_disk_is_empty(&self, disk: DiskId) {
+        let disk_stats = self.per_disk_stats.get(disk).unwrap();
+        assert_eq!(disk_stats.alloc_bytes, 0);
+        assert_eq!(disk_stats.free_bytes, 0);
+        assert_eq!(disk_stats.noalloc_bytes, 0);
     }
 
     fn mark_slab_info(&mut self, id: SlabId) {
@@ -1755,6 +2090,13 @@ impl BlockAllocator {
             &mut self.spacemap_next
         };
         slab.mark_slab_info(target_spacemap);
+    }
+
+    // Returns the number of slabs moved.
+    pub async fn transfer_metadata_for_removal(&mut self, disk: DiskId) -> u64 {
+        let mut moved = self.spacemap.transfer_data_for_removal(disk).await;
+        moved += self.spacemap_next.transfer_data_for_removal(disk).await;
+        moved
     }
 }
 

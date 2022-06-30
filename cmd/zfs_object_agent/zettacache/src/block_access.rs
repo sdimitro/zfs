@@ -49,6 +49,7 @@ use util::DeviceEntry;
 use util::DeviceList;
 use util::DeviceStatus;
 use util::From64;
+use util::VecMap;
 use uuid::Uuid;
 
 use crate::base_types::DiskId;
@@ -138,7 +139,7 @@ impl<'a> Drop for OpInProgress<'a> {
 #[derive(Debug)]
 pub struct BlockAccess {
     sector_size: usize,
-    disks: RwLock<Vec<Disk>>,
+    disks: RwLock<VecMap<DiskId, Disk>>,
     readonly: bool,
     timebase: Instant,
 }
@@ -149,7 +150,17 @@ pub struct Disk {
     file: Arc<File>,
 
     path: PathBuf,
+
+    // In most OSs it is common for a device to be represented by multiple files in different
+    // subdirectories under /dev, and subdirectories created by different cloud providers may
+    // complicate things even more. Therefore we remember each device path as the path that was
+    // supplied from the user so that we can display it back to them in a way that they
+    // understand. That said, we want to stay flexible and allow the user to specify any path
+    // that resolves to the same device. So we derive the canonical name so devices in the config
+    // can be matched with devices supplied by the user regardless of the path they are
+    // specified.
     canonical_path: PathBuf,
+
     size: Mutex<u64>,
     sector_size: usize,
     #[derivative(Debug = "ignore")]
@@ -589,9 +600,14 @@ impl Disk {
 // we can use "glommio" to use io_uring for much lower overheads.  Or SPDK
 // (which can use io_uring or nvme hardware directly).
 impl BlockAccess {
-    pub fn new(disks: Vec<Disk>, readonly: bool) -> Self {
-        let sector_size = disks
-            .iter()
+    pub fn new(disks: &BTreeMap<DiskId, PathBuf>, readonly: bool) -> Result<Self> {
+        let mut disk_map: VecMap<DiskId, Disk> = Default::default();
+        for (&disk_id, disk_path) in disks {
+            disk_map.insert(disk_id, Disk::new(disk_path, false)?);
+        }
+
+        let sector_size = disk_map
+            .values()
             .reduce(|a, b| {
                 assert_eq!(a.sector_size, b.sector_size);
                 a
@@ -599,34 +615,40 @@ impl BlockAccess {
             .unwrap()
             .sector_size;
 
-        BlockAccess {
+        Ok(BlockAccess {
             sector_size,
-            disks: RwLock::new(disks),
+            disks: RwLock::new(disk_map),
             readonly,
             timebase: Instant::now(),
-        }
+        })
     }
 
     pub fn add_disk(&self, disk: Disk) -> Result<DiskId> {
         let mut disks = self.disks.write().unwrap();
-        for existing_disk in disks.iter() {
-            if disk.canonical_path == existing_disk.canonical_path {
-                return Err(anyhow!(
-                    "disk {:?} ({:?}) is already part of the zettacache",
-                    disk.path,
-                    disk.canonical_path,
-                ));
-            }
+        if disks
+            .values()
+            .any(|existing_disk| existing_disk.canonical_path == disk.canonical_path)
+        {
+            return Err(anyhow!(
+                "disk {:?} ({:?}) is already part of the zettacache",
+                disk.path,
+                disk.canonical_path,
+            ));
         }
-        let id = DiskId::new(disks.len());
-        disks.push(disk);
+        let id = match disks.keys().next_back() {
+            Some(id) => id.next(),
+            None => DiskId::new(0),
+        };
+        disks.insert(id, disk);
         Ok(id)
     }
 
     // Returns the number of bytes added to the disk.
     pub fn expand_disk(&self, disk: DiskId) -> Result<ExpandDiskResponse> {
         let disks = self.disks.read().unwrap();
-        let disk = &disks[disk.index()];
+        let disk = disks
+            .get(disk)
+            .ok_or_else(|| anyhow!("cannot expand removed disk"))?;
         let (_, new_size) = disk_sizes(&disk.file)?;
         let mut size = disk.size.lock().unwrap();
         let additional_bytes = new_size.checked_sub(*size).ok_or_else(|| {
@@ -643,11 +665,21 @@ impl BlockAccess {
         })
     }
 
-    /// Note: In the future we'll support device removal in which case the
-    /// DiskId's will probably not be sequential.  By using this accessor we
-    /// need not assume anything about the values inside the DiskId's.
+    pub fn remove_disk(&self, disk: DiskId) {
+        let mut disks = self.disks.write().unwrap();
+        let removed = disks.remove(disk);
+        assert!(removed.is_some());
+    }
+
+    /// Accessor function that does not assume anything about the value in of the DiskIds.
+    /// Note: after device removal, DiskIds may not be sequential.
     pub fn disks(&self) -> impl Iterator<Item = DiskId> {
-        (0..self.disks.read().unwrap().len()).map(DiskId::new)
+        self.disks
+            .read()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>()
+            .into_iter()
     }
 
     pub fn path_to_disk_id(&self, path: &Path) -> Result<DiskId> {
@@ -656,8 +688,8 @@ impl BlockAccess {
             .read()
             .unwrap()
             .iter()
-            .position(|disk| disk.canonical_path == canonical_path)
-            .map(DiskId::new)
+            .find(|(_, disk)| disk.canonical_path == canonical_path)
+            .map(|(disk_id, _)| disk_id)
             .ok_or_else(|| {
                 anyhow!("disk {path:?} ({canonical_path:?}) is not part of the zettacache")
             })
@@ -669,7 +701,7 @@ impl BlockAccess {
             .disks
             .read()
             .unwrap()
-            .iter()
+            .values()
             .map(|d| DeviceEntry {
                 name: d.path.clone(),
                 size: *d.size.lock().unwrap(),
@@ -683,7 +715,7 @@ impl BlockAccess {
         self.disks
             .read()
             .unwrap()
-            .iter()
+            .values()
             .map(|d| DeviceStatus {
                 path: d.path.clone(),
                 canonical_path: d.canonical_path.clone(),
@@ -693,7 +725,12 @@ impl BlockAccess {
     }
 
     pub fn disk_size(&self, disk: DiskId) -> u64 {
-        *self.disks.read().unwrap()[disk.index()]
+        *self
+            .disks
+            .read()
+            .unwrap()
+            .get(disk)
+            .unwrap()
             .size
             .lock()
             .unwrap()
@@ -707,7 +744,7 @@ impl BlockAccess {
     }
 
     pub fn disk_path(&self, disk: DiskId) -> PathBuf {
-        self.disks.read().unwrap()[disk.index()].path.clone()
+        self.disks.read().unwrap().get(disk).unwrap().path.clone()
     }
 
     pub fn total_capacity(&self) -> u64 {
@@ -721,7 +758,7 @@ impl BlockAccess {
         self.verify_aligned(extent.size);
 
         let disk = extent.location.disk();
-        let fut = self.disks.read().unwrap()[disk.index()].read(
+        let fut = self.disks.read().unwrap().get(disk).unwrap().read(
             extent.location.offset(),
             usize::from64(extent.size),
             io_type,
@@ -744,7 +781,13 @@ impl BlockAccess {
         self.verify_aligned(location.offset());
         self.verify_aligned(bytes.len());
         let disk = location.disk();
-        let fut = self.disks.read().unwrap()[disk.index()].write(location.offset(), bytes, io_type);
+        let fut =
+            self.disks
+                .read()
+                .unwrap()
+                .get(disk)
+                .unwrap()
+                .write(location.offset(), bytes, io_type);
         // drop disks RwLock before waiting for io
         fut.await;
     }
@@ -916,7 +959,7 @@ impl BlockAccess {
                 .disks
                 .read()
                 .unwrap()
-                .iter()
+                .values()
                 .map(|disk| disk.io_stats)
                 .collect(),
         }

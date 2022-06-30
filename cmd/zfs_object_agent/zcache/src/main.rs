@@ -12,6 +12,7 @@ mod iostat;
 mod labelclear;
 mod list;
 mod remote_channel;
+mod remove;
 mod stats;
 mod status;
 mod subcommand;
@@ -22,17 +23,24 @@ use std::path::PathBuf;
 use anyhow::Result;
 use clap::Parser;
 use clap::Subcommand;
+use git_version::git_version;
 use hits::ClearHitData;
 use log::*;
 use subcommand::ZcacheSubCommand;
+
+static GIT_VERSION: &str = git_version!(
+    fallback = match option_env!("CARGO_ZOA_GITREV") {
+        Some(value) => value,
+        None => "unknown",
+    }
+);
 
 fn main() -> Result<()> {
     async_main()
 }
 
 #[derive(Parser)]
-// XXX other commands use a git derived version here
-#[clap(version = "1.1")]
+#[clap(version=GIT_VERSION)]
 #[clap(name = "zcache")]
 #[clap(about = "ZFS ZettaCache Command")]
 #[clap(propagate_version = true)]
@@ -62,6 +70,7 @@ enum Commands {
     Stats(stats::Stats),
     Add(add::Add),
     Expand(expand::Expand),
+    Remove(remove::Remove),
     Sync(sync::Sync),
     Labelclear(labelclear::Labelclear),
     Status(status::Status),
@@ -80,6 +89,7 @@ impl Commands {
             Commands::Stats(stats) => stats,
             Commands::Add(add) => add,
             Commands::Expand(expand) => expand,
+            Commands::Remove(remove) => remove,
             Commands::Sync(sync) => sync,
             Commands::Labelclear(labelclear) => labelclear,
             Commands::ClearHitData(clear_hit_data) => clear_hit_data,
@@ -104,8 +114,26 @@ mod test_clap {
 
     use super::*;
 
+    fn neg(s: &str) {
+        assert!(Cli::try_parse_from(s.split_whitespace()).is_err());
+    }
+
     #[test]
     fn test_debug_asserts() {
         Cli::command().debug_assert();
+    }
+
+    #[test]
+    fn test_zcache_remove_conflicts() {
+        neg("zcache remove --pause --resume");
+        neg("zcache remove --pause --cancel");
+        neg("zcache remove --pause -s");
+        neg("zcache remove --pause disk0");
+        neg("zcache remove --resume --cancel");
+        neg("zcache remove --resume -s");
+        neg("zcache remove --resume -s");
+        neg("zcache remove --resume disk0");
+        neg("zcache remove --cancel");
+        neg("zcache remove");
     }
 }

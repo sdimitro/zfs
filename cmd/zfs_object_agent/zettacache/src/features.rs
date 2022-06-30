@@ -29,6 +29,7 @@ lazy_static! {
         SLAB_SIZE_32MB.clone(),
         TRIMMED_INDEX.clone(),
         DISK_GUIDS.clone(),
+        CACHE_DEVICE_REMOVAL.clone(),
     ]
     .map(|feature: Feature| (feature.name, feature.info))
     .into_iter()
@@ -51,6 +52,10 @@ lazy_static! {
     };
     pub static ref DISK_GUIDS: Feature = Feature {
         name: FeatureName("com.delphix:disk_guids".to_string()),
+        info: FeatureType::Upgradeable
+    };
+    pub static ref CACHE_DEVICE_REMOVAL: Feature = Feature {
+        name: FeatureName("com.delphix:cache_device_removal".to_string()),
         info: FeatureType::Upgradeable
     };
 }

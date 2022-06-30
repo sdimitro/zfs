@@ -126,6 +126,42 @@ impl<T: BlockBasedLogEntry> BlockBasedLogPhys<T> {
         }
     }
 
+    /// Find slabs used in this log that are located in the `removing_disk` and move their data
+    /// to newly allocated slabs from non-removing disks. Returns the number of slabs moved.
+    pub async fn transfer_data_for_removal(
+        &mut self,
+        removing_disk: DiskId,
+        slab_allocator: &SlabAllocator,
+        block_access: &BlockAccess,
+    ) -> u64 {
+        let mut moved = 0u64;
+        for slab in &mut self.slabs {
+            let slab_extent = slab_allocator.slab_id_to_extent(*slab);
+            if slab_extent.location.disk() != removing_disk {
+                continue;
+            }
+
+            let new_slab = slab_allocator.allocate_reserved();
+            let new_slab_extent = slab_allocator.slab_id_to_extent(new_slab);
+            assert!(new_slab_extent.location.disk() != removing_disk);
+
+            let bytes = block_access
+                .read_raw(slab_extent, DiskIoType::MaintenanceRead)
+                .await;
+            block_access
+                .write_raw(
+                    new_slab_extent.location,
+                    bytes,
+                    DiskIoType::MaintenanceWrite,
+                )
+                .await;
+            slab_allocator.free(*slab);
+            *slab = new_slab;
+            moved += 1;
+        }
+        moved
+    }
+
     fn written_extents<'a>(
         &'a self,
         slab_access: &'a SlabAccess,
@@ -325,6 +361,13 @@ impl<T: BlockBasedLogEntry> BlockBasedLog<T> {
             self.slab_allocator.free(slab);
         }
         self.phys.trimmed = offset;
+    }
+
+    // Returns the number of slabs moved.
+    pub async fn transfer_data_for_removal(&mut self, removing_disk: DiskId) -> u64 {
+        self.phys
+            .transfer_data_for_removal(removing_disk, &self.slab_allocator, &self.block_access)
+            .await
     }
 
     async fn flush_impl<F>(&mut self, mut new_chunk_fn: F)

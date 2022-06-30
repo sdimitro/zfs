@@ -139,6 +139,10 @@ pub const TYPE_ZCACHE_STATS: &str = "zcache stats";
 pub const TYPE_ZCACHE_STATUS: &str = "zcache status";
 pub const TYPE_ADD_DISK: &str = "add disk";
 pub const TYPE_EXPAND_DISK: &str = "expand disk";
+pub const TYPE_REMOVE_DISK: &str = "remove disk";
+pub const TYPE_CANCEL_DISK_REMOVAL: &str = "cancel disk removal";
+pub const TYPE_PAUSE_DISK_REMOVALS: &str = "pause disk removals";
+pub const TYPE_RESUME_DISK_REMOVALS: &str = "resume disk removals";
 pub const TYPE_SYNC_CHECKPOINT: &str = "sync checkpoint";
 pub const TYPE_INITIATE_MERGE: &str = "initiate merge";
 
@@ -149,6 +153,11 @@ pub struct AddDiskRequest {
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct ExpandDiskRequest {
+    pub path: PathBuf,
+}
+
+#[derive(Serialize, Deserialize, Debug)]
+pub struct RemoveDiskRequest {
     pub path: PathBuf,
 }
 

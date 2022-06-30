@@ -1,17 +1,16 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use anyhow::Result;
 use futures::StreamExt;
 use util::nice_p2size;
-use util::writeln_stderr;
 use util::writeln_stdout;
 
 use super::CheckpointPhys;
 use crate::base_types::CacheGuid;
 use crate::base_types::DiskId;
 use crate::block_access::BlockAccess;
-use crate::block_access::Disk;
 use crate::block_allocator::zcdb::zcachedb_dump_slabs;
 use crate::block_allocator::zcdb::zcachedb_dump_spacemaps;
 use crate::features::check_features;
@@ -33,32 +32,19 @@ pub struct ZCacheDBHandle {
 }
 
 impl ZCacheDBHandle {
-    pub async fn dump_superblocks(paths: Vec<PathBuf>) -> Result<()> {
-        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in paths {
-            match Disk::new(&path, true) {
-                Ok(disk) => disks.push(disk),
-                Err(err) => writeln_stderr!("error: {}", err),
-            }
-        }
-        if disks.is_empty() {
-            return Ok(());
-        }
-        let block_access = BlockAccess::new(disks, true);
+    pub async fn dump_superblocks(paths: BTreeMap<DiskId, PathBuf>) -> Result<()> {
+        let block_access = BlockAccess::new(&paths, true)?;
         SuperblockPhys::dump_all(&block_access).await;
         Ok(())
     }
 
-    pub async fn open(paths: Vec<PathBuf>) -> Result<ZCacheDBHandle> {
-        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in &paths {
-            disks.push(Disk::new(path, true)?);
-        }
-        let block_access = Arc::new(BlockAccess::new(disks, true));
+    pub async fn open(paths: BTreeMap<DiskId, PathBuf>) -> Result<ZCacheDBHandle> {
+        let block_access = Arc::new(BlockAccess::new(&paths, true)?);
 
         let feature_flags = PrimaryPhys::read_features(&block_access).await?;
-        check_features(&feature_flags)
-            .map_err(|e| CacheOpenError::IncompatibleFeatures(paths, e))?;
+        check_features(&feature_flags).map_err(|e| {
+            CacheOpenError::IncompatibleFeatures(paths.values().cloned().collect(), e)
+        })?;
 
         let (primary, primary_disk, guid, _extra_disks) = PrimaryPhys::read(&block_access).await?;
         let checkpoint = Arc::new(CheckpointPhys::read(&block_access, &primary.checkpoint).await?);
@@ -84,13 +70,7 @@ impl ZCacheDBHandle {
         writeln_stdout!("  Primary {:?}, {:?}", self.primary_disk, self.guid);
         writeln_stdout!();
 
-        let slabs_capacity = self
-            .checkpoint
-            .slab_allocator
-            .capacity()
-            .iter()
-            .map(|extent| extent.size)
-            .sum();
+        let slabs_capacity = self.checkpoint.slab_allocator.active_capacity_bytes();
         writeln_stdout!("Slabs Region: {}", nice_p2size(slabs_capacity));
         writeln_stdout!("-------------------------------");
         let mut total_used_bytes = 0;

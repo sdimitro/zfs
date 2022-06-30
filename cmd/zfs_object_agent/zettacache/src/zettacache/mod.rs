@@ -1,5 +1,6 @@
 pub mod merge;
 pub mod remap;
+pub mod removal;
 pub mod zcdb;
 
 use std::collections::btree_map;
@@ -33,6 +34,7 @@ use futures::FutureExt;
 use log::*;
 use lru::LruCache;
 use more_asserts::*;
+use rand::seq::IteratorRandom;
 use rand::Rng;
 use serde::Deserialize;
 use serde::Serialize;
@@ -72,6 +74,7 @@ use self::merge::MergeMessage;
 use self::merge::MergeProgressPhys;
 use self::merge::MergeState;
 use self::remap::RemapState;
+use self::removal::DeviceRemoval;
 use crate::atime_histogram::AtimeHistogram;
 use crate::atime_histogram::AtimeHistogramPhys;
 use crate::base_types::*;
@@ -95,6 +98,7 @@ use crate::slab_allocator::SlabAllocatorPhys;
 use crate::slab_allocator::RESERVED_SLABS_PCT;
 use crate::superblock::DiskPhys;
 use crate::superblock::PrimaryPhys;
+use crate::superblock::SuperblockPhys;
 use crate::superblock::SUPERBLOCK_SIZE;
 use crate::CacheOpenMode;
 
@@ -151,6 +155,13 @@ tunable! {
     static ref CORRUPT_LOOKUP_PCT: Percent = Percent::new(0.0);
     static ref CORRUPTION_FILL: u8 = 0x31; // fill blocks with '1'
 }
+
+// Max number of merge cycles needed for a device to be removed given that it no longer has
+// any user data. This should be at most 2 which is the worst case where we started a removal
+// mid-way of a merge and the device had no user data (e.g. data in the block allocator). In
+// that case we start counting our merges and the first merge doesn't really count because
+// removal started midway so the index metadata was not fully moved away from the device.
+const REMOVAL_MAX_MERGES_FOR_METADATA_EVACUATION: u8 = 2;
 
 /// A PendingChange is the in-core data structure for tracking changes to the index between merges.
 /// Two types of events are tracked: insertions and lookup hits (atime update). Note that there is
@@ -219,7 +230,6 @@ struct Locked {
     block_access: Arc<BlockAccess>,
     primary: PrimaryPhys,
     guid: CacheGuid,
-    primary_disk: DiskId,
     block_allocator: BlockAllocator,
     pending_changes: PendingChanges,
     pending_changes_trigger: usize,
@@ -240,6 +250,7 @@ struct Locked {
     // This is needed to ensure that writes complete before we complete the next
     // checkpoint, so that they are persisted to disk.
     outstanding_writes: ConcurrentBatch,
+    device_removal: DeviceRemoval,
 
     atime: Atime,
     stats: Arc<CacheStats>,
@@ -398,6 +409,32 @@ impl ZettaCache {
         }
     }
 
+    pub async fn remove_disk(&self, path: &Path) -> Result<()> {
+        match &*self.inner.load() {
+            Some(inner) => inner.remove_disk(path).await,
+            None => Err(anyhow!("disk {path:?} is not part of the zettacache")),
+        }
+    }
+
+    pub async fn cancel_disk_removal(&self, path: &Path) -> Result<()> {
+        match &*self.inner.load() {
+            Some(inner) => inner.cancel_disk_removal(path).await,
+            None => Err(anyhow!("disk {path:?} is not part of the zettacache")),
+        }
+    }
+
+    pub async fn pause_disk_removals(&self) {
+        if let Some(inner) = &*self.inner.load() {
+            inner.pause_disk_removals().await;
+        }
+    }
+
+    pub async fn resume_disk_removals(&self) {
+        if let Some(inner) = &*self.inner.load() {
+            inner.resume_disk_removals().await;
+        }
+    }
+
     pub async fn initiate_merge(&self) {
         if let Some(inner) = &*self.inner.load() {
             inner.initiate_merge().await;
@@ -458,11 +495,12 @@ impl ZettaCache {
 
 impl Inner {
     async fn create(paths: Vec<PathBuf>) -> Result<()> {
-        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in paths {
-            disks.push(Disk::new(&path, false)?);
-        }
-        let block_access = BlockAccess::new(disks, false);
+        let paths = paths
+            .into_iter()
+            .enumerate()
+            .map(|(id, path)| (DiskId::new(id), path))
+            .collect();
+        let block_access = BlockAccess::new(&paths, false)?;
 
         let guid = CacheGuid::new();
 
@@ -490,8 +528,10 @@ impl Inner {
             ),
 
             merge_progress: None,
+            device_removal: Default::default(),
         };
-        let slab_allocator = SlabAllocatorBuilder::new(checkpoint.slab_allocator.clone()).build();
+        let slab_allocator =
+            SlabAllocatorBuilder::new(checkpoint.slab_allocator.clone()).build(&Vec::new());
         let checkpoint_extents = checkpoint.write(&block_access, &slab_allocator).await;
         PrimaryPhys::new(
             block_access
@@ -548,25 +588,21 @@ impl Inner {
         if paths.is_empty() {
             return Err(CacheOpenError::NoDevices);
         }
-        let mut disks: Vec<Disk> = Vec::with_capacity(paths.len());
-        for path in &paths {
-            disks.push(Disk::new(path, false)?);
-        }
-        let block_access = Arc::new(BlockAccess::new(disks, false));
+        let block_access = Arc::new(BlockAccess::new(&paths, false)?);
 
         let feature_flags = match PrimaryPhys::read_features(&block_access).await {
             Ok(f) => f,
             Err(_) => {
                 // XXX need proper create CLI
-                Self::create(paths.clone()).await?;
+                Self::create(paths.values().cloned().collect()).await?;
                 PrimaryPhys::read_features(&block_access).await.unwrap()
             }
         };
-        check_features(&feature_flags)
-            .map_err(|e| CacheOpenError::IncompatibleFeatures(paths, e))?;
+        check_features(&feature_flags).map_err(|e| {
+            CacheOpenError::IncompatibleFeatures(paths.values().cloned().collect(), e)
+        })?;
 
-        let (mut primary, primary_disk, guid, extra_disks) =
-            PrimaryPhys::read(&block_access).await.unwrap();
+        let (mut primary, _, guid, extra_disks) = PrimaryPhys::read(&block_access).await.unwrap();
 
         let mut checkpoint = CheckpointPhys::read(&block_access, &primary.checkpoint).await?;
         assert_eq!(checkpoint.id, primary.checkpoint_id);
@@ -640,7 +676,7 @@ impl Inner {
         .await;
         block_builder.claim(&mut slab_builder);
 
-        let slab_allocator = Arc::new(slab_builder.build());
+        let slab_allocator = Arc::new(slab_builder.build(&checkpoint.device_removal.pending));
         let block_allocator = block_builder.build(slab_allocator.clone());
 
         let operation_log = BlockBasedLog::open(
@@ -742,10 +778,10 @@ impl Inner {
             size_histogram: checkpoint.size_histogram,
             operation_log,
             primary,
-            primary_disk,
             guid,
             outstanding_reads: Default::default(),
             outstanding_writes: Default::default(),
+            device_removal: DeviceRemoval::open(checkpoint.device_removal),
             atime: checkpoint.last_atime,
             block_allocator,
             slab_allocator,
@@ -1005,6 +1041,7 @@ impl Inner {
                             let mut locked = lock_non_send_measured!(&self.locked).await;
                             locked.rotate_index(&mut indices.old, new_index);
                             locked.block_allocator.rebalance_fini();
+                            locked.device_removal.complete_merge_cycle();
                             indices.new = None;
                             merging = None;
                             completed_merge = true;
@@ -1491,7 +1528,7 @@ impl Inner {
     }
 
     async fn add_disk(&self, path: &Path) -> Result<()> {
-        lock_non_send_measured!(&self.locked).await.add_disk(path)?;
+        lock_measured!(&self.locked).await.add_disk(path).await?;
         self.sync_checkpoint().await;
         Ok(())
     }
@@ -1503,6 +1540,28 @@ impl Inner {
             .expand_disk(path)?;
         self.sync_checkpoint().await;
         Ok(additional_bytes)
+    }
+
+    async fn remove_disk(&self, path: &Path) -> Result<()> {
+        self.locked.lock().await.remove_disk(path)?;
+        self.sync_checkpoint().await;
+        Ok(())
+    }
+
+    async fn cancel_disk_removal(&self, path: &Path) -> Result<()> {
+        self.locked.lock().await.cancel_disk_removal(path)?;
+        self.sync_checkpoint().await;
+        Ok(())
+    }
+
+    async fn pause_disk_removals(&self) {
+        self.locked.lock().await.pause_disk_removals();
+        self.sync_checkpoint().await;
+    }
+
+    async fn resume_disk_removals(&self) {
+        self.locked.lock().await.resume_disk_removals();
+        self.sync_checkpoint().await;
     }
 
     async fn initiate_merge(&self) {
@@ -1808,6 +1867,75 @@ impl Locked {
         completed_merge: bool,
         pool_guids: PoolGuidMappingPhys,
     ) {
+        if let Some(removal_entry) = self.device_removal.removing_disk_entry() {
+            let disk = removal_entry.disk;
+
+            // The stages of the removal are the following:
+            //
+            // [1] We wait for the merge logic to evict enough blocks so that there's sufficient
+            // space available to the block allocator to move all blocks off the target disk.
+            //
+            // [2] Once we have enough free space to start the evacuation for the first disk
+            // being removed, we issue a rebalance in the block allocator to move its data to
+            // non-removing disks.
+            //
+            // [3] Once that evacuation is done we want to move any metadata away from that disk
+            // so that its fully evacuated. The first piece of metadata that we move is anything
+            // that's not refreshed every merge cycle by the index (currently this means only the
+            // block allocator's spacemaps) - we explicitly move those.
+            //
+            // [4] Once that is done, we have the expecation that all other metadata (index,
+            // operation_log, etc..) will evacuate implicitly over the next couple of merge cyles
+            // as we free their old data which may reside in the removing disks and allocate new
+            // ones in allocatable disks. Since we don't have explict control of the merge tasks
+            // that we spawn from here, we bound this removal stage to a specific number of
+            // cycles (see REMOVAL_MAX_MERGES_FOR_METADATA_EVACUATION). If that bound is ever
+            // crossed then we panic as it is implied that the removal is not making progress.
+            //
+            // [5] Once the disk is fully evacuated we remove it from our in-memory structures
+            // which will later be flushed to disk, effectively finishing the removal of said
+            // disk.
+            //
+            // XXX: The REMOVAL_MAX_MERGES_FOR_METADATA_EVACUATION mechanism is not ideal for
+            // now as we don't store the progress that we've made in terms of merge cycles
+            // on disk for each removal. This means that if the agent restarts we'll have
+            // to wait for another N merges before detecting that we aren't making progress.
+            if !self.block_allocator.disk_is_pending_remap(disk) {
+                if !self.slab_allocator.disk_is_fully_evacuated(disk) {
+                    match removal_entry.merge_cycles_left {
+                        Some(cycles_left) => {
+                            assert_gt!(
+                                cycles_left,
+                                0,
+                                "took more than {} merge cycles to remove the devices metadata",
+                                REMOVAL_MAX_MERGES_FOR_METADATA_EVACUATION
+                            );
+                        }
+                        None => {
+                            let slabs_moved = self
+                                .block_allocator
+                                .transfer_metadata_for_removal(disk)
+                                .await;
+                            removal_entry.merge_cycles_left =
+                                Some(REMOVAL_MAX_MERGES_FOR_METADATA_EVACUATION);
+                            info!(
+                            "removal: {disk:?}: {slabs_moved} metadata slabs moved; awaiting at most {} merge cycles",
+                            REMOVAL_MAX_MERGES_FOR_METADATA_EVACUATION
+                        );
+                        }
+                    }
+                } else {
+                    self.slab_allocator.remove_disk(disk);
+                    self.block_allocator.remove_disk(disk);
+                    self.block_access.remove_disk(disk);
+                    self.device_removal.complete_removal(disk);
+                    let removed = self.primary.disks.remove(&disk);
+                    assert!(removed.is_some());
+                    info!("removal: completed for {disk:?}");
+                }
+            }
+        }
+
         debug!(
             "flushing checkpoint {:?}",
             self.primary.checkpoint_id.next()
@@ -1853,6 +1981,7 @@ impl Locked {
             block_allocator: self.block_allocator.flush(completed_merge).await,
             size_histogram: self.size_histogram.clone(),
             merge_progress: merge_progress_phys,
+            device_removal: self.device_removal.to_phys(),
         };
 
         let checkpoint_extents = checkpoint
@@ -1865,9 +1994,17 @@ impl Locked {
         }
         self.primary.checkpoint_id = checkpoint.id;
         self.primary.feature_flags = SUPPORTED_FEATURES.keys().cloned().collect();
-        // We need to write all the disks' superblocks in case new disks have been added.
+
+        // The following call is the last step on saving the cache's state. Any crash that
+        // happens after this and up until the next checkpoint, will have us restart from the
+        // state recorded here.
+        let primary_disk = self
+            .block_access
+            .disks()
+            .choose(&mut rand::thread_rng())
+            .unwrap();
         self.primary
-            .write_all(self.primary_disk, self.guid, &self.block_access)
+            .write(primary_disk, self.guid, &self.block_access)
             .await;
 
         self.slab_allocator.set_reservation(
@@ -1942,22 +2079,65 @@ impl Locked {
 
     fn space_to_evict(&self) -> u64 {
         let allocatable_from_slabs = self.slab_allocator.allocatable_bytes();
-        let allocatable_from_blocks = self.block_allocator.available();
-        let target_allocatable = TARGET_FREE_BLOCKS_PCT.apply(self.slab_allocator.capacity());
+        let allocatable_from_blocks = self.block_allocator.allocatable_bytes();
+        let slab_allocator_capacity =
+            self.slab_allocator.capacity() - self.slab_allocator.removing_capacity();
+
+        // If we are removing devices make sure that we have enough free space evacuate their
+        // data to the rest of the cache, on top of our TARGET_FREE_BLOCKS_PCT.
+        let bytes_to_relocate = self.block_allocator.removing_bytes();
+
+        let target_allocatable =
+            TARGET_FREE_BLOCKS_PCT.apply(slab_allocator_capacity) + bytes_to_relocate;
         let reduction = target_allocatable
             .saturating_sub(allocatable_from_slabs)
             .saturating_sub(allocatable_from_blocks);
 
         info!(
-            "want to evict {} of allocated blocks ({} allocatable slabs; {} allocatable blocks; {} target; {} freeing; {} histogram)",
+            "want to evict {} of allocated blocks ({} allocatable slabs; {} allocatable blocks; {} target; {} histogram)",
             nice_p2size(reduction),
             nice_p2size(allocatable_from_slabs),
             nice_p2size(allocatable_from_blocks),
             nice_p2size(target_allocatable),
-            nice_p2size(self.block_allocator.freeing()),
             nice_p2size(self.atime_histogram.sum_live()),
         );
         reduction
+    }
+
+    /// Returns true if there is space to evacuate the allocated space of the first removing
+    /// device plus some slop space. Otherwise, false.
+    fn removal_can_evacuate(&self) -> bool {
+        if self.device_removal.paused {
+            return false;
+        }
+
+        match self.device_removal.removing_disk() {
+            Some(disk) => {
+                if !self.block_allocator.disk_is_pending_remap(disk) {
+                    return false;
+                }
+
+                let space_to_evacuate = self.block_allocator.disk_allocated_bytes(disk);
+                if space_to_evacuate == 0 {
+                    return false;
+                }
+
+                let allocatable_space = self.slab_allocator.allocatable_bytes()
+                    + self.block_allocator.allocatable_bytes();
+                let slab_allocator_capacity =
+                    self.slab_allocator.capacity() - self.slab_allocator.removing_capacity();
+                let slop = TARGET_FREE_BLOCKS_PCT.apply(slab_allocator_capacity);
+
+                debug!(
+                    "removal: {} to evacuate (plus slop: {}); {} available",
+                    nice_p2size(space_to_evacuate),
+                    nice_p2size(slop),
+                    nice_p2size(allocatable_space)
+                );
+                allocatable_space > (space_to_evacuate + slop)
+            }
+            None => false,
+        }
     }
 
     fn need_merge(&self) -> bool {
@@ -1984,9 +2164,30 @@ impl Locked {
         }
 
         {
+            if self.removal_can_evacuate() {
+                debug!(
+                    "starting merge due to data evacuation of {:?}",
+                    self.device_removal.removing_disk().unwrap()
+                );
+                need_merge = true;
+            }
+        }
+
+        {
             let slabs = self.slab_allocator.num_slabs_to_evacuate();
             if slabs > EVACUATION_MIN_BATCH_PCT.apply(self.slab_allocator.num_slabs()) {
                 debug!("starting merge due to rebalance of {slabs} slabs");
+                need_merge = true;
+            }
+        }
+
+        {
+            // If we've evacuated the disk's user data (i.e. block_allocator slabs) and misc
+            // metadata explicitly but there is no need for us to start a merge (e.g. no need to
+            // evict space) make sure that we force a merge anyway to evacuate any index metadata
+            // that are part of the removing disk.
+            if self.device_removal.need_index_evacuation() {
+                info!("starting merge due to pending removal");
                 need_merge = true;
             }
         }
@@ -2043,7 +2244,12 @@ impl Locked {
         )
         .await;
 
-        let remap = match self.block_allocator.rebalance_init() {
+        let removing_disk = if self.removal_can_evacuate() {
+            self.device_removal.removing_disk()
+        } else {
+            None
+        };
+        let remap = match self.block_allocator.rebalance_init(removing_disk) {
             None => None,
             Some(map) => {
                 // We need to ensure that rebalance() won't copy from blocks that we're still in
@@ -2179,14 +2385,14 @@ impl Locked {
         self.stats
             .track_instantaneous(SlabCapacity, self.slab_allocator.capacity());
         self.stats
-            .track_instantaneous(AvailableBlocksSize, self.block_allocator.available());
+            .track_instantaneous(FreeBlocksSize, self.block_allocator.free_bytes());
         self.stats.track_instantaneous(
-            AvailableSlabsSize,
+            FreeSlabsSize,
             self.slab_allocator.free_slabs() * self.slab_allocator.slab_size(),
         );
         self.stats.track_instantaneous(
             AvailableSpace,
-            self.block_allocator.available() + self.slab_allocator.allocatable_bytes(),
+            self.block_allocator.allocatable_bytes() + self.slab_allocator.allocatable_bytes(),
         );
         let old_pending = match &self.merge {
             Some(ms) => ms.old_pending_changes.len() as u64,
@@ -2198,7 +2404,7 @@ impl Locked {
         );
     }
 
-    fn add_disk(&mut self, path: &Path) -> Result<()> {
+    async fn add_disk(&mut self, path: &Path) -> Result<()> {
         // We hold the state lock across all these operations to ensure that we're always
         // adding the last DiskId to the SlabAllocator and Primary, in the case of concurrent
         // calls to add_disk().
@@ -2210,10 +2416,19 @@ impl Locked {
                 .disk_extent(disk_id)
                 .trim_start(SUPERBLOCK_SIZE),
         );
+        self.block_allocator.add_disk(disk_id);
 
         self.primary
             .disks
             .insert(disk_id, DiskPhys::new(self.block_access.disk_size(disk_id)));
+
+        let superblock = SuperblockPhys {
+            primary: None,
+            disk: disk_id,
+            cache_guid: self.guid,
+            disk_guid: Some(self.primary.disks.get(&disk_id).unwrap().guid),
+        };
+        superblock.write(&self.block_access, disk_id).await;
 
         // The hit data isn't accurate across cache size changes, so clear
         // it, which also updates the histogram parameters to reflect the
@@ -2227,6 +2442,11 @@ impl Locked {
     // Returns the amount of additional space, in bytes.
     fn expand_disk(&mut self, path: &Path) -> Result<ExpandDiskResponse> {
         let disk = self.block_access.path_to_disk_id(path)?;
+
+        if self.device_removal.disk_is_pending_removal(disk) {
+            return Err(anyhow!("Cannot expand {path:?} - disk is being removed"));
+        }
+
         let response = self.block_access.expand_disk(disk)?;
         if response.additional_bytes > 0 {
             let phys = self.primary.disks.get_mut(&disk).unwrap();
@@ -2245,6 +2465,63 @@ impl Locked {
             info!("{disk:?} ({path:?}) has no expansion capacity");
         }
         Ok(response)
+    }
+
+    fn remove_disk(&mut self, path: &Path) -> Result<()> {
+        let begin = Instant::now();
+
+        let disk = self.block_access.path_to_disk_id(path)?;
+        if self.device_removal.disk_is_pending_removal(disk) {
+            return Err(anyhow!("{path:?} is already being removed"));
+        }
+
+        // TODO: DLPX-81553
+        // If we get rid of all the devices in the cache we should make sure that
+        // all the threads related to Inner and Locked together with the references
+        // that they contain to various structs are dropped correctly and we don't
+        // leak anything.
+        if self.device_removal.disks_in_queue() + 1 == self.block_access.disks().count() {
+            return Err(anyhow!("removal of all disks is not allowed"));
+        }
+
+        self.slab_allocator.mark_noalloc_disk(disk);
+        self.block_allocator.mark_noalloc_disk(disk);
+        self.device_removal.add_to_queue(disk);
+
+        info!(
+            "issued removal of {path:?} in {}ms",
+            begin.elapsed().as_millis(),
+        );
+        Ok(())
+    }
+
+    fn cancel_disk_removal(&mut self, path: &Path) -> Result<()> {
+        let begin = Instant::now();
+
+        let disk = self.block_access.path_to_disk_id(path)?;
+        if !self.device_removal.disk_is_pending_removal(disk) {
+            return Err(anyhow!("{path:?} not currently being removed"));
+        }
+
+        self.slab_allocator.unmark_noalloc_disk(disk);
+        self.block_allocator.unmark_noalloc_disk(disk);
+        self.device_removal.remove_from_queue(disk);
+
+        info!(
+            "cancelled removal of {path:?} in {}ms",
+            begin.elapsed().as_millis(),
+        );
+        Ok(())
+    }
+
+    fn pause_disk_removals(&mut self) {
+        self.device_removal.paused = true;
+        info!("pausing removals");
+    }
+
+    fn resume_disk_removals(&mut self) {
+        self.device_removal.paused = false;
+        info!("resuming removals");
     }
 
     fn request_merge(&mut self) {

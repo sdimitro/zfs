@@ -25,6 +25,7 @@ use crate::slab_allocator::SlabAllocator;
 use crate::slab_allocator::SlabAllocatorBuilder;
 use crate::slab_allocator::SlabAllocatorPhys;
 use crate::zettacache::merge::MergeProgressPhys;
+use crate::zettacache::removal::DeviceRemovalPhys;
 use crate::zettacache::OperationLogEntry;
 
 #[derive(Serialize, Deserialize, Default, Debug, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]
@@ -46,6 +47,8 @@ pub struct CheckpointPhys {
     pub operation_log: BlockBasedLogPhys<OperationLogEntry>,
     pub size_histogram: SizeHistogramPhys,
     pub merge_progress: Option<MergeProgressPhys>,
+    #[serde(default)]
+    pub device_removal: DeviceRemovalPhys,
 }
 
 impl CheckpointPhys {

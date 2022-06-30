@@ -5,6 +5,7 @@ use futures::stream::StreamExt;
 use serde::Deserialize;
 use serde::Serialize;
 
+use crate::base_types::DiskId;
 use crate::base_types::Extent;
 use crate::block_access::BlockAccess;
 use crate::block_allocator::SlabPhysType;
@@ -130,5 +131,10 @@ impl SpaceMap {
     pub fn clear(&mut self) {
         self.log.clear();
         self.alloc_entries = 0;
+    }
+
+    // Returns the number of slabs moved.
+    pub async fn transfer_data_for_removal(&mut self, disk: DiskId) -> u64 {
+        self.log.transfer_data_for_removal(disk).await
     }
 }

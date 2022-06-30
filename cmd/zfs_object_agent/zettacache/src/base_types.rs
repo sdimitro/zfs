@@ -91,6 +91,19 @@ impl DiskId {
     pub fn index(self) -> usize {
         self.0 as usize
     }
+    pub fn next(&self) -> DiskId {
+        DiskId(self.0 + 1)
+    }
+}
+impl From<DiskId> for usize {
+    fn from(val: DiskId) -> Self {
+        val.index()
+    }
+}
+impl From<usize> for DiskId {
+    fn from(val: usize) -> Self {
+        DiskId::new(val)
+    }
 }
 
 #[derive(Serialize, Deserialize, Copy, Clone, PartialEq, Eq, Ord, PartialOrd)]

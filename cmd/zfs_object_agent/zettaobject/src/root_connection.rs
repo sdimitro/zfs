@@ -122,6 +122,19 @@ impl RootConnectionState {
         server.register_handler(TYPE_CLEAR_HIT_DATA, Box::new(Self::clear_hit_data));
         server.register_handler(TYPE_ADD_DISK, Box::new(Self::add_disk));
         server.register_handler(TYPE_EXPAND_DISK, Box::new(Self::expand_disk));
+        server.register_handler(TYPE_REMOVE_DISK, Box::new(Self::remove_disk));
+        server.register_handler(
+            TYPE_CANCEL_DISK_REMOVAL,
+            Box::new(Self::cancel_disk_removals),
+        );
+        server.register_handler(
+            TYPE_PAUSE_DISK_REMOVALS,
+            Box::new(Self::pause_disk_removals),
+        );
+        server.register_handler(
+            TYPE_RESUME_DISK_REMOVALS,
+            Box::new(Self::resume_disk_removals),
+        );
         server.register_handler(TYPE_SYNC_CHECKPOINT, Box::new(Self::sync_checkpoint));
         server.register_handler(TYPE_INITIATE_MERGE, Box::new(Self::initiate_merge));
         server.register_struct_handler(MessageType::ReadBlock, Box::new(Self::read_block));
@@ -603,6 +616,54 @@ impl RootConnectionState {
                 .await
                 .map_err(FailureMessage::new);
             return_result((), result, true)
+        }))
+    }
+
+    fn remove_disk(&mut self, nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            let request: RemoveDiskRequest = nvpair::from_nvlist(&nvl)?;
+            debug!("got {:?}", request);
+
+            let result = cache
+                .remove_disk(&request.path)
+                .await
+                .map_err(FailureMessage::new);
+            return_result((), result, true)
+        }))
+    }
+
+    fn cancel_disk_removals(&mut self, nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            let request: RemoveDiskRequest = nvpair::from_nvlist(&nvl)?;
+            debug!("got {:?}", request);
+
+            let result = cache
+                .cancel_disk_removal(&request.path)
+                .await
+                .map_err(FailureMessage::new);
+            return_result((), result, true)
+        }))
+    }
+
+    fn pause_disk_removals(&mut self, _nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            debug!("got pause_disk_removals");
+
+            cache.pause_disk_removals().await;
+            return_ok((), true)
+        }))
+    }
+
+    fn resume_disk_removals(&mut self, _nvl: NvList) -> HandlerReturn {
+        let cache = self.cache.clone();
+        Ok(Box::pin(async move {
+            debug!("got resume_disk_removals");
+
+            cache.resume_disk_removals().await;
+            return_ok((), true)
         }))
     }
 

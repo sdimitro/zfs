@@ -30,9 +30,15 @@ pub enum CacheOpenMode {
 }
 
 impl CacheOpenMode {
-    pub async fn device_paths(self) -> Result<Vec<PathBuf>> {
+    pub async fn device_paths(self) -> Result<BTreeMap<DiskId, PathBuf>> {
         Ok(match self {
-            CacheOpenMode::DeviceList(paths) => paths,
+            CacheOpenMode::DeviceList(paths) => {
+                let mut disk_map = BTreeMap::new();
+                for (id, path) in paths.into_iter().enumerate() {
+                    disk_map.insert(DiskId::new(id), path);
+                }
+                disk_map
+            }
             CacheOpenMode::DiscoveryDirectory(dir, target_guid) => {
                 discover_devices(&dir, target_guid).await?
             }
@@ -75,7 +81,10 @@ impl DiscoveredDevice {
     }
 }
 
-async fn discover_devices(dir_path: &Path, target_guid: Option<CacheGuid>) -> Result<Vec<PathBuf>> {
+async fn discover_devices(
+    dir_path: &Path,
+    target_guid: Option<CacheGuid>,
+) -> Result<BTreeMap<DiskId, PathBuf>> {
     let mut caches = HashMap::<_, BTreeMap<_, _>>::new();
 
     let mut discovery = FuturesUnordered::new();
@@ -143,19 +152,21 @@ async fn discover_devices(dir_path: &Path, target_guid: Option<CacheGuid>) -> Re
         caches.retain(|cache_guid, _| *cache_guid == guid);
     }
 
-    match caches.values().next() {
-        Some(cache) => {
-            if caches.len() > 1 {
-                Err(anyhow!(
-                    "multiple valid caches found in {dir_path:?}: {:?}",
-                    caches.keys().collect::<Vec<_>>(),
-                ))
-            } else {
-                Ok(cache
-                    .iter()
-                    .map(|(_, dev)| dev.device_path.clone())
-                    .collect())
-            }
+    if caches.len() > 1 {
+        return Err(anyhow!(
+            "multiple valid caches found in {dir_path:?}: {:?}",
+            caches.keys().collect::<Vec<_>>(),
+        ));
+    }
+
+    let cache_info = caches.drain().next();
+    match cache_info {
+        Some((cache_guid, cache)) => {
+            info!("discovery: importing cache '{cache_guid:?}'");
+            Ok(cache
+                .into_iter()
+                .map(|((disk_id, _), dev)| (disk_id, dev.device_path))
+                .collect())
         }
         None => Err(anyhow!("no valid caches found in {dir_path:?}")),
     }
@@ -165,9 +176,10 @@ fn is_valid_cache(
     cache_guid: CacheGuid,
     disks: &mut BTreeMap<(DiskId, Option<DiskGuid>), DiscoveredDevice>,
 ) -> bool {
+    // We always pick the latest primary block (determined by checkpoint_id)
     let primary = disks
         .values()
-        .find(|&disk| disk.superblock.primary.is_some());
+        .max_by_key(|d| d.superblock.primary.as_ref().map(|p| p.checkpoint_id));
 
     match primary {
         Some(disk) => {

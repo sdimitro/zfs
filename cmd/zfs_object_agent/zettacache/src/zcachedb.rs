@@ -1,5 +1,7 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
+use crate::base_types::DiskId;
 use crate::zettacache::zcdb::ZCacheDBHandle;
 use crate::CacheOpenMode;
 
@@ -138,7 +140,7 @@ impl ZettaCacheDBCommand {
 
     async fn issue_pool_state_command(
         command: ZettaCacheDBCommand,
-        paths: Vec<PathBuf>,
+        paths: BTreeMap<DiskId, PathBuf>,
     ) -> Result<(), anyhow::Error> {
         let mut handle = ZCacheDBHandle::open(paths).await?;
         match command {

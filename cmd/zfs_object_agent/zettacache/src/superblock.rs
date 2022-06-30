@@ -57,7 +57,6 @@ impl DiskPhys {
     }
 }
 
-/// State that's only needed on the primary disk (currently, always DiskId(0)).
 #[derive(Serialize, Deserialize, Debug, Clone)]
 pub struct PrimaryPhys {
     pub checkpoint_id: CheckpointId,
@@ -74,6 +73,8 @@ pub struct PrimaryPhys {
 /// Subset of PrimaryPhys that's needed to get the feature flags.
 #[derive(Deserialize, Debug, Clone)]
 pub struct PrimaryFeaturesPhys {
+    // The checkpoint_id is needed so we can pick the latest primary
+    checkpoint_id: CheckpointId,
     feature_flags: Vec<FeatureName>,
 }
 
@@ -92,19 +93,28 @@ impl PrimaryPhys {
         }
     }
 
-    /// Write superblocks to all disks.
+    pub async fn write(
+        &self,
+        primary_disk: DiskId,
+        cache_guid: CacheGuid,
+        block_access: &BlockAccess,
+    ) {
+        let phys = SuperblockPhys {
+            primary: Some(self.clone()),
+            disk: primary_disk,
+            cache_guid,
+            disk_guid: Some(self.disks.get(&primary_disk).unwrap().guid),
+        };
+        phys.write(block_access, primary_disk).await;
+    }
+
+    /// Write superblocks to all disks. Used during cache creation.
     pub async fn write_all(
         &self,
         primary_disk: DiskId,
         cache_guid: CacheGuid,
         block_access: &BlockAccess,
     ) {
-        // Write the non-primary disks first, so that newly-added disks will
-        // have their superblocks present before the primary superblock is
-        // updated to indicate that they are part of the cache.  If we wrote all
-        // the disks (including the primary) at once, we could crash after the
-        // primary was updated but a new disk had not yet been updated.  The
-        // cache would be left in an inconsistent state and could not be opened.
         block_access
             .disks()
             .filter(|&disk| disk != primary_disk)
@@ -120,14 +130,7 @@ impl PrimaryPhys {
             .collect::<FuturesUnordered<_>>()
             .count()
             .await;
-
-        let phys = SuperblockPhys {
-            primary: Some(self.clone()),
-            disk: primary_disk,
-            cache_guid,
-            disk_guid: Some(self.disks.get(&primary_disk).unwrap().guid),
-        };
-        phys.write(block_access, primary_disk).await;
+        self.write(primary_disk, cache_guid, block_access).await;
     }
 
     pub async fn read_features(block_access: &BlockAccess) -> Result<Vec<FeatureName>> {
@@ -144,14 +147,14 @@ impl PrimaryPhys {
 
         let (mut primary, primary_disk, cache_guid) = results
             .iter()
-            .find_map(|result| {
-                if let Ok(phys) = result {
-                    phys.primary
-                        .as_ref()
-                        .map(|primary| (primary.clone(), phys.disk, phys.cache_guid))
-                } else {
-                    None
-                }
+            .flatten()
+            .max_by_key(|phys| phys.primary.as_ref().map(|p| p.checkpoint_id))
+            .map(|phys| {
+                (
+                    phys.primary.as_ref().unwrap().clone(),
+                    phys.disk,
+                    phys.cache_guid,
+                )
             })
             .ok_or_else(|| anyhow!("Primary Superblock not found"))?;
 
@@ -164,17 +167,12 @@ impl PrimaryPhys {
             })
             .collect::<Vec<_>>();
 
-        for (id, result) in results.iter().enumerate() {
-            // XXX proper error handling
-            // XXX we should be able to reorder them?
-            if let Ok(phys) = result {
-                let disk = DiskId::new(id);
-                assert_eq!(disk, phys.disk);
-                assert!(phys.primary.is_none() || phys.disk == primary_disk);
-                assert_eq!(phys.cache_guid, cache_guid);
-                if let Some(disk_guid) = phys.disk_guid {
-                    assert_eq!(disk_guid, primary.disks.get(&disk).unwrap().guid);
-                }
+        // XXX proper error handling
+        for phys in results.iter().flatten() {
+            assert_eq!(phys.cache_guid, cache_guid);
+            assert!(phys.disk != primary_disk || phys.primary.is_some());
+            if let Some(disk_guid) = phys.disk_guid {
+                assert_eq!(disk_guid, primary.disks.get(&phys.disk).unwrap().guid);
             }
         }
         let sector_size = block_access.round_up_to_sector::<u64>(1);
@@ -225,7 +223,7 @@ impl SuperblockPhys {
             .await
     }
 
-    async fn write(&self, block_access: &BlockAccess, disk: DiskId) {
+    pub async fn write(&self, block_access: &BlockAccess, disk: DiskId) {
         maybe_die_with(|| format!("before writing {:#?}", self));
         debug!("writing {:#?}", self);
         let raw = block_access.chunk_to_raw(EncodeType::Json, self);
@@ -237,6 +235,7 @@ impl SuperblockPhys {
                 DiskIoType::MaintenanceWrite,
             )
             .await;
+        maybe_die_with(|| format!("after writing {:#?}", self));
     }
 
     pub async fn dump_all(block_access: &BlockAccess) {
@@ -268,33 +267,27 @@ impl SuperblockPhys {
 }
 
 impl PrimaryFeaturesPhys {
-    /// Return value is (Self, primary_disk, cache_guid, extra_disks)
     pub async fn read(block_access: &BlockAccess) -> Result<Self> {
         let results = SuperblockFeaturesPhys::read_all(block_access).await;
 
         let (primary, primary_disk, cache_guid) = results
             .iter()
-            .find_map(|result| {
-                if let Ok(phys) = result {
-                    phys.primary
-                        .as_ref()
-                        .map(|primary| (primary.clone(), phys.disk, phys.cache_guid))
-                } else {
-                    None
-                }
+            .flatten()
+            .max_by_key(|phys| phys.primary.as_ref().map(|p| p.checkpoint_id))
+            .map(|phys| {
+                (
+                    phys.primary.as_ref().unwrap().clone(),
+                    phys.disk,
+                    phys.cache_guid,
+                )
             })
             .ok_or_else(|| anyhow!("Primary Superblock not found"))?;
 
-        for (id, result) in results.iter().enumerate() {
-            // XXX proper error handling
-            // XXX we should be able to reorder them?
-            if let Ok(phys) = result {
-                assert_eq!(DiskId::new(id), phys.disk);
-                assert_eq!(phys.cache_guid, cache_guid);
-                assert!(phys.primary.is_none() || phys.disk == primary_disk);
-            }
+        // XXX proper error handling
+        for phys in results.iter().flatten() {
+            assert_eq!(phys.cache_guid, cache_guid);
+            assert!(phys.disk != primary_disk || phys.primary.is_some());
         }
-
         Ok(primary)
     }
 }

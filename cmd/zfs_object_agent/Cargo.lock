@@ -3324,6 +3324,7 @@ dependencies = [
  "chrono",
  "clap",
  "exitcode",
+ "git-version",
  "humantime",
  "log",
  "more-asserts",

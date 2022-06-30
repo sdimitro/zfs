@@ -256,11 +256,11 @@ impl StatsDisplay {
         if self.show_block_allocator {
             let available_space = values.value(AvailableSpace);
             let slab_capacity = values.value(SlabCapacity);
-            let free_blocks_size = values.value(AvailableBlocksSize);
-            let free_slabs_size = values.value(AvailableSlabsSize);
-            let block_allocator_allocated = slab_capacity - free_blocks_size - free_slabs_size;
+            let free_blocks_size = values.value(FreeBlocksSize);
+            let free_slabs_size = values.value(FreeSlabsSize);
+            let allocated_space = slab_capacity - free_blocks_size - free_slabs_size;
 
-            self.display_bytes(block_allocator_allocated as f64);
+            self.display_bytes(allocated_space as f64);
             self.display_bytes(available_space as f64);
             self.display_percent(free_blocks_size as f64, slab_capacity as f64);
             self.display_percent(free_slabs_size as f64, slab_capacity as f64);
