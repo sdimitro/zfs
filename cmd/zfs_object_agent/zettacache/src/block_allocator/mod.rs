@@ -246,13 +246,7 @@ impl SlabTrait for BitmapSlab {
             "double free at slot {:?}",
             slot
         );
-
-        if self.allocating.contains(slot) {
-            assert!(!self.freeing.contains(slot));
-            self.allocating.remove(slot);
-        } else {
-            self.freeing.insert(slot);
-        }
+        self.freeing.insert(slot);
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
@@ -269,14 +263,12 @@ impl SlabTrait for BitmapSlab {
         }
         self.allocating.clear();
 
+        // Space freed during this checkpoint is now available for reallocation.
         for (slot, run) in self.freeing.iter_ranges() {
             spacemap.free(Extent {
                 location: self.slot_to_location(slot),
                 size: u64::from(run) * u64::from(self.slot_size),
             });
-        }
-        // Space freed during this checkpoint is now available for reallocation.
-        for (slot, run) in self.freeing.iter_ranges() {
             with_alloctag(Self::ALLOCATABLE_TAG, || {
                 self.allocatable.insert_range(slot..(slot + run))
             });
@@ -502,17 +494,7 @@ impl SlabTrait for ExtentSlab {
         let size = extent.size;
 
         self.allocatable.verify_absent(offset, size);
-
-        match self.allocating.overlap(offset, size) {
-            Some(_) => {
-                self.freeing.verify_absent(offset, size);
-                self.allocating.remove(offset, size);
-            }
-            None => {
-                self.allocating.verify_absent(offset, size);
-                self.freeing.add(offset, size);
-            }
-        }
+        self.freeing.add(offset, size);
     }
 
     fn flush_to_spacemap(&mut self, spacemap: &mut SpaceMap) {
