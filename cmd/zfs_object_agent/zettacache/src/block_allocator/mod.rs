@@ -2092,11 +2092,30 @@ impl BlockAllocator {
         slab.mark_slab_info(target_spacemap);
     }
 
-    // Returns the number of slabs moved.
+    /// Returns the number of slabs moved.
     pub async fn transfer_metadata_for_removal(&mut self, disk: DiskId) -> u64 {
         let mut moved = self.spacemap.transfer_data_for_removal(disk).await;
         moved += self.spacemap_next.transfer_data_for_removal(disk).await;
         moved
+    }
+
+    /// Returns the amount of space that needs to be removed before a removing device has been
+    /// fully evacuated.
+    pub fn disk_space_to_evacuate(&self, disk: DiskId) -> u64 {
+        let block_allocator_slabs = self.noalloc_state.get(disk).unwrap().len() as u64;
+        let slab_allocator_slabs = self.slab_allocator.disk_slabs_to_evacuate(disk);
+        let metadata_slabs = slab_allocator_slabs
+            .checked_sub(block_allocator_slabs)
+            .unwrap();
+
+        // The slab allocator is only aware of the slabs in use by the block allocator and
+        // metadata (like BBLs) but doesn't have knowledge of their internal allocation state.
+        // We have counters for per disk allocation state for the slabs used in the block
+        // allocator but nothing for our metadata.  In the calculation below we assume that
+        // metadata slabs are fully allocated which should be true in general for big structures
+        // like the index where all but the last slab in each BBL are fully allocated.
+        self.per_disk_stats.get(disk).unwrap().alloc_bytes
+            + (metadata_slabs * self.slab_allocator.slab_size())
     }
 }
 

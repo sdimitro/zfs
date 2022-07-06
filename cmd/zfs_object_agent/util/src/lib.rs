@@ -63,4 +63,5 @@ pub use zcache_devices::DeviceList;
 pub use zcache_hits::ReportHitsResponse;
 pub use zcache_status::DeviceStatus;
 pub use zcache_status::IndexStatus;
+pub use zcache_status::RemovalStatus;
 pub use zcache_status::ZcacheStatus;

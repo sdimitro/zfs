@@ -59,7 +59,7 @@ impl List {
     fn max_name_length(&self, devices: &[DeviceEntry]) -> usize {
         devices
             .iter()
-            .map(|d| self.derive_name(&d.name).len())
+            .map(|d| self.derive_name(&d.path).len())
             .max()
             .unwrap_or_default()
     }
@@ -68,7 +68,7 @@ impl List {
         let name_width = self.max_name_length(&devices.devices);
 
         for device in &devices.devices {
-            write_stdout!("{:<1$}  ", self.derive_name(&device.name), name_width);
+            write_stdout!("{:<1$}  ", self.derive_name(&device.path), name_width);
             if self.size {
                 write_stdout!("{:>6}", nice_p2size(device.size));
             }

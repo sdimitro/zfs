@@ -48,7 +48,7 @@ impl ZcacheSubCommand for Labelclear {
         let in_use_paths = devices
             .devices
             .iter()
-            .map(|d| fs::canonicalize(&d.name).unwrap_or_else(|_| d.name.clone()))
+            .map(|d| fs::canonicalize(&d.path).unwrap_or_else(|_| d.path.clone()))
             .collect::<HashSet<_>>();
 
         if in_use_paths.contains(&canonical_path) {

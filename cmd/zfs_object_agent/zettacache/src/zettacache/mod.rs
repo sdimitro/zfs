@@ -63,10 +63,12 @@ use util::zettacache_stats::DiskIoType;
 use util::zettacache_stats::IoStatsRef;
 use util::AlignedBytes;
 use util::DeviceList;
+use util::DeviceStatus;
 use util::From64;
 use util::IndexStatus;
 use util::LockSet;
 use util::LockedItem;
+use util::RemovalStatus;
 use util::ZcacheStatus;
 use uuid::Uuid;
 
@@ -1603,17 +1605,38 @@ impl Inner {
     }
 
     async fn status(&self) -> ZcacheStatus {
-        let indices = self.indices.read().await;
-        let pending_changes = &self.stats.stats[PendingChanges];
-
-        ZcacheStatus {
-            index: IndexStatus {
+        let index;
+        {
+            let indices = self.indices.read().await;
+            let pending_changes = &self.stats.stats[PendingChanges];
+            index = IndexStatus {
                 bytes: indices.old.num_bytes(),
                 entries: indices.old.len(),
                 pending_changes: pending_changes.0.load(Relaxed),
-            },
-            devices: self.block_access.list_device_status(),
+            };
         }
+
+        let mut devices = Vec::new();
+        {
+            let locked = self.locked.lock().await;
+            for device in locked.block_access.list_devices().devices {
+                let disk = locked.block_access.path_to_disk_id(&device.path).unwrap();
+                let status = DeviceStatus {
+                    info: device,
+                    removal: match locked.device_removal.disk_is_pending_removal(disk) {
+                        true => Some(RemovalStatus {
+                            space_left_to_evacuate: locked
+                                .block_allocator
+                                .disk_space_to_evacuate(disk),
+                        }),
+                        false => None,
+                    },
+                };
+                devices.push(status);
+            }
+        }
+
+        ZcacheStatus { index, devices }
     }
 
     fn io_stats<'a>(&self) -> IoStatsRef<'a> {

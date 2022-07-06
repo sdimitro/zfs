@@ -592,7 +592,9 @@ impl SlabAllocator {
         self.access.disk_capacity(disk)
     }
 
-    pub fn disk_is_fully_evacuated(&self, disk: DiskId) -> bool {
+    /// Returns the number of slabs that are currently marked as allocated/in-use from the slab
+    /// allocators perspective. To be called only for devices that are being removed.
+    pub fn disk_slabs_to_evacuate(&self, disk: DiskId) -> u64 {
         let disk_num_slabs = self.access.disk_num_slabs(disk);
         let noalloc_slabs = self
             .inner
@@ -601,8 +603,12 @@ impl SlabAllocator {
             .noalloc_state
             .get(disk)
             .map(|slabs| slabs.len())
-            .unwrap_or_default() as u64;
-        disk_num_slabs == noalloc_slabs
+            .unwrap() as u64;
+        disk_num_slabs.checked_sub(noalloc_slabs).unwrap()
+    }
+
+    pub fn disk_is_fully_evacuated(&self, disk: DiskId) -> bool {
+        self.disk_slabs_to_evacuate(disk) == 0
     }
 
     pub fn removing_capacity(&self) -> u64 {

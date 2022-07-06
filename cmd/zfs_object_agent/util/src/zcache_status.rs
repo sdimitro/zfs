@@ -3,10 +3,10 @@
 //! These structures on the zettacache side are serialized and then deserialized
 //! by the zettacache subcommands.
 
-use std::path::PathBuf;
-
 use serde::Deserialize;
 use serde::Serialize;
+
+use crate::DeviceEntry;
 
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct IndexStatus {
@@ -16,10 +16,14 @@ pub struct IndexStatus {
 }
 
 #[derive(Debug, Serialize, Deserialize)]
+pub struct RemovalStatus {
+    pub space_left_to_evacuate: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceStatus {
-    pub path: PathBuf,
-    pub canonical_path: PathBuf,
-    pub size: u64,
+    pub info: DeviceEntry,
+    pub removal: Option<RemovalStatus>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]

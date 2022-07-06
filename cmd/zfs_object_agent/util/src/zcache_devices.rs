@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use serde::Deserialize;
 use serde::Serialize;
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct DeviceEntry {
-    pub name: PathBuf,
+    pub path: PathBuf,
+    pub canonical_path: PathBuf,
     pub size: u64,
 }
 

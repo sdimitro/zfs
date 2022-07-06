@@ -54,9 +54,9 @@ impl Status {
     /// Derive the device path to display
     fn derive_path(&self, device_status: &DeviceStatus) -> String {
         let device_path = if self.real_paths {
-            &device_status.canonical_path
+            &device_status.info.canonical_path
         } else {
-            &device_status.path
+            &device_status.info.path
         };
         device_path.to_string_lossy().into()
     }
@@ -92,7 +92,7 @@ impl Status {
                 "{:>3$}{:<4$}  {:>6}",
                 "",
                 self.derive_path(device_status),
-                nice_p2size(device_status.size),
+                nice_p2size(device_status.info.size),
                 Status::MAXIMUM_KEY_WIDTH + 2,
                 path_width,
             );
