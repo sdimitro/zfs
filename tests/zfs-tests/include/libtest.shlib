@@ -1715,10 +1715,13 @@ function invalidate_zcache
 {
 	log_note "Invalidate Zettacache device(s)"
 	sudo systemctl stop zfs-object-agent
-	for cache_dev in ${ZETTACACHE_DEVICES}; do
+	for cache_dev in $ZETTACACHE_DEVICES; do
 		invalidate_zcache_dev $cache_dev
 	done
 	sudo systemctl start zfs-object-agent
+	for cache_dev in $ZETTACACHE_DEVICES; do
+		zcache add "$(get_cache_part $cache_dev)"
+	done
 }
 
 #
@@ -1889,7 +1892,7 @@ function create_pool
 
 	# If Zettacache devices were specified, they have been partitioned to
 	# also contain a partition for a slog. Add the log devices here.
-	for cache_dev in ${ZETTACACHE_DEVICES}; do
+	for cache_dev in $ZETTACACHE_DEVICES; do
 		typeset log_dev=$(get_slog_part $cache_dev)
 		log_must zpool add $pool log $log_dev
 	done
