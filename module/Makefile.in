@@ -98,7 +98,7 @@ modules_install-Linux: modules_uninstall-Linux-legacy
 	@# Delphix-specific: split debug info
 	kmoddir=$(INSTALL_MOD_PATH)$(LINUX_MOD_DIR); \
 	debugdir=$(INSTALL_MOD_PATH)$(LINUX_DEBUG_MOD_DIR); \
-	for module in $$(find . -name *.ko); do \
+	for module in $$(find . -name '*.ko'); do \
 		mkdir -p $$debugdir/$(INSTALL_MOD_DIR)/$$(dirname $$module); \
 		cp $$kmoddir/$(INSTALL_MOD_DIR)/$$module $$debugdir/$(INSTALL_MOD_DIR)/$$module; \
 		strip --strip-debug $$kmoddir/$(INSTALL_MOD_DIR)/$$module; \
