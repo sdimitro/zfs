@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -471,7 +471,7 @@ safe_realloc(void *data, size_t size)
 }
 
 static char *
-safe_strdup(char *str)
+safe_strdup(const char *str)
 {
 	char *dupstr = strdup(str);
 
@@ -691,7 +691,8 @@ parse_depth(char *opt, int *flags)
 
 #define	PROGRESS_DELAY 2		/* seconds */
 
-static char *pt_reverse = "\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b";
+static const char *pt_reverse =
+	"\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b\b";
 static time_t pt_begin;
 static char *pt_header = NULL;
 static boolean_t pt_shown;
@@ -704,7 +705,7 @@ start_progress_timer(void)
 }
 
 static void
-set_progress_header(char *header)
+set_progress_header(const char *header)
 {
 	assert(pt_header == NULL);
 	pt_header = safe_strdup(header);
@@ -715,7 +716,7 @@ set_progress_header(char *header)
 }
 
 static void
-update_progress(char *update)
+update_progress(const char *update)
 {
 	if (!pt_shown && time(NULL) > pt_begin) {
 		int len = strlen(update);
@@ -733,10 +734,10 @@ update_progress(char *update)
 }
 
 static void
-finish_progress(char *done)
+finish_progress(const char *done)
 {
 	if (pt_shown) {
-		(void) printf("%s\n", done);
+		(void) puts(done);
 		(void) fflush(stdout);
 	}
 	free(pt_header);
@@ -1904,8 +1905,8 @@ get_callback(zfs_handle_t *zhp, void *data)
 	nvlist_t *user_props = zfs_get_user_props(zhp);
 	zprop_list_t *pl = cbp->cb_proplist;
 	nvlist_t *propval;
-	char *strval;
-	char *sourceval;
+	const char *strval;
+	const char *sourceval;
 	boolean_t received = is_recvd_column(cbp);
 
 	for (; pl != NULL; pl = pl->pl_next) {
@@ -1974,10 +1975,10 @@ get_callback(zfs_handle_t *zhp, void *data)
 				sourcetype = ZPROP_SRC_NONE;
 				strval = "-";
 			} else {
-				verify(nvlist_lookup_string(propval,
-				    ZPROP_VALUE, &strval) == 0);
-				verify(nvlist_lookup_string(propval,
-				    ZPROP_SOURCE, &sourceval) == 0);
+				strval = fnvlist_lookup_string(propval,
+				    ZPROP_VALUE);
+				sourceval = fnvlist_lookup_string(propval,
+				    ZPROP_SOURCE);
 
 				if (strcmp(sourceval,
 				    zfs_get_name(zhp)) == 0) {
@@ -2442,7 +2443,7 @@ upgrade_set_callback(zfs_handle_t *zhp, void *data)
 
 	/* upgrade */
 	if (version < cb->cb_version) {
-		char verstr[16];
+		char verstr[24];
 		(void) snprintf(verstr, sizeof (verstr),
 		    "%llu", (u_longlong_t)cb->cb_version);
 		if (cb->cb_lastfs[0] && !same_pool(zhp, cb->cb_lastfs)) {
@@ -2619,9 +2620,9 @@ enum us_field_types {
 	USFIELD_OBJUSED,
 	USFIELD_OBJQUOTA
 };
-static char *us_field_hdr[] = { "TYPE", "NAME", "USED", "QUOTA",
+static const char *const us_field_hdr[] = { "TYPE", "NAME", "USED", "QUOTA",
 				    "OBJUSED", "OBJQUOTA" };
-static char *us_field_names[] = { "type", "name", "used", "quota",
+static const char *const us_field_names[] = { "type", "name", "used", "quota",
 				    "objused", "objquota" };
 #define	USFIELD_LAST	(sizeof (us_field_names) / sizeof (char *))
 
@@ -2641,8 +2642,8 @@ static int us_type_bits[] = {
 	USTYPE_SMB_USR,
 	USTYPE_ALL
 };
-static char *us_type_names[] = { "posixgroup", "posixuser", "smbgroup",
-	"smbuser", "all" };
+static const char *const us_type_names[] = { "posixgroup", "posixuser",
+	"smbgroup", "smbuser", "all" };
 
 typedef struct us_node {
 	nvlist_t	*usn_nvl;
@@ -2670,11 +2671,9 @@ typedef struct {
 } us_sort_info_t;
 
 static int
-us_field_index(char *field)
+us_field_index(const char *field)
 {
-	int i;
-
-	for (i = 0; i < USFIELD_LAST; i++) {
+	for (int i = 0; i < USFIELD_LAST; i++) {
 		if (strcmp(field, us_field_names[i]) == 0)
 			return (i);
 	}
@@ -2696,8 +2695,8 @@ us_compare(const void *larg, const void *rarg, void *unused)
 	boolean_t lvb, rvb;
 
 	for (; sortcol != NULL; sortcol = sortcol->sc_next) {
-		char *lvstr = "";
-		char *rvstr = "";
+		char *lvstr = (char *)"";
+		char *rvstr = (char *)"";
 		uint32_t lv32 = 0;
 		uint32_t rv32 = 0;
 		uint64_t lv64 = 0;
@@ -2819,7 +2818,7 @@ userspace_cb(void *arg, const char *domain, uid_t rid, uint64_t space)
 	us_cbdata_t *cb = (us_cbdata_t *)arg;
 	zfs_userquota_prop_t prop = cb->cb_prop;
 	char *name = NULL;
-	char *propname;
+	const char *propname;
 	char sizebuf[32];
 	us_node_t *node;
 	uu_avl_pool_t *avl_pool = cb->cb_avl_pool;
@@ -3019,26 +3018,25 @@ print_us_node(boolean_t scripted, boolean_t parsable, int *fields, int types,
 	while ((field = fields[cfield]) != USFIELD_LAST) {
 		nvpair_t *nvp = NULL;
 		data_type_t type;
-		uint32_t val32;
-		uint64_t val64;
-		char *strval = "-";
+		uint32_t val32 = -1;
+		uint64_t val64 = -1;
+		const char *strval = "-";
 
-		while ((nvp = nvlist_next_nvpair(nvl, nvp)) != NULL) {
+		while ((nvp = nvlist_next_nvpair(nvl, nvp)) != NULL)
 			if (strcmp(nvpair_name(nvp),
 			    us_field_names[field]) == 0)
 				break;
-		}
 
 		type = nvp == NULL ? DATA_TYPE_UNKNOWN : nvpair_type(nvp);
 		switch (type) {
 		case DATA_TYPE_UINT32:
-			(void) nvpair_value_uint32(nvp, &val32);
+			val32 = fnvpair_value_uint32(nvp);
 			break;
 		case DATA_TYPE_UINT64:
-			(void) nvpair_value_uint64(nvp, &val64);
+			val64 = fnvpair_value_uint64(nvp);
 			break;
 		case DATA_TYPE_STRING:
-			(void) nvpair_value_string(nvp, &strval);
+			strval = fnvpair_value_string(nvp);
 			break;
 		case DATA_TYPE_UNKNOWN:
 			break;
@@ -3049,7 +3047,7 @@ print_us_node(boolean_t scripted, boolean_t parsable, int *fields, int types,
 		switch (field) {
 		case USFIELD_TYPE:
 			if (type == DATA_TYPE_UINT32)
-				strval = (char *)us_type2str(val32);
+				strval = us_type2str(val32);
 			break;
 		case USFIELD_NAME:
 			if (type == DATA_TYPE_UINT64) {
@@ -3096,12 +3094,12 @@ print_us_node(boolean_t scripted, boolean_t parsable, int *fields, int types,
 
 		if (!first) {
 			if (scripted)
-				(void) printf("\t");
+				(void) putchar('\t');
 			else
-				(void) printf("  ");
+				(void) fputs("  ", stdout);
 		}
 		if (scripted)
-			(void) printf("%s", strval);
+			(void) fputs(strval, stdout);
 		else if (field == USFIELD_TYPE || field == USFIELD_NAME)
 			(void) printf("%-*s", (int)width[field], strval);
 		else
@@ -3111,7 +3109,7 @@ print_us_node(boolean_t scripted, boolean_t parsable, int *fields, int types,
 		cfield++;
 	}
 
-	(void) printf("\n");
+	(void) putchar('\n');
 }
 
 static void
@@ -3477,15 +3475,15 @@ print_dataset(zfs_handle_t *zhp, list_cbdata_t *cb)
 	char property[ZFS_MAXPROPLEN];
 	nvlist_t *userprops = zfs_get_user_props(zhp);
 	nvlist_t *propval;
-	char *propstr;
+	const char *propstr;
 	boolean_t right_justify;
 
 	for (; pl != NULL; pl = pl->pl_next) {
 		if (!first) {
 			if (cb->cb_scripted)
-				(void) printf("\t");
+				(void) putchar('\t');
 			else
-				(void) printf("  ");
+				(void) fputs("  ", stdout);
 		} else {
 			first = B_FALSE;
 		}
@@ -3522,8 +3520,8 @@ print_dataset(zfs_handle_t *zhp, list_cbdata_t *cb)
 			    pl->pl_user_prop, &propval) != 0)
 				propstr = "-";
 			else
-				verify(nvlist_lookup_string(propval,
-				    ZPROP_VALUE, &propstr) == 0);
+				propstr = fnvlist_lookup_string(propval,
+				    ZPROP_VALUE);
 			right_justify = B_FALSE;
 		}
 
@@ -3533,14 +3531,14 @@ print_dataset(zfs_handle_t *zhp, list_cbdata_t *cb)
 		 * format specifier.
 		 */
 		if (cb->cb_scripted || (pl->pl_next == NULL && !right_justify))
-			(void) printf("%s", propstr);
+			(void) fputs(propstr, stdout);
 		else if (right_justify)
 			(void) printf("%*s", (int)pl->pl_width, propstr);
 		else
 			(void) printf("%-*s", (int)pl->pl_width, propstr);
 	}
 
-	(void) printf("\n");
+	(void) putchar('\n');
 }
 
 /*
@@ -6420,7 +6418,7 @@ print_holds(boolean_t scripted, int nwidth, int tagwidth, nvlist_t *nvl)
 {
 	int i;
 	nvpair_t *nvp = NULL;
-	char *hdr_cols[] = { "NAME", "TAG", "TIMESTAMP" };
+	const char *const hdr_cols[] = { "NAME", "TAG", "TIMESTAMP" };
 	const char *col;
 
 	if (!scripted) {
@@ -6441,7 +6439,7 @@ print_holds(boolean_t scripted, int nwidth, int tagwidth, nvlist_t *nvl)
 		(void) nvpair_value_nvlist(nvp, &nvl2);
 		while ((nvp2 = nvlist_next_nvpair(nvl2, nvp2)) != NULL) {
 			char tsbuf[DATETIME_BUF_LEN];
-			char *tagname = nvpair_name(nvp2);
+			const char *tagname = nvpair_name(nvp2);
 			uint64_t val = 0;
 			time_t time;
 			struct tm t;
@@ -6608,7 +6606,7 @@ typedef struct get_all_state {
 static int
 get_one_dataset(zfs_handle_t *zhp, void *data)
 {
-	static char *spin[] = { "-", "\\", "|", "/" };
+	static const char *const spin[] = { "-", "\\", "|", "/" };
 	static int spinval = 0;
 	static int spincheck = 0;
 	static time_t last_spin_time = (time_t)0;
@@ -6894,10 +6892,7 @@ share_mount_one(zfs_handle_t *zhp, int op, int flags, enum sa_protocol protocol,
 		break;
 
 	case OP_MOUNT:
-		if (options == NULL)
-			mnt.mnt_mntopts = "";
-		else
-			mnt.mnt_mntopts = (char *)options;
+		mnt.mnt_mntopts = (char *)(options ?: "");
 
 		if (!hasmntopt(&mnt, MNTOPT_REMOUNT) &&
 		    zfs_is_mounted(zhp, NULL)) {
@@ -7617,7 +7612,7 @@ zfs_do_unshare(int argc, char **argv)
 }
 
 static int
-find_command_idx(char *command, int *idx)
+find_command_idx(const char *command, int *idx)
 {
 	int i;
 
@@ -7882,7 +7877,6 @@ static int
 zfs_do_channel_program(int argc, char **argv)
 {
 	int ret, fd, c;
-	char *progbuf, *filename, *poolname;
 	size_t progsize, progread;
 	nvlist_t *outnvl = NULL;
 	uint64_t instrlimit = ZCP_DEFAULT_INSTRLIMIT;
@@ -7939,8 +7933,8 @@ zfs_do_channel_program(int argc, char **argv)
 		goto usage;
 	}
 
-	poolname = argv[0];
-	filename = argv[1];
+	const char *poolname = argv[0];
+	const char *filename = argv[1];
 	if (strcmp(filename, "-") == 0) {
 		fd = 0;
 		filename = "standard input";
@@ -7965,7 +7959,7 @@ zfs_do_channel_program(int argc, char **argv)
 	 */
 	progread = 0;
 	progsize = 1024;
-	progbuf = safe_malloc(progsize);
+	char *progbuf = safe_malloc(progsize);
 	do {
 		ret = read(fd, progbuf + progread, progsize - progread);
 		progread += ret;
@@ -8011,14 +8005,17 @@ zfs_do_channel_program(int argc, char **argv)
 		 * exists.  Otherwise, generate an appropriate error message,
 		 * falling back on strerror() for an unexpected return code.
 		 */
-		char *errstring = NULL;
+		const char *errstring = NULL;
 		const char *msg = gettext("Channel program execution failed");
 		uint64_t instructions = 0;
 		if (outnvl != NULL && nvlist_exists(outnvl, ZCP_RET_ERROR)) {
+			char *es = NULL;
 			(void) nvlist_lookup_string(outnvl,
-			    ZCP_RET_ERROR, &errstring);
-			if (errstring == NULL)
+			    ZCP_RET_ERROR, &es);
+			if (es == NULL)
 				errstring = strerror(ret);
+			else
+				errstring = es;
 			if (ret == ETIME) {
 				(void) nvlist_lookup_uint64(outnvl,
 				    ZCP_ARG_INSTRLIMIT, &instructions);
@@ -8602,7 +8599,7 @@ main(int argc, char **argv)
 {
 	int ret = 0;
 	int i = 0;
-	char *cmdname;
+	const char *cmdname;
 	char **newargv;
 
 	(void) setlocale(LC_ALL, "");

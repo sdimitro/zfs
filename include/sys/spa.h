@@ -6,7 +6,7 @@
  * You may not use this file except in compliance with the License.
  *
  * You can obtain a copy of the license at usr/src/OPENSOLARIS.LICENSE
- * or http://www.opensolaris.org/os/licensing.
+ * or https://opensource.org/licenses/CDDL-1.0.
  * See the License for the specific language governing permissions
  * and limitations under the License.
  *
@@ -610,7 +610,7 @@ typedef struct blkptr {
 
 #define	SNPRINTF_BLKPTR(func, ws, buf, size, bp, type, checksum, compress) \
 {									\
-	static const char *copyname[] =					\
+	static const char *const copyname[] =				\
 	    { "zero", "single", "double", "triple" };			\
 	int len = 0;							\
 	int copies = 0;							\
@@ -747,8 +747,8 @@ typedef enum trim_type {
 } trim_type_t;
 
 /* state manipulation functions */
-extern int spa_open(const char *pool, spa_t **, void *tag);
-extern int spa_open_rewind(const char *pool, spa_t **, void *tag,
+extern int spa_open(const char *pool, spa_t **, const void *tag);
+extern int spa_open_rewind(const char *pool, spa_t **, const void *tag,
     nvlist_t *policy, nvlist_t **config);
 extern int spa_get_stats(const char *pool, nvlist_t **config, char *altroot,
     size_t buflen);
@@ -805,8 +805,8 @@ extern int spa_vdev_trim(spa_t *spa, nvlist_t *nv, uint64_t cmd_type,
     uint64_t rate, boolean_t partial, boolean_t secure, nvlist_t *vdev_errlist);
 extern int spa_vdev_setpath(spa_t *spa, uint64_t guid, const char *newpath);
 extern int spa_vdev_setfru(spa_t *spa, uint64_t guid, const char *newfru);
-extern int spa_vdev_split_mirror(spa_t *spa, char *newname, nvlist_t *config,
-    nvlist_t *props, boolean_t exp);
+extern int spa_vdev_split_mirror(spa_t *spa, const char *newname,
+    nvlist_t *config, nvlist_t *props, boolean_t exp);
 
 /* spare state (which is global across all pools) */
 extern void spa_spare_add(vdev_t *vd);
@@ -863,9 +863,9 @@ extern void spa_remove(spa_t *spa);
 extern spa_t *spa_next(spa_t *prev);
 
 /* Refcount functions */
-extern void spa_open_ref(spa_t *spa, void *tag);
-extern void spa_close(spa_t *spa, void *tag);
-extern void spa_async_close(spa_t *spa, void *tag);
+extern void spa_open_ref(spa_t *spa, const void *tag);
+extern void spa_close(spa_t *spa, const void *tag);
+extern void spa_async_close(spa_t *spa, const void *tag);
 extern boolean_t spa_refcount_zero(spa_t *spa);
 
 #define	SCL_NONE	0x00
@@ -974,7 +974,8 @@ extern int spa_import_progress_set_state(uint64_t pool_guid,
     spa_load_state_t spa_load_state);
 
 /* Pool configuration locks */
-extern int spa_config_tryenter(spa_t *spa, int locks, void *tag, krw_t rw);
+extern int spa_config_tryenter(spa_t *spa, int locks, const void *tag,
+    krw_t rw);
 extern void spa_config_enter(spa_t *spa, int locks, const void *tag, krw_t rw);
 extern void spa_config_exit(spa_t *spa, int locks, const void *tag);
 extern int spa_config_held(spa_t *spa, int locks, krw_t rw);
@@ -985,7 +986,7 @@ extern uint64_t spa_vdev_enter(spa_t *spa);
 extern uint64_t spa_vdev_detach_enter(spa_t *spa, uint64_t guid);
 extern uint64_t spa_vdev_config_enter(spa_t *spa);
 extern void spa_vdev_config_exit(spa_t *spa, vdev_t *vd, uint64_t txg,
-    int error, char *tag);
+    int error, const char *tag);
 extern int spa_vdev_exit(spa_t *spa, vdev_t *vd, uint64_t txg, int error);
 
 /* Pool vdev state change lock */

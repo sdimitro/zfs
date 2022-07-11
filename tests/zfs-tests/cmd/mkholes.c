@@ -48,7 +48,7 @@ no_memory(void)
 }
 
 static void
-usage(char *msg, int exit_value)
+usage(const char *msg, int exit_value)
 {
 	(void) fprintf(stderr, "mkholes [-d|h offset:length] ... filename\n");
 	(void) fprintf(stderr, "%s\n", msg);

@@ -259,11 +259,11 @@ zoa_send_recv_msg(libpc_handle_t *hdl, nvlist_t *msg,
 }
 
 struct destroying_pool {
-	char *name;
+	const char *name;
 	uint64_t guid;
-	char *protocol;
-	char *endpoint;
-	char *bucket;
+	const char *protocol;
+	const char *endpoint;
+	const char *bucket;
 	uint64_t start_time;
 	uint64_t total_data_objects;
 	uint64_t destroyed_objects;
@@ -287,7 +287,7 @@ print_destroying_item(struct destroying_pool item)
 	}
 	uint64_t pct = item.total_data_objects == 0 ? 0 :
 	    ((double)item.destroyed_objects / item.total_data_objects) * 100;
-	char *state = item.destroyed ? "DESTROYED" : "DESTROYING";
+	const char *state = item.destroyed ? "DESTROYED" : "DESTROYING";
 
 	// Print pool status.
 	printf("\n  pool: %s", item.name);
@@ -367,7 +367,7 @@ zoa_list_destroy_pools(libpc_handle_t *hdl, boolean_t destroy_complete)
 			item.protocol = "s3";
 		}
 		(void) nvlist_lookup_string(config, AGENT_ENDPOINT,
-		    &item.endpoint);
+		    (char **)&item.endpoint);
 		// Optional componenents
 		(void) nvlist_lookup_uint64(config, AGENT_START_TIME,
 		    &item.start_time);

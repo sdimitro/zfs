@@ -30,7 +30,7 @@
 #define	PRINT_VERBOSE 0x4
 
 static void
-usage(char *msg, int exit_value)
+usage(const char *msg, int exit_value)
 {
 	(void) fprintf(stderr, "getholes [-dhv] filename\n");
 	(void) fprintf(stderr, "%s\n", msg);
