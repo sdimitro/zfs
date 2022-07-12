@@ -646,12 +646,14 @@ credentials_in_env() {
 		    [ -n "$AZURE_KEY" ]; then
 			return 0
 		fi
+		return 1
 		;;
 	s3)
 		if [ -n "$AWS_ACCESS_KEY_ID" ] && \
 		    [ -n "$AWS_SECRET_ACCESS_KEY" ]; then \
 			return 0
 		fi
+		return 1
 		;;
 	*)
 		return 1
@@ -678,11 +680,12 @@ test_object_store_connectivity() {
 		zoa_cmd="$zoa_cmd --azure-account $AZURE_ACCOUNT"
 		;;
 	s3)
+		# Common parameters
+		zoa_cmd="$zoa_cmd --region $ZTS_REGION"
+		zoa_cmd="$zoa_cmd --endpoint $ZTS_OBJECT_ENDPOINT"
 		if $use_managed_profile; then
 			zoa_cmd="$zoa_cmd --aws_instance_profile"
 		else
-			zoa_cmd="$zoa_cmd --region $ZTS_REGION"
-			zoa_cmd="$zoa_cmd --endpoint $ZTS_OBJECT_ENDPOINT"
 			zoa_cmd="$zoa_cmd --aws-access-key-id
 			    $AWS_ACCESS_KEY_ID"
 			zoa_cmd="$zoa_cmd --aws-secret-access-key

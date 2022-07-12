@@ -155,8 +155,11 @@ function is_using_iam_role
 {
 	# When using IAM role both of the env variables AWS_SECRET_ACCESS_KEY
 	# and AWS_ACCESS_KEY_ID remains empty or zero length
-	[ -n "$AWS_ACCESS_KEY_ID" ] && [ -n "$AWS_SECRET_ACCESS_KEY" ] && \
-		return 1 || return 0
+	if [ -n "$AWS_ACCESS_KEY_ID" ] && \
+		[ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+		return 1
+	fi
+	return 0
 }
 
 
@@ -1850,8 +1853,14 @@ function create_pool
 		s3)
 			object_store_args="
 			    -o object-endpoint=$ZTS_OBJECT_ENDPOINT
-			    -o object-region=$ZTS_REGION
-			    -o object-credentials-profile=$ZTS_CREDS_PROFILE"
+			    -o object-region=$ZTS_REGION"
+			#
+			# Include the argument object-credentials-profile only
+			# when not running using instance profile.
+			#
+			! is_using_iam_role && \
+				object_store_args="$object_store_args
+				-o object-credentials-profile=$ZTS_CREDS_PROFILE"
 			;;
 		*)
 			log_note "Unknown object store $ZTS_OBJECT_STORE"
