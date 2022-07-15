@@ -1045,14 +1045,14 @@ impl BlockAllocatorBuilder {
             disk_stats.free_bytes += slab.free_space();
             disk_stats.alloc_bytes += slab.allocated_space();
 
-            if matches!(slab.inner, SlabEnum::Evacuating(_)) {
+            let evacuating = matches!(slab.inner, SlabEnum::Evacuating(_));
+            if evacuating {
                 evacuating_slabs.push(slab.id);
             }
-
             if let Some(&disk) = removing_disks.get(&slab_disk) {
                 noalloc_state.get_mut_or_default(disk).insert(slab.id);
                 disk_stats.noalloc_bytes += slab.free_space();
-            } else {
+            } else if !evacuating {
                 assert_eq!(disk_stats.noalloc_bytes, 0);
                 slabs_by_bucket
                     .entry(SlabBucketSize(slab.max_size()))
