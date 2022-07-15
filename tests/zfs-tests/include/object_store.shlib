@@ -72,6 +72,61 @@ function pool_exists_s3
 }
 
 #
+# Returns if a pool exists in the azure blob.
+#
+function pool_exists_blob
+{
+	typeset guid=$1
+
+	# Max num of retries (default 5)
+	typeset num_retries=${2:-5}
+
+	# Constant backoff duration (default 2s)
+	typeset retry_backoff_duration=${3:-2}
+
+	typeset retry_count=0
+
+	# Check if the pool exists in the azure blob.
+	# If the exit code is 0, return immediately
+	# else retry for the given duration (default 10s)
+	while [ $retry_count -le $num_retries ]; do
+		count=$(az storage blob list \
+			--container-name $ZTS_BUCKET_NAME \
+			--account-name $AZURE_ACCOUNT \
+			--account-key $AZURE_KEY \
+			--prefix  zfs/$guid/ \
+			--output table \
+			| awk -F '/' '/zfs/ {print $2}' \
+			| sort -u | wc -l)
+
+		[ $count -eq 1 ] && return 0
+		retry_count=$((retry_count + 1))
+		sleep $retry_backoff_duration
+	done
+	return 1
+}
+
+#
+# Returns that the pool corresponding to the guid
+# exists in the object store
+#
+function pool_exists_object_store
+{
+	typeset guid=$1
+	typeset -i rc=1
+
+	if [ $ZTS_OBJECT_STORE == "s3" ]; then
+		pool_exists_s3 $guid
+		rc=$?
+	elif [ $ZTS_OBJECT_STORE == "blob" ]; then
+		pool_exists_blob $guid
+		rc=$?
+	fi
+	return $rc
+}
+
+
+#
 # Verify if the object store pool is online. Verify the allocated space.
 # Also verify that the pool exists in the object store bucket.
 #
@@ -98,8 +153,8 @@ function verify_active_object_store_pool # pool guid exp_allocated
 	done
 	log_must [ $is_allocated -eq 1 ]
 
-	# Verify that the pool exists in the bucket
-	log_must pool_exists_s3 $guid
+	# Verify that the pool exists in the object store
+	log_must pool_exists_object_store $guid
 }
 
 #
@@ -170,8 +225,8 @@ function verify_destroyed_object_store_pool # pool guid
 	# Verify that the pool GUID should be part of zpool_destroy.cache
 	log_must cat /etc/zfs/zpool_destroy.cache | grep $guid
 
-	# Verify that the pool no longer exists in the bucket
-	log_mustnot pool_exists_s3 $guid
+	# Verify that the pool no longer exists in the object store
+	log_mustnot pool_exists_object_store $guid
 }
 
 #

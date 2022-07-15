@@ -78,14 +78,23 @@ typeset pid=$!
 
 log_note "Started the zfs-object-agent in background with pid=$pid"
 
-typeset OBJECT_STORE_PARAMS="-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-    -o object-region=$ZTS_REGION \
-    -o object-credentials-profile=${ZTS_CREDS_PROFILE:-default}"
+
+typeset object_store_params="-o object-endpoint=$ZTS_OBJECT_ENDPOINT
+	-o object-region=$ZTS_REGION"
+
+if [ $ZTS_OBJECT_STORE == "s3" ]; then
+	if ! is_using_iam_role; then
+		object_store_params="$object_store_params
+			-o object-credentials-profile=${ZTS_CREDS_PROFILE:-default}"
+	fi
+elif [ $ZTS_OBJECT_STORE == "blob" ]; then
+	object_store_params="-o object-protocol=blob"
+fi
 
 # The pool import should hang at this moment since there
 # exists the default TESTPOOL. This import should resume once the object
 # agent starts after a minute.
-log_must zpool import $OBJECT_STORE_PARAMS \
+log_must zpool import $object_store_params \
 	-d $ZTS_BUCKET_NAME $TESTPOOL1
 
 

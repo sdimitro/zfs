@@ -95,9 +95,17 @@ typeset pid=$!
 log_note "Background process to start object agent in 2 mins started" \
 	" with pid: $pid"
 
-typeset OBJECT_STORE_PARAMS="-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
-    -o object-region=$ZTS_REGION \
-    -o object-credentials-profile=${ZTS_CREDS_PROFILE:-default}"
+typeset object_store_params="-o object-endpoint=$ZTS_OBJECT_ENDPOINT
+	-o object-region=$ZTS_REGION"
+
+if [ $ZTS_OBJECT_STORE == "s3" ]; then
+	if ! is_using_iam_role; then
+		object_store_params="$object_store_params
+			-o object-credentials-profile=${ZTS_CREDS_PROFILE:-default}"
+	fi
+elif [ $ZTS_OBJECT_STORE == "blob" ]; then
+	object_store_params="-o object-protocol=blob"
+fi
 
 # This should retry for 15 times before giving up
 
@@ -105,7 +113,7 @@ typeset OBJECT_STORE_PARAMS="-o object-endpoint=$ZTS_OBJECT_ENDPOINT \
 # library function import_pool since it makes use of
 # zpool get command to check if pool exists and the
 # command hangs if the object agent is not running
-log_mustnot zpool import $OBJECT_STORE_PARAMS \
+log_mustnot zpool import $object_store_params \
 	-d $ZTS_BUCKET_NAME $TESTPOOL
 
 #

@@ -91,8 +91,23 @@ typeset guid=$(get_object_store_pool_guid $TESTPOOL)
 #
 log_must test "$guid" != "00000000000000000000"
 
-typeset num_pending_frees_splits=$(aws --endpoint-url $ZTS_OBJECT_ENDPOINT \
-	s3 ls $ZTS_BUCKET_NAME/zfs/$guid/PendingFreesLog/ | wc -l)
+typeset -i num_pending_frees_splits=0
+
+if [ $ZTS_OBJECT_STORE == "s3" ]; then
+	num_pending_frees_splits=$(aws --endpoint-url $ZTS_OBJECT_ENDPOINT \
+		s3 ls $ZTS_BUCKET_NAME/zfs/$guid/PendingFreesLog/ | wc -l)
+elif [ $ZTS_OBJECT_STORE == "blob" ]; then
+	# This list all objects, to get the split count
+	# extract the 4th column separated by '/'
+	# zfs/08878726368137311436/PendingFreesLog/00000/00000000000000000000/...
+	num_pending_frees_splits=$(az storage blob list -c $ZTS_BUCKET_NAME \
+		--account-name $AZURE_ACCOUNT --account-key $AZURE_KEY \
+		--output table \
+		--prefix zfs/$guid/PendingFrees 2>/dev/null \
+		| awk -F '/' '/zfs/ {print $4}' \
+		| sort -u | wc -l)
+fi
+
 log_note "Total no of pending frees log split $num_pending_frees_splits"
 #
 # The pending frees log can hold approximately 10 million objects
@@ -109,8 +124,18 @@ log_must test $num_pending_frees_splits -gt 0
 # A recursive call to list the parent object (PendingFreesLog)
 # can help in summarizing the child count
 #
-typeset num_pending_frees_objects=$(aws --endpoint-url $ZTS_OBJECT_ENDPOINT \
-	s3 ls $ZTS_BUCKET_NAME/zfs/$guid/PendingFreesLog/ --recursive | wc -l)
+typeset -i num_pending_frees_objects=0
+
+if [ $ZTS_OBJECT_STORE == "s3" ]; then
+	num_pending_frees_objects=$(aws --endpoint-url $ZTS_OBJECT_ENDPOINT \
+		s3 ls $ZTS_BUCKET_NAME/zfs/$guid/PendingFreesLog/ --recursive | wc -l)
+elif [ $ZTS_OBJECT_STORE == "blob" ]; then
+	num_pending_frees_objects=$(az storage blob list -c $ZTS_BUCKET_NAME \
+		--account-name $AZURE_ACCOUNT --account-key $AZURE_KEY \
+		--output table \
+		--prefix zfs/$guid/PendingFrees 2>/dev/null | awk '/zfs/' | wc -l)
+fi
+
 log_note "Total no of pending frees objects $num_pending_frees_objects"
 log_must test $num_pending_frees_objects -gt 0
 
