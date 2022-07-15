@@ -2167,6 +2167,7 @@ for_each_vdev_in_nvlist(nvlist_t *nvroot, pool_vdev_iter_f func, void *data)
 int
 zoa_resume_destroy(void *hdl, importargs_t *iarg)
 {
+	char *protocol = NULL;
 	char *endpoint = NULL;
 	char *region = NULL;
 	char *bucket = NULL;
@@ -2183,13 +2184,9 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 	if (bucket == NULL) {
 		return (-1);
 	}
-	if (nvlist_lookup_string(iarg->props, "object-endpoint", &endpoint)
-	    != 0) {
-		return (-1);
-	}
-	if (nvlist_lookup_string(iarg->props, "object-region", &region) != 0) {
-		return (-1);
-	}
+	nvlist_lookup_string(iarg->props, "object-protocol", &protocol);
+	nvlist_lookup_string(iarg->props, "object-endpoint", &endpoint);
+	nvlist_lookup_string(iarg->props, "object-region", &region);
 	nvlist_lookup_string(iarg->props, "object-credentials-profile",
 	    &profile);
 
@@ -2197,16 +2194,18 @@ zoa_resume_destroy(void *hdl, importargs_t *iarg)
 	nvlist_t *msg = fnvlist_alloc();
 	fnvlist_add_string(msg, AGENT_REQUEST_TYPE,
 	    AGENT_TYPE_RESUME_DESTROY_POOL);
-	fnvlist_add_string(msg, AGENT_BUCKET, bucket);
-	fnvlist_add_string(msg, AGENT_REGION, region);
-	fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
-	if (profile != NULL) {
-		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
-	}
 	fnvlist_add_uint64(msg, AGENT_GUID, iarg->guid);
-	if (iarg->poolname != NULL) {
+	if (iarg->poolname != NULL)
 		fnvlist_add_string(msg, AGENT_NAME, iarg->poolname);
-	}
+	fnvlist_add_string(msg, AGENT_BUCKET, bucket);
+	if (region != NULL)
+		fnvlist_add_string(msg, AGENT_REGION, region);
+	if (endpoint != NULL)
+		fnvlist_add_string(msg, AGENT_ENDPOINT, endpoint);
+	if (protocol != NULL)
+		fnvlist_add_string(msg, AGENT_PROTOCOL, protocol);
+	if (profile != NULL)
+		fnvlist_add_string(msg, AGENT_CRED_PROFILE, profile);
 
 	nvlist_t *resp = zoa_send_recv_msg(&handle, msg,
 	    AGENT_PUBLIC_PROTOCOL_VERSION, ZFS_ROOT_SOCKET, NULL);
