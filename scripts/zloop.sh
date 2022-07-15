@@ -199,7 +199,7 @@ credentials_in_env() {
 			return 0
 		fi
 		;;
-	s3)
+	s3|true)
 		if [ -n "$AWS_ACCESS_KEY_ID" ] && \
 		    [ -n "$AWS_SECRET_ACCESS_KEY" ]; then \
 			return 0
@@ -209,6 +209,7 @@ credentials_in_env() {
 		return 1
 		;;
 	esac
+	return 1
 }
 
 # Configures and sets the object storage credentials to the disk
@@ -222,7 +223,7 @@ configure_object_store_credentials() {
 		sudo mkdir -p /root/.azure && \
 		    sudo cp ~/.azure/credentials /root/.azure/credentials
 		;;
-	s3)
+	s3|true)
 		# Check and comment out the AWS_ environment variables
 		# from the /etc/environment file
 		if grep -q "^AWS" /etc/environment 2>/dev/null; then
@@ -243,6 +244,23 @@ configure_object_store_credentials() {
 		exit 1
 		;;
 	esac
+}
+
+#
+# Determine if the test is using an IAM role to access the S3 bucket
+# or via the secret keys
+#
+# Return 0 if using IAM, 1 if otherwise
+#
+function is_using_iam_role
+{
+	# When using IAM role both of the env variables AWS_SECRET_ACCESS_KEY
+	# and AWS_ACCESS_KEY_ID remains empty or zero length
+	if [ -n "$AWS_ACCESS_KEY_ID" ] && \
+		[ -n "$AWS_SECRET_ACCESS_KEY" ]; then
+		return 1
+	fi
+	return 0
 }
 
 # parse arguments
@@ -336,12 +354,16 @@ while (( timeout == 0 )) || (( curtime <= (starttime + timeout) )); do
 		blob)
 			# Blob storage requires no special arguments.
 			;;
-		s3)
+		s3|true)
+			# Convert legacy values of 'true' to an s3 default
+			ZTS_OBJECT_STORE="s3"
 			zopt="$zopt -O $ZTS_OBJECT_ENDPOINT"
 			zopt="$zopt -A $ZTS_REGION"
 			[ -z "$ZTS_CREDS_PROFILE" ] && \
 			    ZTS_CREDS_PROFILE="default"
-			zopt="$zopt -z $ZTS_CREDS_PROFILE"
+			if ! is_using_iam_role; then
+				zopt="$zopt -z $ZTS_CREDS_PROFILE"
+			fi
 			;;
 		*)
 			echo "Unknown object store $ZTS_OBJECT_STORE"
