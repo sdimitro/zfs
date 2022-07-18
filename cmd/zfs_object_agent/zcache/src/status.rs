@@ -70,8 +70,9 @@ impl Status {
     }
 
     fn cli_status(&self, status: &ZcacheStatus) {
+        let now = Local::now();
         if self.timestamp {
-            writeln_stdout!("{}", Local::now().to_rfc2822());
+            writeln_stdout!("{}", now.to_rfc2822());
         }
 
         // Display index status
@@ -97,7 +98,37 @@ impl Status {
                 path_width,
             );
 
-            // ToDo: write optional device status column here
+            let status = match &device_status.removal {
+                Some(removal) => {
+                    let removal_status = if removal.currently_removing_device {
+                        if let Some(start_time) = removal.start_time {
+                            let done_pct = (1.0
+                                - (removal.space_left_to_evacuate as f64
+                                    / removal.total_space_to_evacuate as f64))
+                                * 100.0;
+                            let throughput = ((removal.total_space_to_evacuate
+                                - removal.space_left_to_evacuate)
+                                / u64::try_from((now - start_time).num_seconds()).unwrap())
+                                / (1024 * 1024);
+                            format!(
+                                "evacuating: moving {} of data - {done_pct:.0}% done, {throughput}MB/s",
+                                nice_p2size(removal.total_space_to_evacuate),
+                            )
+                        } else {
+                            let done_pct = (1.0
+                                - (removal.space_left_to_evict as f64
+                                    / removal.total_space_to_evacuate as f64))
+                                * 100.0;
+                            format!("evicting: index merge {done_pct:.0}% done")
+                        }
+                    } else {
+                        "waiting for other removals".to_string()
+                    };
+                    format!("REMOVING ({removal_status})")
+                }
+                None => "ONLINE".to_string(),
+            };
+            write_stdout!("  {status}");
 
             writeln_stdout!();
         }

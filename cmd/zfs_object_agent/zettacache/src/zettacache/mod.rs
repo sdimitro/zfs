@@ -25,6 +25,7 @@ use arc_swap::ArcSwapAny;
 use arc_swap::ArcSwapOption;
 use bytes::Bytes;
 use bytesize::ByteSize;
+use chrono::Local;
 use either::Either;
 use futures::future;
 use futures::stream::FuturesUnordered;
@@ -68,7 +69,6 @@ use util::From64;
 use util::IndexStatus;
 use util::LockSet;
 use util::LockedItem;
-use util::RemovalStatus;
 use util::ZcacheStatus;
 use uuid::Uuid;
 
@@ -783,7 +783,7 @@ impl Inner {
             guid,
             outstanding_reads: Default::default(),
             outstanding_writes: Default::default(),
-            device_removal: DeviceRemoval::open(checkpoint.device_removal),
+            device_removal: DeviceRemoval::open(checkpoint.device_removal, &block_allocator),
             atime: checkpoint.last_atime,
             block_allocator,
             slab_allocator,
@@ -1623,14 +1623,11 @@ impl Inner {
                 let disk = locked.block_access.path_to_disk_id(&device.path).unwrap();
                 let status = DeviceStatus {
                     info: device,
-                    removal: match locked.device_removal.disk_is_pending_removal(disk) {
-                        true => Some(RemovalStatus {
-                            space_left_to_evacuate: locked
-                                .block_allocator
-                                .disk_space_to_evacuate(disk),
-                        }),
-                        false => None,
-                    },
+                    removal: locked.device_removal.get_status(
+                        disk,
+                        &locked.block_allocator,
+                        &locked.slab_allocator,
+                    ),
                 };
                 devices.push(status);
             }
@@ -2268,7 +2265,12 @@ impl Locked {
         .await;
 
         let removing_disk = if self.removal_can_evacuate() {
-            self.device_removal.removing_disk()
+            self.device_removal
+                .removing_disk_entry()
+                .map(|removal_entry| {
+                    removal_entry.start_time = Some(Local::now());
+                    removal_entry.disk
+                })
         } else {
             None
         };
@@ -2509,7 +2511,8 @@ impl Locked {
 
         self.slab_allocator.mark_noalloc_disk(disk);
         self.block_allocator.mark_noalloc_disk(disk);
-        self.device_removal.add_to_queue(disk);
+        self.device_removal
+            .add_to_queue(disk, self.block_allocator.disk_space_to_evacuate(disk));
 
         info!(
             "issued removal of {path:?} in {}ms",
