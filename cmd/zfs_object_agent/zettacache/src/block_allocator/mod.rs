@@ -2102,7 +2102,11 @@ impl BlockAllocator {
     /// Returns the amount of space that needs to be removed before a removing device has been
     /// fully evacuated.
     pub fn disk_space_to_evacuate(&self, disk: DiskId) -> u64 {
-        let block_allocator_slabs = self.noalloc_state.get(disk).unwrap().len() as u64;
+        let block_allocator_slabs = self
+            .noalloc_state
+            .get(disk)
+            .map(|slabs| slabs.len() as u64)
+            .unwrap_or_default();
         let slab_allocator_slabs = self.slab_allocator.disk_slabs_to_evacuate(disk);
         let metadata_slabs = slab_allocator_slabs
             .checked_sub(block_allocator_slabs)
